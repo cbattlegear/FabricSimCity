@@ -46,7 +46,7 @@ Fixture mode includes deterministic, sanitized history covering active-interval 
 
 All list/detail routes are GET-only and return versioned contracts with decimal-string integers, explicit source/freshness/caveats, and opaque continuation tokens. Summary probes exclude SQL text and Showplan XML. The two single-record payload probes are on-demand only; `ProtectedQueryStoreRepository` writes those payloads only through `IProtectedRecordStore`. The Showplan parser prohibits DTDs and resolvers, enforces character/depth/node/text limits and cancellation, tolerates namespace version changes, and emits a normalized structural graph. Query Store supplies aggregate query runtime, not actual operator progress or actual operator metrics.
 
-Connected atlas mode never substitutes fixture Query Store history. Until the connected history source is explicitly enabled in a deployment, its history endpoint returns an explicit unavailable source with no numeric zero. The source-neutral incremental collector and protected sink seams are ready for that opt-in: per-database watermarks, overlap replay, retention/reset epochs, bounded pages/concurrency, cancellation, partial failures, and active-interval replacement are enforced independently of transport.
+Connected atlas mode never substitutes fixture Query Store history. Set `QueryStoreHistory:Mode=Connected` together with `Atlas:Mode=Connected` and protected storage to opt in. The collector uses static keyset probes, per-database overlap watermarks, bounded pages/concurrency, cancellation, partial failures, reset epochs, and per-bucket active-interval replacement. It publishes encrypted, bounded snapshot chunks through one final encrypted pointer, so a failed cycle or process crash leaves the prior complete snapshot current. `Disabled` remains an explicit unavailable state; fixture mode remains the default.
 
 ## Fixture and connected collection
 
@@ -100,7 +100,7 @@ The image targets Linux containers on x86-64 and ARM64 where the selected offici
 
 ## Protected storage
 
-`SqlSimCity.Storage` is an optional, source-neutral encrypted embedded record store for future use by SQL Server collection. It ships **disabled by default** and is unused by the fixture path in this release. When enabled it:
+`SqlSimCity.Storage` is the source-neutral encrypted embedded record store used by opt-in connected Query Store history. It ships **disabled by default** and is unused by the fixture path. When enabled it:
 
 - encrypts every payload with AES-256-GCM inside a versioned envelope (format version, key version, nonce, tag, ciphertext) before any byte reaches SQLite, with record kind, opaque record ID, and key version bound as authenticated associated data so ciphertext cannot be swapped between records;
 - loads its key ring only from an explicitly configured file (see [SECURITY.md](SECURITY.md) for the exact JSON format, key rotation, and backup guidance) and never logs key material;
@@ -109,7 +109,7 @@ The image targets Linux containers on x86-64 and ARM64 where the selected offici
 - prunes at most `ProtectedStorage:Retention:PruneBatchSize` expired records per invocation (call again to drain more), under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`; the batch size is bounded from 1 through 500.
 - restricts the database filename to a simple filename, record-kind metadata to 128 characters (maximum 1,024), and plaintext payloads to 1 MiB (maximum 16 MiB); `MaxRecordKindLength` and `MaxPayloadBytes` are explicit protected-storage configuration limits.
 
-Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). This release does not use protected storage for anything; it exists so a future SQL Server collector has an already-hardened place to put retained evidence and credentials instead of a new unencrypted table.
+Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). Connected Query Store history refuses to start without it. Raw SQL and Showplan XML enter only protected detail records; normalized facts, watermarks, reset epochs, and atomically published indexes are protected as well. The background collector invokes bounded retention pruning after successful publication.
 
 ## SQL Server connection and authentication
 

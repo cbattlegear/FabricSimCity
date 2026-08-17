@@ -117,10 +117,16 @@ public sealed class SecureShowplanParser
                 {
                     scalarNode.AddExpression(SanitizeExpression(scalar));
                 }
-                else if (local.Contains("Warning", StringComparison.OrdinalIgnoreCase) &&
+                else if (local != "Warnings" &&
+                          local.Contains("Warning", StringComparison.OrdinalIgnoreCase) &&
                          nodeStack.TryPeek(out var warningNode))
                 {
-                    warningNode.Warnings.Add(new ShowplanWarningV1(local, Attribute(reader, "ColumnsWithNoStatistics")));
+                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalAttributes(reader)));
+                }
+                else if (elementStack.Contains("Warnings") && local != "Warnings" &&
+                         nodeStack.TryPeek(out warningNode))
+                {
+                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalAttributes(reader)));
                 }
                 else if (local is "ParameterSensitivePredicate" or "DispatcherExpression")
                 {
@@ -161,8 +167,10 @@ public sealed class SecureShowplanParser
             }
         }
 
-        var nodes = builders.Select(builder => builder.Build()).OrderBy(node => node.NodeId).ToArray();
-        var fingerprint = StructuralPlanFingerprint.Compute(nodes, optimization, dispatcherExpression);
+        var nodes = builders.Select(builder => builder.Build()).ToArray();
+        ValidateTree(nodes);
+        var fingerprint = StructuralPlanFingerprint.Compute(
+            nodes, optimization, dispatcherExpression, ceVersion, desiredMemory, requiredMemory);
         return new NormalizedShowplanV1(
             "1.0", planId, version, ceVersion, desiredMemory, requiredMemory, nodes,
             optimization, dispatcherExpression, fingerprint, Caveat,
@@ -196,6 +204,34 @@ public sealed class SecureShowplanParser
         return string.Join(';', attributes);
     }
 
+    private void ValidateTree(ShowplanNodeV1[] nodes)
+    {
+        var ids = new HashSet<int>();
+        foreach (var node in nodes)
+            if (!ids.Add(node.NodeId)) throw new XmlException($"Showplan contains duplicate RelOp NodeId {node.NodeId}.");
+        if (nodes.Length == 0) throw new XmlException("Showplan contains no RelOp tree.");
+        var roots = nodes.Where(node => node.ParentNodeId is null).ToArray();
+        if (roots.Length != 1) throw new XmlException("Showplan must contain exactly one RelOp root.");
+        foreach (var node in nodes)
+            if (node.ParentNodeId is { } parent && !ids.Contains(parent))
+                throw new XmlException($"Showplan RelOp {node.NodeId} references missing parent {parent}.");
+
+        var byId = nodes.ToDictionary(node => node.NodeId);
+        foreach (var node in nodes)
+        {
+            var visited = new HashSet<int>();
+            var current = node;
+            var depth = 0;
+            while (current.ParentNodeId is { } parent)
+            {
+                if (!visited.Add(current.NodeId)) throw new XmlException("Showplan RelOp tree contains a cycle.");
+                if (++depth > _limits.MaximumDepth)
+                    throw new XmlException($"Showplan RelOp tree exceeds the maximum depth of {_limits.MaximumDepth}.");
+                current = byId[parent];
+            }
+        }
+    }
+
     private sealed class NodeBuilder(int nodeId, int? parentNodeId, string logicalOperation, string physicalOperation)
     {
         public int NodeId { get; } = nodeId;
@@ -227,19 +263,14 @@ public static class StructuralPlanFingerprint
     public static string Compute(
         IEnumerable<ShowplanNodeV1> nodes,
         QueryOptimizationKind optimization,
-        string? dispatcherExpression)
+        string? dispatcherExpression,
+        string? cardinalityEstimatorVersion = null,
+        decimal? serialDesiredMemoryKiB = null,
+        decimal? serialRequiredMemoryKiB = null)
     {
-        var canonical = new StringBuilder().Append(optimization).Append('|').Append(dispatcherExpression).AppendLine();
-        foreach (var node in nodes.OrderBy(node => node.NodeId))
-        {
-            canonical.Append(node.NodeId).Append('>').Append(node.ParentNodeId).Append('|')
-                .Append(node.LogicalOperation).Append('|').Append(node.PhysicalOperation).Append('|')
-                .Append(node.Parallel).Append('|').Append(node.ObjectReference?.Database).Append('|')
-                .Append(node.ObjectReference?.Schema).Append('|').Append(node.ObjectReference?.Table).Append('|')
-                .Append(node.ObjectReference?.Index).Append('|').Append(node.Predicate).Append('|')
-                .Append(node.EstimatedRows).Append('|').Append(node.EstimatedCpuCost).Append('|')
-                .Append(node.EstimatedIoCost).Append('|').Append(node.EstimatedTotalSubtreeCost).AppendLine();
-        }
+        var canonical = PlanCanonicalizer.Canonicalize(
+            nodes, optimization, dispatcherExpression, cardinalityEstimatorVersion,
+            serialDesiredMemoryKiB, serialRequiredMemoryKiB);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))).ToLowerInvariant();
     }
 }

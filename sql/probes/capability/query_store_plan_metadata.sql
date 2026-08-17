@@ -35,4 +35,15 @@ UNION ALL
 SELECT N'sys.query_store_runtime_stats' AS view_name, c.name AS column_name
 FROM sys.all_columns AS c
 WHERE c.object_id = OBJECT_ID(N'sys.query_store_runtime_stats', N'V')
-  AND c.name IN (N'replica_group_id');
+  AND c.name IN (N'replica_group_id')
+UNION ALL
+SELECT N'sys.query_store_query_variant', N'<view>'
+WHERE OBJECT_ID(N'sys.query_store_query_variant', N'V') IS NOT NULL
+UNION ALL
+SELECT N'sys.query_store_replicas', N'<view>'
+WHERE OBJECT_ID(N'sys.query_store_replicas', N'V') IS NOT NULL
+UNION ALL
+SELECT N'sys.query_store_query_text', c.name
+FROM sys.all_columns AS c
+WHERE c.object_id = OBJECT_ID(N'sys.query_store_query_text', N'V')
+  AND c.name = N'has_restricted_text';

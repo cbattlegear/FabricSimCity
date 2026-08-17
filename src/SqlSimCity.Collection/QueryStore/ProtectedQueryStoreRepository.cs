@@ -1,87 +1,190 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using SqlSimCity.Contracts.V1;
 using SqlSimCity.Storage;
 
 namespace SqlSimCity.Collection.QueryStore;
 
-public sealed class ProtectedQueryStoreRepository
+public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
 {
-    private readonly IProtectedRecordStore _store;
-
-    public ProtectedQueryStoreRepository(IProtectedRecordStore store) =>
-        _store = store ?? throw new ArgumentNullException(nameof(store));
+    private static readonly ProtectedRecordId CurrentPointerId = new("qs:current-snapshot-pointer");
+    private const int TargetChunkBytes = 512 * 1024;
 
     public Task StoreQueryTextAsync(
-        string databaseId,
-        string queryTextId,
-        DateTimeOffset capturedAt,
-        string queryText,
+        string databaseId, string queryTextId, DateTimeOffset capturedAt, string queryText,
         CancellationToken cancellationToken = default) =>
-        PutUtf8Async(
-            Id("query-text", databaseId, queryTextId), "query-store-query-text",
+        PutUtf8Async(Id("query-text", databaseId, queryTextId), "query-store-query-text",
             capturedAt, queryText, StorageResolution.Detail, cancellationToken);
 
     public Task StorePlanXmlAsync(
-        string databaseId,
-        string planId,
-        DateTimeOffset capturedAt,
-        string showplanXml,
+        string databaseId, string planId, DateTimeOffset capturedAt, string showplanXml,
         CancellationToken cancellationToken = default) =>
-        PutUtf8Async(
-            Id("showplan", databaseId, planId), "query-store-showplan",
+        PutUtf8Async(Id("showplan", databaseId, planId), "query-store-showplan",
             capturedAt, showplanXml, StorageResolution.Detail, cancellationToken);
 
-    public async Task StoreNormalizedFactAsync<T>(
-        string databaseId,
-        string factId,
-        DateTimeOffset capturedAt,
-        StorageResolution resolution,
-        T value,
+    public Task StoreNormalizedPlanAsync(
+        NormalizedShowplanV1 plan, DateTimeOffset capturedAt,
+        CancellationToken cancellationToken = default) =>
+        PutJsonAsync(Id("normalized-plan", plan.PlanId, "current"),
+            "query-store-normalized-plan", capturedAt, StorageResolution.Detail, plan, cancellationToken);
+
+    public Task<NormalizedShowplanV1?> ReadNormalizedPlanAsync(
+        string planId, CancellationToken cancellationToken = default) =>
+        ReadJsonAsync<NormalizedShowplanV1>(Id("normalized-plan", planId, "current"), cancellationToken);
+
+    public Task StoreTextDescriptorAsync(
+        string databaseId, string queryTextId, QueryTextDescriptorV1 descriptor,
+        DateTimeOffset capturedAt, CancellationToken cancellationToken = default) =>
+        PutJsonAsync(Id("text-descriptor", databaseId, queryTextId),
+            "query-store-text-descriptor", capturedAt, StorageResolution.Detail, descriptor, cancellationToken);
+
+    public Task<QueryTextDescriptorV1?> ReadTextDescriptorAsync(
+        string databaseId, string queryTextId, CancellationToken cancellationToken = default) =>
+        ReadJsonAsync<QueryTextDescriptorV1>(Id("text-descriptor", databaseId, queryTextId), cancellationToken);
+
+    public Task StoreNormalizedFactAsync<T>(
+        string databaseId, string factId, DateTimeOffset capturedAt,
+        StorageResolution resolution, T value, CancellationToken cancellationToken = default) =>
+        PutJsonAsync(Id("fact", databaseId, factId), "query-store-normalized-fact",
+            capturedAt, resolution, value, cancellationToken);
+
+    public async Task PublishSnapshotAsync(
+        QueryStorePublishedSnapshot snapshot,
         CancellationToken cancellationToken = default)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
-        try
+        ArgumentNullException.ThrowIfNull(snapshot);
+        var chunkIds = new List<string>();
+        var chunk = new List<QueryFamilyDetailV1>();
+        var chunkBytes = 0;
+        foreach (var family in snapshot.Families)
         {
-            await _store.PutAsync(
-                Id("fact", databaseId, factId), "query-store-normalized-fact",
-                capturedAt, resolution, bytes, cancellationToken);
+            var familyBytes = SerializedSize(family);
+            if (chunk.Count > 0 && chunkBytes + familyBytes > TargetChunkBytes)
+            {
+                chunkIds.Add(await StoreFamilyChunkAsync(
+                    snapshot, chunkIds.Count, chunk, cancellationToken).ConfigureAwait(false));
+                chunk = [];
+                chunkBytes = 0;
+            }
+            chunk.Add(family);
+            chunkBytes += familyBytes;
         }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(bytes);
-        }
+        if (chunk.Count > 0)
+            chunkIds.Add(await StoreFamilyChunkAsync(
+                snapshot, chunkIds.Count, chunk, cancellationToken).ConfigureAwait(false));
+
+        var index = snapshot with { Families = [], FamilyChunkRecordIds = chunkIds };
+        var snapshotId = Id("snapshot", snapshot.SnapshotId,
+            snapshot.Sequence.ToString(CultureInfo.InvariantCulture));
+        await PutJsonAsync(snapshotId, "query-store-published-snapshot", snapshot.PublishedAt,
+            StorageResolution.Detail, index, cancellationToken).ConfigureAwait(false);
+        await PutJsonAsync(CurrentPointerId, "query-store-snapshot-pointer", snapshot.PublishedAt,
+            StorageResolution.Detail, new QueryStoreSnapshotPointer(snapshotId.Value), cancellationToken)
+            .ConfigureAwait(false);
     }
 
-    public async Task<string?> ReadSensitiveTextAsync(
-        string kind,
+    public async Task<QueryStorePublishedSnapshot?> ReadPublishedSnapshotAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var pointer = await ReadJsonAsync<QueryStoreSnapshotPointer>(
+            CurrentPointerId, cancellationToken).ConfigureAwait(false);
+        if (pointer is null) return null;
+        var snapshot = await ReadJsonAsync<QueryStorePublishedSnapshot>(
+            new ProtectedRecordId(pointer.SnapshotRecordId), cancellationToken).ConfigureAwait(false);
+        if (snapshot is null) return null;
+        if (snapshot.FamilyChunkRecordIds is null) return snapshot;
+        var families = new List<QueryFamilyDetailV1>();
+        foreach (var chunkId in snapshot.FamilyChunkRecordIds)
+        {
+            var chunk = await ReadJsonAsync<QueryStoreFamilyChunk>(
+                new ProtectedRecordId(chunkId), cancellationToken).ConfigureAwait(false) ??
+                throw new InvalidDataException("A protected Query Store snapshot family chunk is missing.");
+            families.AddRange(chunk.Families);
+        }
+        return snapshot with { Families = families };
+    }
+
+    public Task StoreWatermarkAsync(
+        QueryStoreWatermark watermark,
+        CancellationToken cancellationToken = default) =>
+        PutJsonAsync(Id("watermark", watermark.DatabaseId, "current"),
+            "query-store-watermark", watermark.Through, StorageResolution.Detail, watermark, cancellationToken);
+
+    public Task<QueryStoreWatermark?> ReadWatermarkAsync(
         string databaseId,
-        string sourceId,
+        CancellationToken cancellationToken = default) =>
+        ReadJsonAsync<QueryStoreWatermark>(Id("watermark", databaseId, "current"), cancellationToken);
+
+    public async Task<string?> ReadSensitiveTextAsync(
+        string kind, string databaseId, string sourceId,
         CancellationToken cancellationToken = default)
     {
         if (kind is not ("query-text" or "showplan")) throw new ArgumentOutOfRangeException(nameof(kind));
-        var record = await _store.GetAsync(Id(kind, databaseId, sourceId), cancellationToken);
+        var record = await store.GetAsync(Id(kind, databaseId, sourceId), cancellationToken).ConfigureAwait(false);
         return record is null ? null : Encoding.UTF8.GetString(record.Payload.Span);
     }
 
     private async Task PutUtf8Async(
-        ProtectedRecordId id,
-        string recordKind,
-        DateTimeOffset capturedAt,
-        string value,
-        StorageResolution resolution,
-        CancellationToken cancellationToken)
+        ProtectedRecordId id, string recordKind, DateTimeOffset capturedAt, string value,
+        StorageResolution resolution, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(value);
         var bytes = Encoding.UTF8.GetBytes(value);
         try
         {
-            await _store.PutAsync(id, recordKind, capturedAt, resolution, bytes, cancellationToken);
+            await store.PutAsync(id, recordKind, capturedAt, resolution, bytes, cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(bytes);
         }
+    }
+
+    private async Task<string> StoreFamilyChunkAsync(
+        QueryStorePublishedSnapshot snapshot,
+        int index,
+        IReadOnlyList<QueryFamilyDetailV1> families,
+        CancellationToken cancellationToken)
+    {
+        var id = Id("snapshot-families", snapshot.SnapshotId, index.ToString(CultureInfo.InvariantCulture));
+        await PutJsonAsync(id, "query-store-snapshot-families", snapshot.PublishedAt,
+            StorageResolution.Detail, new QueryStoreFamilyChunk(families), cancellationToken)
+            .ConfigureAwait(false);
+        return id.Value;
+    }
+
+    private static int SerializedSize<T>(T value)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        try { return bytes.Length; }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    private async Task PutJsonAsync<T>(
+        ProtectedRecordId id, string recordKind, DateTimeOffset capturedAt,
+        StorageResolution resolution, T value, CancellationToken cancellationToken)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        try
+        {
+            await store.PutAsync(id, recordKind, capturedAt, resolution, bytes, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    private async Task<T?> ReadJsonAsync<T>(
+        ProtectedRecordId id,
+        CancellationToken cancellationToken)
+    {
+        var record = await store.GetAsync(id, cancellationToken).ConfigureAwait(false);
+        return record is null ? default : JsonSerializer.Deserialize<T>(record.Payload.Span);
     }
 
     private static ProtectedRecordId Id(string kind, string databaseId, string sourceId)
@@ -90,3 +193,16 @@ public sealed class ProtectedQueryStoreRepository
         return new ProtectedRecordId($"qs:{Convert.ToHexString(opaque).ToLowerInvariant()}");
     }
 }
+
+public sealed record QueryStoreSnapshotPointer(string SnapshotRecordId);
+
+public sealed record QueryStorePublishedSnapshot(
+    string SchemaVersion,
+    string SnapshotId,
+    long Sequence,
+    DateTimeOffset PublishedAt,
+    IReadOnlyList<QueryFamilyDetailV1> Families,
+    QueryStoreCollectorStatusV1 Status,
+    IReadOnlyList<string>? FamilyChunkRecordIds = null);
+
+public sealed record QueryStoreFamilyChunk(IReadOnlyList<QueryFamilyDetailV1> Families);

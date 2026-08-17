@@ -1,4 +1,5 @@
 using SqlSimCity.Collection.QueryStore;
+using System.Xml;
 
 namespace SqlSimCity.Collection.Tests.QueryStore;
 
@@ -70,4 +71,72 @@ public sealed class ShowplanParserTests
         Assert.Contains("[a]+?", predicate, StringComparison.Ordinal);
         Assert.Contains("[b]+?", predicate, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task FingerprintAndComparisonIgnoreNodeIdRenumbering()
+    {
+        var parser = new SecureShowplanParser();
+        var left = await parser.ParseAsync("left", Plan("0", "1", "Index Scan"));
+        var right = await parser.ParseAsync("right", Plan("91", "37", "Index Scan"));
+
+        var comparison = PlanComparer.Compare(left, right);
+
+        Assert.Equal(left.StructuralFingerprint, right.StructuralFingerprint);
+        Assert.True(comparison.StructurallyEqual);
+        Assert.Empty(comparison.Changes);
+    }
+
+    [Fact]
+    public async Task RejectsDuplicateIdsMalformedXmlAndConfiguredLimits()
+    {
+        var duplicate = """
+            <ShowPlanXML><RelOp NodeId="0" LogicalOp="A" PhysicalOp="A">
+              <RelOp NodeId="0" LogicalOp="B" PhysicalOp="B" />
+            </RelOp></ShowPlanXML>
+            """;
+        await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser().ParseAsync("duplicate", duplicate));
+        await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser().ParseAsync("malformed", "<ShowPlanXML><RelOp"));
+        await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser(new ShowplanParserLimits(MaximumXmlCharacters: 20))
+                .ParseAsync("large", Plan("0", "1", "Scan")));
+        await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser(new ShowplanParserLimits(MaximumDepth: 2))
+                .ParseAsync("deep", Plan("0", "1", "Scan")));
+    }
+
+    [Fact]
+    public async Task CapturesMaterialWarningAndDiffsPropertyChanges()
+    {
+        const string leftXml = """
+            <ShowPlanXML><BatchSequence><RelOp NodeId="0" LogicalOp="Scan" PhysicalOp="Index Scan"
+              EstimateRows="10"><Warnings><SpillToTempDb SpillLevel="2" /></Warnings></RelOp></BatchSequence></ShowPlanXML>
+            """;
+        const string rightXml = """
+            <ShowPlanXML><BatchSequence><RelOp NodeId="8" LogicalOp="Scan" PhysicalOp="Table Scan"
+              EstimateRows="20" /></BatchSequence></ShowPlanXML>
+            """;
+        var parser = new SecureShowplanParser();
+        var left = await parser.ParseAsync("left", leftXml);
+        var right = await parser.ParseAsync("right", rightXml);
+
+        var warning = Assert.Single(Assert.Single(left.Nodes).Warnings);
+        Assert.Equal("SpillToTempDb", warning.Kind);
+        var comparison = PlanComparer.Compare(left, right);
+        Assert.Contains(comparison.Changes, change => change.Path == "root/physical");
+        Assert.Contains(comparison.Changes, change => change.Path == "root/warnings");
+    }
+
+    private static string Plan(string rootId, string childId, string physical) => $"""
+        <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+          <BatchSequence><Batch><Statements><StmtSimple CardinalityEstimationModelVersion="160"><QueryPlan>
+            <RelOp NodeId="{rootId}" LogicalOp="Select" PhysicalOp="Compute Scalar">
+              <RelOp NodeId="{childId}" LogicalOp="Scan" PhysicalOp="{physical}">
+                <IndexScan><Object Schema="[dbo]" Table="[T]" /></IndexScan>
+              </RelOp>
+            </RelOp>
+          </QueryPlan></StmtSimple></Statements></Batch></BatchSequence>
+        </ShowPlanXML>
+        """;
 }

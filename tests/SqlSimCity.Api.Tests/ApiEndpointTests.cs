@@ -153,4 +153,29 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
         Assert.Equal(HttpStatusCode.OK, compareResponse.StatusCode);
         Assert.Contains("not a raw XML line diff", comparison, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Theory]
+    [InlineData("/api/v1/query-store/queries?metric=indexAdvice")]
+    [InlineData("/api/v1/query-store/queries?pageSize=0")]
+    [InlineData("/api/v1/query-store/queries?pageSize=201")]
+    [InlineData("/api/v1/query-store/queries?pageToken=not-base64")]
+    public async Task QueryStoreApiRejectsMalformedPagingAndFilters(string path)
+    {
+        using var response = await _client.GetAsync(new Uri(path, UriKind.Relative));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task QueryStoreStatusIsReadOnlyAndExplicit()
+    {
+        using var response = await _client.GetAsync(
+            new Uri("/api/v1/query-store/status", UriKind.Relative));
+        var body = await response.Content.ReadAsStringAsync();
+        using var post = await _client.PostAsync(
+            new Uri("/api/v1/query-store/status", UriKind.Relative), content: null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"state\":\"Ready\"", body, StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
+    }
 }

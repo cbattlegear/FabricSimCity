@@ -182,6 +182,8 @@ export interface QueryFamilyPage {
 
 export interface NormalizedShowplan {
   planId: string
+  optimization: 'None' | 'ParameterSensitivePlan' | 'OptionalParameterPlanOptimization'
+  dispatcherExpression: string | null
   structuralFingerprint: string
   runtimeOverlayCaveat: string
   nodes: Array<{
@@ -201,4 +203,19 @@ export interface PlanComparison {
   changes: Array<{ path: string; changeKind: string; before: string | null; after: string | null }>
   source: string
   caveat: string
+}
+
+export interface QueryStoreCollectorStatus {
+  schemaVersion: string
+  state: 'Disabled' | 'Starting' | 'Collecting' | 'Ready' | 'Partial' | 'Stale' | 'BackingOff' | 'Failed'
+  sequence: number
+  lastStartedAt: string | null
+  lastPublishedAt: string | null
+  nextAttemptAt: string | null
+  databases: Array<{
+    databaseId: string
+    state: 'ReadWrite' | 'ReadOnly' | 'Off' | 'Error' | 'PermissionDenied' | 'Unsupported' | 'Unknown'
+    reason: string
+  }>
+  reason: string
 }

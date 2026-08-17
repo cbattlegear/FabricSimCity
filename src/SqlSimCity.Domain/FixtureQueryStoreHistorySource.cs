@@ -20,12 +20,14 @@ public sealed class FixtureQueryStoreHistorySource : IQueryStoreHistorySource
         _families = BuildFamilies();
     }
 
-    public PageV1<QueryFamilySummaryV1> GetQueries(
+    public Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(
         string? databaseId,
         string metric,
         int pageSize,
-        string? pageToken)
+        string? pageToken,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         pageSize = Math.Clamp(pageSize, 1, 200);
         var offset = DecodePageToken(pageToken);
         var query = _families
@@ -43,20 +45,32 @@ public sealed class FixtureQueryStoreHistorySource : IQueryStoreHistorySource
         var all = ordered.ThenBy(family => family.FamilyId, StringComparer.Ordinal).ToArray();
         var items = all.Skip(offset).Take(pageSize).ToArray();
         var next = offset + items.Length < all.Length ? EncodePageToken(offset + items.Length) : null;
-        return new PageV1<QueryFamilySummaryV1>(
+        return Task.FromResult(new PageV1<QueryFamilySummaryV1>(
             "1.0", items, next, pageSize, all.Length.ToString(CultureInfo.InvariantCulture))
-        { Evidence = Evidence };
+        { Evidence = Evidence });
     }
 
-    public QueryFamilyDetailV1? GetFamily(string familyId) =>
-        _families.SingleOrDefault(family => string.Equals(family.Family.FamilyId, familyId, StringComparison.Ordinal));
-
-    public NormalizedShowplanV1? GetPlan(string planId) =>
-        _plans.TryGetValue(planId, out var plan) ? plan : null;
-
-    public PlanComparisonV1? ComparePlans(string leftPlanId, string rightPlanId)
+    public Task<QueryFamilyDetailV1?> GetFamilyAsync(string familyId, CancellationToken cancellationToken)
     {
-        if (!_plans.TryGetValue(leftPlanId, out var left) || !_plans.TryGetValue(rightPlanId, out var right)) return null;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_families.SingleOrDefault(
+            family => string.Equals(family.Family.FamilyId, familyId, StringComparison.Ordinal)));
+    }
+
+    public Task<NormalizedShowplanV1?> GetPlanAsync(string planId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(_plans.TryGetValue(planId, out var plan) ? plan : null);
+    }
+
+    public Task<PlanComparisonV1?> ComparePlansAsync(
+        string leftPlanId,
+        string rightPlanId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_plans.TryGetValue(leftPlanId, out var left) || !_plans.TryGetValue(rightPlanId, out var right))
+            return Task.FromResult<PlanComparisonV1?>(null);
         var changes = new List<PlanChangeV1>();
         var ids = left.Nodes.Select(n => n.NodeId).Union(right.Nodes.Select(n => n.NodeId)).Order().ToArray();
         foreach (var id in ids)
@@ -77,11 +91,21 @@ public sealed class FixtureQueryStoreHistorySource : IQueryStoreHistorySource
             AddChange(changes, $"node/{id}/predicate", before.Predicate, after.Predicate);
         }
 
-        return new PlanComparisonV1(
+        return Task.FromResult<PlanComparisonV1?>(new PlanComparisonV1(
             "1.0", leftPlanId, rightPlanId,
             string.Equals(left.StructuralFingerprint, right.StructuralFingerprint, StringComparison.Ordinal),
             changes, "Normalized Query Store Showplan",
-            "Structural comparison, not a raw XML line diff. Runtime overlays are query-level aggregates and are not attributed to operators.");
+            "Structural comparison, not a raw XML line diff. Runtime overlays are query-level aggregates and are not attributed to operators."));
+    }
+
+    public Task<QueryStoreCollectorStatusV1> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new QueryStoreCollectorStatusV1(
+            "1.0", QueryStoreCollectorState.Ready, 1, CapturedAt, CapturedAt, null,
+            [new QueryStoreDatabaseStatusV1("sales", QueryStoreCollectionStateV1.ReadWrite,
+                "fixture-epoch", CapturedAt, CapturedAt.AddDays(-7), "Deterministic fixture history.")],
+            "Fixture source; no background SQL Server collection is running."));
     }
 
     private static IReadOnlyList<QueryFamilyDetailV1> BuildFamilies()
@@ -218,9 +242,11 @@ public sealed class FixtureQueryStoreHistorySource : IQueryStoreHistorySource
         try
         {
             var raw = Encoding.UTF8.GetString(Convert.FromBase64String(token));
-            return int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value >= 0 ? value : 0;
+            if (int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value >= 0)
+                return value;
+            throw new QueryStorePageTokenException("The Query Store page token is malformed.");
         }
-        catch (FormatException) { return 0; }
+        catch (FormatException) { throw new QueryStorePageTokenException("The Query Store page token is malformed."); }
     }
     private static string EncodePageToken(int offset) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(offset.ToString(CultureInfo.InvariantCulture)));

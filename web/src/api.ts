@@ -1,5 +1,5 @@
 import * as signalR from '@microsoft/signalr'
-import type { AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage } from './contracts'
+import type { AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import { assertAtlasSnapshot } from './atlas'
 import { assertLiveIncidentResponse, computeReconnectDelayMs } from './liveIncidents'
@@ -204,3 +204,6 @@ export const fetchPlanComparison = (left: string, right: string, signal?: AbortS
     `/api/v1/query-store/plans/compare?leftPlanId=${encodeURIComponent(left)}&rightPlanId=${encodeURIComponent(right)}`,
     signal,
   )
+
+export const fetchQueryStoreStatus = (signal?: AbortSignal) =>
+  fetchJson<QueryStoreCollectorStatus>('/api/v1/query-store/status', signal)

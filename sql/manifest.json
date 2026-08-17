@@ -839,11 +839,35 @@
       "relativeCost": "trivial"
     },
     {
+      "id": "querystore.query_text_single_2016",
+      "title": "Single Query Store query text (SQL Server 2016 variant; sensitive, on demand)",
+      "file": "probes/querystore/query_store_query_text_single_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported. Restricted and encrypted module flags must be preserved; the returned text is sensitive and must enter only the encrypted protected store."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2016-2019) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+); Azure SQL Database uses VIEW DATABASE STATE/VIEW DATABASE PERFORMANCE STATE.",
+      "cadenceClass": "on_demand",
+      "parameters": [
+        {
+          "name": "@QueryTextId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Exact query_text_id already selected by an authorized detail request."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or one row for exactly @QueryTextId. Sensitive query_sql_text is never returned by a summary probe and must be encrypted immediately.",
+      "relativeCost": "trivial"
+    },
+    {
       "id": "querystore.query_text_single",
       "title": "Single Query Store query text (sensitive, on demand)",
       "file": "probes/querystore/query_store_query_text_single.sql",
       "connectionScope": "database",
-      "minPlatform": "SQL Server 2016 (13.x)",
+      "minPlatform": "SQL Server 2022 (16.x)",
       "azureSqlDatabase": {
         "unsupported": false,
         "notes": "Supported. Restricted and encrypted module flags must be preserved; the returned text is sensitive and must enter only the encrypted protected store."
@@ -902,7 +926,7 @@
       "cadenceClass": "standard",
       "parameters": [
         {
-          "name": "@TopN",
+          "name": "@PageSize",
           "sqlDbType": "Int",
           "required": true,
           "description": "Bounded maximum variant rows for this page."
@@ -932,9 +956,533 @@
       },
       "requiredPermission": "VIEW SERVER PERFORMANCE STATE on SQL Server 2025; Azure SQL Database uses the documented database-scoped performance-state permission.",
       "cadenceClass": "low_frequency",
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum replica rows in this keyset page."
+        },
+        {
+          "name": "@AfterReplicaGroupId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Exclusive replica-group cursor, or zero."
+        }
+      ],
       "resultSets": 1,
       "resultContract": "Zero or more replica_group_id/name rows. Row absence means no readable-secondary Query Store replica group is visible.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "querystore.identities_page_2016",
+      "title": "Keyset query identities (SQL Server 2016 variant)",
+      "file": "probes/querystore/query_store_identities_page_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterExecutionTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Last execution timestamp from the prior page, or the minimum value."
+        },
+        {
+          "name": "@AfterQueryId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Query-id tie breaker from the prior page, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize physical query identities and context settings, ordered by (last_execution_time, query_id); no SQL text.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.identities_page",
+      "title": "Keyset query identities",
+      "file": "probes/querystore/query_store_identities_page.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterExecutionTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Last execution timestamp from the prior page, or the minimum value."
+        },
+        {
+          "name": "@AfterQueryId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Query-id tie breaker from the prior page, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize physical query identities and context settings, ordered by (last_execution_time, query_id); no SQL text.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.plans_page_2016",
+      "title": "Keyset plan metadata (2016)",
+      "file": "probes/querystore/query_store_plans_page_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "versionVariantOf": "querystore.plans_page",
+      "versionVariantNotes": "SQL Server 2016 omits forcing type and plan type columns.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterExecutionTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Last execution timestamp from the prior page, or the minimum value."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan-id tie breaker from the prior page, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize plans ordered by (last_execution_time, plan_id); no XML.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.plans_page_2017",
+      "title": "Keyset plan metadata (2017-2019)",
+      "file": "probes/querystore/query_store_plans_page_2017.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2017 (14.x)",
+      "versionVariantOf": "querystore.plans_page",
+      "versionVariantNotes": "SQL Server 2017 adds forcing type but not SQL Server 2022 plan type.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterExecutionTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Last execution timestamp from the prior page, or the minimum value."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan-id tie breaker from the prior page, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize plans ordered by (last_execution_time, plan_id); no XML.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.plans_page_2022",
+      "title": "Keyset plan metadata (2022+)",
+      "file": "probes/querystore/query_store_plans_page_2022.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "versionVariantOf": "querystore.plans_page",
+      "versionVariantNotes": "SQL Server 2022 adds plan_type for PSP dispatcher and variant plans.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterExecutionTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Last execution timestamp from the prior page, or the minimum value."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan-id tie breaker from the prior page, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize plans ordered by (last_execution_time, plan_id), including dispatcher/variant type; no XML.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.runtime_page_2016",
+      "title": "Keyset runtime buckets (2016-2019)",
+      "file": "probes/querystore/query_store_runtime_page_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "versionVariantOf": "querystore.runtime_page",
+      "versionVariantNotes": "Pre-2022 engines have no replica_group_id; this variant emits primary group zero.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterIntervalId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Interval cursor, or zero."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan cursor within the interval, or zero."
+        },
+        {
+          "name": "@AfterExecutionType",
+          "sqlDbType": "TinyInt",
+          "required": true,
+          "description": "Execution-type cursor within the plan, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize complete-key active/closed runtime buckets; active duplicates aggregated and fractional weighted averages preserved.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.runtime_page_2022",
+      "title": "Keyset runtime buckets (2022+)",
+      "file": "probes/querystore/query_store_runtime_page_2022.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "versionVariantOf": "querystore.runtime_page",
+      "versionVariantNotes": "SQL Server 2022 adds replica_group_id to runtime rows.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterIntervalId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Interval cursor, or zero."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan cursor within the interval, or zero."
+        },
+        {
+          "name": "@AfterExecutionType",
+          "sqlDbType": "TinyInt",
+          "required": true,
+          "description": "Execution-type cursor within the plan, or zero."
+        },
+        {
+          "name": "@AfterReplicaGroupId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Replica cursor within execution type, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize complete-key runtime buckets separated by execution type and replica.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.waits_page_2017",
+      "title": "Keyset wait buckets (2017-2019)",
+      "file": "probes/querystore/query_store_waits_page_2017.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2017 (14.x)",
+      "versionVariantOf": "querystore.waits_page",
+      "versionVariantNotes": "Query Store waits begin with SQL Server 2017; no replica group before 2022.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterIntervalId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Interval cursor, or zero."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan cursor within the interval, or zero."
+        },
+        {
+          "name": "@AfterExecutionType",
+          "sqlDbType": "TinyInt",
+          "required": true,
+          "description": "Execution-type cursor within the plan, or zero."
+        },
+        {
+          "name": "@AfterWaitCategory",
+          "sqlDbType": "TinyInt",
+          "required": true,
+          "description": "Wait-category cursor, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize wait categories separated by plan, interval, execution type, and primary replica.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.waits_page_2022",
+      "title": "Keyset wait buckets (2022+)",
+      "file": "probes/querystore/query_store_waits_page_2022.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "versionVariantOf": "querystore.waits_page",
+      "versionVariantNotes": "SQL Server 2022 adds replica_group_id to wait rows.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability negotiation selects this engine-safe variant."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022; VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+. Query text itself requires the separately declared server permission.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@PageSize",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Maximum rows in this keyset page."
+        },
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive overlap start."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive collection end."
+        },
+        {
+          "name": "@AfterIntervalId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Interval cursor, or zero."
+        },
+        {
+          "name": "@AfterPlanId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Plan cursor within the interval, or zero."
+        },
+        {
+          "name": "@AfterExecutionType",
+          "sqlDbType": "TinyInt",
+          "required": true,
+          "description": "Execution-type cursor within the plan, or zero."
+        },
+        {
+          "name": "@AfterReplicaGroupId",
+          "sqlDbType": "BigInt",
+          "required": true,
+          "description": "Replica cursor within execution type, or zero."
+        },
+        {
+          "name": "@AfterWaitCategory",
+          "sqlDbType": "TinyInt",
+          "required": true,
+          "description": "Wait-category cursor, or zero."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @PageSize wait categories separated by complete execution and replica keys.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.oldest_interval",
+      "title": "Oldest retained Query Store runtime interval",
+      "file": "probes/querystore/query_store_oldest_interval.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE STATE before SQL Server 2022 or VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+.",
+      "cadenceClass": "standard",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Exactly one row; oldest_interval_start is NULL when no runtime interval is retained. Used for retention-gap/reset detection, never as a zero.",
       "relativeCost": "trivial"
     }
   ]

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
-import { fetchPlan, fetchPlanComparison, fetchQueryFamilies, fetchQueryFamily } from './api'
-import type { NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilySummary } from './contracts'
+import { useEffect, useRef, useState } from 'react'
+import { fetchPlan, fetchPlanComparison, fetchQueryFamilies, fetchQueryFamily, fetchQueryStoreStatus } from './api'
+import type { NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilySummary, QueryStoreCollectorStatus } from './contracts'
 
 const metrics = ['execution', 'cpu', 'duration', 'reads', 'waits'] as const
 
@@ -13,10 +13,35 @@ export function QueryStoreView() {
   const [comparison, setComparison] = useState<PlanComparison | null>(null)
   const [nextPageToken, setNextPageToken] = useState<string | null>(null)
   const [pageEvidence, setPageEvidence] = useState<QueryFamilySummary['evidence'] | null>(null)
+  const [status, setStatus] = useState<QueryStoreCollectorStatus | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const requests = useRef(new Set<AbortController>())
+
+  function tracked<T>(request: (signal: AbortSignal) => Promise<T>, accept: (value: T) => void) {
+    const controller = new AbortController()
+    requests.current.add(controller)
+    void request(controller.signal)
+      .then(accept)
+      .catch(reason => {
+        if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason))
+      })
+      .finally(() => requests.current.delete(controller))
+  }
+
+  useEffect(() => () => {
+    for (const controller of requests.current) controller.abort()
+    requests.current.clear()
+  }, [])
 
   useEffect(() => {
+    for (const request of requests.current) request.abort()
+    requests.current.clear()
     const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    setDetail(null)
+    setPlan(null)
     void fetchQueryFamilies(metric, null, controller.signal)
       .then(page => {
         setFamilies(page.items)
@@ -27,34 +52,40 @@ export function QueryStoreView() {
       })
       .then(value => { if (value) setDetail(value) })
       .catch(reason => { if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason)) })
+      .finally(() => setLoading(false))
+    void fetchQueryStoreStatus(controller.signal)
+      .then(setStatus)
+      .catch(reason => { if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason)) })
     return () => controller.abort()
   }, [metric])
 
   useEffect(() => {
     if (!detail?.plans[0]) { setPlan(null); return }
     const controller = new AbortController()
-    void fetchPlan(detail.plans[0].planId, controller.signal).then(setPlan)
+    void fetchPlan(detail.plans[0].planId, controller.signal)
+      .then(setPlan)
+      .catch(reason => { if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason)) })
     setComparePlanId(detail.plans[1]?.planId ?? '')
     setComparison(null)
     return () => controller.abort()
   }, [detail])
 
   const selectFamily = (familyId: string) => {
-    void fetchQueryFamily(familyId).then(setDetail).catch(reason => setError(String(reason)))
+    tracked(signal => fetchQueryFamily(familyId, signal), setDetail)
   }
   const loadMore = () => {
     if (!nextPageToken) return
-    void fetchQueryFamilies(metric, nextPageToken).then(page => {
+    tracked(signal => fetchQueryFamilies(metric, nextPageToken, signal), page => {
       setFamilies(current => [...current, ...page.items])
       setNextPageToken(page.nextPageToken)
-    }).catch(reason => setError(String(reason)))
+    })
   }
   const selectPlan = (planId: string) => {
-    void fetchPlan(planId).then(setPlan).catch(reason => setError(String(reason)))
+    tracked(signal => fetchPlan(planId, signal), setPlan)
   }
   const compare = () => {
     if (plan && comparePlanId) {
-      void fetchPlanComparison(plan.planId, comparePlanId).then(setComparison).catch(reason => setError(String(reason)))
+      tracked(signal => fetchPlanComparison(plan.planId, comparePlanId, signal), setComparison)
     }
   }
 
@@ -66,7 +97,12 @@ export function QueryStoreView() {
           {metrics.map(value => <option key={value} value={value}>{value}</option>)}
         </select></label>
       </div>
+      {loading && <p role="status">Loading Query Store history…</p>}
       {error && <p role="alert" className="error">{error}</p>}
+      {status && <p className={`source-banner status-${status.state.toLowerCase()}`} role="status">
+        <strong>Collection {status.state}</strong> · {status.reason}
+        {status.lastPublishedAt && ` · published ${new Date(status.lastPublishedAt).toLocaleString()}`}
+      </p>}
       <p className="source-banner"><strong>{detail?.family.evidence.source ?? pageEvidence?.source ?? 'Query Store'} source</strong> · {detail?.family.evidence.reason ?? pageEvidence?.reason ?? 'Loading…'}</p>
       <div className="query-grid">
         <div className="table-scroll">
@@ -90,10 +126,11 @@ export function QueryStoreView() {
           </li>)}</ul>
           <h3>Runtime timeline</h3>
           <div className="table-scroll"><table>
-            <thead><tr><th>Interval / plan</th><th>Execution type</th><th>Replica</th><th>Executions</th><th>Average duration µs</th></tr></thead>
+            <thead><tr><th>Interval / plan</th><th>Execution type</th><th>Replica</th><th>Executions</th><th>Average duration µs</th><th>Waits</th></tr></thead>
             <tbody>{detail.runtime.map(bucket => <tr key={`${bucket.planId}:${bucket.intervalId}:${bucket.executionType}:${bucket.replicaGroupId}`}>
               <td>{new Date(bucket.intervalStart).toLocaleString()} · {bucket.planId}</td><td>{bucket.executionType}</td>
               <td>{bucket.replicaGroupId}</td><td>{bucket.executionCount}</td><td>{bucket.averageDurationMicroseconds}</td>
+              <td>{Object.entries(bucket.waitMilliseconds).map(([category, value]) => `${category}: ${value} ms`).join(', ') || 'None captured'}</td>
             </tr>)}</tbody>
           </table></div>
           <h3>Plan history</h3>
@@ -106,6 +143,9 @@ export function QueryStoreView() {
           {plan && <section aria-labelledby="plan-tree-title">
             <h3 id="plan-tree-title">Compiled plan tree</h3>
             <p className="caveat">{plan.runtimeOverlayCaveat}</p>
+            {plan.optimization !== 'None' && <p><strong>{plan.optimization}</strong>
+              {plan.dispatcherExpression ? ` · dispatcher ${plan.dispatcherExpression}` : ''}
+            </p>}
             <ol className="plan-tree">{plan.nodes.map(node => <li key={node.nodeId}>
               Node {node.nodeId} · {node.physicalOperation} / {node.logicalOperation}
               {node.estimatedRows !== null && ` · estimated rows ${node.estimatedRows}`}
@@ -117,7 +157,17 @@ export function QueryStoreView() {
               </select></label>
               <button type="button" onClick={compare} disabled={!comparePlanId}>Compare structure</button>
             </div>
-            {comparison && <div aria-live="polite"><p>{comparison.source}: {comparison.structurallyEqual ? 'same structure' : `${comparison.changes.length} structural changes`}</p><p className="caveat">{comparison.caveat}</p></div>}
+            {comparison && <div aria-live="polite">
+              <p>{comparison.source}: {comparison.structurallyEqual ? 'same structure' : `${comparison.changes.length} structural changes`}</p>
+              {!comparison.structurallyEqual && <div className="table-scroll"><table aria-label="Structural plan changes">
+                <thead><tr><th>Path</th><th>Change</th><th>Before</th><th>After</th></tr></thead>
+                <tbody>{comparison.changes.map((change, index) => <tr key={`${change.path}:${index}`}>
+                  <th scope="row">{change.path}</th><td>{change.changeKind}</td>
+                  <td>{change.before ?? '—'}</td><td>{change.after ?? '—'}</td>
+                </tr>)}</tbody>
+              </table></div>}
+              <p className="caveat">{comparison.caveat}</p>
+            </div>}
           </section>}
         </article>}
       </div>

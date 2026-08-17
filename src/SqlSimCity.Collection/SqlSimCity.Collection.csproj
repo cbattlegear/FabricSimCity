@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" />
   </ItemGroup>
 
   <ItemGroup>

@@ -142,3 +142,25 @@ public sealed record PlanComparisonV1(
     IReadOnlyList<PlanChangeV1> Changes,
     string Source,
     string Caveat);
+
+public enum QueryStoreCollectorState { Disabled, Starting, Collecting, Ready, Partial, Stale, BackingOff, Failed }
+
+public sealed record QueryStoreDatabaseStatusV1(
+    string DatabaseId,
+    QueryStoreCollectionStateV1 State,
+    string ResetEpoch,
+    DateTimeOffset? CollectedThrough,
+    DateTimeOffset? OldestAvailableAt,
+    string Reason);
+
+public enum QueryStoreCollectionStateV1 { ReadWrite, ReadOnly, Off, Error, PermissionDenied, Unsupported, Unknown }
+
+public sealed record QueryStoreCollectorStatusV1(
+    string SchemaVersion,
+    QueryStoreCollectorState State,
+    long Sequence,
+    DateTimeOffset? LastStartedAt,
+    DateTimeOffset? LastPublishedAt,
+    DateTimeOffset? NextAttemptAt,
+    IReadOnlyList<QueryStoreDatabaseStatusV1> Databases,
+    string Reason);

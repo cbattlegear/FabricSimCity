@@ -4,7 +4,7 @@ SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
 SET LOCK_TIMEOUT 5000;
 
-SELECT TOP (@TopN)
+SELECT TOP (@PageSize)
     qv.query_variant_query_id,
     qv.parent_query_id,
     qv.dispatcher_plan_id

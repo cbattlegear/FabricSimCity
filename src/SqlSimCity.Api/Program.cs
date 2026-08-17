@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
 using SqlSimCity.Collection.Atlas;
 using SqlSimCity.Collection.LiveIncidents;
+using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Domain;
 using SqlSimCity.SqlServer;
 using SqlSimCity.SqlServer.Secrets;
@@ -24,15 +25,12 @@ builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton(probeCatalog);
 builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
-if (AtlasConfiguration.IsConnected(builder.Configuration))
-{
-    builder.Services.AddSingleton<IQueryStoreHistorySource, UnavailableQueryStoreHistorySource>();
-}
-else
-{
-    builder.Services.AddSingleton<IQueryStoreHistorySource, FixtureQueryStoreHistorySource>();
-}
 builder.Services.AddProtectedStorage(builder.Configuration);
+var queryStoreConnected = QueryStoreHistoryConfiguration.IsConnected(builder.Configuration);
+if (queryStoreConnected && !AtlasConfiguration.IsConnected(builder.Configuration))
+    throw new InvalidOperationException("Connected Query Store history requires Atlas:Mode=Connected so both share one validated profile and authentication strategy.");
+if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled"))
+    throw new InvalidOperationException("Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden.");
 
 // LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
 // SqlConnectionFactory-backed collector in and fails closed before the host serves traffic.
@@ -66,12 +64,34 @@ if (AtlasConfiguration.IsConnected(builder.Configuration))
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
     builder.Services.AddHostedService<AtlasRefreshBackgroundService>();
+    if (queryStoreConnected)
+    {
+        builder.Services.AddSingleton(QueryStoreHistoryConfiguration.BuildCollectionOptions(builder.Configuration));
+        builder.Services.AddSingleton(QueryStoreHistoryConfiguration.BuildHostOptions(builder.Configuration));
+        builder.Services.AddSingleton<IQueryStoreIncrementalSource, SqlQueryStoreIncrementalSource>();
+        builder.Services.AddSingleton<ProtectedQueryStoreRepository>();
+        builder.Services.AddSingleton<QueryStoreCollectionStatusTracker>();
+        builder.Services.AddSingleton<SecureShowplanParser>();
+        builder.Services.AddSingleton<ProtectedQueryStoreHistorySink>();
+        builder.Services.AddSingleton<IQueryStoreHistorySink>(services =>
+            services.GetRequiredService<ProtectedQueryStoreHistorySink>());
+        builder.Services.AddSingleton<IncrementalQueryStoreCollector>();
+        builder.Services.AddSingleton<ConnectedQueryStoreHistorySource>();
+        builder.Services.AddSingleton<IQueryStoreHistorySource>(services =>
+            services.GetRequiredService<ConnectedQueryStoreHistorySource>());
+        builder.Services.AddHostedService<QueryStoreHistoryBackgroundService>();
+    }
+    else
+    {
+        builder.Services.AddSingleton<IQueryStoreHistorySource, UnavailableQueryStoreHistorySource>();
+    }
 }
 else
 {
     builder.Services.AddSingleton<FixtureAtlasSnapshotSource>();
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
+    builder.Services.AddSingleton<IQueryStoreHistorySource, FixtureQueryStoreHistorySource>();
 }
 
 var app = builder.Build();
@@ -126,52 +146,76 @@ app.MapGet("/api/v1/live", (LiveIncidentSamplerService sampler, HttpContext cont
 });
 
 var queryStore = app.MapGroup("/api/v1/query-store");
-queryStore.MapGet("/queries", (
+queryStore.MapGet("/queries", async (
     IQueryStoreHistorySource source,
     HttpContext context,
     string? databaseId,
     string? metric,
     int? pageSize,
-    string? pageToken) =>
+    string? pageToken,
+    CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return Results.Ok(source.GetQueries(databaseId, metric ?? "cpu", pageSize ?? 50, pageToken));
+    var selectedMetric = metric ?? "cpu";
+    if (selectedMetric is not ("cpu" or "execution" or "executions" or "duration" or "reads" or "waits"))
+        return Results.BadRequest(new { error = "metric must be cpu, execution, duration, reads, or waits." });
+    var selectedPageSize = pageSize ?? 50;
+    if (selectedPageSize is < 1 or > 200)
+        return Results.BadRequest(new { error = "pageSize must be between 1 and 200." });
+    try
+    {
+        return Results.Ok(await source.GetQueriesAsync(
+            databaseId, selectedMetric, selectedPageSize, pageToken, cancellationToken));
+    }
+    catch (QueryStorePageTokenException)
+    {
+        return Results.BadRequest(new { error = "pageToken is malformed or no longer valid." });
+    }
 });
-queryStore.MapGet("/queries/{familyId}", (
-    IQueryStoreHistorySource source, HttpContext context, string familyId) =>
+queryStore.MapGet("/queries/{familyId}", async (
+    IQueryStoreHistorySource source, HttpContext context, string familyId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return source.GetFamily(familyId) is { } family ? Results.Ok(family) : Results.NotFound();
+    return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
+        ? Results.Ok(family) : Results.NotFound();
 });
-queryStore.MapGet("/queries/{familyId}/timeline", (
-    IQueryStoreHistorySource source, HttpContext context, string familyId) =>
+queryStore.MapGet("/queries/{familyId}/timeline", async (
+    IQueryStoreHistorySource source, HttpContext context, string familyId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return source.GetFamily(familyId) is { } family
+    return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
         ? Results.Ok(new { schemaVersion = "1.0", items = family.Runtime })
         : Results.NotFound();
 });
-queryStore.MapGet("/queries/{familyId}/plans", (
-    IQueryStoreHistorySource source, HttpContext context, string familyId) =>
+queryStore.MapGet("/queries/{familyId}/plans", async (
+    IQueryStoreHistorySource source, HttpContext context, string familyId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return source.GetFamily(familyId) is { } family
+    return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
         ? Results.Ok(new { schemaVersion = "1.0", items = family.Plans })
         : Results.NotFound();
 });
-queryStore.MapGet("/plans/{planId}", (
-    IQueryStoreHistorySource source, HttpContext context, string planId) =>
+queryStore.MapGet("/plans/{planId}", async (
+    IQueryStoreHistorySource source, HttpContext context, string planId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return source.GetPlan(planId) is { } plan ? Results.Ok(plan) : Results.NotFound();
+    return await source.GetPlanAsync(planId, cancellationToken) is { } plan
+        ? Results.Ok(plan) : Results.NotFound();
 });
-queryStore.MapGet("/plans/compare", (
-    IQueryStoreHistorySource source, HttpContext context, string leftPlanId, string rightPlanId) =>
+queryStore.MapGet("/plans/compare", async (
+    IQueryStoreHistorySource source, HttpContext context, string leftPlanId, string rightPlanId,
+    CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return source.ComparePlans(leftPlanId, rightPlanId) is { } comparison
+    return await source.ComparePlansAsync(leftPlanId, rightPlanId, cancellationToken) is { } comparison
         ? Results.Ok(comparison)
         : Results.NotFound();
+});
+queryStore.MapGet("/status", async (
+    IQueryStoreHistorySource source, HttpContext context, CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(await source.GetStatusAsync(cancellationToken));
 });
 app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 app.MapFallbackToFile("index.html");

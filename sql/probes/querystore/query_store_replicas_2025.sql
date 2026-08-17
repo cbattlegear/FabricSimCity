@@ -4,7 +4,9 @@ SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
 SET LOCK_TIMEOUT 5000;
 
-SELECT
+SELECT TOP (@PageSize)
     r.replica_group_id,
     r.replica_name
-FROM sys.query_store_replicas AS r;
+FROM sys.query_store_replicas AS r
+WHERE r.replica_group_id > @AfterReplicaGroupId
+ORDER BY r.replica_group_id;
