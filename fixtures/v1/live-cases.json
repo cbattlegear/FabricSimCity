@@ -1,0 +1,85 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureId": "live-cases-v1",
+  "observedAt": "2026-08-17T17:04:00Z",
+  "requests": [
+    {
+      "requestId": "req:80",
+      "sessionId": 80,
+      "status": "suspended",
+      "blockingSessionId": 0,
+      "databaseId": "db:atlas-sales",
+      "availability": "available"
+    },
+    {
+      "requestId": "req:81",
+      "sessionId": 81,
+      "status": "suspended",
+      "blockingSessionId": 80,
+      "databaseId": "db:atlas-sales",
+      "availability": "available"
+    },
+    {
+      "requestId": "req:82",
+      "sessionId": 82,
+      "status": "suspended",
+      "blockingSessionId": 81,
+      "databaseId": "db:atlas-sales",
+      "availability": "available"
+    },
+    {
+      "requestId": "req:sentinel",
+      "sessionId": 83,
+      "status": "suspended",
+      "blockingSessionId": -5,
+      "databaseId": "db:atlas-sales",
+      "availability": "available"
+    },
+    {
+      "requestId": "req:gone",
+      "sessionId": 84,
+      "status": "completed",
+      "availability": "disappeared",
+      "availabilityReason": "Request ended before detail collection."
+    },
+    {
+      "requestId": "req:plan-unavailable",
+      "sessionId": 85,
+      "status": "running",
+      "blockingSessionId": 0,
+      "databaseId": "db:atlas-sales",
+      "availability": "available",
+      "planAvailability": "unavailable",
+      "planAvailabilityReason": "Plan XML collection was denied or unavailable."
+    }
+  ],
+  "waitingTasks": [
+    {
+      "taskId": "wait:81:coordinator",
+      "sessionId": 81,
+      "executionContext": "coordinator",
+      "waitType": "CXPACKET",
+      "blockingSessionId": 80
+    },
+    {
+      "taskId": "wait:81:worker-1",
+      "sessionId": 81,
+      "executionContext": "worker",
+      "waitType": "CXCONSUMER",
+      "blockingSessionId": 80
+    },
+    {
+      "taskId": "wait:81:worker-2",
+      "sessionId": 81,
+      "executionContext": "worker",
+      "waitType": "CXCONSUMER",
+      "blockingSessionId": 80
+    }
+  ],
+  "azureSqlDatabaseScope": {
+    "targetId": "azure-sql-database",
+    "visibilityScope": "current-database-only",
+    "visibleDatabaseId": "db:atlas-sales",
+    "unavailableServerWideEvidenceReason": "Azure SQL Database DMV visibility is database-scoped."
+  }
+}

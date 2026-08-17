@@ -1,0 +1,126 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureId": "query-store-runtime-v1",
+  "source": "Query Store catalog views",
+  "observedAt": "2026-08-17T17:03:00Z",
+  "resetEpoch": {
+    "epochId": "qsr:reset:2026-08-17T16:00:00Z",
+    "resetAt": "2026-08-17T16:00:00Z",
+    "reason": "Synthetic Query Store clear/reset boundary; aggregates must not cross it."
+  },
+  "activeInterval": {
+    "intervalId": "qsr:interval:active-01",
+    "rawRows": [
+      {
+        "rowId": "qsr:raw:40",
+        "executions": 40
+      },
+      {
+        "rowId": "qsr:raw:7",
+        "executions": 7
+      }
+    ],
+    "aggregateExecutions": 47
+  },
+  "executionTypes": [
+    {
+      "executionType": "regular",
+      "executions": 120
+    },
+    {
+      "executionType": "client-aborted",
+      "executions": 5
+    },
+    {
+      "executionType": "exception",
+      "executions": 2
+    }
+  ],
+  "weightedDuration": {
+    "samples": [
+      {
+        "sampleId": "qsr:duration:fast",
+        "executions": 1000,
+        "meanDurationMicroseconds": 2000
+      },
+      {
+        "sampleId": "qsr:duration:slow",
+        "executions": 10,
+        "meanDurationMicroseconds": 200000
+      }
+    ],
+    "weightedMeanMicroseconds": 3960.3960396039606,
+    "naiveMeanMicroseconds": 101000
+  },
+  "contextSettings": [
+    {
+      "compoundId": "query:41|context:7|interval:active-01",
+      "queryId": 41,
+      "contextSettingsId": 7,
+      "intervalId": "qsr:interval:active-01",
+      "executions": 21
+    },
+    {
+      "compoundId": "query:41|context:7|interval:active-01",
+      "queryId": 41,
+      "contextSettingsId": 7,
+      "intervalId": "qsr:interval:active-01",
+      "executions": 26
+    }
+  ],
+  "plans": [
+    {
+      "planId": 99,
+      "queryId": 41,
+      "lastExecutionAt": "2026-08-17T16:55:00Z"
+    },
+    {
+      "planId": 3,
+      "queryId": 41,
+      "lastExecutionAt": "2026-08-17T16:58:00Z"
+    },
+    {
+      "planId": 2,
+      "queryId": 41,
+      "lastExecutionAt": "2026-08-17T16:59:30Z"
+    }
+  ],
+  "forcedPlan": {
+    "planId": 99,
+    "isForced": true,
+    "forceFailureCount": 3,
+    "lastForceFailureReason": "NO_PLAN",
+    "state": "force-failed"
+  },
+  "parameterSensitivePlan": {
+    "dispatcherPlanId": 200,
+    "variants": [
+      {
+        "variantId": 201,
+        "predicate": "@customer_id <= 100",
+        "lastExecutionAt": "2026-08-17T16:58:30Z"
+      },
+      {
+        "variantId": 202,
+        "predicate": "@customer_id > 100",
+        "lastExecutionAt": "2026-08-17T16:59:00Z"
+      }
+    ]
+  },
+  "optionalParameterPlanOptimization": {
+    "target": "SQL Server 2025",
+    "dispatcherPlanId": 300,
+    "variants": [
+      {
+        "variantId": 301,
+        "predicate": "@region IS NULL",
+        "lastExecutionAt": "2026-08-17T16:58:10Z"
+      },
+      {
+        "variantId": 302,
+        "predicate": "@region IS NOT NULL",
+        "lastExecutionAt": "2026-08-17T16:59:10Z"
+      }
+    ]
+  }
+}
