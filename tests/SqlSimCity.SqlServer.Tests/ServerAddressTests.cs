@@ -95,6 +95,12 @@ public class ServerAddressTests
     [InlineData(" sql01.example.com")]
     [InlineData("sql01.example.com ")]
     [InlineData("sql 01.example.com")]
+    [InlineData("sql01/evil")]
+    [InlineData("sql01'evil")]
+    [InlineData("sql01\"evil")]
+    [InlineData("sql01[evil]")]
+    [InlineData("[sql01")]
+    [InlineData("sql01]")]
     public void ConstructorRejectsEmbeddedRoutingSyntaxAndWhitespace(string host)
     {
         Assert.Throws<ConnectionProfileValidationException>(() => new ServerAddress(host));
@@ -129,5 +135,34 @@ public class ServerAddressTests
     {
         Assert.Throws<ConnectionProfileValidationException>(
             () => new ServerAddress("sql01.example.com", instanceName: string.Empty));
+    }
+
+    [Theory]
+    [InlineData("SQLEXPRESS")]
+    [InlineData("_named_instance")]
+    [InlineData("Instance1")]
+    public void ConstructorAcceptsValidInstanceNameShapes(string instanceName)
+    {
+        var address = new ServerAddress("sql01.example.com", instanceName: instanceName);
+        Assert.Equal(instanceName, address.InstanceName);
+    }
+
+    [Theory]
+    [InlineData("SQL EXPRESS")]
+    [InlineData("SQL\tEXPRESS")]
+    [InlineData("SQL,EXPRESS")]
+    [InlineData("SQL\\EXPRESS")]
+    [InlineData("SQL:EXPRESS")]
+    [InlineData("SQL/EXPRESS")]
+    [InlineData("SQL'EXPRESS")]
+    [InlineData("SQL\"EXPRESS")]
+    [InlineData("SQL[EXPRESS]")]
+    [InlineData("1SQLEXPRESS")]
+    [InlineData("-SQLEXPRESS")]
+    [InlineData("SQL.EXPRESS")]
+    public void ConstructorRejectsInstanceNameRoutingSyntaxWhitespaceAndInvalidShape(string instanceName)
+    {
+        Assert.Throws<ConnectionProfileValidationException>(
+            () => new ServerAddress("sql01.example.com", instanceName: instanceName));
     }
 }

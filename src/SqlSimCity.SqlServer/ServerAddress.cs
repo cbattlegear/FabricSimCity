@@ -1,5 +1,7 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.RegularExpressions;
 
 namespace SqlSimCity.SqlServer;
 
@@ -15,6 +17,17 @@ public sealed class ServerAddress
     private const int MaxInstanceNameLength = 128;
     public const int MinPort = 1;
     public const int MaxPort = 65535;
+
+    // SqlClient TCP routing/protocol syntax and other characters that would
+    // let a host or instance name be misread as something other than a plain
+    // identifier: comma (port separator), backslash (instance separator),
+    // colon (protocol prefix or IPv6), slash, quotes, and brackets.
+    private static readonly SearchValues<char> RoutingSyntaxCharacters =
+        SearchValues.Create([',', '\\', ':', '/', '\'', '"', '[', ']']);
+
+    // Mirrors SQL Server's own named-instance naming rule: must start with a
+    // letter or underscore and contain only letters, digits, and underscores.
+    private static readonly Regex InstanceNameShape = new("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
 
     public string Host { get; }
 
@@ -41,6 +54,7 @@ public sealed class ServerAddress
             ConnectionValidation.EnsureNoControlCharacters(instanceName, nameof(instanceName));
             ConnectionValidation.EnsureNoConnectionStringFragment(instanceName, nameof(instanceName));
             ConnectionValidation.EnsureLength(instanceName, nameof(instanceName), 1, MaxInstanceNameLength);
+            EnsureInstanceNameSyntax(instanceName);
         }
 
         if (port is int p && (p < MinPort || p > MaxPort))
@@ -79,10 +93,26 @@ public sealed class ServerAddress
                 "IPv6 host literals are not supported until their SqlClient TCP data-source syntax is implemented.");
         }
 
-        if (host.IndexOfAny([',', '\\', ':']) >= 0)
+        if (host.IndexOfAny(RoutingSyntaxCharacters) >= 0)
         {
             throw new ConnectionProfileValidationException(
-                "host must not embed a port, instance, protocol prefix, or other SqlClient routing syntax; use port or instanceName instead.");
+                "host must not embed a port, instance, protocol prefix, quote, bracket, or other SqlClient routing syntax; use port or instanceName instead.");
+        }
+    }
+
+    private static void EnsureInstanceNameSyntax(string instanceName)
+    {
+        if (instanceName.Any(char.IsWhiteSpace) || instanceName.IndexOfAny(RoutingSyntaxCharacters) >= 0)
+        {
+            throw new ConnectionProfileValidationException(
+                "instanceName must not contain whitespace or SqlClient routing syntax (',', '\\', ':', '/', quotes, or brackets).");
+        }
+
+        if (!InstanceNameShape.IsMatch(instanceName))
+        {
+            throw new ConnectionProfileValidationException(
+                "instanceName must start with a letter or underscore and contain only letters, digits, and underscores.");
         }
     }
 }
+
