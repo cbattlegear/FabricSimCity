@@ -1,0 +1,532 @@
+{
+  "$schema": "./manifest.schema.md",
+  "manifestVersion": 1,
+  "description": "Static, read-only SQL Server / Azure SQL Database probe catalog for future Microsoft.Data.SqlClient collection. Every probe is a static SELECT/CTE/APPLY plus safe session SET statements; no dynamic SQL, no mutating statements. See sql/README.md for permission tables, unit conventions, and cadence/overhead guidance.",
+  "connectionScopes": {
+    "server": "Instance-wide facts; the query itself is not tied to a particular user database, though the connection can be opened against any database that grants the required permission.",
+    "master": "Conventionally run against the master database; the underlying catalog view is visible from any database context on-box, but Azure SQL Database restricts the visible row set (see the probe's azureSqlDatabase notes).",
+    "database": "Assumes the client already opened (or switched pooled connections to) the specific target database. The probe only reports on that database.",
+    "tempdb": "Assumes the client explicitly opened its connection with tempdb as the current database. Unlike 'database', this is never the application's own business database."
+  },
+  "cadenceClasses": {
+    "realtime": "Sub-minute polling; designed for live dashboards of active work (sessions, waits, blocking).",
+    "frequent": "1-5 minute polling; cheap, high-value operational counters.",
+    "standard": "5-15 minute polling; Query Store summaries, space, and index usage roll-ups.",
+    "low_frequency": "15-60+ minute polling; identity and configuration facts that rarely change.",
+    "on_demand": "Only run in response to a specific, already-identified object; never on a fixed timer."
+  },
+  "relativeCosts": {
+    "trivial": "In-memory counters or fixed-size DMVs; no page or plan-cache scan.",
+    "low": "Small, bounded in-memory scan (session/request/task lists, single-database catalog joins).",
+    "medium": "Bounded by an explicit parameter (time window, TopN, or a required object id); cost scales with that bound, not with database size.",
+    "high": "Not used in this catalog; any probe that would require this cost class needs an explicit bound before it may be added."
+  },
+  "probes": [
+    {
+      "id": "server.identity",
+      "title": "Server/platform identity",
+      "file": "probes/server/server_identity.sql",
+      "connectionScope": "master",
+      "minPlatform": "SQL Server 2017 (14.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported (EngineEdition = 5). cpu_count/physical_memory_kb reflect the assigned vCore/DTU tier, not a physical host."
+      },
+      "requiredPermission": "SERVERPROPERTY(): none. sys.dm_os_sys_info/sys.dm_os_host_info: VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "low_frequency",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Exactly one row: server/instance identity, edition, engine edition, host platform, CPU/scheduler/memory sizing, and start time.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "server.database_discovery",
+      "title": "Visible database inventory",
+      "file": "probes/server/database_discovery.sql",
+      "connectionScope": "master",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": true,
+        "notes": "sys.databases on Azure SQL Database only returns 'master' and the current user database; it cannot enumerate every database on the logical server. Callers must iterate known database names instead."
+      },
+      "requiredPermission": "VIEW ANY DATABASE (granted to PUBLIC by default since SQL Server 2016 SP1).",
+      "cadenceClass": "low_frequency",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per visible database: id, name, state, recovery model, containment, compatibility level, Query Store on/off, collation, create date.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "querystore.options_2016",
+      "title": "Query Store options (base, SQL Server 2016-2017)",
+      "file": "probes/querystore/query_store_options_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "versionVariantOf": "querystore.options",
+      "versionVariantNotes": "Base column set only; use querystore.options_2019 on SQL Server 2019+/Azure SQL Database for the CUSTOM capture-policy columns.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported, but prefer querystore.options_2019 on Azure SQL Database since it always runs a current engine."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2016-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "low_frequency",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero rows if Query Store was never enabled, otherwise exactly one row describing desired/actual state, size limits, retention, and capture mode.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "querystore.options_2019",
+      "title": "Query Store options (CUSTOM capture policy, SQL Server 2019+)",
+      "file": "probes/querystore/query_store_options_2019.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2019 (15.x)",
+      "versionVariantOf": "querystore.options",
+      "versionVariantNotes": "Adds wait_stats_capture_mode (2017+) and capture_policy_* CUSTOM-mode columns (2019+); querying these on SQL Server 2016/2017 raises 'Invalid column name'. Use querystore.options_2016 there instead.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "low_frequency",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero rows if Query Store was never enabled, otherwise exactly one row including CUSTOM capture-policy thresholds and wait-stats capture mode.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "querystore.query_summary",
+      "title": "Query Store query identity and compile statistics",
+      "file": "probes/querystore/query_store_query_summary.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2016-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on last_execution_time. Callers should pass a bounded, recent window (e.g. now - collection interval)."
+        },
+        {
+          "name": "@TopN",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Caps the row count via TOP(@TopN). Must be a small, positive, application-chosen bound."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @TopN rows ordered by last_execution_time descending: query identity, parameterization type, and compile-time statistics in microseconds/KiB. No plan or runtime execution data.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.plan_summary_2016",
+      "title": "Query Store plan metadata (base, SQL Server 2016-2019)",
+      "file": "probes/querystore/query_store_plan_summary_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "versionVariantOf": "querystore.plan_summary",
+      "versionVariantNotes": "plan_forcing_type/plan_forcing_type_desc read NULL before SQL Server 2017. Use querystore.plan_summary_2022 on SQL Server 2022+/Azure SQL Database for parameter-sensitive-plan (variant) columns.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; prefer querystore.plan_summary_2022 since Azure SQL Database always runs a current engine."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2016-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on last_execution_time."
+        },
+        {
+          "name": "@TopN",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Caps the row count via TOP(@TopN)."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @TopN rows ordered by last_execution_time descending: plan identity, forcing state, and compile duration in microseconds. query_plan (Showplan XML) is deliberately excluded.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.plan_summary_2022",
+      "title": "Query Store plan metadata with parameter-sensitive-plan variants (SQL Server 2022+)",
+      "file": "probes/querystore/query_store_plan_summary_2022.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "versionVariantOf": "querystore.plan_summary",
+      "versionVariantNotes": "has_compile_replay_script, is_optimized_plan_forcing_disabled, plan_type, plan_type_desc do not exist before SQL Server 2022 and raise 'Invalid column name' there. Use querystore.plan_summary_2016 for SQL Server 2016-2019.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE PERFORMANCE STATE on the database.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on last_execution_time."
+        },
+        {
+          "name": "@TopN",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Caps the row count via TOP(@TopN)."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most @TopN rows ordered by last_execution_time descending: base plan metadata plus plan_type_desc distinguishing Compiled/Dispatcher/Query Variant plans. query_plan (Showplan XML) is deliberately excluded.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.runtime_stats_summary",
+      "title": "Query Store runtime execution statistics (weighted, de-duplicated)",
+      "file": "probes/querystore/query_store_runtime_stats_summary.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2016-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on the runtime-stats interval start_time."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive upper bound on the runtime-stats interval start_time."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (plan_id, runtime_stats_interval_id, execution_type), already SUMmed across any duplicate active-interval rows. Durations/CPU are microseconds; IO columns are 8-KiB pages; weighted_avg_duration_us is execution-count-weighted, separated by execution_type_desc (Regular/Aborted/Exception).",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.wait_stats_summary_2017",
+      "title": "Query Store wait statistics (base, SQL Server 2017-2019)",
+      "file": "probes/querystore/query_store_wait_stats_summary_2017.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2017 (14.x)",
+      "versionVariantOf": "querystore.wait_stats_summary",
+      "versionVariantNotes": "sys.query_store_wait_stats does not exist on SQL Server 2016. Use querystore.wait_stats_summary_2022 on SQL Server 2022+/Azure SQL Database for the secondary-replica identifier.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; prefer querystore.wait_stats_summary_2022 since Azure SQL Database always runs a current engine."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2017-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on the runtime-stats interval start_time."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive upper bound on the runtime-stats interval start_time."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (plan_id, runtime_stats_interval_id, execution_type, wait_category), already SUMmed across duplicate active-interval rows, with total_count_executions joined in from Query Store runtime stats. All wait-time columns are MILLISECONDS.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.wait_stats_summary_2022",
+      "title": "Query Store wait statistics with replica identifier (SQL Server 2022+)",
+      "file": "probes/querystore/query_store_wait_stats_summary_2022.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "versionVariantOf": "querystore.wait_stats_summary",
+      "versionVariantNotes": "replica_group_id does not exist before SQL Server 2022 and raises 'Invalid column name' there. Use querystore.wait_stats_summary_2017 for SQL Server 2017-2019.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE PERFORMANCE STATE on the database.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on the runtime-stats interval start_time."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive upper bound on the runtime-stats interval start_time."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (plan_id, runtime_stats_interval_id, execution_type, wait_category, replica_group_id), already SUMmed across duplicate active-interval rows, with total_count_executions joined in. All wait-time columns are MILLISECONDS.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "space.database_file_space",
+      "title": "Database/file allocated vs. used space",
+      "file": "probes/space/database_file_space.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "sys.database_files: ordinary database access. sys.dm_db_file_space_usage: VIEW DATABASE STATE (SQL Server 2016-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "standard",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "One row per file in the current database. All *_mb columns are computed from 8-KiB pages. data_total_mb/data_used_mb/data_free_mb/version_store_mb are NULL for LOG files; log allocated size still appears via allocated_mb, but log usage is reported separately by space.log_space_usage.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "space.log_space_usage",
+      "title": "Transaction log space usage",
+      "file": "probes/space/log_space_usage.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW DATABASE STATE (SQL Server 2016-2019) or VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "frequent",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Exactly one row for the current database: total/used log size in MiB and used_log_space_in_percent (0-100, relative to total_log_size_in_bytes).",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "sessions.active_requests",
+      "title": "Live sessions/requests with current statement text",
+      "file": "probes/sessions/active_requests.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported, but VIEW DATABASE STATE on Azure SQL Database restricts visibility to the current database's own sessions rather than the whole logical server."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier; VIEW DATABASE STATE on Azure SQL Database) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "realtime",
+      "parameters": [
+        {
+          "name": "@IncludeIdleSessions",
+          "sqlDbType": "Bit",
+          "required": false,
+          "default": false,
+          "description": "When false, only sessions with an active request are returned."
+        },
+        {
+          "name": "@MinElapsedMs",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": 0,
+          "description": "Lower bound on total_elapsed_time (ms) for the active request; use to focus on long-running requests."
+        },
+        {
+          "name": "@DatabaseId",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": null,
+          "description": "When supplied, restricts to requests against this database_id. NULL returns requests against any visible database."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (session_id, request_id). current_statement_text is the offset-resolved substring of the executing statement; batch_text is the full submitted batch. No plan XML is fetched.",
+      "relativeCost": "low"
+    },
+    {
+      "id": "sessions.waiting_tasks",
+      "title": "Current waiting task queue",
+      "file": "probes/sessions/waiting_tasks.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "realtime",
+      "parameters": [
+        {
+          "name": "@MinWaitMs",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": 0,
+          "description": "Lower bound on wait_duration_ms."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per waiting task, preserving exec_context_id and the raw blocking_session_id sentinel values (NULL, -2, -3, -4, -5) documented in sql/README.md; the application interprets them, this probe never rewrites them.",
+      "relativeCost": "low"
+    },
+    {
+      "id": "sessions.blocking_inputs",
+      "title": "Root-blocker input facts (no graph construction)",
+      "file": "probes/sessions/blocking_inputs.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported, subject to the same VIEW DATABASE STATE visibility restriction as sessions.active_requests."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "realtime",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows tagged by fact_source ('blocked_request' or 'idle_open_transaction'). Returns facts only; the application builds any blocking graph and determines the root blocker itself. Raw blocking_session_id sentinel values are preserved.",
+      "relativeCost": "low"
+    },
+    {
+      "id": "sessions.memory_grants",
+      "title": "Query memory grant requests and holders",
+      "file": "probes/sessions/memory_grants.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; scheduler_id/wait_order/pool_id/group_id are filtered to NULL by the engine to avoid exposing cross-tenant placement information."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier; VIEW DATABASE STATE on Azure SQL Database) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "frequent",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (session_id, request_id) with a memory grant request. Memory columns are KiB. plan_handle/sql_handle are opaque; batch_text is resolved but no Showplan XML is fetched.",
+      "relativeCost": "low"
+    },
+    {
+      "id": "tempdb.usage",
+      "title": "tempdb file/session/task space usage",
+      "file": "probes/tempdb/tempdb_usage.sql",
+      "connectionScope": "tempdb",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; each Azure SQL Database has its own private tempdb."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier; VIEW DATABASE STATE in tempdb on Azure SQL Database) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "frequent",
+      "parameters": [
+        {
+          "name": "@IncludeSystemSessions",
+          "sqlDbType": "Bit",
+          "required": false,
+          "default": false,
+          "description": "When false, session_id <= 50 (system sessions) are excluded from the session/task result sets."
+        }
+      ],
+      "resultSets": 3,
+      "resultContract": "Three result sets in order: (1) tempdb file space usage, requires the connection's current database to be tempdb; (2) per-session tempdb page allocation; (3) per-task tempdb page allocation with exec_context_id preserved. Page counts converted to MiB where noted.",
+      "relativeCost": "low"
+    },
+    {
+      "id": "io.file_io_stats",
+      "title": "Cumulative per-file I/O counters",
+      "file": "probes/io/file_io_stats.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Restricted to the current database's own files; Azure SQL Database does not expose other databases' file identifiers through this DMV."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
+      "cadenceClass": "frequent",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "One row per (database_id, file_id) visible to the caller. Cumulative since the Database Engine's last restart; the application computes deltas between polls and must detect/discard a delta after a service restart rather than treat a lower reading as negative throughput. *_ms columns are milliseconds; byte columns are raw bytes, not pages.",
+      "relativeCost": "low"
+    },
+    {
+      "id": "scheduler.pressure",
+      "title": "Scheduler CPU/runnable-queue pressure",
+      "file": "probes/scheduler/scheduler_pressure.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported, subject to the tiered permission rules in sql/README.md. The visible scheduler count reflects the database's assigned vCore/DTU allocation, not a physical host's processor count."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+). Azure SQL Database: server admin/Microsoft Entra admin or ##MS_ServerStateReader## membership (Basic/S0/S1/elastic pool), else VIEW DATABASE STATE or ##MS_ServerStateReader## membership.",
+      "cadenceClass": "frequent",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "One row per VISIBLE ONLINE scheduler (hidden/internal schedulers excluded). Cumulative CPU/delay columns since engine start; runnable_tasks_count > 0 with a high current_tasks_count signals CPU pressure.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "index.usage_summary",
+      "title": "Index seek/scan/lookup/update counts",
+      "file": "probes/index/index_usage_summary.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; rows for other databases are silently filtered by the engine."
+      },
+      "requiredPermission": "None beyond ordinary database access; not gated by VIEW SERVER STATE/VIEW DATABASE STATE.",
+      "cadenceClass": "standard",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (object_id, index_id) touched since the last engine restart or index rebuild. An index with no row here has not been used, not that it is empty. Excludes memory-optimized and spatial indexes.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "index.operational_stats",
+      "title": "Targeted index operational (lock/latch) statistics",
+      "file": "probes/index/index_operational_stats.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported."
+      },
+      "requiredPermission": "None beyond ordinary database access and SELECT/VIEW DEFINITION on the target object.",
+      "cadenceClass": "on_demand",
+      "parameters": [
+        {
+          "name": "@ObjectId",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "object_id of the table/view to inspect. Must not be supplied as NULL: NULL here (with NULL index/partition) forces a resource-intensive whole-database enumeration. Resolve a specific object first via index.usage_summary or OBJECT_ID()."
+        },
+        {
+          "name": "@IndexId",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": null,
+          "description": "NULL returns all indexes on @ObjectId."
+        },
+        {
+          "name": "@PartitionNumber",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": null,
+          "description": "NULL returns all partitions."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per (object_id, index_id, partition_number). Wait columns are milliseconds; count columns are raw counts. Cumulative since the last engine restart or index rebuild, whichever is more recent.",
+      "relativeCost": "medium"
+    }
+  ]
+}
