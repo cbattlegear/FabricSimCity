@@ -51,6 +51,31 @@ public sealed class AtlasContractSerializationTests
     }
 
     [Fact]
+    public void QueryStoreCountsAboveJavaScriptSafeIntegerRemainExact()
+    {
+        const string exactCount = "9007199254740993";
+        var evidence = new EvidenceV1(EvidenceSource.QueryStoreAggregate, DataStatus.Available,
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(1), "fixture");
+        var history = new QueryStoreHistoryV1(exactCount, exactCount, 1000m,
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(1),
+            QueryStoreCapability.Available, QueryStoreHealth.Healthy, "collecting", evidence);
+
+        var json = JsonSerializer.Serialize(history, Options);
+        using var document = JsonDocument.Parse(json);
+
+        Assert.Equal(JsonValueKind.String, document.RootElement.GetProperty("executionCount").ValueKind);
+        Assert.Equal(exactCount, document.RootElement.GetProperty("executionCount").GetString());
+        Assert.Equal(exactCount, document.RootElement.GetProperty("logicalReads8KiBPages").GetString());
+
+        var unavailable = history with { ExecutionCount = null, LogicalReads8KiBPages = null };
+        json = JsonSerializer.Serialize(unavailable, Options);
+        using var unavailableDocument = JsonDocument.Parse(json);
+        Assert.Equal(JsonValueKind.Null, unavailableDocument.RootElement.GetProperty("executionCount").ValueKind);
+        Assert.Equal(JsonValueKind.Null,
+            unavailableDocument.RootElement.GetProperty("logicalReads8KiBPages").ValueKind);
+    }
+
+    [Fact]
     public void EvidenceSerializesSourceStatusAndTimestampsSeparately()
     {
         var evidence = new EvidenceV1(EvidenceSource.QueryStoreAggregate, DataStatus.PermissionDenied,

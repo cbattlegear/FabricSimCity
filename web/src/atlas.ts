@@ -31,6 +31,12 @@ export function formatBytes(measurement: ByteMeasurement): string {
   return `${exact} bytes (${formatBinary(value)})`
 }
 
+export function formatDecimalCount(value: string | null): string {
+  if (value === null) return 'Unavailable'
+  if (!/^\d+$/.test(value)) return 'Invalid count'
+  return new Intl.NumberFormat('en-US').format(BigInt(value))
+}
+
 export function evidenceText(evidence: Evidence): string {
   const source: Record<Evidence['source'], string> = {
     Fixture: 'Fixture value',

@@ -36,8 +36,14 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
         using var document = JsonDocument.Parse(rawJson);
         var firstDatabase = document.RootElement.GetProperty("databases")[0];
         Assert.Equal(JsonValueKind.String, firstDatabase.GetProperty("allocated").GetProperty("bytes").ValueKind);
-        var queryStore = firstDatabase.GetProperty("queryStore");
-        Assert.True(queryStore.TryGetProperty("logicalReads8KiBPages", out _));
+        var unavailableQueryStore = firstDatabase.GetProperty("queryStore");
+        Assert.Equal(JsonValueKind.Null, unavailableQueryStore.GetProperty("executionCount").ValueKind);
+        Assert.Equal(JsonValueKind.Null, unavailableQueryStore.GetProperty("logicalReads8KiBPages").ValueKind);
+        var sampledDatabase = document.RootElement.GetProperty("databases").EnumerateArray()
+            .First(database => database.GetProperty("name").GetString() == "sales");
+        var queryStore = sampledDatabase.GetProperty("queryStore");
+        Assert.Equal(JsonValueKind.String, queryStore.GetProperty("logicalReads8KiBPages").ValueKind);
+        Assert.Equal(JsonValueKind.String, queryStore.GetProperty("executionCount").ValueKind);
         Assert.True(queryStore.TryGetProperty("averageDurationMicroseconds", out _));
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.Contains("object-src 'none'", response.Headers.GetValues("Content-Security-Policy").Single(),

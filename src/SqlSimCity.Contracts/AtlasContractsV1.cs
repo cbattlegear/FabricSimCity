@@ -28,8 +28,8 @@ public sealed record LiveActivityV1(
     EvidenceV1 Evidence);
 
 public sealed record QueryStoreHistoryV1(
-    long? ExecutionCount,
-    long? LogicalReads8KiBPages,
+    string? ExecutionCount,
+    string? LogicalReads8KiBPages,
     decimal? AverageDurationMicroseconds,
     DateTimeOffset? WindowStart,
     DateTimeOffset? WindowEnd,

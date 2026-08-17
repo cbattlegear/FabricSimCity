@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { databaseSide, isFreshLive } from './atlas'
-import { layoutStableIds, stableHash } from './atlasLayout'
+import { AtlasLayoutReservations, stableHash } from './atlasLayout'
 import type { AtlasSnapshot, DatabaseAtlasItem, EdgeConfidence } from './contracts'
 
 type AtlasSceneCallbacks = {
@@ -13,11 +13,12 @@ type Beacon = { mesh: THREE.Mesh; phase: number }
 export class AtlasScene {
   private readonly renderer: THREE.WebGLRenderer
   private readonly scene = new THREE.Scene()
-  private readonly camera = new THREE.PerspectiveCamera(36, 1, 1, 2200)
+  private readonly camera = new THREE.PerspectiveCamera(36, 1, 1, 2800)
   private readonly raycaster = new THREE.Raycaster()
   private readonly pointer = new THREE.Vector2()
   private readonly interactive: THREE.Object3D[] = []
   private readonly beacons: Beacon[] = []
+  private readonly layout = new AtlasLayoutReservations()
   private readonly resizeObserver: ResizeObserver
   private readonly reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
   private frame: number | null = null
@@ -32,7 +33,7 @@ export class AtlasScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.setClearColor(0x080c12, 1)
-    this.camera.position.set(560, 680, 820)
+    this.camera.position.set(680, 820, 980)
     this.camera.lookAt(0, 0, 0)
 
     this.scene.add(new THREE.HemisphereLight(0xc9e9ff, 0x17202a, 1.7))
@@ -40,7 +41,7 @@ export class AtlasScene {
     key.position.set(-80, 160, 100)
     this.scene.add(key)
 
-    const grid = new THREE.GridHelper(1040, 52, 0x38516a, 0x1a2735)
+    const grid = new THREE.GridHelper(1240, 62, 0x38516a, 0x1a2735)
     grid.position.y = -0.2
     this.scene.add(grid)
 
@@ -57,7 +58,7 @@ export class AtlasScene {
     this.clearAtlasObjects()
     const centers = new Map<string, THREE.Vector3>()
 
-    const layout = layoutStableIds(snapshot.databases.map(database => database.databaseId))
+    const layout = this.layout.place(snapshot.databases.map(database => database.databaseId))
     for (const database of snapshot.databases) {
       const position = layout.get(database.databaseId)
       if (!position) continue

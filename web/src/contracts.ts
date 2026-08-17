@@ -29,8 +29,8 @@ export interface LiveActivity {
 }
 
 export interface QueryStoreHistory {
-  executionCount: number | null
-  logicalReads8KiBPages: number | null
+  executionCount: string | null
+  logicalReads8KiBPages: string | null
   averageDurationMicroseconds: number | null
   windowStart: string | null
   windowEnd: string | null

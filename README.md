@@ -10,7 +10,7 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 - Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
-- A keyboard and screen-reader-friendly table contains the same records. Exact bytes cross the wire as nonnegative decimal strings and are formatted with `BigInt`, avoiding JavaScript precision loss.
+- A keyboard and screen-reader-friendly table contains the same records. Exact bytes and Query Store integer aggregates cross the wire as nonnegative decimal strings and are formatted with `BigInt`, avoiding JavaScript precision loss.
 
 ## Accuracy boundary
 

@@ -116,7 +116,11 @@ public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
             ? (DateTimeOffset?)null
             : status is DataStatus.Stale ? CapturedAt.AddHours(-2) : CapturedAt;
         var freshUntil = status is DataStatus.Available ? CapturedAt.AddMinutes(15) : CapturedAt.AddMinutes(-1);
-        return new QueryStoreHistoryV1(executions, executions is null ? null : executions * 80, duration,
+        var executionCount = executions?.ToString(CultureInfo.InvariantCulture);
+        var logicalReads8KiBPages = executions is null
+            ? null
+            : checked(executions.Value * 80).ToString(CultureInfo.InvariantCulture);
+        return new QueryStoreHistoryV1(executionCount, logicalReads8KiBPages, duration,
             executions is null ? null : CapturedAt.AddHours(-24), observedAt,
             capability, health, reason,
             new EvidenceV1(EvidenceSource.QueryStoreAggregate, status, observedAt, freshUntil, reason));

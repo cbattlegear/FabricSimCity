@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessibleDatabaseLabel, databaseSide, evidenceText, formatBytes, isFreshLive, sizeToSide } from './atlas'
+import { accessibleDatabaseLabel, databaseSide, evidenceText, formatBytes, formatDecimalCount, isFreshLive, sizeToSide } from './atlas'
 import type { DatabaseAtlasItem, Evidence } from './contracts'
 
 const observed = '2026-08-17T16:59:52Z'
@@ -36,8 +36,8 @@ function database(bytes: string | null, status: 'Known' | 'Unknown' = 'Known'): 
       evidence: evidence(),
     },
     queryStore: {
-      executionCount: 0,
-      logicalReads8KiBPages: 0,
+      executionCount: '0',
+      logicalReads8KiBPages: '0',
       averageDurationMicroseconds: 0,
       windowStart: observed,
       windowEnd: generated,
@@ -88,6 +88,11 @@ describe('evidence semantics and accessible text', () => {
     item.liveActivity.evidence.status = 'Available'
     item.liveActivity.evidence.freshUntil = '2026-08-17T16:59:59Z'
     expect(isFreshLive(item, generated)).toBe(false)
+  })
+
+  it('retains Query Store counts above Number.MAX_SAFE_INTEGER and unavailable values', () => {
+    expect(formatDecimalCount('9007199254740993')).toBe('9,007,199,254,740,993')
+    expect(formatDecimalCount(null)).toBe('Unavailable')
   })
 
   it('names the source, status, exact bytes, and untrusted-looking name as text', () => {
