@@ -37,12 +37,23 @@ export function formatDecimalCount(value: string | null): string {
   return new Intl.NumberFormat('en-US').format(BigInt(value))
 }
 
+export function formatFill(used: ByteMeasurement, allocated: ByteMeasurement): string {
+  const usedBytes = parseExactBytes(used)
+  const allocatedBytes = parseExactBytes(allocated)
+  if (usedBytes === null || allocatedBytes === null) return 'Unavailable'
+  if (allocatedBytes === 0n) return usedBytes === 0n ? '0%' : 'Invalid'
+  const tenths = (usedBytes * 1000n) / allocatedBytes
+  return `${tenths / 10n}.${tenths % 10n}%`
+}
+
 export function evidenceText(evidence: Evidence): string {
   const source: Record<Evidence['source'], string> = {
     Fixture: 'Fixture value',
     LiveDmvSample: 'Live DMV sample',
     QueryStoreAggregate: 'Query Store aggregate history',
     InferredTopology: 'Inferred topology',
+    LiveDmvCumulative: 'Cumulative file I/O DMV sample',
+    NotProbed: 'Not probed',
   }
   const observed = evidence.observedAt ? ` Observed ${new Date(evidence.observedAt).toLocaleString()}.` : ''
   return `${source[evidence.source]} — ${splitPascal(evidence.status)}.${observed} ${evidence.reason}`
@@ -62,6 +73,18 @@ export function accessibleDatabaseLabel(database: DatabaseAtlasItem): string {
 
 export function metric(value: number | null, suffix = ''): string {
   return value === null ? 'Unavailable' : `${value.toLocaleString('en-US')}${suffix}`
+}
+
+export function collectorSummary(collection: NonNullable<AtlasSnapshot['collection']>): string {
+  const details = [
+    `sequence ${collection.sequence}`,
+    `${collection.databaseCount} databases`,
+    `${collection.rowCount} rows`,
+    `${collection.durationMilliseconds} ms`,
+  ]
+  if (collection.isStale) details.push('stale')
+  if (collection.failureCount > 0) details.push(`${collection.failureCount} partial failure(s)`)
+  return details.join(' · ')
 }
 
 export function assertAtlasSnapshot(value: unknown): AtlasSnapshot {

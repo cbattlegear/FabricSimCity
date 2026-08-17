@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessibleDatabaseLabel, databaseSide, evidenceText, formatBytes, formatDecimalCount, isFreshLive, sizeToSide } from './atlas'
+import { accessibleDatabaseLabel, collectorSummary, databaseSide, evidenceText, formatBytes, formatDecimalCount, formatFill, isFreshLive, sizeToSide } from './atlas'
 import type { DatabaseAtlasItem, Evidence } from './contracts'
 
 const observed = '2026-08-17T16:59:52Z'
@@ -77,9 +77,34 @@ describe('allocated size mapping', () => {
     expect(label).toContain('9,007,199,254,740,993 bytes')
     expect(BigInt(value)).toBe(9007199254740993n)
   })
+
+  it('computes used fill from exact integer bytes', () => {
+    const allocated = database('18014398509481986')
+    allocated.used.bytes = '9007199254740993'
+    expect(formatFill(allocated.used, allocated.allocated)).toBe('50.0%')
+  })
 })
 
 describe('evidence semantics and accessible text', () => {
+  it('reports connected source staleness and partial failures', () => {
+    const summary = collectorSummary({
+      mode: 'Connected',
+      state: 'Degraded',
+      sequence: 7,
+      collectedAt: generated,
+      sourceTimestamp: observed,
+      staleAfter: observed,
+      isStale: true,
+      databaseCount: 99,
+      failureCount: 1,
+      skipCount: 0,
+      durationMilliseconds: 1250,
+      rowCount: 450,
+      reason: 'One database failed.',
+    })
+    expect(summary).toBe('sequence 7 · 99 databases · 450 rows · 1250 ms · stale · 1 partial failure(s)')
+  })
+
   it('permits motion only for a fresh available live sample', () => {
     const item = database('1024')
     expect(isFreshLive(item, generated)).toBe(true)

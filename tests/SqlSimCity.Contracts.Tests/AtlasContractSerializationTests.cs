@@ -58,7 +58,11 @@ public sealed class AtlasContractSerializationTests
             DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(1), "fixture");
         var history = new QueryStoreHistoryV1(exactCount, exactCount, 1000m,
             DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddMinutes(1),
-            QueryStoreCapability.Available, QueryStoreHealth.Healthy, "collecting", evidence);
+            QueryStoreCapability.Available, QueryStoreHealth.Healthy, "collecting", evidence)
+        {
+            TotalDurationMicroseconds = exactCount,
+            TotalCpuMicroseconds = exactCount,
+        };
 
         var json = JsonSerializer.Serialize(history, Options);
         using var document = JsonDocument.Parse(json);
@@ -66,6 +70,8 @@ public sealed class AtlasContractSerializationTests
         Assert.Equal(JsonValueKind.String, document.RootElement.GetProperty("executionCount").ValueKind);
         Assert.Equal(exactCount, document.RootElement.GetProperty("executionCount").GetString());
         Assert.Equal(exactCount, document.RootElement.GetProperty("logicalReads8KiBPages").GetString());
+        Assert.Equal(JsonValueKind.String, document.RootElement.GetProperty("totalDurationMicroseconds").ValueKind);
+        Assert.Equal(exactCount, document.RootElement.GetProperty("totalCpuMicroseconds").GetString());
 
         var unavailable = history with { ExecutionCount = null, LogicalReads8KiBPages = null };
         json = JsonSerializer.Serialize(unavailable, Options);

@@ -3,12 +3,17 @@ using SqlSimCity.Contracts.V1;
 
 namespace SqlSimCity.Domain;
 
-public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
+public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource, IAtlasCollectorStatusSource
 {
     private static readonly DateTimeOffset CapturedAt = new(2026, 8, 17, 17, 0, 0, TimeSpan.Zero);
     private static readonly AtlasSnapshotV1 Snapshot = BuildSnapshot();
 
     public AtlasSnapshotV1 GetCurrent() => Snapshot;
+
+    public AtlasCollectorStatusV1 GetStatus() => new(
+        AtlasCollectorMode.Fixture, AtlasCollectorState.Ready, 1, CapturedAt, CapturedAt,
+        null, false, Snapshot.Databases.Count, 0, 0, 0, 0, null,
+        "Deterministic fixture mode; no network collection is running.");
 
     private static AtlasSnapshotV1 BuildSnapshot()
     {
@@ -62,7 +67,13 @@ public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
         return new AtlasSnapshotV1(
             "1.0", "fixture-snapshot-20260817T170000Z",
             new AtlasTargetV1("fixture-target-primary", "Fixture SQL Server", "SQL Server fixture (no connection)"),
-            CapturedAt, databases, edges);
+            CapturedAt, databases, edges)
+        {
+            Collection = new AtlasCollectionMetadataV1(
+                AtlasCollectorMode.Fixture, AtlasCollectorState.Ready, 1, CapturedAt, CapturedAt,
+                null, false, databases.Length, 0, 0, 0,
+                "Deterministic fixture mode; no network collection is running."),
+        };
     }
 
     private static DatabaseAtlasItemV1 Database(

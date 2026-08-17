@@ -1,5 +1,5 @@
 export type MeasurementStatus = 'Known' | 'Unknown'
-export type EvidenceSource = 'Fixture' | 'LiveDmvSample' | 'QueryStoreAggregate' | 'InferredTopology'
+export type EvidenceSource = 'Fixture' | 'LiveDmvSample' | 'QueryStoreAggregate' | 'InferredTopology' | 'LiveDmvCumulative' | 'NotProbed'
 export type DataStatus = 'Available' | 'Stale' | 'Disconnected' | 'PermissionDenied' | 'Disabled' | 'Unsupported' | 'Unknown'
 export type QueryStoreCapability = 'Available' | 'Disabled' | 'PermissionDenied' | 'Unsupported' | 'Unknown'
 export type QueryStoreHealth = 'Healthy' | 'ReadOnly' | 'Error' | 'Stale' | 'Unavailable' | 'Unknown'
@@ -38,6 +38,22 @@ export interface QueryStoreHistory {
   health: QueryStoreHealth
   reason: string
   evidence: Evidence
+  totalDurationMicroseconds?: string | null
+  totalCpuMicroseconds?: string | null
+  desiredState?: string | null
+  captureMode?: string | null
+  currentStorageBytes?: string | null
+  maxStorageBytes?: string | null
+}
+
+export interface FileIo {
+  bytesRead: string | null
+  bytesWritten: string | null
+  readBytesPerSecond: string | null
+  writeBytesPerSecond: string | null
+  sampleMilliseconds: string | null
+  resetEpoch: string | null
+  evidence: Evidence
 }
 
 export interface DatabaseAtlasItem {
@@ -47,6 +63,11 @@ export interface DatabaseAtlasItem {
   used: ByteMeasurement
   liveActivity: LiveActivity
   queryStore: QueryStoreHistory
+  state?: string | null
+  compatibilityLevel?: number | null
+  logAllocated?: ByteMeasurement | null
+  logUsed?: ByteMeasurement | null
+  fileIo?: FileIo | null
 }
 
 export interface AtlasEdge {
@@ -65,4 +86,19 @@ export interface AtlasSnapshot {
   generatedAt: string
   databases: DatabaseAtlasItem[]
   edges: AtlasEdge[]
+  collection?: {
+    mode: 'Fixture' | 'Connected'
+    state: 'Ready' | 'Collecting' | 'Paused' | 'BackingOff' | 'Degraded' | 'Disconnected'
+    sequence: number
+    collectedAt: string
+    sourceTimestamp: string
+    staleAfter: string | null
+    isStale: boolean
+    databaseCount: number
+    failureCount: number
+    skipCount: number
+    durationMilliseconds: number
+    rowCount: number
+    reason: string
+  } | null
 }

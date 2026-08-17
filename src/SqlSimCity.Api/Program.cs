@@ -1,7 +1,10 @@
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
+using SqlSimCity.Collection.Atlas;
 using SqlSimCity.Domain;
+using SqlSimCity.SqlServer;
+using SqlSimCity.SqlServer.Secrets;
 using SqlSimCity.Storage;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -18,10 +21,40 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-builder.Services.AddSingleton<IAtlasSnapshotSource, FixtureAtlasSnapshotSource>();
 builder.Services.AddSingleton(probeCatalog);
 builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
 builder.Services.AddProtectedStorage(builder.Configuration);
+
+if (AtlasConfiguration.IsConnected(builder.Configuration))
+{
+    var atlasOptions = AtlasConfiguration.BuildCollectionOptions(builder.Configuration);
+    var connectionProfile = AtlasConfiguration.BuildProfile(builder.Configuration);
+    builder.Services.AddSingleton(atlasOptions);
+    builder.Services.AddSingleton(connectionProfile);
+    builder.Services.AddSingleton(TimeProvider.System);
+    builder.Services.AddSingleton(new FileSecretFileProvider(AtlasConfiguration.BuildSecretOptions(builder.Configuration)));
+    builder.Services.AddSingleton<ISqlConnectionFactory>(services =>
+        new SqlConnectionFactory(services.GetRequiredService<FileSecretFileProvider>()));
+    builder.Services.AddSingleton<IAtlasProbeExecutor, SqlClientAtlasProbeExecutor>();
+    builder.Services.AddSingleton<ILiveAtlasActivitySource, NotProbedLiveAtlasActivitySource>();
+    builder.Services.AddSingleton<AtlasCollector>();
+    builder.Services.AddSingleton<IReconnectJitter, RandomReconnectJitter>();
+    builder.Services.AddSingleton<IReconnectBackoff>(services =>
+        new ExponentialReconnectBackoff(
+            TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(5),
+            services.GetRequiredService<IReconnectJitter>()));
+    builder.Services.AddSingleton<AtlasRefreshCoordinator>();
+    builder.Services.AddSingleton<ConnectedAtlasSource>();
+    builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
+    builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
+    builder.Services.AddHostedService<AtlasRefreshBackgroundService>();
+}
+else
+{
+    builder.Services.AddSingleton<FixtureAtlasSnapshotSource>();
+    builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
+    builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
+}
 
 var app = builder.Build();
 
@@ -57,6 +90,11 @@ app.MapGet("/api/v1/atlas", (IAtlasSnapshotSource source, HttpContext context) =
 {
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(source.GetCurrent());
+});
+app.MapGet("/api/v1/atlas/status", (IAtlasCollectorStatusSource source, HttpContext context) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(source.GetStatus());
 });
 app.MapGet("/api/v1/capabilities", (ICapabilitiesSource source, HttpContext context) =>
 {

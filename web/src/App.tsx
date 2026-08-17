@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchAtlas } from './api'
-import { accessibleDatabaseLabel, evidenceText, formatBytes, formatDecimalCount, metric } from './atlas'
+import { accessibleDatabaseLabel, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { AtlasViewport } from './AtlasViewport'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
@@ -13,16 +13,29 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    fetchAtlas(controller.signal)
+    let refreshTimer: number | undefined
+    let loaded = false
+    const load = () => fetchAtlas(controller.signal)
       .then(atlas => {
         setSnapshot(atlas)
-        setSelectedId(atlas.databases[0]?.databaseId ?? null)
+        loaded = true
+        setSelectedId(current => current && atlas.databases.some(database => database.databaseId === current)
+          ? current
+          : atlas.databases[0]?.databaseId ?? null)
+        setError(null)
       })
       .catch(reason => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setError(reason instanceof Error ? reason.message : 'The atlas could not be loaded')
+        if (!loaded) setError(reason instanceof Error ? reason.message : 'The atlas could not be loaded')
       })
-    return () => controller.abort()
+      .finally(() => {
+        if (!controller.signal.aborted) refreshTimer = window.setTimeout(load, 30_000)
+      })
+    void load()
+    return () => {
+      controller.abort()
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+    }
   }, [])
 
   const selectDatabase = useCallback((databaseId: string) => setSelectedId(databaseId), [])
@@ -42,8 +55,8 @@ export default function App() {
         </div>
         {snapshot && (
           <div className="capture" aria-label={`Snapshot generated ${new Date(snapshot.generatedAt).toLocaleString()}`}>
-            <span className="capture-dot" aria-hidden="true" />
-            Fixture snapshot · {new Date(snapshot.generatedAt).toLocaleTimeString()}
+            <span className={`capture-dot ${snapshot.collection?.isStale || snapshot.collection?.failureCount ? 'is-degraded' : ''}`} aria-hidden="true" />
+            {snapshot.collection?.mode ?? 'Fixture'} · {snapshot.collection?.state ?? 'Ready'} · {new Date(snapshot.generatedAt).toLocaleTimeString()}
           </div>
         )}
       </header>
@@ -59,6 +72,13 @@ export default function App() {
         </section>
       ) : (
         <>
+          {snapshot.collection && (
+            <section className={`collector-status ${snapshot.collection.failureCount > 0 || snapshot.collection.isStale ? 'is-degraded' : ''}`} aria-label="Atlas collector status">
+              <strong>{snapshot.collection.mode} source · {snapshot.collection.state}</strong>
+              <span>{collectorSummary(snapshot.collection)}</span>
+              <small>{snapshot.collection.reason}</small>
+            </section>
+          )}
           <section className="atlas-shell" aria-labelledby="atlas-title">
             <div className="atlas-heading">
               <div>
@@ -164,6 +184,10 @@ function DetailPanel({ database }: { database: DatabaseAtlasItem | null }) {
         <div><dt>Stable ID</dt><dd>{database.databaseId}</dd></div>
         <div><dt>Allocated</dt><dd>{formatBytes(database.allocated)}</dd></div>
         <div><dt>Used</dt><dd>{formatBytes(database.used)}</dd></div>
+        <div><dt>Data fill</dt><dd>{formatFill(database.used, database.allocated)}</dd></div>
+        {database.logAllocated && <div><dt>Log allocated</dt><dd>{formatBytes(database.logAllocated)}</dd></div>}
+        {database.logUsed && <div><dt>Log used</dt><dd>{formatBytes(database.logUsed)}</dd></div>}
+        <div><dt>State / compatibility</dt><dd>{database.state ?? 'Unavailable'} / {database.compatibilityLevel ?? 'Unavailable'}</dd></div>
         <div><dt>Active sessions</dt><dd>{metric(database.liveActivity.activeSessions)}</dd></div>
         <div><dt>Running requests</dt><dd>{metric(database.liveActivity.runningRequests)}</dd></div>
         <div><dt>Blocked sessions</dt><dd>{metric(database.liveActivity.blockedSessions)}</dd></div>
@@ -171,6 +195,18 @@ function DetailPanel({ database }: { database: DatabaseAtlasItem | null }) {
         <div><dt>Query executions</dt><dd>{formatDecimalCount(database.queryStore.executionCount)}</dd></div>
         <div><dt>Logical reads (8-KiB pages)</dt><dd>{formatDecimalCount(database.queryStore.logicalReads8KiBPages)}</dd></div>
         <div><dt>Average duration</dt><dd>{metric(database.queryStore.averageDurationMicroseconds, ' µs')}</dd></div>
+        <div><dt>Total duration</dt><dd>{formatDecimalCount(database.queryStore.totalDurationMicroseconds ?? null)} µs</dd></div>
+        <div><dt>Total CPU</dt><dd>{formatDecimalCount(database.queryStore.totalCpuMicroseconds ?? null)} µs</dd></div>
+        <div><dt>Query Store state</dt><dd>{database.queryStore.desiredState ?? 'Unavailable'} → {database.queryStore.health}</dd></div>
+        <div><dt>Capture mode</dt><dd>{database.queryStore.captureMode ?? 'Unavailable'}</dd></div>
+        {database.queryStore.currentStorageBytes && <div><dt>Query Store storage</dt><dd>
+          {formatBytes({ bytes: database.queryStore.currentStorageBytes, status: 'Known', reason: null, evidence: database.queryStore.evidence })}
+        </dd></div>}
+        <div><dt>Query Store window</dt><dd>{database.queryStore.windowStart && database.queryStore.windowEnd
+          ? `${new Date(database.queryStore.windowStart).toLocaleString()} – ${new Date(database.queryStore.windowEnd).toLocaleString()}`
+          : 'Unavailable'}</dd></div>
+        <div><dt>I/O read rate</dt><dd>{formatDecimalCount(database.fileIo?.readBytesPerSecond ?? null)} bytes/s</dd></div>
+        <div><dt>I/O write rate</dt><dd>{formatDecimalCount(database.fileIo?.writeBytesPerSecond ?? null)} bytes/s</dd></div>
       </dl>
       <div className="source-note"><strong>Live source</strong><p>{evidenceText(database.liveActivity.evidence)}</p></div>
       <div className="source-note"><strong>Historical source</strong><p>{evidenceText(database.queryStore.evidence)}</p></div>

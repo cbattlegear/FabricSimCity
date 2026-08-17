@@ -1,12 +1,12 @@
 # SQLSimCity
 
-SQLSimCity is a self-hosted, evidence-first visual atlas for SQL Server performance data. This foundation is deliberately **fixture-driven**: it proves the end-to-end contract, API, accessible analytical shell, and imperative three.js viewport without connecting to SQL Server.
+SQLSimCity is a self-hosted, evidence-first visual atlas for SQL Server performance data. It starts in deterministic **fixture mode** and can be explicitly configured for read-only connected collection.
 
 The fixture is not a benchmark or a description of a real server. SQLSimCity is independent software and is not affiliated with, sponsored by, or endorsed by Microsoft, Electronic Arts, Maxis, the SimCity franchise, or the PGSimCity project. No SimCity assets are included.
 
 ## What works
 
-- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/capabilities`, `/healthz`, `/readyz`, a minimal `/hubs/current-snapshot` SignalR seam, and the production Vite bundle.
+- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/atlas/status`, `/api/v1/capabilities`, health endpoints, a SignalR snapshot-notification seam, and the production Vite bundle.
 - Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
@@ -20,16 +20,16 @@ The contract keeps three evidence classes separate:
 2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero.
 3. **Topology is inferred evidence.** Confirmed, probable, and unknown confidence carry rationale; the atlas is not claiming a complete dependency graph.
 
-There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. This version does not execute SQL, discover topology, retain history, or validate production collection behavior. It ships a source-neutral `Microsoft.Data.SqlClient` connection and authentication library (`SqlSimCity.SqlServer`, see below) that is not yet wired into the running application.
+There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. Connected mode executes only validated static SQL embedded in the application. It does not fetch plan XML or fabricate live traffic; live request activity is explicitly `NotProbed` until an `ILiveAtlasActivitySource` is supplied.
 
 ## Architecture
 
 ```text
 src/SqlSimCity.Contracts  versioned transport records and evidence enums
-src/SqlSimCity.Domain     fixture source and source seam
+src/SqlSimCity.Domain     fixture source and API source seam
 src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
 src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
-src/SqlSimCity.Collection SQL probe catalog loader and capability negotiation layer
+src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, and refresh coordinator
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 sql/                      versioned probe catalog (manifest.json + probes/*.sql)
 fixtures/                 deterministic JSON fixtures for the atlas and capabilities APIs
@@ -38,6 +38,17 @@ web/                      strict TypeScript React shell and three.js scene
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
+
+## Fixture and connected collection
+
+`Atlas:Mode` defaults to `Fixture`; this mode opens no network connection and remains deterministic. Set it to `Connected` only with a validated `Atlas:Connection` profile. Connected collection:
+
+- discovers at most 100 visible databases from `master` on SQL Server and Managed Instance;
+- requires `Atlas:KnownDatabases` for Azure SQL Database, where sibling databases cannot be inferred from one database connection;
+- records exact data/log allocation and use, bounded Query Store totals, cumulative file I/O plus reset epoch, and per-database partial failures;
+- limits database concurrency to 4 by default (hard maximum 16), uses the profile command timeout, never overlaps refresh cycles, and backs off after target-level connection failures.
+
+Example non-secret settings are in `compose.yaml`. Authentication supports the explicit strategies in `SqlSimCity.SqlServer`. Passwords, certificates, and client secrets are file references under `Atlas:SecretsDirectory` (`/run/secrets` by default), never configuration values. For SQL Server 2016–2019 grant the collector login `VIEW SERVER STATE` and `VIEW DATABASE STATE` in each collected database; SQL Server 2022+ uses `VIEW SERVER PERFORMANCE STATE` and `VIEW DATABASE PERFORMANCE STATE`. Also grant `CONNECT` to each database and preserve the default `VIEW ANY DATABASE` only when server discovery is desired. Azure SQL Database should use the smallest documented database-scoped permission/role that exposes the required DMVs for its service tier. SQLSimCity never executes grants.
 
 ## Development
 
@@ -93,7 +104,7 @@ Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`
 
 ## SQL Server connection and authentication
 
-`SqlSimCity.SqlServer` is a source-neutral connection and authentication library for a future SQL Server collector. It is **not wired into `SqlSimCity.Api`** in this release — no request path opens a SQL Server connection. It exists as a standalone, independently tested library so a future collector builds on already-hardened connection handling instead of new ad hoc code. It ships:
+`SqlSimCity.SqlServer` is the source-neutral connection and authentication library used by explicitly enabled connected collection. Fixture mode does not instantiate it or open a connection. It ships:
 
 - an immutable, fully validated `ConnectionProfile` (DNS/FQDN or IPv4 host, optional named instance or explicit port — never both, initial database, bounded connect/command timeouts and pool bounds, a fixed `SQLSimCity` application name, an explicit `EncryptionPolicy`, and a per-profile `TrustServerCertificate` opt-in that is never inherited or global; IPv6 literals are rejected until their SqlClient TCP syntax is implemented);
 - a closed authentication-strategy hierarchy with **no fallback between strategies**: SQL login (username plus a secret-file password reference), a Linux Kerberos/SSPI service identity, and four explicit Microsoft Entra ID strategies (`ManagedIdentity`, `WorkloadIdentity`, `ServicePrincipalCertificate`, `ServicePrincipalSecret`) — **never `DefaultAzureCredential` or any credential chain**, enforced by a static test;
@@ -104,10 +115,7 @@ See [SECURITY.md](SECURITY.md) for the Kerberos keytab/SPN/DNS/clock-sync and En
 
 ## Capability negotiation
 
-`SqlSimCity.Collection` is an implementation-ready capability negotiation layer for a
-future SQL Server/Azure SQL collector. It is deliberately **not the full atlas
-collector**: it decides what a target can safely be asked for, not how to gather bulk
-telemetry from it.
+`SqlSimCity.Collection` contains capability negotiation and the source-neutral atlas collector. Both fixture/fake and real executors use the same typed seams.
 
 - **Versioned, embedded probe catalog.** `sql/manifest.json` and every `sql/probes/**/*.sql`
   file are embedded resources in `SqlSimCity.Collection.dll`, so a published container image
@@ -175,9 +183,9 @@ binding, least-privilege script quoting, and fixture-to-contract mapping.
 
 ## Security and privacy
 
-SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. It has no application network dependency after loading.
+SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. Fixture mode has no application network dependency after loading; connected mode contacts only its configured SQL target and explicit identity endpoints required by the selected authentication strategy.
 
-Collection is intended to be read-only, but no collector exists yet. Future authentication must fail closed: unavailable keys or identity providers must prevent collection and disclosure rather than fall back to plaintext or anonymous access. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
+Collection is read-only and fails closed: unavailable secrets or identity providers never fall back to plaintext or anonymous access. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
 
 ## Validation
 

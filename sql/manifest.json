@@ -74,6 +74,23 @@
       "relativeCost": "trivial"
     },
     {
+      "id": "server.database_identity_current",
+      "title": "Current database identity",
+      "file": "probes/server/database_identity_current.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported and intentionally limited to DB_ID() on the current connection."
+      },
+      "requiredPermission": "Ordinary access to the current database.",
+      "cadenceClass": "low_frequency",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Exactly one row for DB_ID(): connection-local database id, name, state, compatibility level, and Query Store on/off. The id is not a globally stable Azure database identity.",
+      "relativeCost": "trivial"
+    },
+    {
       "id": "querystore.options_2016",
       "title": "Query Store options (base, SQL Server 2016-2017)",
       "file": "probes/querystore/query_store_options_2016.sql",
@@ -379,7 +396,7 @@
       "cadenceClass": "standard",
       "parameters": [],
       "resultSets": 1,
-      "resultContract": "One row per file in the current database. All *_mb columns are computed from 8-KiB pages. data_total_mb/data_used_mb/data_free_mb/version_store_mb are NULL for LOG files; log allocated size still appears via allocated_mb, but log usage is reported separately by space.log_space_usage.",
+      "resultContract": "One row per file in the current database. allocated_bytes/data_total_bytes/data_used_bytes are exact bigint byte counts derived from 8-KiB pages. Data fields are NULL for LOG files; log allocated size appears via allocated_bytes, while log usage is reported separately.",
       "relativeCost": "trivial"
     },
     {
@@ -396,7 +413,7 @@
       "cadenceClass": "frequent",
       "parameters": [],
       "resultSets": 1,
-      "resultContract": "Exactly one row for the current database: total/used log size in MiB and used_log_space_in_percent (0-100, relative to total_log_size_in_bytes).",
+      "resultContract": "Exactly one row for the current database: exact bigint total/used log bytes and used_log_space_in_percent (0-100, relative to total_log_size_in_bytes).",
       "relativeCost": "trivial"
     },
     {

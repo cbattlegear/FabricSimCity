@@ -6,3 +6,8 @@ public interface IAtlasSnapshotSource
 {
     AtlasSnapshotV1 GetCurrent();
 }
+
+public interface IAtlasCollectorStatusSource
+{
+    AtlasCollectorStatusV1 GetStatus();
+}

@@ -12,9 +12,9 @@
 --   membership; on other Azure SQL Database service objectives, VIEW DATABASE STATE or
 --   ##MS_ServerStateReader## membership is sufficient. Querying sys.database_files itself only
 --   requires ordinary access to the database.
--- Result contract: one row per file in the current database. All *_mb columns are computed from
---   8-KiB pages (1 MiB = 128 pages); size/max_size/growth on sys.database_files are already
---   expressed in 8-KiB pages by that catalog view's own definition.
+-- Result contract: one row per file in the current database. Exact *_bytes columns are computed
+--   from 8-KiB pages; size/max_size/growth on sys.database_files are already expressed in 8-KiB
+--   pages by that catalog view's own definition.
 -- Relative cost: trivial.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
@@ -26,10 +26,10 @@ SELECT
     df.physical_name,
     df.type_desc,
     df.state_desc,
-    df.size * 8.0 / 1024.0                           AS allocated_mb, -- from sys.database_files (all file types)
-    fs.total_page_count * 8.0 / 1024.0               AS data_total_mb,       -- NULL for LOG files
-    (fs.total_page_count - fs.unallocated_extent_page_count) * 8.0 / 1024.0
-                                                       AS data_used_mb,       -- NULL for LOG files
+    CONVERT(bigint, df.size) * 8192                   AS allocated_bytes, -- exact, all file types
+    CONVERT(bigint, fs.total_page_count) * 8192       AS data_total_bytes,       -- NULL for LOG files
+    CONVERT(bigint, fs.total_page_count - fs.unallocated_extent_page_count) * 8192
+                                                       AS data_used_bytes,       -- NULL for LOG files
     fs.unallocated_extent_page_count * 8.0 / 1024.0  AS data_free_mb,        -- NULL for LOG files
     fs.version_store_reserved_page_count * 8.0 / 1024.0 AS version_store_mb, -- NULL for LOG files
     df.max_size,      -- 8-KiB pages; -1 means unlimited growth

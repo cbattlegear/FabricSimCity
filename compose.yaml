@@ -15,6 +15,22 @@ services:
       - no-new-privileges:true
     environment:
       ASPNETCORE_ENVIRONMENT: Production
+      Atlas__Mode: Fixture
+      # Connected mode is opt-in. Supply only non-secret profile values here;
+      # mount passwords/certificates/client secrets under /run/secrets.
+      # Replace Atlas__Mode above with Connected, then configure:
+      # Atlas__TargetId: production-east
+      # Atlas__DisplayName: Production East
+      # Atlas__Connection__Host: sql.example.internal
+      # Atlas__Connection__Port: "1433"
+      # Atlas__Connection__InitialDatabase: master
+      # Atlas__Connection__Encryption: Mandatory
+      # Atlas__Connection__Authentication__Mode: SqlLogin
+      # Atlas__Connection__Authentication__Username: sqlsimcity_reader
+      # Atlas__Connection__Authentication__PasswordSecret: sqlsimcity-sql-password
+      # Azure SQL Database must name each database explicitly:
+      # Atlas__KnownDatabases__0: sales
+      # Atlas__KnownDatabases__1: warehouse
       # Protected storage is disabled by default; this app runs fine without
       # the settings below. To enable the encrypted embedded record store,
       # uncomment these three lines and mount a key file secret (see
@@ -28,12 +44,9 @@ services:
     # secrets:
     #   - sqlsimcity-storage-key
     #
-    # --- SqlSimCity.SqlServer (not wired into this image yet) ---
-    # SqlSimCity.SqlServer is a standalone connection/authentication library;
-    # nothing in this Compose file or image currently opens a SQL Server
-    # connection. The settings below document what a future collector would
-    # need, so they can be copied without re-deriving them. Never commit a
-    # real keytab, certificate, or client secret to this repository.
+    # --- Connected authentication deployment requirements ---
+    # These apply only after Atlas__Mode is changed to Connected. Never commit
+    # a real password, keytab, certificate, or client secret to this repository.
     #
     # Linux Kerberos/SSPI service identity (Integrated Security):
     #   - mount the keytab as a Docker/Compose secret, e.g.:

@@ -9,8 +9,8 @@
 --   server admin, Microsoft Entra admin account, or ##MS_ServerStateReader## server-role
 --   membership; on other Azure SQL Database service objectives, VIEW DATABASE STATE or
 --   ##MS_ServerStateReader## membership is sufficient.
--- Result contract: exactly one row for the current database. Sizes are converted from bytes to
---   MiB; used_log_space_in_percent is already a 0-100 percentage as reported by the engine and is
+-- Result contract: exactly one row for the current database. Sizes remain exact bytes;
+--   used_log_space_in_percent is already a 0-100 percentage as reported by the engine and is
 --   relative to total_log_size_in_bytes, not to any configured log growth limit.
 -- Relative cost: trivial.
 SET NOCOUNT ON;
@@ -20,7 +20,7 @@ SET LOCK_TIMEOUT 5000;
 SELECT
     ls.database_id,
     DB_NAME(ls.database_id)                    AS database_name,
-    ls.total_log_size_in_bytes / 1048576.0      AS total_log_size_mb,
-    ls.used_log_space_in_bytes / 1048576.0      AS used_log_space_mb,
+    CONVERT(bigint, ls.total_log_size_in_bytes) AS total_log_size_bytes,
+    CONVERT(bigint, ls.used_log_space_in_bytes) AS used_log_space_bytes,
     ls.used_log_space_in_percent
 FROM sys.dm_db_log_space_usage AS ls;

@@ -103,4 +103,19 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, postResponse.StatusCode);
     }
+
+    [Fact]
+    public async Task CollectorStatusIsReadOnlyAndContainsNoConnectionSecrets()
+    {
+        using var response = await _client.GetAsync(new Uri("/api/v1/atlas/status", UriKind.Relative));
+        var body = await response.Content.ReadAsStringAsync();
+        using var post = await _client.PostAsync(new Uri("/api/v1/atlas/status", UriKind.Relative), content: null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"mode\":\"Fixture\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"Ready\"", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("password", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("connectionString", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
+    }
 }
