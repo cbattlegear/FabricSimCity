@@ -162,6 +162,23 @@ public class CapabilityNegotiatorErrorClassificationTests
         Assert.Equal(CapabilityState.NotProbed, profile.LiveSessions.State);
     }
 
+    [Fact]
+    public async Task DeniedLegacyPermissionWithUnknownModernPermissionIsDenied()
+    {
+        var executor = new FakeProbeExecutor
+        {
+            ServerPermission = (permission, _) => Task.FromResult<bool?>(
+                permission == "VIEW SERVER STATE" ? false : null),
+        };
+
+        var profile = await Build(executor).NegotiateAsync(
+            new CapabilityNegotiationRequest("t", "fixture_db"), CancellationToken.None);
+
+        Assert.Equal(CapabilityState.PermissionDenied, profile.Waits.State);
+        Assert.Equal(CapabilityState.PermissionDenied, profile.LiveSessions.State);
+        Assert.Equal(CapabilityState.PermissionDenied, profile.PlansAndText.State);
+    }
+
     [Theory]
     [MemberData(nameof(MetadataFailures))]
     public async Task MetadataFailureRemainsDistinctFromUnsupported(

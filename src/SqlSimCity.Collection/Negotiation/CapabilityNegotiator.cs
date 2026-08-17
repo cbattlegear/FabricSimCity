@@ -223,7 +223,7 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
             return (true, new CapabilityEvidenceV1(CapabilityState.Supported, $"HAS_PERMS_BY_NAME confirmed a {scope}-scoped state-visibility permission is granted.", now, null, null));
         }
 
-        if (legacy == false && modern == false)
+        if (legacy == false || modern == false)
         {
             return (false, new CapabilityEvidenceV1(CapabilityState.PermissionDenied, $"Neither {scope}-scoped state-visibility permission is granted to the connected login.", now, null, null));
         }
