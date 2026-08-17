@@ -65,7 +65,9 @@ Protected storage never silently degrades to plaintext. Every one of the followi
 
 ### Retention
 
-Default retention is 7 days for `Detail`-resolution records and 90 days for `HourlyRollup` records, pruned in bounded batches so a single pruning pass cannot lock the store indefinitely. Retention pruning only ever deletes expired rows from the record table; it never touches the canary or schema metadata.
+Default retention is 7 days for `Detail`-resolution records and 90 days for `HourlyRollup` records. `PruneExpiredAsync` deletes at most `PruneBatchSize` rows per invocation, so callers repeat it to drain further expired rows; `PruneBatchSize` must be from 1 through 500. Retention pruning only ever deletes expired rows from the record table; it never touches the canary or schema metadata.
+
+`DatabaseFileName` must be a simple filename, not a rooted path or a path containing separators or traversal. To prevent arbitrary memory, AAD, ciphertext, and SQLite BLOB allocation by future callers, `MaxRecordKindLength` defaults to 128 characters and is capped at 1,024, while `MaxPayloadBytes` defaults to 1 MiB and is capped at 16 MiB; both must be positive when protected storage is enabled.
 
 ### Storage engine and `/data`
 

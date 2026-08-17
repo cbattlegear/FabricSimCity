@@ -21,9 +21,22 @@ public sealed class KeyRing : IDisposable
         // Clone every key so this ring owns independent storage: disposal must
         // not zero out a byte[] the caller (or another ring) still references.
         _keysByVersion = new Dictionary<uint, byte[]>(keysByVersion.Count);
-        foreach (var (version, key) in keysByVersion)
+        try
         {
-            _keysByVersion[version] = (byte[])key.Clone();
+            foreach (var (version, key) in keysByVersion)
+            {
+                _keysByVersion[version] = (byte[])key.Clone();
+            }
+        }
+        catch
+        {
+            foreach (var key in _keysByVersion.Values)
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
+
+            _keysByVersion.Clear();
+            throw;
         }
     }
 

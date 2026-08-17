@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using SqlSimCity.Storage;
+using SqlSimCity.Storage.Crypto;
 
 namespace SqlSimCity.Storage.Sqlite;
 
@@ -35,7 +36,17 @@ internal static class SqliteSchema
         ) STRICT;
         """;
 
-    public static async Task MigrateAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// Creates a fresh v1 store, then verifies its canary. Existing stores
+    /// authenticate before <see cref="ApplyAuthenticatedMigrationsAsync"/> can
+    /// make a future schema change.
+    /// </summary>
+    public static async Task EnsureReadyAsync(
+        SqliteConnection connection,
+        KeyRing keyRing,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken,
+        Func<SqliteConnection, int, CancellationToken, Task>? migrationAfterCanary = null)
     {
         await ExecuteAsync(connection, "PRAGMA journal_mode=WAL;", cancellationToken);
         await ExecuteAsync(connection, "PRAGMA synchronous=NORMAL;", cancellationToken);
@@ -55,14 +66,41 @@ internal static class SqliteSchema
             try
             {
                 await ExecuteAsync(connection, CreateV1Schema, cancellationToken, transaction);
+                await CanaryVerifier.EnsureCanaryAsync(
+                    connection, keyRing, timeProvider, cancellationToken, transaction, createIfMissing: true);
                 await SetUserVersionAsync(connection, 1, transaction, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
+                currentVersion = 1;
             }
             catch (SqliteException ex)
             {
                 throw new ProtectedStorageMigrationException("Failed to create the version 1 schema.", ex);
             }
         }
+        else
+        {
+            await CanaryVerifier.EnsureCanaryAsync(connection, keyRing, timeProvider, cancellationToken);
+        }
+
+        await ApplyAuthenticatedMigrationsAsync(connection, currentVersion, cancellationToken);
+        if (migrationAfterCanary is not null)
+        {
+            await migrationAfterCanary(connection, (int)currentVersion, cancellationToken);
+        }
+    }
+
+    /*
+     * New migration cases belong here, after the canary check above. The
+     * callback parameter provides a regression seam proving this ordering
+     * without claiming that schema v2 exists yet.
+     */
+    private static Task ApplyAuthenticatedMigrationsAsync(
+        SqliteConnection connection, long authenticatedVersion, CancellationToken cancellationToken)
+    {
+        _ = connection;
+        _ = authenticatedVersion;
+        _ = cancellationToken;
+        return Task.CompletedTask;
     }
 
     private static async Task<long> GetUserVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)

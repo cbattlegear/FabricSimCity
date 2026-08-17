@@ -21,6 +21,8 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
     private readonly KeyRing _keyRing;
     private readonly RetentionOptions _retention;
     private readonly TimeProvider _timeProvider;
+    private readonly int _maxRecordKindLength;
+    private readonly int _maxPayloadBytes;
     private int _ready;
     private bool _disposed;
 
@@ -29,13 +31,28 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
         string databaseFileName,
         KeyRing keyRing,
         RetentionOptions retention,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        int maxRecordKindLength = ProtectedStorageOptions.DefaultMaxRecordKindLength,
+        int maxPayloadBytes = ProtectedStorageOptions.DefaultMaxPayloadBytes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseFileName);
         ArgumentNullException.ThrowIfNull(keyRing);
         ArgumentNullException.ThrowIfNull(retention);
         ArgumentNullException.ThrowIfNull(timeProvider);
+        if (maxRecordKindLength is < 1 or > ProtectedStorageOptions.MaximumRecordKindLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxRecordKindLength),
+                $"Record-kind length limit must be between 1 and {ProtectedStorageOptions.MaximumRecordKindLength}.");
+        }
+
+        if (maxPayloadBytes is < 1 or > ProtectedStorageOptions.MaximumPayloadBytes)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxPayloadBytes),
+                $"Payload size limit must be between 1 and {ProtectedStorageOptions.MaximumPayloadBytes}.");
+        }
 
         Directory.CreateDirectory(dataDirectory);
         var databasePath = Path.Combine(dataDirectory, databaseFileName);
@@ -51,14 +68,15 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
         _keyRing = keyRing;
         _retention = retention;
         _timeProvider = timeProvider;
+        _maxRecordKindLength = maxRecordKindLength;
+        _maxPayloadBytes = maxPayloadBytes;
     }
 
     public async Task EnsureReadyAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await using var connection = await OpenConnectionAsync(cancellationToken);
-        await SqliteSchema.MigrateAsync(connection, cancellationToken);
-        await CanaryVerifier.EnsureCanaryAsync(connection, _keyRing, _timeProvider, cancellationToken);
+        await SqliteSchema.EnsureReadyAsync(connection, _keyRing, _timeProvider, cancellationToken);
         Volatile.Write(ref _ready, 1);
     }
 
@@ -72,6 +90,17 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
     {
         EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(recordKind);
+        if (recordKind.Length > _maxRecordKindLength)
+        {
+            throw new ArgumentException(
+                $"Record kind must be {_maxRecordKindLength} characters or fewer.", nameof(recordKind));
+        }
+
+        if (payload.Length > _maxPayloadBytes)
+        {
+            throw new ArgumentException(
+                $"Payload must be {_maxPayloadBytes} bytes or fewer.", nameof(payload));
+        }
 
         var envelope = EnvelopeCodec.Seal(_keyRing, recordKind, id.Value, payload.Span);
 
@@ -148,59 +177,45 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
         var detailCutoffUnixMs = now.Subtract(_retention.DetailRetention).ToUnixTimeMilliseconds();
         var rollupCutoffUnixMs = now.Subtract(_retention.HourlyRollupRetention).ToUnixTimeMilliseconds();
         var batchSize = _retention.PruneBatchSize;
-        var totalDeleted = 0;
-
         await using var connection = await OpenConnectionAsync(cancellationToken);
-        while (true)
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var idsToDelete = new List<string>();
+        await using (var selectCommand = connection.CreateCommand())
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var idsToDelete = new List<string>();
-            await using (var selectCommand = connection.CreateCommand())
+            selectCommand.CommandText = """
+                SELECT id FROM protected_records
+                WHERE (resolution = 'Detail' AND captured_at_unix_ms < $detailCutoff)
+                   OR (resolution = 'HourlyRollup' AND captured_at_unix_ms < $rollupCutoff)
+                LIMIT $batchSize;
+                """;
+            selectCommand.Parameters.AddWithValue("$detailCutoff", detailCutoffUnixMs);
+            selectCommand.Parameters.AddWithValue("$rollupCutoff", rollupCutoffUnixMs);
+            selectCommand.Parameters.AddWithValue("$batchSize", batchSize);
+            await using var reader = await selectCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                selectCommand.CommandText = """
-                    SELECT id FROM protected_records
-                    WHERE (resolution = 'Detail' AND captured_at_unix_ms < $detailCutoff)
-                       OR (resolution = 'HourlyRollup' AND captured_at_unix_ms < $rollupCutoff)
-                    LIMIT $batchSize;
-                    """;
-                selectCommand.Parameters.AddWithValue("$detailCutoff", detailCutoffUnixMs);
-                selectCommand.Parameters.AddWithValue("$rollupCutoff", rollupCutoffUnixMs);
-                selectCommand.Parameters.AddWithValue("$batchSize", batchSize);
-                await using var reader = await selectCommand.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    idsToDelete.Add(reader.GetString(0));
-                }
-            }
-
-            if (idsToDelete.Count == 0)
-            {
-                break;
-            }
-
-            await using (var deleteCommand = connection.CreateCommand())
-            {
-                var parameterNames = new string[idsToDelete.Count];
-                for (var i = 0; i < idsToDelete.Count; i++)
-                {
-                    var parameterName = $"$id{i}";
-                    parameterNames[i] = parameterName;
-                    deleteCommand.Parameters.AddWithValue(parameterName, idsToDelete[i]);
-                }
-
-                deleteCommand.CommandText =
-                    $"DELETE FROM protected_records WHERE id IN ({string.Join(",", parameterNames)});";
-                totalDeleted += await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            if (idsToDelete.Count < batchSize)
-            {
-                break;
+                idsToDelete.Add(reader.GetString(0));
             }
         }
 
-        return totalDeleted;
+        if (idsToDelete.Count == 0)
+        {
+            return 0;
+        }
+
+        await using var deleteCommand = connection.CreateCommand();
+        var parameterNames = new string[idsToDelete.Count];
+        for (var i = 0; i < idsToDelete.Count; i++)
+        {
+            var parameterName = $"$id{i}";
+            parameterNames[i] = parameterName;
+            deleteCommand.Parameters.AddWithValue(parameterName, idsToDelete[i]);
+        }
+
+        deleteCommand.CommandText =
+            $"DELETE FROM protected_records WHERE id IN ({string.Join(",", parameterNames)});";
+        return await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public void Dispose()

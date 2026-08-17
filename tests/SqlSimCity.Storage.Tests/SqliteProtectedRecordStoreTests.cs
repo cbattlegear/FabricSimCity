@@ -334,7 +334,11 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
 
         var deletedCount = await store.PruneExpiredAsync();
 
-        Assert.Equal(4, deletedCount); // 3 expired detail rows across 2 batches + 1 expired rollup
+        Assert.Equal(retention.PruneBatchSize, deletedCount);
+        Assert.Equal(2, await CountRowsAsync("protected_records", expiredOnly: true, clock, retention));
+
+        var secondDeletedCount = await store.PruneExpiredAsync();
+        Assert.Equal(2, secondDeletedCount);
         Assert.Null(await store.GetAsync("detail-expired-1"));
         Assert.Null(await store.GetAsync("detail-expired-2"));
         Assert.Null(await store.GetAsync("detail-expired-3"));
@@ -363,6 +367,74 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
         Assert.Null(await store.GetAsync("past-cutoff"));
     }
 
+    [Fact]
+    public async Task RejectsOversizedRecordKindAndPayloadWithoutIncludingPayloadInError()
+    {
+        using var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
+        var store = new SqliteProtectedRecordStore(
+            _directory, DbFileName, keyRing, new RetentionOptions(), TimeProvider.System,
+            maxRecordKindLength: 4, maxPayloadBytes: 3);
+        await store.EnsureReadyAsync();
+
+        await store.PutAsync("at-limits", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "abc"u8.ToArray());
+        Assert.NotNull(await store.GetAsync("at-limits"));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => store.PutAsync("kind-too-long", "hello", DateTimeOffset.UtcNow, StorageResolution.Detail, "x"u8.ToArray()));
+        var ex = await Assert.ThrowsAsync<ArgumentException>(
+            () => store.PutAsync("payload-too-large", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "secret"u8.ToArray()));
+
+        Assert.DoesNotContain("secret", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExistingStoreAuthenticatesBeforeAnyFutureMigrationHook()
+    {
+        var key = KeyRingTestHelpers.NewKeyBytes();
+        using (var validRing = NewRing(1, key))
+        {
+            var store = NewStore(validRing);
+            await store.EnsureReadyAsync();
+        }
+
+        using var wrongRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
+        await using var connection = new SqliteConnection(RawConnectionString);
+        await connection.OpenAsync();
+        var migrationRan = false;
+
+        await Assert.ThrowsAsync<CanaryVerificationException>(() => SqliteSchema.EnsureReadyAsync(
+            connection, wrongRing, TimeProvider.System, CancellationToken.None,
+            (_, _, _) =>
+            {
+                migrationRan = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.False(migrationRan);
+    }
+
+    [Fact]
+    public async Task ExistingSchemaWithoutCanaryFailsInsteadOfCreatingOne()
+    {
+        using (var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes()))
+        {
+            var store = NewStore(keyRing);
+            await store.EnsureReadyAsync();
+        }
+
+        await using (var connection = new SqliteConnection(RawConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var deleteCanary = connection.CreateCommand();
+            deleteCanary.CommandText = "DELETE FROM storage_canary;";
+            await deleteCanary.ExecuteNonQueryAsync();
+        }
+
+        using var replacementRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
+        var replacementStore = NewStore(replacementRing);
+        await Assert.ThrowsAsync<CanaryVerificationException>(() => replacementStore.EnsureReadyAsync());
+        Assert.Equal(0, await CountRowsAsync("storage_canary"));
+    }
+
     private async Task CheckpointAsync()
     {
         await using var connection = new SqliteConnection(RawConnectionString);
@@ -372,12 +444,30 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
         await command.ExecuteNonQueryAsync();
     }
 
-    private async Task<long> CountRowsAsync(string table)
+    private async Task<long> CountRowsAsync(
+        string table,
+        bool expiredOnly = false,
+        TestTimeProvider? clock = null,
+        RetentionOptions? retention = null)
     {
         await using var connection = new SqliteConnection(RawConnectionString);
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {table};";
+        command.CommandText = expiredOnly
+            ? """
+                SELECT COUNT(*) FROM protected_records
+                WHERE (resolution = 'Detail' AND captured_at_unix_ms < $detailCutoff)
+                   OR (resolution = 'HourlyRollup' AND captured_at_unix_ms < $rollupCutoff);
+                """
+            : $"SELECT COUNT(*) FROM {table};";
+        if (expiredOnly)
+        {
+            ArgumentNullException.ThrowIfNull(clock);
+            ArgumentNullException.ThrowIfNull(retention);
+            command.Parameters.AddWithValue("$detailCutoff", (clock.GetUtcNow() - retention.DetailRetention).ToUnixTimeMilliseconds());
+            command.Parameters.AddWithValue("$rollupCutoff", (clock.GetUtcNow() - retention.HourlyRollupRetention).ToUnixTimeMilliseconds());
+        }
+
         return (long)(await command.ExecuteScalarAsync())!;
     }
 

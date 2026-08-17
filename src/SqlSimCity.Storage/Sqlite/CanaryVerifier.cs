@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using SqlSimCity.Storage;
@@ -18,12 +19,18 @@ internal static class CanaryVerifier
     private static readonly byte[] ExpectedPlaintext = Encoding.UTF8.GetBytes("sqlsimcity-protected-storage-canary-v1");
 
     public static async Task EnsureCanaryAsync(
-        SqliteConnection connection, KeyRing keyRing, TimeProvider timeProvider, CancellationToken cancellationToken)
+        SqliteConnection connection,
+        KeyRing keyRing,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken,
+        SqliteTransaction? transaction = null,
+        bool createIfMissing = false)
     {
         byte[]? existingEnvelope = null;
         await using (var selectCommand = connection.CreateCommand())
         {
             selectCommand.CommandText = "SELECT envelope FROM storage_canary WHERE id = 1;";
+            selectCommand.Transaction = transaction;
             await using var reader = await selectCommand.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -33,8 +40,15 @@ internal static class CanaryVerifier
 
         if (existingEnvelope is null)
         {
+            if (!createIfMissing)
+            {
+                throw new CanaryVerificationException(
+                    "Protected storage canary is missing; an existing store cannot be authenticated.");
+            }
+
             var envelope = EnvelopeCodec.Seal(keyRing, CanaryRecordKind, CanaryRecordId, ExpectedPlaintext);
             await using var insertCommand = connection.CreateCommand();
+            insertCommand.Transaction = transaction;
             insertCommand.CommandText =
                 "INSERT INTO storage_canary (id, envelope, created_at_unix_ms) VALUES (1, $envelope, $createdAt);";
             insertCommand.Parameters.AddWithValue("$envelope", envelope);
@@ -59,9 +73,16 @@ internal static class CanaryVerifier
                 "Protected storage canary was sealed with a key version absent from the configured key ring.", ex);
         }
 
-        if (!plaintext.AsSpan().SequenceEqual(ExpectedPlaintext))
+        try
         {
-            throw new CanaryVerificationException("Protected storage canary decrypted to an unexpected value.");
+            if (!plaintext.AsSpan().SequenceEqual(ExpectedPlaintext))
+            {
+                throw new CanaryVerificationException("Protected storage canary decrypted to an unexpected value.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
         }
     }
 }

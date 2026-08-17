@@ -18,7 +18,7 @@ COPY src/ src/
 COPY --from=web-build /source/web/dist web/dist
 RUN dotnet publish src/SqlSimCity.Api/SqlSimCity.Api.csproj --configuration Release --no-restore --output /app/publish
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 RUN mkdir /data && chown $APP_UID:$APP_UID /data
 COPY --from=api-build --chown=$APP_UID:$APP_UID /app/publish ./

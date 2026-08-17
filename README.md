@@ -82,7 +82,8 @@ The image targets Linux containers on x86-64 and ARM64 where the selected offici
 - loads its key ring only from an explicitly configured file (see [SECURITY.md](SECURITY.md) for the exact JSON format, key rotation, and backup guidance) and never logs key material;
 - fails closed: a missing/wrong key, corrupt or tampered envelope, failed canary check, or migration error prevents the application from becoming ready rather than silently degrading to an unencrypted or partially working store;
 - exposes only opaque record IDs, record kind, captured timestamp, and resolution (`Detail`/`HourlyRollup`) as plaintext metadata — payload bytes are always encrypted;
-- prunes expired records in bounded batches under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`, configurable via `ProtectedStorage:Retention`.
+- prunes at most `ProtectedStorage:Retention:PruneBatchSize` expired records per invocation (call again to drain more), under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`; the batch size is bounded from 1 through 500.
+- restricts the database filename to a simple filename, record-kind metadata to 128 characters (maximum 1,024), and plaintext payloads to 1 MiB (maximum 16 MiB); `MaxRecordKindLength` and `MaxPayloadBytes` are explicit protected-storage configuration limits.
 
 Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). This release does not use protected storage for anything; it exists so a future SQL Server collector has an already-hardened place to put retained evidence and credentials instead of a new unencrypted table.
 

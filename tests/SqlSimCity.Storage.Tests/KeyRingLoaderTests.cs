@@ -30,6 +30,44 @@ public sealed class KeyRingLoaderTests : IDisposable
     }
 
     [Fact]
+    public void ZerosDecodedSourceBuffersAfterConstructingRing()
+    {
+        var key = KeyRingTestHelpers.NewKeyBytes();
+        var path = KeyRingTestHelpers.WriteKeyFile(_directory, activeKeyVersion: 1, (1, key));
+        var decoded = new List<byte[]>();
+
+        using var keyRing = KeyRingLoader.Load(path, base64 =>
+        {
+            var bytes = Convert.FromBase64String(base64);
+            decoded.Add(bytes);
+            return bytes;
+        });
+
+        Assert.All(decoded, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+        Assert.Equal(key, keyRing.GetKey(1));
+    }
+
+    [Fact]
+    public void ZerosDecodedSourceBuffersWhenLaterValidationFails()
+    {
+        var key = KeyRingTestHelpers.NewKeyBytes();
+        var json = $$"""
+            { "formatVersion": 1, "activeKeyVersion": 2, "keys": [ { "version": 1, "key": "{{KeyRingTestHelpers.ToBase64(key)}}" } ] }
+            """;
+        var path = KeyRingTestHelpers.WriteRawKeyFile(_directory, json);
+        byte[]? decoded = null;
+
+        Assert.Throws<KeyRingConfigurationException>(() => KeyRingLoader.Load(path, base64 =>
+        {
+            decoded = Convert.FromBase64String(base64);
+            return decoded;
+        }));
+
+        Assert.NotNull(decoded);
+        Assert.All(decoded!, value => Assert.Equal(0, value));
+    }
+
+    [Fact]
     public void ThrowsWhenFileIsMissing()
     {
         var path = Path.Combine(_directory, "does-not-exist.json");

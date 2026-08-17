@@ -82,6 +82,21 @@ public sealed class EnvelopeCodecTests
     }
 
     [Fact]
+    public void OpenZerosUnauthenticatedPlaintextBuffer()
+    {
+        using var keyRing = SingleKeyRing();
+        var envelope = EnvelopeCodec.Seal(keyRing, "kind", "id", "payload"u8);
+        envelope[^1] ^= 0xFF;
+        byte[]? failedPlaintext = null;
+
+        Assert.Throws<EnvelopeIntegrityException>(
+            () => EnvelopeCodec.Open(keyRing, "kind", "id", envelope, bytes => failedPlaintext = bytes.ToArray()));
+
+        Assert.NotNull(failedPlaintext);
+        Assert.All(failedPlaintext!, value => Assert.Equal(0, value));
+    }
+
+    [Fact]
     public void OpenRejectsMismatchedRecordKind()
     {
         using var keyRing = SingleKeyRing();

@@ -50,6 +50,14 @@ internal static class EnvelopeCodec
     }
 
     public static byte[] Open(KeyRing keyRing, string recordKind, string recordId, ReadOnlySpan<byte> envelope)
+        => Open(keyRing, recordKind, recordId, envelope, onAuthenticationFailure: null);
+
+    internal static byte[] Open(
+        KeyRing keyRing,
+        string recordKind,
+        string recordId,
+        ReadOnlySpan<byte> envelope,
+        Action<byte[]>? onAuthenticationFailure)
     {
         ArgumentNullException.ThrowIfNull(keyRing);
         ArgumentException.ThrowIfNullOrEmpty(recordKind);
@@ -83,6 +91,8 @@ internal static class EnvelopeCodec
         }
         catch (CryptographicException ex)
         {
+            CryptographicOperations.ZeroMemory(plaintext);
+            onAuthenticationFailure?.Invoke(plaintext);
             throw new EnvelopeIntegrityException(
                 "Envelope failed AES-256-GCM authentication (wrong key, tampering, or a mismatched record).", ex);
         }

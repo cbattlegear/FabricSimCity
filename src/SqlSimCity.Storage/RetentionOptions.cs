@@ -8,10 +8,19 @@ namespace SqlSimCity.Storage;
 /// </summary>
 public sealed class RetentionOptions
 {
+    /// <summary>
+    /// SQLite's default parameter limit is 999. The lower bound leaves room for
+    /// future pruning predicates while keeping one invocation predictably small.
+    /// </summary>
+    public const int MaximumPruneBatchSize = 500;
+
     public TimeSpan DetailRetention { get; set; } = TimeSpan.FromDays(7);
 
     public TimeSpan HourlyRollupRetention { get; set; } = TimeSpan.FromDays(90);
 
-    /// <summary>Maximum number of records deleted per pruning round-trip.</summary>
+    /// <summary>
+    /// Maximum number of records a single <see cref="IProtectedRecordStore.PruneExpiredAsync"/>
+    /// invocation deletes. Valid values are 1 through <see cref="MaximumPruneBatchSize"/>.
+    /// </summary>
     public int PruneBatchSize { get; set; } = 500;
 }

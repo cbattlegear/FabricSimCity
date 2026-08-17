@@ -26,8 +26,9 @@ public interface IProtectedRecordStore
 
     /// <summary>
     /// Prunes records older than the configured retention window for their
-    /// resolution, in bounded batches. Never deletes canary or configuration
-    /// metadata. Returns the total number of records removed.
+    /// resolution, deleting at most the configured <c>PruneBatchSize</c> per
+    /// invocation. Callers repeat it to drain additional expired rows. Never
+    /// deletes canary or configuration metadata.
     /// </summary>
     Task<int> PruneExpiredAsync(CancellationToken cancellationToken = default);
 }

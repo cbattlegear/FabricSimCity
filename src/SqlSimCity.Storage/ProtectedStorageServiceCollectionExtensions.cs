@@ -47,6 +47,7 @@ public static class ProtectedStorageServiceCollectionExtensions
                 $"{sectionName}:{nameof(ProtectedStorageOptions.KeyFilePath)} must be configured when protected storage is enabled.");
         }
 
+        options.ValidateForEnabledStorage(sectionName);
         services.AddSingleton(options.Retention);
         services.AddSingleton(sp =>
         {
@@ -54,7 +55,8 @@ public static class ProtectedStorageServiceCollectionExtensions
             var timeProvider = sp.GetRequiredService<TimeProvider>();
             var retention = sp.GetRequiredService<RetentionOptions>();
             return new SqliteProtectedRecordStore(
-                options.DataDirectory, options.DatabaseFileName, keyRing, retention, timeProvider);
+                options.DataDirectory, options.DatabaseFileName, keyRing, retention, timeProvider,
+                options.MaxRecordKindLength, options.MaxPayloadBytes);
         });
         services.AddSingleton<IProtectedRecordStore>(sp => sp.GetRequiredService<SqliteProtectedRecordStore>());
         services.AddSingleton<IProtectedStorageInitializer>(sp => sp.GetRequiredService<SqliteProtectedRecordStore>());

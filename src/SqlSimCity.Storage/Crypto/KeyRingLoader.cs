@@ -31,8 +31,11 @@ public static class KeyRingLoader
         PropertyNameCaseInsensitive = false,
     };
 
-    public static KeyRing Load(string keyFilePath)
+    public static KeyRing Load(string keyFilePath) => Load(keyFilePath, Convert.FromBase64String);
+
+    internal static KeyRing Load(string keyFilePath, Func<string, byte[]> decodeBase64)
     {
+        ArgumentNullException.ThrowIfNull(decodeBase64);
         if (string.IsNullOrWhiteSpace(keyFilePath))
         {
             throw new KeyRingConfigurationException(
@@ -84,60 +87,82 @@ public static class KeyRingLoader
         }
 
         var keysByVersion = new Dictionary<uint, byte[]>();
-        foreach (var entry in dto.Keys)
+        try
         {
-            if (entry.Version <= 0)
+            foreach (var entry in dto.Keys)
+            {
+                if (entry.Version <= 0)
+                {
+                    throw new KeyRingConfigurationException(
+                        "Each key entry must declare a positive integer version.");
+                }
+
+                var version = (uint)entry.Version;
+                if (keysByVersion.ContainsKey(version))
+                {
+                    throw new KeyRingConfigurationException($"Duplicate key version {version} in key file.");
+                }
+
+                if (string.IsNullOrWhiteSpace(entry.Key))
+                {
+                    throw new KeyRingConfigurationException(
+                        $"Key version {version} must declare a non-empty base64 key.");
+                }
+
+                byte[]? keyBytes = null;
+                try
+                {
+                    try
+                    {
+                        keyBytes = decodeBase64(entry.Key);
+                    }
+                    catch (FormatException ex)
+                    {
+                        throw new KeyRingConfigurationException(
+                            $"Key version {version} is not valid base64.", ex);
+                    }
+
+                    if (keyBytes.Length != RequiredKeyLengthBytes)
+                    {
+                        throw new KeyRingConfigurationException(
+                            $"Key version {version} must decode to exactly {RequiredKeyLengthBytes} bytes.");
+                    }
+
+                    keysByVersion[version] = keyBytes;
+                    keyBytes = null; // The outer finally now owns this buffer.
+                }
+                finally
+                {
+                    if (keyBytes is not null)
+                    {
+                        CryptographicOperations.ZeroMemory(keyBytes);
+                    }
+                }
+            }
+
+            if (dto.ActiveKeyVersion <= 0)
             {
                 throw new KeyRingConfigurationException(
-                    "Each key entry must declare a positive integer version.");
+                    "The key file must declare a positive activeKeyVersion.");
             }
 
-            var version = (uint)entry.Version;
-            if (keysByVersion.ContainsKey(version))
-            {
-                throw new KeyRingConfigurationException($"Duplicate key version {version} in key file.");
-            }
-
-            if (string.IsNullOrWhiteSpace(entry.Key))
+            var activeVersion = (uint)dto.ActiveKeyVersion;
+            if (!keysByVersion.ContainsKey(activeVersion))
             {
                 throw new KeyRingConfigurationException(
-                    $"Key version {version} must declare a non-empty base64 key.");
+                    $"activeKeyVersion {activeVersion} is not present among the declared keys.");
             }
 
-            byte[] keyBytes;
-            try
-            {
-                keyBytes = Convert.FromBase64String(entry.Key);
-            }
-            catch (FormatException ex)
-            {
-                throw new KeyRingConfigurationException(
-                    $"Key version {version} is not valid base64.", ex);
-            }
-
-            if (keyBytes.Length != RequiredKeyLengthBytes)
-            {
-                CryptographicOperations.ZeroMemory(keyBytes);
-                throw new KeyRingConfigurationException(
-                    $"Key version {version} must decode to exactly {RequiredKeyLengthBytes} bytes.");
-            }
-
-            keysByVersion[version] = keyBytes;
+            return new KeyRing(activeVersion, keysByVersion);
         }
-
-        if (dto.ActiveKeyVersion <= 0)
+        finally
         {
-            throw new KeyRingConfigurationException(
-                "The key file must declare a positive activeKeyVersion.");
-        }
+            foreach (var key in keysByVersion.Values)
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
 
-        var activeVersion = (uint)dto.ActiveKeyVersion;
-        if (!keysByVersion.ContainsKey(activeVersion))
-        {
-            throw new KeyRingConfigurationException(
-                $"activeKeyVersion {activeVersion} is not present among the declared keys.");
+            keysByVersion.Clear();
         }
-
-        return new KeyRing(activeVersion, keysByVersion);
     }
 }
