@@ -161,4 +161,61 @@ public class CapabilityNegotiatorErrorClassificationTests
         Assert.Equal(CapabilityState.NotProbed, profile.Waits.State);
         Assert.Equal(CapabilityState.NotProbed, profile.LiveSessions.State);
     }
+
+    [Theory]
+    [MemberData(nameof(MetadataFailures))]
+    public async Task MetadataFailureRemainsDistinctFromUnsupported(
+        ProbeExecutionException failure,
+        CapabilityState expected)
+    {
+        var executor = new FakeProbeExecutor
+        {
+            QueryStorePlanMetadata = (_, _) => throw failure,
+        };
+
+        var profile = await Build(executor).NegotiateAsync(
+            new CapabilityNegotiationRequest("t", "fixture_db"), CancellationToken.None);
+
+        Assert.Equal(expected, profile.ParameterSensitivePlan.State);
+        Assert.Equal(expected, profile.ReadableSecondaryQueryStore.State);
+        Assert.Equal(failure.SqlErrorNumber, profile.ParameterSensitivePlan.Evidence.SqlErrorNumber);
+    }
+
+    public static TheoryData<ProbeExecutionException, CapabilityState> MetadataFailures => new()
+    {
+        { new ProbePermissionDeniedException("denied", 229, 14), CapabilityState.PermissionDenied },
+        { new ProbeTimeoutException("timeout", -2, 11), CapabilityState.Unavailable },
+        { new ProbeAuthenticationException("authentication failed", 18456, 14), CapabilityState.Unavailable },
+    };
+
+    [Fact]
+    public async Task DatabaseDiscoveryFailureIsVisibleWithClassifiedEvidence()
+    {
+        var executor = new FakeProbeExecutor
+        {
+            DatabaseDiscovery = _ => throw new ProbePermissionDeniedException("denied", 229, 14),
+        };
+
+        var profile = await Build(executor).NegotiateAsync(
+            new CapabilityNegotiationRequest("t", "fixture_db"), CancellationToken.None);
+
+        Assert.Empty(profile.Databases);
+        Assert.Equal(CapabilityState.PermissionDenied, profile.DatabaseDiscovery.State);
+        Assert.Equal(229, profile.DatabaseDiscovery.Evidence.SqlErrorNumber);
+    }
+
+    [Fact]
+    public async Task AzureDatabaseIdsIncludeTargetScope()
+    {
+        var executor = new FakeProbeExecutor
+        {
+            ServerIdentity = _ => Task.FromResult(
+                new ServerIdentityResult("azure", "current", null, "Azure SQL Database", 5, false, 4, 4, null, null)),
+        };
+
+        var profile = await Build(executor).NegotiateAsync(
+            new CapabilityNegotiationRequest("target-a", "fixture_db"), CancellationToken.None);
+
+        Assert.Equal("target-a/database/2", Assert.Single(profile.Databases).DatabaseId);
+    }
 }

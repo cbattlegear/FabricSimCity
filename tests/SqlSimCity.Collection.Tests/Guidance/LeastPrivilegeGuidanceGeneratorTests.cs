@@ -14,6 +14,7 @@ public class LeastPrivilegeGuidanceGeneratorTests
         TargetId: "test-target",
         Platform: new EnginePlatformV1(platform, productVersion, "Enterprise Edition", platform == EnginePlatform.AzureSqlDatabase ? 5 : 2, Evidence(CapabilityState.Supported)),
         Databases: [],
+        DatabaseDiscovery: new FeatureCapabilityV1(CapabilityState.Supported, "n/a", Evidence(CapabilityState.Supported)),
         ServerVisibility: new VisibilityV1(VisibilityScope.Server, "n/a", Evidence(CapabilityState.Supported)),
         Waits: new FeatureCapabilityV1(CapabilityState.NotProbed, "n/a", Evidence(CapabilityState.NotProbed)),
         LiveSessions: new FeatureCapabilityV1(CapabilityState.NotProbed, "n/a", Evidence(CapabilityState.NotProbed)),

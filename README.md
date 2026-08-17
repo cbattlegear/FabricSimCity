@@ -116,12 +116,13 @@ telemetry from it.
   drive-rooted paths, forward slashes only), that every referenced file actually exists,
   that declared parameters match exactly what each `.sql` file references, and that every
   `connectionScope`/`cadenceClass`/`relativeCost`/`versionVariantOf` value is one this
-  loader documents. Any inconsistency throws `ProbeCatalogValidationException` before the
-  application becomes ready. The existing JS manifest guard (`npm test`) still runs in CI
-  as an independent, source-of-truth-adjacent check; the .NET loader never shells out to
-  Node at runtime.
+  loader documents. It also strips comments and rejects mutating statements, dynamic SQL,
+  `SELECT ... INTO`, unsafe top-level shapes, and undocumented `SET` options. Program startup
+  eagerly loads this catalog in fixture mode too; any inconsistency throws
+  `ProbeCatalogException` before the host is built or can become ready. The JS manifest guard
+  (`npm test`) remains an independent CI check; the .NET loader never shells out to Node.
 - **Canonical capability contracts** (`SqlSimCity.Contracts.V1`) give every fact -- engine
-  platform, product version, edition, per-database compatibility level, Query Store
+  platform, product version, edition, database-discovery evidence, per-database compatibility level, Query Store
   desired/actual state, read-only reason, capture mode, size, server-vs-database
   visibility, waits, live sessions, plans/text, Parameter Sensitive Plan (PSP), Optional
   Parameter Plan Optimization (OPPO), readable-secondary Query Store, Azure resource

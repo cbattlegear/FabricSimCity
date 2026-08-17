@@ -87,4 +87,16 @@ public sealed class ConnectionProfile
         TrustServerCertificate = trustServerCertificate;
         Authentication = authentication;
     }
+
+    /// <summary>Returns an otherwise identical validated profile targeting another database.</summary>
+    public ConnectionProfile WithInitialDatabase(string initialDatabase) => new(
+        Id,
+        Server,
+        initialDatabase,
+        Timeouts,
+        Pool,
+        Encryption,
+        Authentication,
+        HostNameInCertificate,
+        TrustServerCertificate);
 }

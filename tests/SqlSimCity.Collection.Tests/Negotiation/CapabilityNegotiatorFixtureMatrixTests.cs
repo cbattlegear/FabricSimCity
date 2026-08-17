@@ -148,4 +148,14 @@ public class CapabilityNegotiatorFixtureMatrixTests
     {
         Assert.Throws<ArgumentException>(() => new FixtureProbeExecutor("no-such-target"));
     }
+
+    [Fact]
+    public void FixtureCapabilityStatesDoNotConflateUnsupportedWithPermissionDenied()
+    {
+        Assert.True(FixtureProbeExecutor.MapCapabilityToPermission("supported"));
+        Assert.False(FixtureProbeExecutor.MapCapabilityToPermission("permission-denied"));
+        Assert.Null(FixtureProbeExecutor.MapCapabilityToPermission("not-probed"));
+        Assert.Throws<ProbeObjectUnavailableException>(
+            () => FixtureProbeExecutor.MapCapabilityToPermission("unsupported"));
+    }
 }

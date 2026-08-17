@@ -38,7 +38,6 @@ public class SqlExceptionClassifierTests
     }
 
     [Theory]
-    [InlineData(4060)]
     [InlineData(40197)]
     [InlineData(40501)]
     [InlineData(40613)]
@@ -48,13 +47,30 @@ public class SqlExceptionClassifierTests
     [InlineData(10053)]
     [InlineData(10054)]
     [InlineData(10060)]
-    [InlineData(18456)]
     [InlineData(233)]
     [InlineData(64)]
     public void TransientErrorsClassifyAsTransientConnection(int number)
     {
         var result = SqlExceptionClassifier.ClassifyByNumberAndClass(number, 16, "test.probe");
         Assert.IsType<ProbeTransientConnectionException>(result);
+    }
+
+    [Fact]
+    public void LoginFailureIsAuthenticationUnavailableNotTransient()
+    {
+        var result = SqlExceptionClassifier.ClassifyByNumberAndClass(18456, 14, "test.probe");
+
+        Assert.IsType<ProbeAuthenticationException>(result);
+        Assert.DoesNotContain("transient", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CannotOpenDatabaseIsDatabaseUnavailableNotTransient()
+    {
+        var result = SqlExceptionClassifier.ClassifyByNumberAndClass(4060, 11, "test.probe");
+
+        Assert.IsType<ProbeDatabaseUnavailableException>(result);
+        Assert.DoesNotContain("transient", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

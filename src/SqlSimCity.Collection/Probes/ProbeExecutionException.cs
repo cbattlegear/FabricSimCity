@@ -50,6 +50,18 @@ public sealed class ProbeTransientConnectionException(string reason, int? sqlErr
 public sealed class ProbeTimeoutException(string reason, int? sqlErrorNumber, byte? sqlErrorClass, Exception? innerException = null)
     : ProbeExecutionException(reason, sqlErrorNumber, sqlErrorClass, innerException);
 
+/// <summary>Authentication or login configuration failed and should not be retried as transient.</summary>
+public sealed class ProbeAuthenticationException(string reason, int? sqlErrorNumber, byte? sqlErrorClass, Exception? innerException = null)
+    : ProbeExecutionException(reason, sqlErrorNumber, sqlErrorClass, innerException);
+
+/// <summary>The requested database cannot be opened and retry policy requires external context.</summary>
+public sealed class ProbeDatabaseUnavailableException(string reason, int? sqlErrorNumber, byte? sqlErrorClass, Exception? innerException = null)
+    : ProbeExecutionException(reason, sqlErrorNumber, sqlErrorClass, innerException);
+
+/// <summary>A deterministic source explicitly records that this probe was not attempted.</summary>
+public sealed class ProbeNotProbedException(string reason, int? sqlErrorNumber = null, byte? sqlErrorClass = null, Exception? innerException = null)
+    : ProbeExecutionException(reason, sqlErrorNumber, sqlErrorClass, innerException);
+
 /// <summary>
 /// An unclassified SQL/infrastructure error. The internal exception is preserved on
 /// <see cref="Exception.InnerException"/> for local diagnostics but must never be surfaced to a

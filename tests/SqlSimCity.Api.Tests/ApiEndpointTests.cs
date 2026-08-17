@@ -86,6 +86,14 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
             Assert.NotEmpty(target.TargetId);
             Assert.NotEqual(default, target.SourceTimestamp);
         }
+
+        var rawJson = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(rawJson);
+        var sales = document.RootElement.GetProperty("targets")[0]
+            .GetProperty("queryStoreByDatabase")
+            .GetProperty("db:atlas-sales");
+        Assert.Equal(JsonValueKind.String, sales.GetProperty("maxStorageBytes").ValueKind);
+        Assert.Equal("9007199255789568", sales.GetProperty("maxStorageBytes").GetString());
     }
 
     [Fact]

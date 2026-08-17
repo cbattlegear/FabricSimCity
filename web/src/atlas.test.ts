@@ -90,8 +90,9 @@ describe('evidence semantics and accessible text', () => {
     expect(isFreshLive(item, generated)).toBe(false)
   })
 
-  it('retains Query Store counts above Number.MAX_SAFE_INTEGER and unavailable values', () => {
+  it('retains Query Store counts and capability storage bytes above Number.MAX_SAFE_INTEGER', () => {
     expect(formatDecimalCount('9007199254740993')).toBe('9,007,199,254,740,993')
+    expect(formatDecimalCount('9007199255789568')).toBe('9,007,199,255,789,568')
     expect(formatDecimalCount(null)).toBe('Unavailable')
   })
 

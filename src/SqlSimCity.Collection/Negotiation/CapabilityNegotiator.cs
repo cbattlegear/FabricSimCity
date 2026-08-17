@@ -44,7 +44,8 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         var now = _timeProvider.GetUtcNow();
 
         var (platform, platformEvidence, identity) = await NegotiatePlatformAsync(now, cancellationToken).ConfigureAwait(false);
-        var databases = await NegotiateDatabasesAsync(now, cancellationToken).ConfigureAwait(false);
+        var (databases, databaseDiscovery) = await NegotiateDatabasesAsync(
+            platform, request.TargetId, now, cancellationToken).ConfigureAwait(false);
         var visibility = NegotiateVisibility(platform, now);
 
         var targetDatabase = databases.FirstOrDefault(d => string.Equals(d.DatabaseName, request.DatabaseName, StringComparison.OrdinalIgnoreCase));
@@ -68,8 +69,8 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
             now);
 
         var planMetadata = platform == EnginePlatform.Unsupported || targetDatabase is null
-            ? null
-            : await NegotiatePlanMetadataAsync(request.DatabaseName, cancellationToken).ConfigureAwait(false);
+            ? PlanMetadataNegotiation.NotProbed(now)
+            : await NegotiatePlanMetadataAsync(request.DatabaseName, now, cancellationToken).ConfigureAwait(false);
 
         var psp = NegotiateParameterSensitivePlan(platform, compatibilityLevel, planMetadata, now);
         var oppo = NegotiateOptionalParameterPlanOptimization(platform, compatibilityLevel, planMetadata, now);
@@ -91,6 +92,7 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
                 identity?.EngineEdition,
                 platformEvidence),
             Databases: databases,
+            DatabaseDiscovery: databaseDiscovery,
             ServerVisibility: visibility,
             Waits: waits,
             LiveSessions: liveSessions,
@@ -135,22 +137,39 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         return (platform, evidence, identity);
     }
 
-    private async Task<IReadOnlyList<DatabaseCompatibilityV1>> NegotiateDatabasesAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<DatabaseCompatibilityV1> Databases, FeatureCapabilityV1 Discovery)>
+        NegotiateDatabasesAsync(
+            EnginePlatform platform,
+            string targetId,
+            DateTimeOffset now,
+            CancellationToken cancellationToken)
     {
         IReadOnlyList<DatabaseDiscoveryRow> rows;
         try
         {
             rows = await _probeExecutor.GetDatabaseDiscoveryAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (ProbeExecutionException)
+        catch (ProbeExecutionException ex)
         {
-            return [];
+            var failure = FromException(ex, now);
+            return ([], new FeatureCapabilityV1(failure.State, failure.Reason, failure));
         }
 
-        var evidence = new CapabilityEvidenceV1(CapabilityState.Supported, "Read from sys.databases.", now, null, null);
-        return rows
-            .Select(r => new DatabaseCompatibilityV1(r.DatabaseId.ToString(System.Globalization.CultureInfo.InvariantCulture), r.DatabaseName, r.CompatibilityLevel, evidence))
+        var reason = rows.Count == 0
+            ? "Database discovery completed successfully and returned zero visible databases."
+            : "Read from sys.databases.";
+        var evidence = new CapabilityEvidenceV1(CapabilityState.Supported, reason, now, null, null);
+        var databases = rows
+            .Select(r =>
+            {
+                var rawId = r.DatabaseId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var databaseId = platform == EnginePlatform.AzureSqlDatabase
+                    ? $"{targetId}/database/{rawId}"
+                    : rawId;
+                return new DatabaseCompatibilityV1(databaseId, r.DatabaseName, r.CompatibilityLevel, evidence);
+            })
             .ToList();
+        return (databases, new FeatureCapabilityV1(CapabilityState.Supported, reason, evidence));
     }
 
     private static VisibilityV1 NegotiateVisibility(EnginePlatform platform, DateTimeOffset now) => platform switch
@@ -224,23 +243,36 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         {
             true => new FeatureCapabilityV1(CapabilityState.Supported, $"Permission confirmed for {featureLabel}.", permissionEvidence),
             false => new FeatureCapabilityV1(CapabilityState.PermissionDenied, $"Permission denied for {featureLabel}.", permissionEvidence),
-            null => new FeatureCapabilityV1(CapabilityState.NotProbed, $"Permission for {featureLabel} could not be evaluated.", permissionEvidence),
+            null => new FeatureCapabilityV1(
+                permissionEvidence.State,
+                $"Permission for {featureLabel} could not be evaluated: {permissionEvidence.Reason}",
+                permissionEvidence),
         };
     }
 
-    private async Task<QueryStorePlanMetadataResult?> NegotiatePlanMetadataAsync(string databaseName, CancellationToken cancellationToken)
+    private async Task<PlanMetadataNegotiation> NegotiatePlanMetadataAsync(
+        string databaseName,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
         try
         {
-            return await _probeExecutor.GetQueryStorePlanMetadataAsync(databaseName, cancellationToken).ConfigureAwait(false);
+            var metadata = await _probeExecutor.GetQueryStorePlanMetadataAsync(databaseName, cancellationToken).ConfigureAwait(false);
+            var evidence = new CapabilityEvidenceV1(
+                CapabilityState.Supported,
+                "Query Store plan metadata probe completed successfully.",
+                now,
+                null,
+                null);
+            return new PlanMetadataNegotiation(metadata, evidence, true);
         }
-        catch (ProbeExecutionException)
+        catch (ProbeExecutionException ex)
         {
-            return null;
+            return new PlanMetadataNegotiation(null, FromException(ex, now), false);
         }
     }
 
-    private static FeatureCapabilityV1 NegotiateParameterSensitivePlan(EnginePlatform platform, int? compatibilityLevel, QueryStorePlanMetadataResult? metadata, DateTimeOffset now)
+    private static FeatureCapabilityV1 NegotiateParameterSensitivePlan(EnginePlatform platform, int? compatibilityLevel, PlanMetadataNegotiation metadata, DateTimeOffset now)
     {
         if (platform == EnginePlatform.Unsupported)
         {
@@ -265,7 +297,12 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
             return new FeatureCapabilityV1(CapabilityState.Unsupported, e.Reason, e);
         }
 
-        if (metadata is not { HasPlanTypeDesc: true })
+        if (!metadata.Succeeded)
+        {
+            return FeatureFromMetadataFailure(metadata);
+        }
+
+        if (metadata.Metadata is not { HasPlanTypeDesc: true })
         {
             var e = new CapabilityEvidenceV1(
                 CapabilityState.Unsupported,
@@ -285,7 +322,7 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         return new FeatureCapabilityV1(CapabilityState.Supported, supported.Reason, supported);
     }
 
-    private static FeatureCapabilityV1 NegotiateOptionalParameterPlanOptimization(EnginePlatform platform, int? compatibilityLevel, QueryStorePlanMetadataResult? metadata, DateTimeOffset now)
+    private static FeatureCapabilityV1 NegotiateOptionalParameterPlanOptimization(EnginePlatform platform, int? compatibilityLevel, PlanMetadataNegotiation metadata, DateTimeOffset now)
     {
         if (platform == EnginePlatform.Unsupported)
         {
@@ -321,7 +358,12 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
             return new FeatureCapabilityV1(CapabilityState.Unsupported, e.Reason, e);
         }
 
-        if (metadata is not { HasPlanTypeDesc: true })
+        if (!metadata.Succeeded)
+        {
+            return FeatureFromMetadataFailure(metadata);
+        }
+
+        if (metadata.Metadata is not { HasPlanTypeDesc: true })
         {
             var e = new CapabilityEvidenceV1(
                 CapabilityState.Unsupported,
@@ -341,7 +383,7 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         return new FeatureCapabilityV1(CapabilityState.Supported, supported.Reason, supported);
     }
 
-    private static FeatureCapabilityV1 NegotiateReadableSecondaryQueryStore(EnginePlatform platform, QueryStorePlanMetadataResult? metadata, DateTimeOffset now)
+    private static FeatureCapabilityV1 NegotiateReadableSecondaryQueryStore(EnginePlatform platform, PlanMetadataNegotiation metadata, DateTimeOffset now)
     {
         if (platform == EnginePlatform.Unsupported)
         {
@@ -349,7 +391,12 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
             return new FeatureCapabilityV1(CapabilityState.Unsupported, e.Reason, e);
         }
 
-        if (metadata is not { HasReplicaGroupId: true })
+        if (!metadata.Succeeded)
+        {
+            return FeatureFromMetadataFailure(metadata);
+        }
+
+        if (metadata.Metadata is not { HasReplicaGroupId: true })
         {
             var e = new CapabilityEvidenceV1(
                 CapabilityState.Unsupported,
@@ -379,8 +426,21 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         try
         {
             row = await _probeExecutor.GetQueryStoreOptionsAsync(databaseName, cancellationToken).ConfigureAwait(false);
-            availability = CapabilityState.Supported;
-            evidence = new CapabilityEvidenceV1(CapabilityState.Supported, "Read from sys.database_query_store_options.", now, null, null);
+            if (row is null)
+            {
+                availability = CapabilityState.Unavailable;
+                evidence = new CapabilityEvidenceV1(
+                    CapabilityState.Unavailable,
+                    "Query Store options probe unexpectedly returned no row; operational state was not determined.",
+                    now,
+                    null,
+                    null);
+            }
+            else
+            {
+                availability = CapabilityState.Supported;
+                evidence = new CapabilityEvidenceV1(CapabilityState.Supported, "Read from sys.database_query_store_options.", now, null, null);
+            }
         }
         catch (ProbePermissionDeniedException ex)
         {
@@ -423,14 +483,39 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
             ? QueryStoreReadOnlyReason.Describe(row.ReadonlyReason)
             : null;
 
+        string currentStorageBytes;
+        string maxStorageBytes;
+        try
+        {
+            currentStorageBytes = checked(row.CurrentStorageSizeMb * 1024L * 1024L)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            maxStorageBytes = checked(row.MaxStorageSizeMb * 1024L * 1024L)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (OverflowException)
+        {
+            var overflowEvidence = new CapabilityEvidenceV1(
+                CapabilityState.Unavailable,
+                "Query Store storage size conversion overflowed the supported 64-bit byte range.",
+                now,
+                null,
+                null);
+            return new Dictionary<string, QueryStoreStateV1>(StringComparer.OrdinalIgnoreCase)
+            {
+                [databaseName] = new QueryStoreStateV1(
+                    null, null, QueryStoreOperationalState.Unknown, null, null, null, null,
+                    CapabilityState.Unavailable, overflowEvidence),
+            };
+        }
+
         var state = new QueryStoreStateV1(
             row.DesiredStateDesc,
             row.ActualStateDesc,
             operationalState,
             readOnlyReason,
             row.QueryCaptureModeDesc,
-            row.CurrentStorageSizeMb * 1024L * 1024L,
-            row.MaxStorageSizeMb * 1024L * 1024L,
+            currentStorageBytes,
+            maxStorageBytes,
             CapabilityState.Supported,
             evidence);
 
@@ -465,10 +550,31 @@ public sealed class CapabilityNegotiator : ICapabilityNegotiator
         {
             ProbePermissionDeniedException => CapabilityState.PermissionDenied,
             ProbeObjectUnavailableException => CapabilityState.Unsupported,
+            ProbeNotProbedException => CapabilityState.NotProbed,
             ProbeTransientConnectionException or ProbeTimeoutException => CapabilityState.Unavailable,
             _ => CapabilityState.Unavailable,
         };
 
         return new CapabilityEvidenceV1(state, exception.Reason, now, exception.SqlErrorNumber, exception.SqlErrorClass);
+    }
+
+    private static FeatureCapabilityV1 FeatureFromMetadataFailure(PlanMetadataNegotiation metadata) =>
+        new(metadata.Evidence.State, metadata.Evidence.Reason, metadata.Evidence);
+
+    private sealed record PlanMetadataNegotiation(
+        QueryStorePlanMetadataResult? Metadata,
+        CapabilityEvidenceV1 Evidence,
+        bool Succeeded)
+    {
+        public static PlanMetadataNegotiation NotProbed(DateTimeOffset now)
+        {
+            var evidence = new CapabilityEvidenceV1(
+                CapabilityState.NotProbed,
+                "Query Store plan metadata was not probed because the target database or platform was unavailable.",
+                now,
+                null,
+                null);
+            return new PlanMetadataNegotiation(null, evidence, false);
+        }
     }
 }

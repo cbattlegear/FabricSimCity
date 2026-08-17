@@ -92,5 +92,33 @@ public class CapabilityNegotiatorQueryStoreTests
         Assert.Equal(QueryStoreOperationalState.Unknown, qs.OperationalState);
         Assert.Null(qs.CurrentStorageBytes);
         Assert.Null(qs.MaxStorageBytes);
+        Assert.Equal(CapabilityState.Unavailable, qs.Availability);
+    }
+
+    [Fact]
+    public async Task StorageBytesSerializeLosslesslyAboveJavaScriptSafeInteger()
+    {
+        var profile = await BuildNegotiator().NegotiateAsync(
+            new CapabilityNegotiationRequest("t", "db:atlas-sales"), CancellationToken.None);
+
+        Assert.Equal("9007199255789568", profile.QueryStoreByDatabase["db:atlas-sales"].MaxStorageBytes);
+    }
+
+    [Fact]
+    public async Task MegabyteConversionOverflowIsUnavailableRatherThanWrapped()
+    {
+        var executor = new FakeProbeExecutor
+        {
+            QueryStoreOptions = (_, _) => Task.FromResult<QueryStoreOptionsRow?>(
+                new QueryStoreOptionsRow("READ_WRITE", "READ_WRITE", 0, long.MaxValue, 1, "AUTO")),
+        };
+
+        var profile = await new CapabilityNegotiator(executor).NegotiateAsync(
+            new CapabilityNegotiationRequest("t", "fixture_db"), CancellationToken.None);
+        var state = profile.QueryStoreByDatabase["fixture_db"];
+
+        Assert.Equal(CapabilityState.Unavailable, state.Availability);
+        Assert.Null(state.CurrentStorageBytes);
+        Assert.Contains("overflow", state.Evidence.Reason, StringComparison.OrdinalIgnoreCase);
     }
 }

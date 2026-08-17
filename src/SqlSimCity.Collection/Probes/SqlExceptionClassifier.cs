@@ -19,7 +19,7 @@ public static class SqlExceptionClassifier
 
     // Connection-level/throttling/failover errors a caller may reasonably retry.
     private static readonly HashSet<int> TransientConnectionNumbers =
-        [4060, 40197, 40501, 40613, 40615, 10928, 10929, 10053, 10054, 10060, 18456, 233, 64];
+        [40197, 40501, 40613, 40615, 10928, 10929, 10053, 10054, 10060, 233, 64];
 
     public static ProbeExecutionException Classify(SqlException exception, string probeId)
     {
@@ -40,6 +40,24 @@ public static class SqlExceptionClassifier
         {
             return new ProbeTimeoutException(
                 $"Probe '{probeId}' timed out before it completed.",
+                number,
+                errorClass,
+                cause);
+        }
+
+        if (number == 18456)
+        {
+            return new ProbeAuthenticationException(
+                $"Probe '{probeId}' could not authenticate the configured login.",
+                number,
+                errorClass,
+                cause);
+        }
+
+        if (number == 4060)
+        {
+            return new ProbeDatabaseUnavailableException(
+                $"Probe '{probeId}' could not open the requested database.",
                 number,
                 errorClass,
                 cause);

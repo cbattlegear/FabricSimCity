@@ -100,6 +100,12 @@ public sealed class FixtureProbeExecutor : IProbeExecutor
                 $"Fixture record '{record.RecordId}' models Query Store being unsupported on this target.", null, null);
         }
 
+        if (record.Availability == "not-probed")
+        {
+            throw new ProbeNotProbedException(
+                $"Fixture record '{record.RecordId}' models a Query Store probe that was not attempted.");
+        }
+
         return Task.FromResult<QueryStoreOptionsRow?>(new QueryStoreOptionsRow(
             DesiredStateDesc: record.DesiredState ?? "OFF",
             ActualStateDesc: record.ActualState ?? "OFF",
@@ -113,15 +119,11 @@ public sealed class FixtureProbeExecutor : IProbeExecutor
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
 
-        // The plan_type_desc and replica_group_id columns were both added in the SQL Server 2022
-        // engine, the same release that introduced database compatibility level 160; every
-        // fixture target at or above that level models an engine build that carries them.
-        var hasModernColumns = _target.CompatibilityLevel >= 160;
         return Task.FromResult(new QueryStorePlanMetadataResult(
-            HasPlanTypeDesc: hasModernColumns,
-            HasIsOptimizedPlanForcingDisabled: hasModernColumns,
-            HasCompileReplayScript: hasModernColumns,
-            HasReplicaGroupId: hasModernColumns));
+            HasPlanTypeDesc: _target.PlanMetadata.HasPlanTypeDesc,
+            HasIsOptimizedPlanForcingDisabled: _target.PlanMetadata.HasIsOptimizedPlanForcingDisabled,
+            HasCompileReplayScript: _target.PlanMetadata.HasCompileReplayScript,
+            HasReplicaGroupId: _target.PlanMetadata.HasReplicaGroupId));
     }
 
     public Task<bool?> CheckServerPermissionAsync(string permission, CancellationToken cancellationToken)
@@ -148,12 +150,14 @@ public sealed class FixtureProbeExecutor : IProbeExecutor
         return Task.FromResult<AzureResourceGovernanceRow?>(new AzureResourceGovernanceRow(CpuLimit: 2.0, ProcessMemoryLimitMb: 7168));
     }
 
-    private static bool? MapCapabilityToPermission(string capability) => capability switch
+    internal static bool? MapCapabilityToPermission(string capability) => capability switch
     {
         "supported" => true,
         "permission-denied" => false,
-        "unsupported" => false,
-        _ => null,
+        "unsupported" => throw new ProbeObjectUnavailableException(
+            "Fixture capability explicitly records that this probe is unsupported.", null, null),
+        "not-probed" => null,
+        _ => throw new InvalidOperationException($"Unknown fixture capability state '{capability}'."),
     };
 
     private static List<TargetCapabilityFixtureRow> LoadTargetCapabilities(Assembly assembly)
@@ -175,6 +179,7 @@ public sealed class FixtureProbeExecutor : IProbeExecutor
                 element.GetProperty("platform").GetString()!,
                 element.GetProperty("release").GetString()!,
                 element.GetProperty("compatibilityLevel").GetInt32(),
+                ReadPlanMetadata(element.GetProperty("planMetadata")),
                 capabilities));
         }
 
@@ -210,6 +215,12 @@ public sealed class FixtureProbeExecutor : IProbeExecutor
     private static long? GetNullableInt64(JsonElement element, string propertyName) =>
         element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Number ? value.GetInt64() : null;
 
+    private static FixturePlanMetadata ReadPlanMetadata(JsonElement element) => new(
+        element.GetProperty("hasPlanTypeDesc").GetBoolean(),
+        element.GetProperty("hasIsOptimizedPlanForcingDisabled").GetBoolean(),
+        element.GetProperty("hasCompileReplayScript").GetBoolean(),
+        element.GetProperty("hasReplicaGroupId").GetBoolean());
+
     private static Stream OpenFixtureResource(Assembly assembly, string fileName)
     {
         var logicalName = "fixtures/v1/" + fileName;
@@ -224,7 +235,14 @@ public sealed class FixtureProbeExecutor : IProbeExecutor
         string Platform,
         string Release,
         int CompatibilityLevel,
+        FixturePlanMetadata PlanMetadata,
         IReadOnlyDictionary<string, string> Capabilities);
+
+    private sealed record FixturePlanMetadata(
+        bool HasPlanTypeDesc,
+        bool HasIsOptimizedPlanForcingDisabled,
+        bool HasCompileReplayScript,
+        bool HasReplicaGroupId);
 
     private sealed record QueryStoreFixtureRecord(
         string RecordId,

@@ -14,6 +14,25 @@ public class ConnectionProfileTests
     }
 
     [Fact]
+    public void WithInitialDatabaseCopiesValidatedProfileWithoutChangingOtherSettings()
+    {
+        var profile = TestProfiles.Build(initialDatabase: "DB-A", hostNameInCertificate: "sql.example.com");
+
+        var copy = profile.WithInitialDatabase("DB-B");
+
+        Assert.Equal("DB-B", copy.InitialDatabase);
+        Assert.Equal(profile.Id, copy.Id);
+        Assert.Same(profile.Server, copy.Server);
+        Assert.Same(profile.Timeouts, copy.Timeouts);
+        Assert.Same(profile.Pool, copy.Pool);
+        Assert.Same(profile.Authentication, copy.Authentication);
+        Assert.Equal(profile.Encryption, copy.Encryption);
+        Assert.Equal(profile.HostNameInCertificate, copy.HostNameInCertificate);
+        Assert.Equal(profile.TrustServerCertificate, copy.TrustServerCertificate);
+        Assert.Throws<ConnectionProfileValidationException>(() => profile.WithInitialDatabase("bad;db"));
+    }
+
+    [Fact]
     public void ApplicationNameIsFixedConstant()
     {
         Assert.Equal("SQLSimCity", ConnectionProfile.ApplicationName);

@@ -11,7 +11,7 @@
       "actualState": "READ_WRITE",
       "captureMode": "AUTO",
       "currentStorageBytes": 12582912,
-      "maxStorageBytes": 104857600,
+      "maxStorageBytes": 9007199255789568,
       "reasonCode": null,
       "source": "sys.database_query_store_options",
       "observedAt": "2026-08-17T17:00:01Z"

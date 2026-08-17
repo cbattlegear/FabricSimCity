@@ -35,6 +35,8 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
     public Task<ServerIdentityResult> GetServerIdentityAsync(CancellationToken cancellationToken) =>
         ExecuteAsync(
             "server.identity",
+            "master",
+            databaseName: null,
             parameters: null,
             async (reader, ct) =>
             {
@@ -62,6 +64,8 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
     public Task<IReadOnlyList<DatabaseDiscoveryRow>> GetDatabaseDiscoveryAsync(CancellationToken cancellationToken) =>
         ExecuteAsync(
             "server.database_discovery",
+            "master",
+            databaseName: null,
             parameters: null,
             async (reader, ct) =>
             {
@@ -85,6 +89,8 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         return ExecuteAsync(
             "querystore.options_2019",
+            "database",
+            databaseName,
             parameters: null,
             async (reader, ct) =>
             {
@@ -109,6 +115,8 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         return ExecuteAsync(
             "capability.query_store_plan_metadata",
+            "database",
+            databaseName,
             parameters: null,
             async (reader, ct) =>
             {
@@ -128,7 +136,9 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         ArgumentException.ThrowIfNullOrWhiteSpace(permission);
         return ExecuteAsync(
             "capability.server_permission_check",
-            [new SqlParameter("@Permission", SqlDbType.NVarChar, 128) { Value = permission }],
+            "server",
+            databaseName: null,
+            new Dictionary<string, object?> { ["@Permission"] = permission },
             ReadHasPermissionAsync,
             cancellationToken);
     }
@@ -139,7 +149,9 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         ArgumentException.ThrowIfNullOrWhiteSpace(permission);
         return ExecuteAsync(
             "capability.database_permission_check",
-            [new SqlParameter("@Permission", SqlDbType.NVarChar, 128) { Value = permission }],
+            "database",
+            databaseName,
+            new Dictionary<string, object?> { ["@Permission"] = permission },
             ReadHasPermissionAsync,
             cancellationToken);
     }
@@ -149,6 +161,8 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         return ExecuteAsync(
             "capability.azure_resource_governance",
+            "database",
+            databaseName,
             parameters: null,
             async (reader, ct) =>
             {
@@ -182,16 +196,33 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
     /// </summary>
     private async Task<T> ExecuteAsync<T>(
         string probeId,
-        SqlParameter[]? parameters,
+        string expectedConnectionScope,
+        string? databaseName,
+        IReadOnlyDictionary<string, object?>? parameters,
         Func<SqlDataReader, CancellationToken, Task<T>> project,
         CancellationToken cancellationToken)
     {
         var probe = _catalog.Get(probeId);
+        if (!string.Equals(probe.ConnectionScope, expectedConnectionScope, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Probe '{probeId}' declares connectionScope '{probe.ConnectionScope}', not expected scope '{expectedConnectionScope}'.");
+        }
+
+        var boundParameters = BuildParameters(probe, parameters);
+        var executionProfile = expectedConnectionScope switch
+        {
+            "master" => _profile.WithInitialDatabase("master"),
+            "database" when !string.IsNullOrWhiteSpace(databaseName) => _profile.WithInitialDatabase(databaseName),
+            "database" => throw new InvalidOperationException($"Database-scoped probe '{probeId}' requires a target database."),
+            "server" => _profile,
+            _ => throw new InvalidOperationException($"Probe '{probeId}' cannot execute through this capability executor with scope '{expectedConnectionScope}'."),
+        };
 
         SqlConnectionOpenResult openResult;
         try
         {
-            openResult = await _connectionFactory.OpenAsync(_profile, cancellationToken).ConfigureAwait(false);
+            openResult = await _connectionFactory.OpenAsync(executionProfile, cancellationToken).ConfigureAwait(false);
         }
         catch (SqlException ex)
         {
@@ -200,13 +231,13 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
 
         await using (openResult.ConfigureAwait(false))
         {
-            var command = openResult.Connection.CreateCommand();
+            await using var command = openResult.Connection.CreateCommand();
             command.CommandType = CommandType.Text;
             command.CommandText = probe.CommandText;
-            command.CommandTimeout = _profile.Timeouts.CommandTimeoutSeconds;
-            if (parameters is not null)
+            command.CommandTimeout = executionProfile.Timeouts.CommandTimeoutSeconds;
+            if (boundParameters.Length > 0)
             {
-                command.Parameters.AddRange(parameters);
+                command.Parameters.AddRange(boundParameters);
             }
 
             try
@@ -219,5 +250,43 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
                 throw SqlExceptionClassifier.Classify(ex, probeId);
             }
         }
+    }
+
+    private static SqlParameter[] BuildParameters(
+        Catalog.ProbeDefinition probe,
+        IReadOnlyDictionary<string, object?>? values)
+    {
+        values ??= new Dictionary<string, object?>();
+        var declared = probe.Parameters.ToDictionary(parameter => parameter.Name, StringComparer.Ordinal);
+        var undeclared = values.Keys.Where(name => !declared.ContainsKey(name)).ToList();
+        var missing = probe.Parameters
+            .Where(parameter => parameter.Required && !values.ContainsKey(parameter.Name))
+            .Select(parameter => parameter.Name)
+            .ToList();
+        if (undeclared.Count > 0 || missing.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Probe '{probe.Id}' parameter contract mismatch. " +
+                $"Undeclared: [{string.Join(", ", undeclared)}]; missing required: [{string.Join(", ", missing)}].");
+        }
+
+        var result = new List<SqlParameter>(values.Count);
+        foreach (var definition in probe.Parameters)
+        {
+            if (!values.TryGetValue(definition.Name, out var value))
+            {
+                continue;
+            }
+
+            if (!Enum.TryParse<SqlDbType>(definition.SqlDbType, ignoreCase: false, out var sqlDbType))
+            {
+                throw new InvalidOperationException(
+                    $"Probe '{probe.Id}' parameter '{definition.Name}' declares unsupported SqlDbType '{definition.SqlDbType}'.");
+            }
+
+            result.Add(new SqlParameter(definition.Name, sqlDbType) { Value = value ?? DBNull.Value });
+        }
+
+        return [.. result];
     }
 }

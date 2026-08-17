@@ -57,8 +57,8 @@ public sealed record QueryStoreStateV1(
     QueryStoreOperationalState OperationalState,
     string? ReadOnlyReason,
     string? CaptureMode,
-    long? CurrentStorageBytes,
-    long? MaxStorageBytes,
+    string? CurrentStorageBytes,
+    string? MaxStorageBytes,
     CapabilityState Availability,
     CapabilityEvidenceV1 Evidence);
 
@@ -77,6 +77,7 @@ public sealed record TargetCapabilityProfileV1(
     string TargetId,
     EnginePlatformV1 Platform,
     IReadOnlyList<DatabaseCompatibilityV1> Databases,
+    FeatureCapabilityV1 DatabaseDiscovery,
     VisibilityV1 ServerVisibility,
     FeatureCapabilityV1 Waits,
     FeatureCapabilityV1 LiveSessions,

@@ -8,6 +8,12 @@
       "platform": "SQL Server",
       "release": "2019",
       "compatibilityLevel": 150,
+      "planMetadata": {
+        "hasPlanTypeDesc": false,
+        "hasIsOptimizedPlanForcingDisabled": false,
+        "hasCompileReplayScript": false,
+        "hasReplicaGroupId": false
+      },
       "sourceScope": "server-and-database",
       "sourceLimitations": [
         "Server-level DMV visibility depends on VIEW SERVER STATE."
@@ -25,6 +31,12 @@
       "platform": "SQL Server",
       "release": "2022",
       "compatibilityLevel": 160,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
       "sourceScope": "server-and-database",
       "sourceLimitations": [
         "Database Query Store is queried in each database."
@@ -42,6 +54,12 @@
       "platform": "SQL Server",
       "release": "2025",
       "compatibilityLevel": 170,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
       "sourceScope": "server-and-database",
       "sourceLimitations": [
         "OPPO requires compatibility level 170 and its database-scoped configuration."
@@ -59,6 +77,12 @@
       "platform": "Azure SQL Database",
       "release": "current",
       "compatibilityLevel": 170,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
       "sourceScope": "database-only",
       "sourceLimitations": [
         "sys.dm_exec_requests and related DMVs expose only the current database.",
@@ -77,6 +101,12 @@
       "platform": "Azure SQL Managed Instance",
       "release": "current",
       "compatibilityLevel": 170,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
       "sourceScope": "server-and-database",
       "sourceLimitations": [
         "Server-scoped visibility still requires the granted permissions."

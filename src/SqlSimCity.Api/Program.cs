@@ -10,12 +10,17 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     WebRootPath = WebRootResolver.Resolve(AppContext.BaseDirectory),
 });
 
+var probeCatalog = ApplicationInitialization.LoadProbeCatalog();
+var capabilitiesSource = await FixtureCapabilitiesSource.CreateAsync(
+    cancellationToken: CancellationToken.None);
+
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton<IAtlasSnapshotSource, FixtureAtlasSnapshotSource>();
-builder.Services.AddSingleton<ICapabilitiesSource, FixtureCapabilitiesSource>();
+builder.Services.AddSingleton(probeCatalog);
+builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
 builder.Services.AddProtectedStorage(builder.Configuration);
 
 var app = builder.Build();

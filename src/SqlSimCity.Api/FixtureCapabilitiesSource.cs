@@ -12,7 +12,7 @@ namespace SqlSimCity.Api;
 /// healthy Query Store record as a representative per-database fact set. This produces genuine
 /// <see cref="TargetCapabilityProfileV1"/> data -- the same shape a live
 /// <c>SqlClientProbeExecutor</c> would produce -- before any live SQL Server connection exists.
-/// The snapshot is computed once at construction (the fixture data is static and deterministic)
+/// The snapshot is computed once by the async startup factory (the fixture data is static and deterministic)
 /// and cached, mirroring <see cref="SqlSimCity.Domain.IAtlasSnapshotSource"/>'s pattern.
 /// </summary>
 public sealed class FixtureCapabilitiesSource : ICapabilitiesSource
@@ -21,23 +21,27 @@ public sealed class FixtureCapabilitiesSource : ICapabilitiesSource
 
     private readonly CapabilitiesSnapshotV1 _snapshot;
 
-    public FixtureCapabilitiesSource(TimeProvider? timeProvider = null)
+    private FixtureCapabilitiesSource(CapabilitiesSnapshotV1 snapshot)
+    {
+        _snapshot = snapshot;
+    }
+
+    public static async Task<FixtureCapabilitiesSource> CreateAsync(
+        TimeProvider? timeProvider = null,
+        CancellationToken cancellationToken = default)
     {
         var time = timeProvider ?? TimeProvider.System;
         var generatedAt = time.GetUtcNow();
+        var profiles = new List<TargetCapabilityProfileV1>();
+        foreach (var targetId in FixtureProbeExecutor.GetKnownTargetIds())
+        {
+            var negotiator = new CapabilityNegotiator(new FixtureProbeExecutor(targetId), time);
+            profiles.Add(await negotiator.NegotiateAsync(
+                new CapabilityNegotiationRequest(targetId, RepresentativeDatabaseName),
+                cancellationToken).ConfigureAwait(false));
+        }
 
-        var profiles = FixtureProbeExecutor.GetKnownTargetIds()
-            .Select(targetId =>
-            {
-                var negotiator = new CapabilityNegotiator(new FixtureProbeExecutor(targetId), time);
-                return negotiator
-                    .NegotiateAsync(new CapabilityNegotiationRequest(targetId, RepresentativeDatabaseName), CancellationToken.None)
-                    .GetAwaiter()
-                    .GetResult();
-            })
-            .ToList();
-
-        _snapshot = new CapabilitiesSnapshotV1("1", generatedAt, profiles);
+        return new FixtureCapabilitiesSource(new CapabilitiesSnapshotV1("1", generatedAt, profiles));
     }
 
     public CapabilitiesSnapshotV1 GetCurrent() => _snapshot;
