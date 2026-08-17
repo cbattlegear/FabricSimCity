@@ -18,6 +18,12 @@
 -- Result contract: zero or more rows, one per (session_id, request_id). current_statement_text is
 --   the substring of the batch actually executing right now, resolved via statement offsets;
 --   batch_text is the full submitted batch. Both are NULL for idle sessions with no sql_handle.
+--   request_id IS NULL for an idle session with no currently executing request -- distinct from a
+--   real, active request_id 0, which is an ordinary (not sentinel) value for a session's first or
+--   only concurrently executing request. The application layer must never coerce a NULL
+--   request_id into 0; see LiveIncidentCollector.MapActiveRequest.
+-- Excludes the caller's own session (@@SPID): the collector's polling connection would otherwise
+--   appear as a permanently "idle" or churning session in its own sample every cycle.
 -- Relative cost: low; in-memory session/request state, no page or plan-cache scan.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
@@ -63,6 +69,7 @@ LEFT JOIN sys.dm_exec_requests AS r
     ON r.session_id = s.session_id
 OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS st
 WHERE s.is_user_process = 1
+  AND s.session_id <> @@SPID
   AND (@IncludeIdleSessions = 1 OR r.session_id IS NOT NULL)
   AND (r.request_id IS NULL OR r.total_elapsed_time >= @MinElapsedMs)
   AND (@DatabaseId IS NULL OR r.database_id = @DatabaseId);

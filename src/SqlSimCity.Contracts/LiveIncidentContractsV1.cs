@@ -4,8 +4,13 @@ namespace SqlSimCity.Contracts.V1;
 /// Coarse availability of one sampled artifact (a request row, a plan lookup, a whole subsystem
 /// sample) -- distinct from <see cref="DataStatus"/>, which describes freshness/permission of an
 /// entire evidence stream rather than whether one specific row was still present.
+/// <see cref="Stale"/> is a request row carried forward from a previous cycle because this
+/// cycle's own <c>sessions.active_requests</c> probe failed outright -- a probe failure is never
+/// evidence that the request disappeared, so it must not be reported as <see cref="Available"/>
+/// in a snapshot whose own timestamps say the data is fresh, nor silently reclassified as
+/// <see cref="Disappeared"/> (requirement 6).
 /// </summary>
-public enum SampleAvailability { Available, Disappeared, Unavailable }
+public enum SampleAvailability { Available, Disappeared, Unavailable, Stale }
 
 /// <summary>
 /// The four documented negative <c>sys.dm_exec_requests.blocking_session_id</c> /
