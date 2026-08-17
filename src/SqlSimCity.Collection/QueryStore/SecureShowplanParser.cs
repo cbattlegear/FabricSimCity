@@ -121,12 +121,12 @@ public sealed class SecureShowplanParser
                           local.Contains("Warning", StringComparison.OrdinalIgnoreCase) &&
                          nodeStack.TryPeek(out var warningNode))
                 {
-                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalAttributes(reader)));
+                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalWarningAttributes(reader)));
                 }
                 else if (elementStack.Contains("Warnings") && local != "Warnings" &&
                          nodeStack.TryPeek(out warningNode))
                 {
-                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalAttributes(reader)));
+                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalWarningAttributes(reader)));
                 }
                 else if (local is "ParameterSensitivePredicate" or "DispatcherExpression")
                 {
@@ -199,6 +199,24 @@ public sealed class SecureShowplanParser
         var attributes = new List<string>();
         while (reader.MoveToNextAttribute())
             attributes.Add($"{reader.LocalName}={SanitizeExpression(reader.Value)}");
+        reader.MoveToElement();
+        attributes.Sort(StringComparer.Ordinal);
+        return string.Join(';', attributes);
+    }
+
+    private static string? CanonicalWarningAttributes(XmlReader reader)
+    {
+        if (!reader.HasAttributes) return null;
+        var attributes = new List<string>();
+        while (reader.MoveToNextAttribute())
+        {
+            var value = decimal.TryParse(
+                reader.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out _) ||
+                bool.TryParse(reader.Value, out _)
+                ? reader.Value
+                : SanitizeExpression(reader.Value);
+            attributes.Add($"{reader.LocalName}={value}");
+        }
         reader.MoveToElement();
         attributes.Sort(StringComparer.Ordinal);
         return string.Join(';', attributes);

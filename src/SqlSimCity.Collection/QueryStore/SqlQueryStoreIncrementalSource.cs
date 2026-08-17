@@ -44,7 +44,7 @@ public sealed class SqlQueryStoreIncrementalSource(
         var capabilities = await GetCapabilitiesAsync(databaseId, cancellationToken).ConfigureAwait(false);
         try
         {
-            var optionsProbe = capabilities.MajorVersion >= 15
+            var optionsProbe = capabilities.MajorVersion >= 15 || capabilities.EngineEdition == 5
                 ? "querystore.options_2019" : "querystore.options_2016";
             var options = await ExecuteAsync(
                 optionsProbe, "database", databaseId, null,
@@ -79,7 +79,8 @@ public sealed class SqlQueryStoreIncrementalSource(
             return new QueryStoreDatabaseState(
                 databaseId, state, $"query-store:{databaseId}", intervalRange.Oldest, timeProvider.GetUtcNow(),
                 options.Reason, capabilities.MajorVersion, capabilities.CompatibilityLevel,
-                capabilities.MajorVersion >= 14, capabilities.HasVariantView,
+                capabilities.MajorVersion >= 14 || capabilities.EngineEdition == 5,
+                capabilities.HasVariantView,
                 capabilities.HasReplicaView, capabilities.SupportsOppo, intervalRange.LatestId);
         }
         catch (ProbePermissionDeniedException)

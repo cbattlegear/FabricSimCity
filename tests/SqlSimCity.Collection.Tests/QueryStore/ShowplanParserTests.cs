@@ -123,6 +123,7 @@ public sealed class ShowplanParserTests
 
         var warning = Assert.Single(Assert.Single(left.Nodes).Warnings);
         Assert.Equal("SpillToTempDb", warning.Kind);
+        Assert.Equal("SpillLevel=2", warning.Detail);
         var comparison = PlanComparer.Compare(left, right);
         Assert.Contains(comparison.Changes, change => change.Path == "root/physical");
         Assert.Contains(comparison.Changes, change => change.Path == "root/warnings");
