@@ -3,11 +3,13 @@
     <Project Path="src/SqlSimCity.Api/SqlSimCity.Api.csproj" />
     <Project Path="src/SqlSimCity.Contracts/SqlSimCity.Contracts.csproj" />
     <Project Path="src/SqlSimCity.Domain/SqlSimCity.Domain.csproj" />
+    <Project Path="src/SqlSimCity.SqlServer/SqlSimCity.SqlServer.csproj" />
     <Project Path="src/SqlSimCity.Storage/SqlSimCity.Storage.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SqlSimCity.Api.Tests/SqlSimCity.Api.Tests.csproj" />
     <Project Path="tests/SqlSimCity.Contracts.Tests/SqlSimCity.Contracts.Tests.csproj" />
+    <Project Path="tests/SqlSimCity.SqlServer.Tests/SqlSimCity.SqlServer.Tests.csproj" />
     <Project Path="tests/SqlSimCity.Storage.Tests/SqlSimCity.Storage.Tests.csproj" />
   </Folder>
 </Solution>

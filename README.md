@@ -20,7 +20,7 @@ The contract keeps three evidence classes separate:
 2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero.
 3. **Topology is inferred evidence.** Confirmed, probable, and unknown confidence carry rationale; the atlas is not claiming a complete dependency graph.
 
-There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. This version does not include `Microsoft.Data.SqlClient`, execute SQL, discover topology, retain history, or validate production collection behavior.
+There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. This version does not execute SQL, discover topology, retain history, or validate production collection behavior. It ships a source-neutral `Microsoft.Data.SqlClient` connection and authentication library (`SqlSimCity.SqlServer`, see below) that is not yet wired into the running application.
 
 ## Architecture
 
@@ -28,9 +28,10 @@ There is no opaque health score. Query Store capability, health, data status, an
 src/SqlSimCity.Contracts  versioned transport records and evidence enums
 src/SqlSimCity.Domain     fixture source and source seam
 src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
+src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 web/                      strict TypeScript React shell and three.js scene
- tests/                    serialization, fixture, endpoint, storage, and mapping tests
+ tests/                    serialization, fixture, endpoint, storage, connection, and mapping tests
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
@@ -86,6 +87,17 @@ The image targets Linux containers on x86-64 and ARM64 where the selected offici
 - restricts the database filename to a simple filename, record-kind metadata to 128 characters (maximum 1,024), and plaintext payloads to 1 MiB (maximum 16 MiB); `MaxRecordKindLength` and `MaxPayloadBytes` are explicit protected-storage configuration limits.
 
 Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). This release does not use protected storage for anything; it exists so a future SQL Server collector has an already-hardened place to put retained evidence and credentials instead of a new unencrypted table.
+
+## SQL Server connection and authentication
+
+`SqlSimCity.SqlServer` is a source-neutral connection and authentication library for a future SQL Server collector. It is **not wired into `SqlSimCity.Api`** in this release — no request path opens a SQL Server connection. It exists as a standalone, independently tested library so a future collector builds on already-hardened connection handling instead of new ad hoc code. It ships:
+
+- an immutable, fully validated `ConnectionProfile` (server host/FQDN, optional named instance or explicit port — never both, initial database, bounded connect/command timeouts and pool bounds, a fixed `SQLSimCity` application name, an explicit `EncryptionPolicy`, and a per-profile `TrustServerCertificate` opt-in that is never inherited or global);
+- a closed authentication-strategy hierarchy with **no fallback between strategies**: SQL login (username plus a secret-file password reference), a Linux Kerberos/SSPI service identity, and four explicit Microsoft Entra ID strategies (`ManagedIdentity`, `WorkloadIdentity`, `ServicePrincipalCertificate`, `ServicePrincipalSecret`) — **never `DefaultAzureCredential` or any credential chain**, enforced by a static test;
+- an `ISecretFileProvider` that resolves only simple, validated file-name references under one configured secrets directory (default `/run/secrets`), enforces a size limit, and fails closed (`SecretResolutionException`) on anything missing, oversized, or invalid — never logging secret content;
+- an `ISqlConnectionFactory` that builds every connection through `SqlConnectionStringBuilder` only (a password or Entra token is never concatenated into the connection string) and a `SafeConnectionSettings` diagnostic DTO that a caller can log or serialize because it structurally cannot contain a secret or token.
+
+See [SECURITY.md](SECURITY.md) for the Kerberos keytab/SPN/DNS/clock-sync and Entra endpoint/IMDS deployment requirements.
 
 ## Security and privacy
 

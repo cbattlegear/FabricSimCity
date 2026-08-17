@@ -2,7 +2,7 @@
 
 ## Foundation threat model
 
-This repository currently serves deterministic fixtures. It has no SQL Server connector, credentials, login, user account, analytics, or telemetry. An optional encrypted protected storage layer exists (see below) but is disabled by default and unused by this release's fixture path. The intended future collector is read-only, but that intent is not yet a security control.
+This repository currently serves deterministic fixtures. `SqlSimCity.Api` has no SQL Server connector, credentials, login, user account, analytics, or telemetry wired into it. A separate, opt-in `SqlSimCity.SqlServer` library (see below) provides source-neutral connection and authentication building blocks for a future collector, but nothing in the running application calls it yet. An optional encrypted protected storage layer exists (see below) but is disabled by default and unused by this release's fixture path. The intended future collector is read-only, but that intent is not yet a security control.
 
 The application exposes operational-shaped evidence to every client that can reach it. **There is no authentication or authorization.** Run the default Compose configuration on loopback or another explicitly trusted network only. Do not publish port 8080 on all interfaces or place the service on the public internet.
 
@@ -75,7 +75,7 @@ Protected storage runs SQLite in WAL (write-ahead log) journal mode, which relie
 
 ### Still missing: SQL Server collection
 
-Protected storage is a storage primitive only; no SQL Server connector exists yet. Future collection must:
+`SqlSimCity.SqlServer` (see below) is a connection and authentication library only: it opens a validated, authenticated `SqlConnection` and nothing else. It is not wired into `SqlSimCity.Api`, executes no SQL, and does not discover topology, retain history, or perform collection. Everything below remains true of the running application until a collector is built on top of this library:
 
 - use a least-privilege, read-only SQL Server principal and document every required permission;
 - keep target secrets out of images, source, logs, URLs, and atlas responses;
@@ -86,6 +86,41 @@ Protected storage is a storage primitive only; no SQL Server connector exists ye
 - avoid logging query text or other potentially sensitive workload content by default.
 
 Supported host targets are Linux containers on x86-64 and ARM64 using official .NET 10 images. Browser targets are current Chromium, Firefox, and Safari. Real SQL Server versions are not yet supported because this release performs no collection; future support claims require versioned fixtures and integration verification.
+
+## SQL Server connection and authentication
+
+`SqlSimCity.SqlServer` builds and opens `SqlConnection`s from an immutable, validated `ConnectionProfile`. It has no fallback between authentication strategies: a strategy either succeeds on its own terms or the connection attempt fails. Every connection is built through `SqlConnectionStringBuilder` only; a password or Entra token is never concatenated into a connection string, logged, or returned from the diagnostic `SafeConnectionSettings` DTO.
+
+### Authentication strategies (closed set, no fallback)
+
+- **SQL login** — username plus a `SecretFileReference` (never a plaintext password field). The password is read once per connection attempt and handed to `SqlCredential`, never the connection string.
+- **Linux Kerberos service identity (Integrated Security/SSPI)** — uses the container's own Kerberos identity. There is no interactive/browser user delegation and nothing falls back to SQL login if Kerberos fails. Deployment requires:
+  - a keytab file mounted as a Docker/Compose secret (never baked into an image or committed to source);
+  - `KRB5_CONFIG` pointing at a `krb5.conf` that names the realm and KDC;
+  - `KRB5_KTNAME` pointing at that mounted keytab;
+  - a `MSSQLSvc/<target FQDN>:<port>` service principal name registered for the SQL Server target (for example `MSSQLSvc/sql01.internal.example.com:1433`);
+  - working forward and reverse DNS for the target FQDN, and clock synchronization with the KDC (Kerberos rejects clock skew beyond a small tolerance, commonly five minutes).
+- **Microsoft Entra ID** (`ManagedIdentity`, `WorkloadIdentity`, `ServicePrincipalCertificate`, `ServicePrincipalSecret`) — every strategy maps to exactly one explicit `Azure.Core.TokenCredential` (`ManagedIdentityCredential`, `WorkloadIdentityCredential`, `ClientCertificateCredential`, or `ClientSecretCredential`). **`DefaultAzureCredential` and any other credential chain are never used** — a static test asserts this. The resulting token is supplied only through `SqlConnection.AccessTokenCallback` for the `https://database.windows.net/.default` scope; it never appears in a connection string, log, or exception. There is no interactive/browser sign-in flow. Deployment requires outbound HTTPS reachability to:
+  - the Entra token endpoint, `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` (or the equivalent Entra ID endpoint for the deployment's cloud environment);
+  - for `ManagedIdentity` only, the Azure Instance Metadata Service (IMDS) at `http://169.254.169.254/metadata/identity/oauth2/token`, reachable only from within Azure compute — this strategy cannot succeed outside Azure;
+  - for `WorkloadIdentity`, the platform-projected federated token file (normally `AZURE_FEDERATED_TOKEN_FILE`, overridable per profile) must be present and refreshed by the platform; this library re-reads it on every token request and does nothing extra to handle rotation;
+  - for `ServicePrincipalCertificate`/`ServicePrincipalSecret`, the certificate (PKCS#12/PFX) or client secret is read once per connection attempt from a `SecretFileReference`, never held as a plaintext field on the strategy type.
+
+### Secret resolution (`ISecretFileProvider`)
+
+Secret references are simple file names only (no path separators, drive letters, or `.`/`..` segments — rejected at construction, before any file-system access) resolved under one configured directory (default `/run/secrets`, the conventional Docker/Compose secrets mount). Every candidate path is canonicalized and re-checked against that directory as defense in depth. Reads are size-bounded (default 16 KiB), happen once per connection attempt, and never log secret content. A missing, unreadable, oversized, or invalid (non-UTF-8, where text is expected) secret fails closed with `SecretResolutionException` — never a partially usable value and never a fallback to another authentication mode.
+
+### `TrustServerCertificate` and encryption policy
+
+Every profile sets an explicit `EncryptionPolicy` — `Mandatory` (TLS required; supported since SQL Server 2019) or `Strict` (TDS 8.0 strict TLS; requires SQL Server 2022+ or Azure SQL) — there is no "optional" encryption. `TrustServerCertificate` is a per-profile opt-in only; it is never inherited, defaulted, or applied globally, and enabling it always surfaces a `ConnectionWarning.TrustServerCertificateEnabled` on that connection's result, regardless of encryption policy.
+
+### Package versions
+
+- `Microsoft.Data.SqlClient` 7.0.2
+- `Azure.Identity` 1.21.0
+- `Azure.Core` 1.61.0
+
+SqlClient 7 removed Entra ID authentication providers from its core package into `Microsoft.Data.SqlClient.Extensions.Azure`; this library does not take that dependency because it authenticates through `SqlConnection.AccessTokenCallback` plus directly constructed `Azure.Identity` credentials, a core-SqlClient mechanism unrelated to the extracted `Authentication=Active Directory ...` connection-string modes.
 
 ## Reporting
 

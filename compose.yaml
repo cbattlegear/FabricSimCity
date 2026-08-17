@@ -27,6 +27,36 @@ services:
       # ProtectedStorage__KeyFilePath: /run/secrets/sqlsimcity-storage-key
     # secrets:
     #   - sqlsimcity-storage-key
+    #
+    # --- SqlSimCity.SqlServer (not wired into this image yet) ---
+    # SqlSimCity.SqlServer is a standalone connection/authentication library;
+    # nothing in this Compose file or image currently opens a SQL Server
+    # connection. The settings below document what a future collector would
+    # need, so they can be copied without re-deriving them. Never commit a
+    # real keytab, certificate, or client secret to this repository.
+    #
+    # Linux Kerberos/SSPI service identity (Integrated Security):
+    #   - mount the keytab as a Docker/Compose secret, e.g.:
+    #       secrets:
+    #         - sqlsimcity-krb5-keytab
+    #   - KRB5_CONFIG: /etc/krb5.conf   (naming the realm and KDC; mount read-only)
+    #   - KRB5_KTNAME: /run/secrets/sqlsimcity-krb5-keytab
+    #   - register a MSSQLSvc/<target FQDN>:<port> SPN for the SQL Server target
+    #   - working forward/reverse DNS for the target FQDN and clock sync with
+    #     the KDC are required; Kerberos rejects meaningful clock skew
+    #   - there is no fallback to SQL login if Kerberos authentication fails
+    #
+    # Microsoft Entra ID (ManagedIdentity/WorkloadIdentity/ServicePrincipal*):
+    #   - outbound HTTPS to https://login.microsoftonline.com/<tenant-id>/... is required
+    #   - ManagedIdentity additionally requires the Azure IMDS endpoint
+    #     (http://169.254.169.254/metadata/identity/oauth2/token), reachable
+    #     only from Azure compute
+    #   - WorkloadIdentity reads the platform-projected federated token file
+    #     (AZURE_FEDERATED_TOKEN_FILE by default)
+    #   - ServicePrincipalCertificate/ServicePrincipalSecret read their
+    #     certificate/secret once per connection from a Docker/Compose secret
+    #     under /run/secrets, never from an environment variable
+    #   - DefaultAzureCredential and any credential chain are never used
     restart: unless-stopped
 
 volumes:
