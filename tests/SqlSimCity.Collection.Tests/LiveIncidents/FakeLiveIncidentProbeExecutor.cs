@@ -15,7 +15,7 @@ public sealed class FakeLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
     public Func<CancellationToken, Task<IReadOnlyList<WaitingTaskFact>>>? WaitingTasks { get; set; }
     public Func<CancellationToken, Task<IReadOnlyList<BlockingInputFact>>>? BlockingInputs { get; set; }
     public Func<CancellationToken, Task<IReadOnlyList<MemoryGrantRow>>>? MemoryGrants { get; set; }
-    public Func<CancellationToken, Task<TempdbUsageRaw>>? TempdbUsage { get; set; }
+    public Func<bool, CancellationToken, Task<TempdbUsageRaw>>? TempdbUsage { get; set; }
     public Func<bool, CancellationToken, Task<IReadOnlyList<FileIoRow>>>? FileIoStats { get; set; }
     public Func<bool, CancellationToken, Task<IReadOnlyList<SchedulerRow>>>? SchedulerPressure { get; set; }
     public Func<CancellationToken, Task<LogSpaceRow?>>? LogSpaceUsage { get; set; }
@@ -43,8 +43,8 @@ public sealed class FakeLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
     public Task<IReadOnlyList<MemoryGrantRow>> GetMemoryGrantsAsync(CancellationToken cancellationToken) =>
         (MemoryGrants ?? (_ => Task.FromResult<IReadOnlyList<MemoryGrantRow>>([])))(cancellationToken);
 
-    public Task<TempdbUsageRaw> GetTempdbUsageAsync(CancellationToken cancellationToken) =>
-        (TempdbUsage ?? (_ => Task.FromResult(new TempdbUsageRaw([], [], []))))(cancellationToken);
+    public Task<TempdbUsageRaw> GetTempdbUsageAsync(bool azureScoped, CancellationToken cancellationToken) =>
+        (TempdbUsage ?? ((_, _) => Task.FromResult(new TempdbUsageRaw([], [], []))))(azureScoped, cancellationToken);
 
     public Task<IReadOnlyList<FileIoRow>> GetFileIoStatsAsync(bool azureScoped, CancellationToken cancellationToken) =>
         (FileIoStats ?? ((_, _) => Task.FromResult<IReadOnlyList<FileIoRow>>([])))(azureScoped, cancellationToken);

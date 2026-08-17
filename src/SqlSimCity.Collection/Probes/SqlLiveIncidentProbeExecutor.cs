@@ -1,7 +1,9 @@
 using System.Data;
 using System.Globalization;
+using Azure.Identity;
 using Microsoft.Data.SqlClient;
 using SqlSimCity.SqlServer;
+using SqlSimCity.SqlServer.Secrets;
 
 namespace SqlSimCity.Collection.Probes;
 
@@ -51,9 +53,7 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                     Convert.ToInt32(reader["cpu_count"], CultureInfo.InvariantCulture),
                     Convert.ToInt32(reader["scheduler_count"], CultureInfo.InvariantCulture),
                     reader["physical_memory_mb"] is DBNull ? null : Convert.ToInt64(reader["physical_memory_mb"], CultureInfo.InvariantCulture),
-                    reader["sqlserver_start_time"] is DBNull
-                        ? null
-                        : new DateTimeOffset(Convert.ToDateTime(reader["sqlserver_start_time"], CultureInfo.InvariantCulture)));
+                    AsOpaqueEpochToken(reader, "sqlserver_start_time"));
             },
             cancellationToken);
 
@@ -109,13 +109,13 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
                     rows.Add(new Blocking.WaitingTaskFact(
-                        AsString(reader, "waiting_task_address") ?? string.Empty,
+                        AsVarbinaryHex(reader, "waiting_task_address") ?? string.Empty,
                         Convert.ToInt32(reader["session_id"], CultureInfo.InvariantCulture),
                         Convert.ToInt32(reader["exec_context_id"], CultureInfo.InvariantCulture),
                         Convert.ToInt64(reader["wait_duration_ms"], CultureInfo.InvariantCulture),
                         AsString(reader, "wait_type"),
-                        AsString(reader, "resource_address"),
-                        AsString(reader, "blocking_task_address"),
+                        AsVarbinaryHex(reader, "resource_address"),
+                        AsVarbinaryHex(reader, "blocking_task_address"),
                         AsNullableInt64(reader, "blocking_session_id"),
                         AsString(reader, "resource_description")));
                 }
@@ -187,7 +187,18 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
             },
             cancellationToken);
 
-    public Task<TempdbUsageRaw> GetTempdbUsageAsync(CancellationToken cancellationToken) =>
+    /// <summary>
+    /// <paramref name="azureScoped"/> selects <c>tempdb.usage_azure_scoped</c> (session/task
+    /// allocation only, run from the caller's own regular database connection -- never tempdb)
+    /// instead of <c>tempdb.usage</c> (the full file/session/task result set, which requires a
+    /// tempdb-scoped connection unavailable on Azure SQL Database). The caller must never request
+    /// <paramref name="azureScoped"/><c>: false</c> for an Azure SQL Database target; see each
+    /// probe's own header and <c>LiveIncidentCollector</c>'s platform-gated selection.
+    /// </summary>
+    public Task<TempdbUsageRaw> GetTempdbUsageAsync(bool azureScoped, CancellationToken cancellationToken) =>
+        azureScoped ? GetTempdbUsageAzureScopedAsync(cancellationToken) : GetTempdbUsageFullAsync(cancellationToken);
+
+    private Task<TempdbUsageRaw> GetTempdbUsageFullAsync(CancellationToken cancellationToken) =>
         ExecuteAsync(
             "tempdb.usage",
             "tempdb",
@@ -208,18 +219,23 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                         Convert.ToDecimal(reader["mixed_extent_mb"], CultureInfo.InvariantCulture)));
                 }
 
+                var sessions = await ReadTempdbSessionsAsync(reader, ct).ConfigureAwait(false);
+                var tasks = await ReadTempdbTasksAsync(reader, ct).ConfigureAwait(false);
+                return new TempdbUsageRaw(files, sessions, tasks);
+            },
+            cancellationToken,
+            new Dictionary<string, object?> { ["@IncludeSystemSessions"] = false });
+
+    private Task<TempdbUsageRaw> GetTempdbUsageAzureScopedAsync(CancellationToken cancellationToken) =>
+        ExecuteAsync(
+            "tempdb.usage_azure_scoped",
+            "database",
+            async (reader, ct) =>
+            {
                 var sessions = new List<TempdbSessionRow>();
-                if (await reader.NextResultAsync(ct).ConfigureAwait(false))
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    {
-                        sessions.Add(new TempdbSessionRow(
-                            Convert.ToInt32(reader["session_id"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["user_objects_alloc_page_count"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["user_objects_dealloc_page_count"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["internal_objects_alloc_page_count"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["internal_objects_dealloc_page_count"], CultureInfo.InvariantCulture)));
-                    }
+                    sessions.Add(ReadTempdbSessionRow(reader));
                 }
 
                 var tasks = new List<TempdbTaskRow>();
@@ -227,21 +243,60 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                 {
                     while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     {
-                        tasks.Add(new TempdbTaskRow(
-                            Convert.ToInt32(reader["session_id"], CultureInfo.InvariantCulture),
-                            AsNullableInt32(reader, "request_id"),
-                            Convert.ToInt32(reader["exec_context_id"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["user_objects_alloc_page_count"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["user_objects_dealloc_page_count"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["internal_objects_alloc_page_count"], CultureInfo.InvariantCulture),
-                            Convert.ToInt64(reader["internal_objects_dealloc_page_count"], CultureInfo.InvariantCulture)));
+                        tasks.Add(ReadTempdbTaskRow(reader));
                     }
                 }
 
-                return new TempdbUsageRaw(files, sessions, tasks);
+                // No file-level result set: Azure SQL Database supports neither a tempdb-scoped
+                // connection nor a cross-database reference to read it (see the probe's header).
+                return new TempdbUsageRaw([], sessions, tasks);
             },
             cancellationToken,
             new Dictionary<string, object?> { ["@IncludeSystemSessions"] = false });
+
+    private static async Task<List<TempdbSessionRow>> ReadTempdbSessionsAsync(SqlDataReader reader, CancellationToken ct)
+    {
+        var sessions = new List<TempdbSessionRow>();
+        if (await reader.NextResultAsync(ct).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                sessions.Add(ReadTempdbSessionRow(reader));
+            }
+        }
+
+        return sessions;
+    }
+
+    private static async Task<List<TempdbTaskRow>> ReadTempdbTasksAsync(SqlDataReader reader, CancellationToken ct)
+    {
+        var tasks = new List<TempdbTaskRow>();
+        if (await reader.NextResultAsync(ct).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                tasks.Add(ReadTempdbTaskRow(reader));
+            }
+        }
+
+        return tasks;
+    }
+
+    private static TempdbSessionRow ReadTempdbSessionRow(SqlDataReader reader) => new(
+        Convert.ToInt32(reader["session_id"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["user_objects_alloc_page_count"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["user_objects_dealloc_page_count"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["internal_objects_alloc_page_count"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["internal_objects_dealloc_page_count"], CultureInfo.InvariantCulture));
+
+    private static TempdbTaskRow ReadTempdbTaskRow(SqlDataReader reader) => new(
+        Convert.ToInt32(reader["session_id"], CultureInfo.InvariantCulture),
+        AsNullableInt32(reader, "request_id"),
+        Convert.ToInt32(reader["exec_context_id"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["user_objects_alloc_page_count"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["user_objects_dealloc_page_count"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["internal_objects_alloc_page_count"], CultureInfo.InvariantCulture),
+        Convert.ToInt64(reader["internal_objects_dealloc_page_count"], CultureInfo.InvariantCulture));
 
     public Task<IReadOnlyList<FileIoRow>> GetFileIoStatsAsync(bool azureScoped, CancellationToken cancellationToken) =>
         ExecuteAsync(
@@ -322,14 +377,47 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
 
     private static string? AsString(SqlDataReader reader, string column) => reader[column] is DBNull ? null : (string)reader[column];
 
+    /// <summary>
+    /// Encodes a <c>varbinary</c> column (e.g. <c>waiting_task_address</c>, <c>resource_address</c>,
+    /// <c>blocking_task_address</c> -- all <c>varbinary(8)</c>) as a deterministic <c>0x</c>-prefixed
+    /// uppercase hex string, or null for a NULL column. Never cast these columns with
+    /// <see cref="AsString"/>: a raw <c>byte[]</c> value is not a <see cref="string"/>, and that cast
+    /// throws <see cref="InvalidCastException"/> at runtime for every row.
+    /// </summary>
+    private static string? AsVarbinaryHex(SqlDataReader reader, string column) => FormatVarbinaryHex(reader[column] as byte[]);
+
+    /// <summary>The pure formatting rule <see cref="AsVarbinaryHex"/> applies, extracted so it is unit-testable without a live <see cref="SqlDataReader"/>.</summary>
+    internal static string? FormatVarbinaryHex(byte[]? bytes) => bytes is null ? null : "0x" + Convert.ToHexString(bytes);
+
     private static int? AsNullableInt32(SqlDataReader reader, string column) =>
         reader[column] is DBNull ? null : Convert.ToInt32(reader[column], CultureInfo.InvariantCulture);
 
     private static long? AsNullableInt64(SqlDataReader reader, string column) =>
         reader[column] is DBNull ? null : Convert.ToInt64(reader[column], CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// A SQL Server <c>datetime</c>/<c>datetime2</c> column is always <see cref="DateTimeKind.Unspecified"/>
+    /// and, for every column this executor reads, represents the connected engine's own local clock --
+    /// never guaranteed UTC. Wrapping it with <c>new DateTimeOffset(DateTime)</c> would silently apply
+    /// this PROCESS's local time zone offset instead, which is wrong for display and, worse, is not even
+    /// stable across polls of the very same value if the collector process's own zone observes a DST
+    /// transition between polls. Every value here therefore carries a fixed, zero UTC offset: it is a
+    /// server-local clock reading rendered as a <see cref="DateTimeOffset"/> only for convenient
+    /// arithmetic/comparison, never a claim that the moment shown is actually UTC.
+    /// </summary>
     private static DateTimeOffset? AsDateTimeOffset(SqlDataReader reader, string column) =>
-        reader[column] is DBNull ? null : new DateTimeOffset(Convert.ToDateTime(reader[column], CultureInfo.InvariantCulture));
+        reader[column] is DBNull ? null : new DateTimeOffset(Convert.ToDateTime(reader[column], CultureInfo.InvariantCulture).Ticks, TimeSpan.Zero);
+
+    /// <summary>
+    /// <c>sys.dm_os_sys_info.sqlserver_start_time</c> read as a purely opaque, deterministic
+    /// comparable token for cross-cycle engine-restart detection (requirement 8) -- not a
+    /// dependable UTC instant. See <see cref="AsDateTimeOffset"/>'s doc comment for why a naive
+    /// <c>DateTimeOffset(DateTime)</c> conversion is unsafe even for this narrower purpose: it would
+    /// make the token's value depend on the COLLECTOR process's local time zone, so a DST
+    /// transition on the collector machine between two polls could register as a spurious engine
+    /// restart even though the server's own start time never changed.
+    /// </summary>
+    private static DateTimeOffset? AsOpaqueEpochToken(SqlDataReader reader, string column) => AsDateTimeOffset(reader, column);
 
     /// <summary>
     /// Opens one connection scoped correctly for <paramref name="expectedConnectionScope"/>
@@ -370,6 +458,10 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
         {
             throw SqlExceptionClassifier.Classify(ex, probeId);
         }
+        catch (Exception ex) when (IsCredentialResolutionFailure(ex))
+        {
+            throw ClassifyCredentialFailure(ex, probeId);
+        }
 
         await using (openResult.ConfigureAwait(false))
         {
@@ -391,8 +483,36 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
             {
                 throw SqlExceptionClassifier.Classify(ex, probeId);
             }
+            catch (Exception ex) when (IsCredentialResolutionFailure(ex))
+            {
+                throw ClassifyCredentialFailure(ex, probeId);
+            }
         }
     }
+
+    /// <summary>
+    /// True for the non-<see cref="SqlException"/> failure types a connection open can raise before
+    /// ever reaching the server: a mounted secret file that could not be resolved
+    /// (<see cref="SecretResolutionException"/>), or an Entra/Azure Identity credential that could
+    /// not produce a token (<see cref="CredentialUnavailableException"/>,
+    /// <see cref="AuthenticationFailedException"/>). None of these are caught anywhere else in this
+    /// executor, so without this classification they would propagate raw all the way to the
+    /// sampler and risk exposing secret paths, tenant/client identifiers, or credential provider
+    /// diagnostics through an unclassified error message (requirements 11 and 16).
+    /// </summary>
+    private static bool IsCredentialResolutionFailure(Exception ex) =>
+        ex is SecretResolutionException or CredentialUnavailableException or AuthenticationFailedException;
+
+    private static ProbeAuthenticationException ClassifyCredentialFailure(Exception ex, string probeId) => ex switch
+    {
+        SecretResolutionException => new ProbeAuthenticationException(
+            $"Probe '{probeId}' could not open a connection because a required secret could not be resolved.", null, null, ex),
+        CredentialUnavailableException => new ProbeAuthenticationException(
+            $"Probe '{probeId}' could not open a connection because no Microsoft Entra credential was available for this identity.", null, null, ex),
+        AuthenticationFailedException => new ProbeAuthenticationException(
+            $"Probe '{probeId}' could not open a connection because Microsoft Entra authentication failed.", null, null, ex),
+        _ => new ProbeAuthenticationException($"Probe '{probeId}' could not open a connection because authentication failed.", null, null, ex),
+    };
 
     private static SqlParameter[] BuildParameters(Catalog.ProbeDefinition probe, IReadOnlyDictionary<string, object?>? values)
     {

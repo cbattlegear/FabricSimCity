@@ -11,8 +11,15 @@ public enum CapabilityState { Supported, Unsupported, PermissionDenied, Unavaila
 /// <summary>
 /// The engine platform family a target was identified as, from
 /// <c>SERVERPROPERTY('EngineEdition')</c> (see <c>server.identity</c> in <c>sql/manifest.json</c>).
+/// <see cref="Unsupported"/> means the platform WAS determined and is a genuinely unsupported
+/// edition; <see cref="Unknown"/> means the platform could not be determined at all (for example,
+/// the master-scoped identity probe failed for a contained Azure SQL Database user, or no platform
+/// was configured/negotiated yet). The two are never conflated: only <see cref="Unknown"/> forces
+/// every Azure-incompatible, server-wide-only probe to be skipped and forbids advertising
+/// server-wide visibility, because a genuinely-detected <see cref="Unsupported"/> edition still
+/// tells the caller something concrete, while <see cref="Unknown"/> tells it nothing.
 /// </summary>
-public enum EnginePlatform { SqlServerOnPremises, AzureSqlDatabase, AzureSqlManagedInstance, Unsupported }
+public enum EnginePlatform { SqlServerOnPremises, AzureSqlDatabase, AzureSqlManagedInstance, Unsupported, Unknown }
 
 /// <summary>Whether database enumeration reflects the whole logical server or only the connected database.</summary>
 public enum VisibilityScope { Server, DatabaseScoped, Unknown }

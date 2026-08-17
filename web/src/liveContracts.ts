@@ -2,7 +2,7 @@
 // Every bigint count/byte crosses the wire as a base-10 string (never a narrowed JS number), so
 // this file has no numeric fields for anything the C# side declares as `string` bigint text.
 
-export type SampleAvailability = 'Available' | 'Disappeared' | 'Unavailable'
+export type SampleAvailability = 'Available' | 'Disappeared' | 'Unavailable' | 'Stale'
 
 /// The four documented negative blocking_session_id sentinels; -5 is common/benign and is never
 /// itself reported as a blocking "problem".

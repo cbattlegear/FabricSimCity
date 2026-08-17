@@ -24,8 +24,15 @@ public interface ILiveIncidentProbeExecutor
 
     Task<IReadOnlyList<MemoryGrantRow>> GetMemoryGrantsAsync(CancellationToken cancellationToken);
 
-    /// <summary>Requires the caller's connection to be opened against tempdb (see sql/probes/tempdb/tempdb_usage.sql).</summary>
-    Task<TempdbUsageRaw> GetTempdbUsageAsync(CancellationToken cancellationToken);
+    /// <summary>
+    /// <paramref name="azureScoped"/> selects <c>tempdb.usage_azure_scoped</c> (session/task
+    /// allocation only, run from the caller's regular database connection -- required on Azure SQL
+    /// Database, which cannot open a tempdb-scoped connection) instead of <c>tempdb.usage</c> (the
+    /// full file/session/task result set, which requires the caller's connection to be opened
+    /// against tempdb; see sql/probes/tempdb/tempdb_usage.sql and
+    /// sql/probes/tempdb/tempdb_usage_azure_scoped.sql).
+    /// </summary>
+    Task<TempdbUsageRaw> GetTempdbUsageAsync(bool azureScoped, CancellationToken cancellationToken);
 
     /// <summary>
     /// <paramref name="azureScoped"/> selects <c>io.file_io_stats_current_db</c> (Azure SQL
