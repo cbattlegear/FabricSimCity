@@ -52,6 +52,21 @@
     "weightedMeanMicroseconds": 3960.3960396039606,
     "naiveMeanMicroseconds": 101000
   },
+  "fractionalAverageContribution": {
+    "samples": [
+      {
+        "executions": 100,
+        "meanDurationMicroseconds": 0.4,
+        "meanCpuMicroseconds": 0.25,
+        "meanLogicalReads8KiBPages": 0.4
+      }
+    ],
+    "roundedTotals": {
+      "durationMicroseconds": 40,
+      "cpuMicroseconds": 25,
+      "logicalReads8KiBPages": 40
+    }
+  },
   "contextSettings": [
     {
       "compoundId": "query:41|context:7|interval:active-01",

@@ -96,6 +96,21 @@ test('Query Store runtime retains duplicate rows, exact weighted duration, and e
   assert.equal(runtime.contextSettings[0].compoundId, runtime.contextSettings[1].compoundId);
 });
 
+test('Query Store fractional averages contribute before integral totals are rounded', () => {
+  const fixture = runtime.fractionalAverageContribution;
+  const total = (property) => Math.round(
+    fixture.samples.reduce((sum, row) => sum + row.executions * row[property], 0),
+  );
+  assert.equal(total('meanDurationMicroseconds'), fixture.roundedTotals.durationMicroseconds);
+  assert.equal(total('meanCpuMicroseconds'), fixture.roundedTotals.cpuMicroseconds);
+  assert.equal(total('meanLogicalReads8KiBPages'), fixture.roundedTotals.logicalReads8KiBPages);
+  assert.deepEqual(fixture.roundedTotals, {
+    durationMicroseconds: 40,
+    cpuMicroseconds: 25,
+    logicalReads8KiBPages: 40,
+  });
+});
+
 test('plan recency, failure state, PSP, OPPO, and reset epoch stay distinct', () => {
   const newest = runtime.plans.reduce((latest, plan) => asTime(plan.lastExecutionAt) > asTime(latest.lastExecutionAt) ? plan : latest);
   assert.equal(newest.planId, 2);

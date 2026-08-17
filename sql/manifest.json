@@ -347,7 +347,7 @@
         }
       ],
       "resultSets": 1,
-      "resultContract": "At most one exact decimal aggregate row per execution_type after active-interval duplicate consolidation. Regular, Aborted, and Exception rows remain separate. Duration/CPU are microseconds and logical reads are 8-KiB pages. No query text or plan XML.",
+      "resultContract": "At most one aggregate row per execution_type after active-interval duplicate consolidation. Execution count remains exact decimal(38,0). Duration/CPU microseconds and logical-read 8-KiB pages preserve source float fractions through weighting and both sums, then round once to checked decimal(38,0) integral totals. Regular, Aborted, and Exception rows remain separate. No query text or plan XML.",
       "relativeCost": "medium"
     },
     {
@@ -379,7 +379,7 @@
         }
       ],
       "resultSets": 1,
-      "resultContract": "At most one exact decimal database-wide aggregate row per execution_type after replica-aware active-interval duplicate consolidation. Regular, Aborted, and Exception rows remain separate. No query text or plan XML.",
+      "resultContract": "At most one database-wide aggregate row per execution_type after replica-aware active-interval duplicate consolidation. Execution count remains exact decimal(38,0). Duration/CPU microseconds and logical-read 8-KiB pages preserve source float fractions through weighting and both sums, then round once to checked decimal(38,0) integral totals. Regular, Aborted, and Exception rows remain separate. No query text or plan XML.",
       "relativeCost": "medium"
     },
     {

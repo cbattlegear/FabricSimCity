@@ -639,6 +639,46 @@ describe('regression: query_store_runtime_stats_summary version split (2016 vs 2
   });
 });
 
+describe('regression: atlas workload summaries preserve fractional Query Store averages', () => {
+  for (const id of [
+    'querystore.database_workload_summary_2016',
+    'querystore.database_workload_summary_2022',
+  ]) {
+    test(`${id}: multiplies as float and converts only final integral totals`, () => {
+      const stripped = stripSqlComments(readProbeSource(probeById(id)));
+      for (const [source, total] of [
+        ['avg_duration', 'total_duration_us'],
+        ['avg_cpu_time', 'total_cpu_us'],
+        ['avg_logical_io_reads', 'logical_reads_pages'],
+      ]) {
+        assert.match(
+          stripped,
+          new RegExp(
+            `SUM\\(\\s*CONVERT\\(\\s*float\\s*,\\s*rs\\.${source}\\s*\\)\\s*\\*\\s*` +
+            'CONVERT\\(\\s*float\\s*,\\s*rs\\.count_executions\\s*\\)\\s*\\)',
+            'i',
+          ),
+          `${id} must preserve the source float average through multiplication and summation`,
+        );
+        assert.match(
+          stripped,
+          new RegExp(
+            `CONVERT\\(\\s*decimal\\(\\s*38\\s*,\\s*0\\s*\\)\\s*,\\s*` +
+            `ROUND\\(\\s*SUM\\(\\s*${total}\\s*\\)\\s*,\\s*0\\s*\\)\\s*\\)`,
+            'i',
+          ),
+          `${id} must round and checked-convert ${total} only after the final sum`,
+        );
+      }
+      assert.doesNotMatch(
+        stripped,
+        /CONVERT\(\s*decimal\(\s*38\s*,\s*0\s*\)\s*,\s*rs\.avg_(?:duration|cpu_time|logical_io_reads)/i,
+        `${id} must not round a fractional average before weighting it by executions`,
+      );
+    });
+  }
+});
+
 describe('regression: query_store_wait_stats_summary replica grouping and division truncation', () => {
   test('2022 exec_agg CTE groups by replica_group_id and the outer join keys on it', () => {
     const probe = probeById('querystore.wait_stats_summary_2022');
