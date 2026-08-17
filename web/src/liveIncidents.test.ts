@@ -1,15 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import {
   POLLING_DISCLOSURE,
+  RECONNECT_BASE_DELAY_MS,
+  RECONNECT_MAX_DELAY_MS,
   assertLiveIncidentResponse,
   blockingGraphSummaryLabel,
   blockingReferenceLabel,
   collectorStatusLabel,
+  computeReconnectDelayMs,
   counterDeltaLabel,
   dataStatusLabel,
   formatKb,
+  groupRequestsByAvailability,
   isSnapshotFresh,
+  liveFeedConnectionGlyph,
+  liveFeedConnectionLabel,
   memoryGrantLabel,
+  requestGroupSummaryLabel,
   requestLabel,
   waitingTaskLabel,
 } from './liveIncidents'
@@ -22,6 +29,7 @@ import type {
   MemoryGrant,
   WaitingTask,
 } from './liveContracts'
+import type { LiveFeedConnectionState } from './liveIncidents'
 
 function noneBlocking(sessionId: number | null = null): BlockingReference {
   return { blockingSessionId: sessionId, sentinel: 'None' }
@@ -177,6 +185,34 @@ describe('requirement 8: accessible, exact-value labels', () => {
     expect(label).toContain('completed or was killed')
   })
 
+  it('says a stale row was carried forward after a failed probe, never that it disappeared', () => {
+    const label = requestLabel(baseRequest({ availability: 'Stale', availabilityReason: 'probe timed out' }))
+    expect(label).toContain('carried forward')
+    expect(label).toContain("this cycle's own probe failed")
+    expect(label).toContain('probe timed out')
+    expect(label).toContain('not known to have disappeared')
+    expect(label).not.toContain('disappeared between samples')
+  })
+
+  it('does not invent a reason when a stale row carries none', () => {
+    const label = requestLabel(baseRequest({ availability: 'Stale', availabilityReason: null }))
+    expect(label).toContain('no reason recorded')
+  })
+
+  it('says nothing about availability for a request observed in this cycle', () => {
+    const label = requestLabel(baseRequest({ availability: 'Available' }))
+    expect(label).not.toContain('disappeared')
+    expect(label).not.toContain('carried forward')
+    expect(label).not.toContain('unavailable')
+  })
+
+  it('marks an unavailable row as unavailable rather than active or gone', () => {
+    const label = requestLabel(baseRequest({ availability: 'Unavailable', availabilityReason: 'permission denied' }))
+    expect(label).toContain('unavailable')
+    expect(label).toContain('permission denied')
+    expect(label).not.toContain('disappeared')
+  })
+
   it('exposes the exact wait type and duration for a request, and its blocker', () => {
     const label = requestLabel(baseRequest())
     expect(label).toContain('LCK_M_X')
@@ -299,6 +335,91 @@ describe('freshness and collector status', () => {
   it('surfaces missed/skipped cycle counts when nonzero', () => {
     const label = collectorStatusLabel(baseCollectorStatus({ missedCycles: 3, skippedCycles: 1 }))
     expect(label).toContain('Missed 3, skipped 1')
+  })
+})
+
+describe('request availability grouping (Available vs Disappeared vs Stale)', () => {
+  it('never counts a disappeared or carried-forward row as active', () => {
+    const groups = groupRequestsByAvailability([
+      baseRequest({ requestId: 'a1', availability: 'Available' }),
+      baseRequest({ requestId: 'a2', availability: 'Available' }),
+      baseRequest({ requestId: 'd1', availability: 'Disappeared' }),
+      baseRequest({ requestId: 's1', availability: 'Stale' }),
+      baseRequest({ requestId: 'u1', availability: 'Unavailable' }),
+    ])
+    expect(groups.available.map(r => r.requestId)).toEqual(['a1', 'a2'])
+    expect(groups.disappeared.map(r => r.requestId)).toEqual(['d1'])
+    expect(groups.stale.map(r => r.requestId)).toEqual(['s1'])
+    expect(groups.unavailable.map(r => r.requestId)).toEqual(['u1'])
+  })
+
+  it('keeps every input row in exactly one group', () => {
+    const requests = [
+      baseRequest({ requestId: 'a1', availability: 'Available' }),
+      baseRequest({ requestId: 'd1', availability: 'Disappeared' }),
+      baseRequest({ requestId: 's1', availability: 'Stale' }),
+      baseRequest({ requestId: 's2', availability: 'Stale' }),
+      baseRequest({ requestId: 'u1', availability: 'Unavailable' }),
+    ]
+    const groups = groupRequestsByAvailability(requests)
+    const regrouped = [...groups.available, ...groups.disappeared, ...groups.stale, ...groups.unavailable]
+    expect(regrouped).toHaveLength(requests.length)
+    expect(new Set(regrouped.map(r => r.requestId)).size).toBe(requests.length)
+  })
+
+  it('produces empty groups for an empty sample', () => {
+    expect(groupRequestsByAvailability([])).toEqual({ available: [], disappeared: [], stale: [], unavailable: [] })
+  })
+
+  it('summarizes the split without describing a stale row as disappeared', () => {
+    const groups = groupRequestsByAvailability([
+      baseRequest({ requestId: 'a1', availability: 'Available' }),
+      baseRequest({ requestId: 's1', availability: 'Stale' }),
+      baseRequest({ requestId: 's2', availability: 'Stale' }),
+    ])
+    const summary = requestGroupSummaryLabel(groups)
+    expect(summary).toContain('1 active now')
+    expect(summary).toContain('0 disappeared since the last cycle')
+    expect(summary).toContain('2 carried forward after a failed probe')
+  })
+})
+
+describe('reconnect backoff and live feed state labels', () => {
+  it('starts at the base delay and doubles', () => {
+    expect(computeReconnectDelayMs(0)).toBe(RECONNECT_BASE_DELAY_MS)
+    expect(computeReconnectDelayMs(1)).toBe(RECONNECT_BASE_DELAY_MS * 2)
+    expect(computeReconnectDelayMs(2)).toBe(RECONNECT_BASE_DELAY_MS * 4)
+  })
+
+  it('is monotonically non-decreasing and never exceeds the cap', () => {
+    let previous = 0
+    for (let attempt = 0; attempt <= 64; attempt += 1) {
+      const delay = computeReconnectDelayMs(attempt)
+      expect(delay).toBeGreaterThanOrEqual(previous)
+      expect(delay).toBeLessThanOrEqual(RECONNECT_MAX_DELAY_MS)
+      previous = delay
+    }
+    expect(computeReconnectDelayMs(64)).toBe(RECONNECT_MAX_DELAY_MS)
+  })
+
+  it('never returns a negative, NaN, or infinite delay for hostile inputs', () => {
+    for (const attempt of [-1, -1000, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER]) {
+      const delay = computeReconnectDelayMs(attempt)
+      expect(Number.isFinite(delay)).toBe(true)
+      expect(delay).toBeGreaterThanOrEqual(RECONNECT_BASE_DELAY_MS)
+      expect(delay).toBeLessThanOrEqual(RECONNECT_MAX_DELAY_MS)
+    }
+  })
+
+  it('labels every channel state distinctly, with a distinct non-color glyph', () => {
+    const states: LiveFeedConnectionState[] = ['connected', 'reconnecting', 'polling-fallback', 'disconnected']
+    const labels = states.map(liveFeedConnectionLabel)
+    const glyphs = states.map(liveFeedConnectionGlyph)
+    expect(new Set(labels).size).toBe(states.length)
+    expect(new Set(glyphs).size).toBe(states.length)
+    expect(labels.every(label => label.length > 0)).toBe(true)
+    expect(liveFeedConnectionLabel('polling-fallback')).toContain('REST')
+    expect(liveFeedConnectionLabel('disconnected')).toContain('reconnect')
   })
 })
 

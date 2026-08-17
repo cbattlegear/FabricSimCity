@@ -6,18 +6,24 @@ import {
   collectorStatusLabel,
   counterDeltaLabel,
   dataStatusLabel,
+  groupRequestsByAvailability,
   isSnapshotFresh,
+  liveFeedConnectionGlyph,
+  liveFeedConnectionLabel,
   memoryGrantLabel,
+  requestGroupSummaryLabel,
   requestLabel,
   waitingTaskLabel,
 } from './liveIncidents'
-import type { LiveIncidentResponse, LiveIncidentSnapshot } from './liveContracts'
+import type { LiveFeedConnectionState, RequestAvailabilityGroups } from './liveIncidents'
+import type { LiveIncidentResponse, LiveIncidentSnapshot, LiveRequest } from './liveContracts'
 import './LiveIncidentsPanel.css'
 
 export default function LiveIncidents() {
   const [response, setResponse] = useState<LiveIncidentResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => new Date().toISOString())
+  const [feedState, setFeedState] = useState<LiveFeedConnectionState>('reconnecting')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -27,10 +33,13 @@ export default function LiveIncidents() {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
         setError(reason instanceof Error ? reason.message : 'The live incident feed could not be loaded')
       })
-    const unsubscribe = subscribeToLiveIncidents(update => {
-      setResponse(update)
-      setError(null)
-    })
+    const unsubscribe = subscribeToLiveIncidents(
+      update => {
+        setResponse(update)
+        setError(null)
+      },
+      setFeedState,
+    )
     return () => {
       controller.abort()
       unsubscribe()
@@ -60,6 +69,7 @@ export default function LiveIncidents() {
     return (
       <section className="live-incidents loading" aria-live="polite">
         <span className="loading-mark" aria-hidden="true" /> Loading live incident sample…
+        <FeedConnectionNotice state={feedState} />
       </section>
     )
   }
@@ -73,6 +83,8 @@ export default function LiveIncidents() {
         </div>
         <StatusBadge fresh={fresh} snapshot={snapshot} />
       </header>
+
+      <FeedConnectionNotice state={feedState} />
 
       <p className="collector-status" aria-live="polite">{collectorStatusLabel(response.collector)}</p>
 
@@ -99,7 +111,17 @@ function StatusBadge({ fresh, snapshot }: { fresh: boolean; snapshot: LiveIncide
   )
 }
 
+function FeedConnectionNotice({ state }: { state: LiveFeedConnectionState }) {
+  return (
+    <p className={`feed-connection feed-connection-${state}`} role="status">
+      <span className="feed-connection-mark" aria-hidden="true">{liveFeedConnectionGlyph(state)}</span>
+      <span>{liveFeedConnectionLabel(state)}</span>
+    </p>
+  )
+}
+
 function LiveSnapshotBody({ snapshot, fresh }: { snapshot: LiveIncidentSnapshot; fresh: boolean }) {
+  const groups = groupRequestsByAvailability(snapshot.requests)
   return (
     <>
       {!fresh && (
@@ -110,14 +132,20 @@ function LiveSnapshotBody({ snapshot, fresh }: { snapshot: LiveIncidentSnapshot;
 
       <div className="live-grid">
         <section aria-labelledby="requests-title">
-          <h3 id="requests-title">Active requests ({snapshot.requests.length})</h3>
+          <h3 id="requests-title">Active requests ({groups.available.length})</h3>
+          <p className="section-note">{requestGroupSummaryLabel(groups)}</p>
           <ul className="record-list">
-            {snapshot.requests.map(request => (
-              <li key={request.requestId}>{requestLabel(request)}</li>
+            {groups.available.map(request => (
+              <li key={request.requestId}>
+                <span className="request-mark" aria-hidden="true">▶</span>
+                <span className="request-state">Active:</span> {requestLabel(request)}
+              </li>
             ))}
-            {snapshot.requests.length === 0 && <li>No active requests in this sample.</li>}
+            {groups.available.length === 0 && <li>No active requests in this sample.</li>}
           </ul>
         </section>
+
+        <InactiveRequests groups={groups} />
 
         <section aria-labelledby="waits-title">
           <h3 id="waits-title">Waiting tasks — all parallel waits ({snapshot.waitingTasks.length})</h3>
@@ -165,6 +193,78 @@ function LiveSnapshotBody({ snapshot, fresh }: { snapshot: LiveIncidentSnapshot;
 
       <UnavailableList snapshot={snapshot} />
     </>
+  )
+}
+
+function InactiveRequests({ groups }: { groups: RequestAvailabilityGroups }) {
+  const total = groups.disappeared.length + groups.stale.length + groups.unavailable.length
+  if (total === 0) return null
+  return (
+    <section aria-labelledby="inactive-requests-title" className="inactive-requests">
+      <h3 id="inactive-requests-title">Not counted as active ({total})</h3>
+      <p className="section-note">
+        These rows are excluded from the active count above. A carried-forward row is not evidence
+        that its request ended; it only means this cycle could not observe it.
+      </p>
+      <RequestGroup
+        headingId="disappeared-requests-title"
+        heading={`Disappeared since the last cycle (${groups.disappeared.length})`}
+        glyph="✕"
+        stateLabel="Disappeared"
+        note="Observed in an earlier cycle and confirmed absent in this one."
+        requests={groups.disappeared}
+      />
+      <RequestGroup
+        headingId="stale-requests-title"
+        heading={`Carried forward after a failed probe (${groups.stale.length})`}
+        glyph="◐"
+        stateLabel="Stale"
+        note="This cycle's own probe failed, so these values come from an earlier cycle. They are neither current nor known to be gone."
+        requests={groups.stale}
+      />
+      <RequestGroup
+        headingId="unavailable-requests-title"
+        heading={`Unavailable (${groups.unavailable.length})`}
+        glyph="?"
+        stateLabel="Unavailable"
+        note="No availability could be determined for these rows."
+        requests={groups.unavailable}
+      />
+    </section>
+  )
+}
+
+function RequestGroup({
+  headingId,
+  heading,
+  glyph,
+  stateLabel,
+  note,
+  requests,
+}: {
+  headingId: string
+  heading: string
+  glyph: string
+  stateLabel: string
+  note: string
+  requests: LiveRequest[]
+}) {
+  if (requests.length === 0) return null
+  return (
+    <section aria-labelledby={headingId} className={`request-group request-group-${stateLabel.toLowerCase()}`}>
+      <h4 id={headingId}>
+        <span className="request-mark" aria-hidden="true">{glyph}</span> {heading}
+      </h4>
+      <p className="section-note">{note}</p>
+      <ul className="record-list">
+        {requests.map(request => (
+          <li key={request.requestId}>
+            <span className="request-mark" aria-hidden="true">{glyph}</span>
+            <span className="request-state">{stateLabel}:</span> {requestLabel(request)}
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 
