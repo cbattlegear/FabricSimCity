@@ -57,10 +57,10 @@ else
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
 }
 
-// Default, no-credentials live-incident path (requirement 7): the fixture collector, never a real
-// SQL Server connection, backs /api/v1/live and the SignalR push until an operator opts a real
-// ILiveIncidentCollector in.
-builder.Services.AddSingleton<ILiveIncidentCollector, FixtureLiveIncidentCollector>();
+// LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
+// SqlConnectionFactory-backed collector in, and fails closed here -- before the host is even
+// built, let alone serving traffic -- if that configuration is missing or invalid.
+builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
 builder.Services.AddSingleton<LiveIncidentSamplerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
 
