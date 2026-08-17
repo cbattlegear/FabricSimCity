@@ -27,9 +27,10 @@ There is no opaque health score. Query Store capability, health, data status, an
 ```text
 src/SqlSimCity.Contracts  versioned transport records and evidence enums
 src/SqlSimCity.Domain     fixture source and source seam
+src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 web/                      strict TypeScript React shell and three.js scene
- tests/                    serialization, fixture, endpoint, and mapping tests
+ tests/                    serialization, fixture, endpoint, storage, and mapping tests
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
@@ -69,15 +70,27 @@ dotnet C:\path\to\artifacts\publish\SqlSimCity.Api.dll --urls http://127.0.0.1:8
 docker compose up --build
 ```
 
-Compose publishes only `127.0.0.1:8080`, runs as the .NET image's non-root user, drops all Linux capabilities, enables `no-new-privileges`, uses a read-only root filesystem, mounts `/tmp` as tmpfs, and reserves named `/data`. The fixture slice writes nothing to `/data`.
+Compose publishes only `127.0.0.1:8080`, runs as the .NET image's non-root user, drops all Linux capabilities, enables `no-new-privileges`, uses a read-only root filesystem, mounts `/tmp` as tmpfs, and reserves named `/data`. The fixture slice writes nothing to `/data`: `SqlSimCity.Storage` (see below) is disabled by default and only touches `/data` when explicitly enabled with a key.
 
 The image targets Linux containers on x86-64 and ARM64 where the selected official .NET and Node images are available. Current Chromium, Firefox, and Safari with WebGL2 are the browser targets; the complete text/table view remains usable when the 3D viewport cannot render.
+
+## Protected storage
+
+`SqlSimCity.Storage` is an optional, source-neutral encrypted embedded record store for future use by SQL Server collection. It ships **disabled by default** and is unused by the fixture path in this release. When enabled it:
+
+- encrypts every payload with AES-256-GCM inside a versioned envelope (format version, key version, nonce, tag, ciphertext) before any byte reaches SQLite, with record kind, opaque record ID, and key version bound as authenticated associated data so ciphertext cannot be swapped between records;
+- loads its key ring only from an explicitly configured file (see [SECURITY.md](SECURITY.md) for the exact JSON format, key rotation, and backup guidance) and never logs key material;
+- fails closed: a missing/wrong key, corrupt or tampered envelope, failed canary check, or migration error prevents the application from becoming ready rather than silently degrading to an unencrypted or partially working store;
+- exposes only opaque record IDs, record kind, captured timestamp, and resolution (`Detail`/`HourlyRollup`) as plaintext metadata — payload bytes are always encrypted;
+- prunes expired records in bounded batches under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`, configurable via `ProtectedStorage:Retention`.
+
+Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). This release does not use protected storage for anything; it exists so a future SQL Server collector has an already-hardened place to put retained evidence and credentials instead of a new unencrypted table.
 
 ## Security and privacy
 
 SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. It has no application network dependency after loading.
 
-Collection is intended to be read-only, but no collector exists yet. Future authentication and encrypted storage must fail closed: unavailable keys or identity providers must prevent collection and disclosure rather than fall back to plaintext or anonymous access. The `/data` volume is not encrypted by SQLSimCity; a plain Docker volume must not be represented as production-safe storage. See [SECURITY.md](SECURITY.md).
+Collection is intended to be read-only, but no collector exists yet. Future authentication must fail closed: unavailable keys or identity providers must prevent collection and disclosure rather than fall back to plaintext or anonymous access. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
 
 ## Validation
 

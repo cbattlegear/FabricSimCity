@@ -15,7 +15,25 @@ services:
       - no-new-privileges:true
     environment:
       ASPNETCORE_ENVIRONMENT: Production
+      # Protected storage is disabled by default; this app runs fine without
+      # the settings below. To enable the encrypted embedded record store,
+      # uncomment these three lines and mount a key file secret (see
+      # SECURITY.md for the key file format, rotation, and backup guidance).
+      # Losing the key file makes every record it protected permanently
+      # unrecoverable, so the key must be backed up independently of the
+      # sqlsimcity-data volume.
+      # ProtectedStorage__Enabled: "true"
+      # ProtectedStorage__DataDirectory: /data
+      # ProtectedStorage__KeyFilePath: /run/secrets/sqlsimcity-storage-key
+    # secrets:
+    #   - sqlsimcity-storage-key
     restart: unless-stopped
 
 volumes:
   sqlsimcity-data:
+
+# Uncomment to mount a key file as a Docker secret. `file:` must point to a
+# key ring JSON file (see SECURITY.md) that is NOT committed to this repo.
+# secrets:
+#   sqlsimcity-storage-key:
+#     file: ./secrets/sqlsimcity-storage-key.json

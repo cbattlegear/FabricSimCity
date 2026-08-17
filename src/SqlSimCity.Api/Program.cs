@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
 using SqlSimCity.Domain;
+using SqlSimCity.Storage;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -14,8 +15,18 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton<IAtlasSnapshotSource, FixtureAtlasSnapshotSource>();
+builder.Services.AddProtectedStorage(builder.Configuration);
 
 var app = builder.Build();
+
+// Protected storage is opt-in and fails closed: when enabled, a missing/invalid
+// key, corrupt canary, or migration error must stop the process before it
+// serves traffic rather than silently falling back to an unencrypted store.
+var protectedStorageInitializer = app.Services.GetService<IProtectedStorageInitializer>();
+if (protectedStorageInitializer is not null)
+{
+    await protectedStorageInitializer.EnsureReadyAsync(app.Lifetime.ApplicationStopping);
+}
 
 app.Use(async (context, next) =>
 {

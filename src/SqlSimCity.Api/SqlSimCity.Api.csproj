@@ -2,6 +2,7 @@
   <ItemGroup>
     <ProjectReference Include="..\SqlSimCity.Domain\SqlSimCity.Domain.csproj" />
     <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Storage\SqlSimCity.Storage.csproj" />
   </ItemGroup>
   <ItemGroup Condition="Exists('..\..\web\dist')">
     <Content Include="..\..\web\dist\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />

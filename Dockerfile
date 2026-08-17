@@ -12,6 +12,7 @@ COPY SqlSimCity.slnx Directory.Build.props Directory.Packages.props ./
 COPY src/SqlSimCity.Api/SqlSimCity.Api.csproj src/SqlSimCity.Api/
 COPY src/SqlSimCity.Domain/SqlSimCity.Domain.csproj src/SqlSimCity.Domain/
 COPY src/SqlSimCity.Contracts/SqlSimCity.Contracts.csproj src/SqlSimCity.Contracts/
+COPY src/SqlSimCity.Storage/SqlSimCity.Storage.csproj src/SqlSimCity.Storage/
 RUN dotnet restore src/SqlSimCity.Api/SqlSimCity.Api.csproj
 COPY src/ src/
 COPY --from=web-build /source/web/dist web/dist
