@@ -23,6 +23,17 @@ public class ServerAddressTests
         Assert.Equal("tcp:sql01.internal.example.com,14330", address.ToDataSource());
     }
 
+    [Theory]
+    [InlineData("sql01")]
+    [InlineData("sql01.internal.example.com")]
+    [InlineData("192.0.2.25")]
+    public void ConstructorAcceptsDnsFqdnAndIpv4Hosts(string host)
+    {
+        var address = new ServerAddress(host);
+
+        Assert.Equal(host, address.Host);
+    }
+
     [Fact]
     public void ConstructorRejectsBothInstanceNameAndPort()
     {
@@ -73,6 +84,30 @@ public class ServerAddressTests
     public void ConstructorRejectsConnectionStringFragmentsInHost(string host)
     {
         Assert.Throws<ConnectionProfileValidationException>(() => new ServerAddress(host));
+    }
+
+    [Theory]
+    [InlineData("sql01,1433")]
+    [InlineData("sql01\\SQLEXPRESS")]
+    [InlineData("tcp:sql01")]
+    [InlineData("np:sql01")]
+    [InlineData("sql01:1433")]
+    [InlineData(" sql01.example.com")]
+    [InlineData("sql01.example.com ")]
+    [InlineData("sql 01.example.com")]
+    public void ConstructorRejectsEmbeddedRoutingSyntaxAndWhitespace(string host)
+    {
+        Assert.Throws<ConnectionProfileValidationException>(() => new ServerAddress(host));
+    }
+
+    [Theory]
+    [InlineData("2001:db8::1")]
+    [InlineData("[2001:db8::1]")]
+    public void ConstructorRejectsIpv6UntilSqlClientTcpSyntaxIsSupported(string host)
+    {
+        var ex = Assert.Throws<ConnectionProfileValidationException>(() => new ServerAddress(host, port: 1433));
+
+        Assert.Contains("IPv6", ex.Message);
     }
 
     [Fact]

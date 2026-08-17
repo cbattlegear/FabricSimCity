@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Sockets;
+
 namespace SqlSimCity.SqlServer;
 
 /// <summary>
@@ -25,6 +28,7 @@ public sealed class ServerAddress
         ConnectionValidation.EnsureNoControlCharacters(host, nameof(host));
         ConnectionValidation.EnsureNoConnectionStringFragment(host, nameof(host));
         ConnectionValidation.EnsureLength(host, nameof(host), 1, MaxHostLength);
+        EnsureHostSyntax(host);
 
         if (instanceName is not null && port is not null)
         {
@@ -59,4 +63,26 @@ public sealed class ServerAddress
         : InstanceName is { } instance
             ? $"{Host}\\{instance}"
             : Host;
+
+    private static void EnsureHostSyntax(string host)
+    {
+        if (host.Any(char.IsWhiteSpace))
+        {
+            throw new ConnectionProfileValidationException("host must not contain whitespace.");
+        }
+
+        var unbracketedHost = host.Trim('[', ']');
+        if (IPAddress.TryParse(unbracketedHost, out var address) &&
+            address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            throw new ConnectionProfileValidationException(
+                "IPv6 host literals are not supported until their SqlClient TCP data-source syntax is implemented.");
+        }
+
+        if (host.IndexOfAny([',', '\\', ':']) >= 0)
+        {
+            throw new ConnectionProfileValidationException(
+                "host must not embed a port, instance, protocol prefix, or other SqlClient routing syntax; use port or instanceName instead.");
+        }
+    }
 }

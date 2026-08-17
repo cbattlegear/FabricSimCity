@@ -9,19 +9,54 @@ namespace SqlSimCity.SqlServer;
 /// </summary>
 public sealed class SqlConnectionOpenResult : IDisposable, IAsyncDisposable
 {
-    public SqlConnectionOpenResult(SqlConnection connection, IReadOnlyList<ConnectionWarning> warnings)
+    private Action? _releaseCredentialLease;
+
+    public SqlConnectionOpenResult(
+        SqlConnection connection,
+        IReadOnlyList<ConnectionWarning> warnings,
+        Action? releaseCredentialLease = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(warnings);
         Connection = connection;
         Warnings = warnings;
+        _releaseCredentialLease = releaseCredentialLease;
+        if (releaseCredentialLease is not null)
+        {
+            Connection.Disposed += OnConnectionDisposed;
+        }
     }
 
     public SqlConnection Connection { get; }
 
     public IReadOnlyList<ConnectionWarning> Warnings { get; }
 
-    public void Dispose() => Connection.Dispose();
+    public void Dispose()
+    {
+        try
+        {
+            Connection.Dispose();
+        }
+        finally
+        {
+            ReleaseCredentialLease();
+        }
+    }
 
-    public ValueTask DisposeAsync() => Connection.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await Connection.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseCredentialLease();
+        }
+    }
+
+    private void ReleaseCredentialLease() =>
+        Interlocked.Exchange(ref _releaseCredentialLease, null)?.Invoke();
+
+    private void OnConnectionDisposed(object? sender, EventArgs eventArgs) => ReleaseCredentialLease();
 }

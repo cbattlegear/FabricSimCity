@@ -5,9 +5,10 @@ namespace SqlSimCity.SqlServer.Auth;
 /// <summary>
 /// SQL Server login/password authentication. The password is never carried as
 /// a plain string on this type -- only a <see cref="SecretFileReference"/> that
-/// <see cref="SqlConnectionFactory"/> resolves once per connection attempt and
-/// hands to <c>SqlCredential</c>, never to the connection string, so it cannot
-/// leak through a log, diagnostic, or exception.
+/// <see cref="SqlConnectionFactory"/> resolves into a factory-lifetime lease
+/// per stable profile configuration and hands only its <c>SqlCredential</c> to
+/// connections, never a password in a connection string, log, diagnostic, or
+/// exception.
 /// </summary>
 public sealed class SqlLoginAuthenticationStrategy : AuthenticationStrategy
 {

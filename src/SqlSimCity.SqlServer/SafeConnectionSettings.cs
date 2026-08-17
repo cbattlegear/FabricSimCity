@@ -3,11 +3,11 @@ using SqlSimCity.SqlServer.Auth;
 namespace SqlSimCity.SqlServer;
 
 /// <summary>
-/// A connection profile's shape with every secret and token stripped out --
-/// safe to log, return from a diagnostics endpoint, or serialize. Authentication
-/// is represented only by its kind plus non-secret identifiers (a SQL login
-/// username, an Entra tenant/client ID); no password, certificate, client
-/// secret, federated token, or bearer token ever reaches this type.
+/// A connection profile's secret-free shape for authorized UI and protected
+/// storage. It contains operationally sensitive target and identity metadata,
+/// so callers must not log or expose it indiscriminately. Authentication is
+/// represented only by its kind plus non-secret identifiers; no password,
+/// certificate, client secret, federated token, or bearer token reaches it.
 /// </summary>
 public sealed record SafeConnectionSettings
 {
@@ -46,6 +46,12 @@ public sealed record SafeConnectionSettings
     public bool EntraUsesUserAssignedIdentity { get; init; }
 
     public required IReadOnlyList<ConnectionWarning> Warnings { get; init; }
+
+    /// <summary>
+    /// Keeps incidental exception and debug logging from exposing target or
+    /// identity metadata. Authorized callers can read individual properties.
+    /// </summary>
+    public override string ToString() => $"{nameof(SafeConnectionSettings)} {{ Redacted = true }}";
 
     public static SafeConnectionSettings From(ConnectionProfile profile)
     {

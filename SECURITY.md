@@ -89,11 +89,11 @@ Supported host targets are Linux containers on x86-64 and ARM64 using official .
 
 ## SQL Server connection and authentication
 
-`SqlSimCity.SqlServer` builds and opens `SqlConnection`s from an immutable, validated `ConnectionProfile`. It has no fallback between authentication strategies: a strategy either succeeds on its own terms or the connection attempt fails. Every connection is built through `SqlConnectionStringBuilder` only; a password or Entra token is never concatenated into a connection string, logged, or returned from the diagnostic `SafeConnectionSettings` DTO.
+`SqlSimCity.SqlServer` builds and opens `SqlConnection`s from an immutable, validated `ConnectionProfile`. It has no fallback between authentication strategies: a strategy either succeeds on its own terms or the connection attempt fails. Every connection is built through `SqlConnectionStringBuilder` only; a password or Entra token is never concatenated into a connection string or logged. `SafeConnectionSettings` excludes secrets and tokens but contains operationally sensitive target and identity metadata; use it only in authorized UI or protected storage, never indiscriminate logs or public diagnostics.
 
 ### Authentication strategies (closed set, no fallback)
 
-- **SQL login** — username plus a `SecretFileReference` (never a plaintext password field). The password is read once per connection attempt and handed to `SqlCredential`, never the connection string.
+- **SQL login** — username plus a `SecretFileReference` (never a plaintext password field). One read-only `SecureString` and its exact `SqlCredential` are cached per stable SQL-login profile configuration and retained for the matching SqlClient pool's lifetime; neither enters a connection string. Call `InvalidateSqlLoginProfileAsync` after rotating a mounted password secret (or restart the process). Invalidation clears that credential's pool before zeroing the old password and defers zeroing until every returned `SqlConnectionOpenResult` is disposed. Without explicit invalidation or restart, a mounted password rotation is not observed.
 - **Linux Kerberos service identity (Integrated Security/SSPI)** — uses the container's own Kerberos identity. There is no interactive/browser user delegation and nothing falls back to SQL login if Kerberos fails. Deployment requires:
   - a keytab file mounted as a Docker/Compose secret (never baked into an image or committed to source);
   - `KRB5_CONFIG` pointing at a `krb5.conf` that names the realm and KDC;
@@ -108,11 +108,11 @@ Supported host targets are Linux containers on x86-64 and ARM64 using official .
 
 ### Secret resolution (`ISecretFileProvider`)
 
-Secret references are simple file names only (no path separators, drive letters, or `.`/`..` segments — rejected at construction, before any file-system access) resolved under one configured directory (default `/run/secrets`, the conventional Docker/Compose secrets mount). Every candidate path is canonicalized and re-checked against that directory as defense in depth. Reads are size-bounded (default 16 KiB), happen once per connection attempt, and never log secret content. A missing, unreadable, oversized, or invalid (non-UTF-8, where text is expected) secret fails closed with `SecretResolutionException` — never a partially usable value and never a fallback to another authentication mode.
+Secret references are simple file names only (no path separators, drive letters, or `.`/`..` segments — rejected at construction, before any file-system access) resolved under one configured directory (default `/run/secrets`, the conventional Docker/Compose secrets mount). Every candidate path is canonicalized and re-checked against that directory as defense in depth. Reads are size-bounded (default 16 KiB) and never log secret content. SQL-login passwords are read once when a credential lease is created; Entra secret material is read as required by its explicit strategy. A missing, unreadable, oversized, or invalid (non-UTF-8, where text is expected) secret fails closed with `SecretResolutionException` — never a partially usable value and never a fallback to another authentication mode.
 
 ### `TrustServerCertificate` and encryption policy
 
-Every profile sets an explicit `EncryptionPolicy` — `Mandatory` (TLS required; supported since SQL Server 2019) or `Strict` (TDS 8.0 strict TLS; requires SQL Server 2022+ or Azure SQL) — there is no "optional" encryption. `TrustServerCertificate` is a per-profile opt-in only; it is never inherited, defaulted, or applied globally, and enabling it always surfaces a `ConnectionWarning.TrustServerCertificateEnabled` on that connection's result, regardless of encryption policy.
+Every profile sets an explicit `EncryptionPolicy` — `Mandatory` (TLS required; supported since SQL Server 2019) or `Strict` (TDS 8.0 strict TLS; requires SQL Server 2022+ or Azure SQL) — there is no "optional" encryption. `TrustServerCertificate` is a per-profile opt-in only for `Mandatory`; it is never inherited, defaulted, or applied globally. `Strict` plus `TrustServerCertificate=true` is rejected because SqlClient ignores that trust bypass in Strict mode. Every accepted trust bypass surfaces a `ConnectionWarning.TrustServerCertificateEnabled` on that connection's result.
 
 ### Package versions
 

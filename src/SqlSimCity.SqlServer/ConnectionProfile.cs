@@ -71,6 +71,12 @@ public sealed class ConnectionProfile
                 hostNameInCertificate, nameof(hostNameInCertificate), 1, MaxHostNameInCertificateLength);
         }
 
+        if (encryption == EncryptionPolicy.Strict && trustServerCertificate)
+        {
+            throw new ConnectionProfileValidationException(
+                "TrustServerCertificate cannot be enabled with Strict encryption because SqlClient ignores the trust bypass in that mode.");
+        }
+
         Id = id;
         Server = server;
         InitialDatabase = initialDatabase;

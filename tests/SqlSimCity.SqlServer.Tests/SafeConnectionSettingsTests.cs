@@ -121,4 +121,21 @@ public class SafeConnectionSettingsTests
         Assert.NotNull(text);
         Assert.DoesNotContain("sql-login-password", text);
     }
+
+    [Fact]
+    public void ToStringDoesNotExposeOperationalIdentifiers()
+    {
+        var profile = TestProfiles.Build(
+            authentication: new SqlLoginAuthenticationStrategy("svc-atlas-reader", new SecretFileReference("sql-login-password")),
+            server: new ServerAddress("sql01.internal.example.com"),
+            initialDatabase: "customer_reporting",
+            id: new ConnectionProfileId("production-customer-a"));
+
+        var text = SafeConnectionSettings.From(profile).ToString();
+
+        Assert.DoesNotContain("sql01.internal.example.com", text);
+        Assert.DoesNotContain("customer_reporting", text);
+        Assert.DoesNotContain("svc-atlas-reader", text);
+        Assert.DoesNotContain("production-customer-a", text);
+    }
 }

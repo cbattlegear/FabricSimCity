@@ -104,4 +104,16 @@ public class ConnectionProfileTests
         var profile = TestProfiles.Build(encryption: EncryptionPolicy.Strict);
         Assert.Equal(EncryptionPolicy.Strict, profile.Encryption);
     }
+
+    [Fact]
+    public void ConstructorRejectsTrustServerCertificateWithStrictEncryption()
+    {
+        var ex = Assert.Throws<ConnectionProfileValidationException>(
+            () => TestProfiles.Build(
+                encryption: EncryptionPolicy.Strict,
+                trustServerCertificate: true));
+
+        Assert.Contains("Strict", ex.Message);
+        Assert.Contains("TrustServerCertificate", ex.Message);
+    }
 }
