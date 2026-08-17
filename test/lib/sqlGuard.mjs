@@ -103,6 +103,15 @@ export const FORBIDDEN_PATTERNS = [
   { name: 'Query Store administrative procedure', regex: /\bsp_query_store_\w+/i },
   { name: 'Query Store CLEAR/force/flush maintenance', regex: /QUERY_STORE\s*(CLEAR|=\s*OFF)/i },
   { name: 'xp_cmdshell', regex: /\bxp_cmdshell\b/i },
+  // SELECT ... INTO creates a persistent table -- a state-changing action disguised as a SELECT.
+  // The lazy match stops scanning at the first FROM it encounters so an earlier statement's own
+  // FROM clause cannot suppress detection of a LATER statement's SELECT ... INTO in the same file
+  // (each candidate SELECT start is tried independently by the regex engine). INSERT INTO/MERGE
+  // INTO are already caught by the separate INSERT/MERGE whole-word patterns above, so this rule
+  // only needs to add the SELECT ... INTO / SELECT ... INTO #temp shape. Bare local-variable
+  // assignment (SELECT @x = ...) is intentionally NOT flagged here: it mutates only a local batch
+  // variable, never server state, and no probe in this catalog uses that form.
+  { name: 'SELECT INTO (creates a table)', regex: /\bSELECT\b(?:(?!\bFROM\b)[\s\S])*?\bINTO\b/i },
 ];
 
 /**

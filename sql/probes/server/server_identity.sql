@@ -1,10 +1,10 @@
 -- Probe: server.identity
 -- Purpose: Server/platform identity for feature-detection before running other probes.
 -- Connection scope: any (conventionally master); values are instance-wide, not database-scoped.
--- Minimum platform: SQL Server 2017 (14.x) -- sys.dm_os_host_info was introduced in 2017.
+-- Minimum platform: SQL Server 2016 (13.x).
 -- Permission: SERVERPROPERTY() requires no special permission.
---   sys.dm_os_sys_info / sys.dm_os_host_info: SQL Server 2019 (15.x) and earlier require
---   VIEW SERVER STATE; SQL Server 2022 (16.x) and later require VIEW SERVER PERFORMANCE STATE.
+--   sys.dm_os_sys_info: SQL Server 2019 (15.x) and earlier require VIEW SERVER STATE; SQL Server
+--   2022 (16.x) and later require VIEW SERVER PERFORMANCE STATE.
 -- Azure SQL Database: supported (EngineEdition = 5). cpu_count / physical_memory_kb from
 --   sys.dm_os_sys_info "might return the number of logical CPUs/total physical memory of the
 --   machine hosting the database or elastic pool" per Microsoft's own documentation -- they are
@@ -13,7 +13,11 @@
 --   (vCore purchasing model only; NULL for DTU databases) and sys.dm_os_job_object.process_memory_limit_mb
 --   separately -- both are Azure SQL Database-specific DMVs deliberately out of scope for this
 --   cross-platform probe. sqlserver_start_time reflects the most recent failover/restart of the
---   tenant, not necessarily the physical node uptime.
+--   tenant, not necessarily the physical node uptime. This file deliberately does NOT join
+--   sys.dm_os_host_info: that DMV's own documented platform list does not include Azure SQL
+--   Database (only SQL Server and Azure SQL Managed Instance), so joining it here would break this
+--   probe on Azure SQL Database. Use server.host_info (SQL Server 2017 (14.x)+ / Managed Instance
+--   only) for host OS platform detection.
 -- Result contract: exactly one row describing the connected instance.
 -- Relative cost: trivial (in-memory server state, no per-database scan).
 SET NOCOUNT ON;
@@ -31,13 +35,8 @@ SELECT
     CAST(SERVERPROPERTY('EngineEdition')          AS int)           AS engine_edition, -- 1/2/3/4=on-prem tiers,5=Azure SQL DB,6=Azure Synapse,8=Managed Instance,9=Azure SQL Edge,11=Azure Synapse serverless
     CAST(SERVERPROPERTY('IsHadrEnabled')          AS int)           AS is_hadr_enabled,
     CAST(SERVERPROPERTY('Collation')              AS nvarchar(128)) AS server_collation,
-    hi.host_platform,
-    hi.host_distribution,
-    hi.host_release,
-    hi.host_service_pack_level,
     si.cpu_count,
     si.scheduler_count,
     si.physical_memory_kb / 1024 AS physical_memory_mb, -- MiB in effect (KB reported is binary KiB)
     si.sqlserver_start_time
-FROM sys.dm_os_sys_info AS si
-CROSS JOIN sys.dm_os_host_info AS hi;
+FROM sys.dm_os_sys_info AS si;

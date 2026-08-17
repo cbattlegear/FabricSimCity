@@ -60,12 +60,20 @@ diagnostic probes generally follow this pattern:
 
 | Probe family | SQL Server 2016-2019 | SQL Server 2022+ |
 | --- | --- | --- |
-| Server/session/task/scheduler/memory-grant/file-IO DMVs (`sys.dm_exec_sessions`, `sys.dm_exec_requests`, `sys.dm_os_waiting_tasks`, `sys.dm_os_schedulers`, `sys.dm_exec_query_memory_grants`, `sys.dm_io_virtual_file_stats`, `sys.dm_db_task_space_usage`, `sys.dm_db_session_space_usage`) | `VIEW SERVER STATE` | `VIEW SERVER PERFORMANCE STATE` |
+| Server/session/task/scheduler/memory-grant/file-IO DMVs (`sys.dm_exec_sessions`, `sys.dm_exec_requests`, `sys.dm_os_waiting_tasks`, `sys.dm_os_schedulers`, `sys.dm_exec_query_memory_grants`, `sys.dm_io_virtual_file_stats`, `sys.dm_db_task_space_usage`, `sys.dm_db_session_space_usage`, `sys.dm_db_file_space_usage`, `sys.dm_db_log_space_usage`) | `VIEW SERVER STATE` | `VIEW SERVER PERFORMANCE STATE` |
 | Query Store catalog views (`sys.database_query_store_options`, `sys.query_store_*`) | `VIEW DATABASE STATE` | `VIEW DATABASE PERFORMANCE STATE` (or `VIEW DATABASE STATE`, which still covers it) |
-| `sys.dm_db_file_space_usage`, `sys.dm_db_log_space_usage` | `VIEW DATABASE STATE` | `VIEW DATABASE PERFORMANCE STATE` |
 | `sys.dm_db_index_usage_stats` | `VIEW SERVER STATE` (server/MI); Azure SQL DB: server admin/Entra admin/`##MS_ServerStateReader##` on Basic/S0/S1/elastic pool, else `VIEW DATABASE STATE`/`##MS_ServerStateReader##` | `VIEW SERVER PERFORMANCE STATE` (server/MI); same Azure SQL DB rules as the prior column |
 | `sys.dm_db_index_operational_stats` (single object, this catalog's usage) | `CONTROL` on the specified object | `CONTROL` on the specified object |
 | `sys.databases`, `SERVERPROPERTY()` | none (public) | none (public) |
+
+`sys.dm_db_file_space_usage` and `sys.dm_db_log_space_usage` are documented by Microsoft
+as requiring the **server-level** `VIEW SERVER STATE`/`VIEW SERVER PERFORMANCE STATE`
+permission even though their output is scoped to the current database -- do not confuse
+this with `VIEW DATABASE STATE`, which is a different, narrower permission that does not
+cover these two DMVs. On Azure SQL Database, both follow the same tiered rule as
+`sys.dm_db_index_usage_stats` above (server admin/Entra admin/`##MS_ServerStateReader##`
+on Basic/S0/S1/elastic pool, else `VIEW DATABASE STATE`/`##MS_ServerStateReader##`).
+
 
 Whole-database or whole-server calls to `sys.dm_db_index_operational_stats` (passing `NULL`
 for `@ObjectId`/`@DatabaseId`, which this catalog's probe deliberately never does) instead
@@ -89,6 +97,11 @@ requirement; this table is a summary, not a substitute for either.
   admin account, or `##MS_ServerStateReader##` server-role membership on Basic/S0/S1
   tiers and databases in an elastic pool; other service tiers require `VIEW DATABASE
   STATE` or `##MS_ServerStateReader##` membership.
+- **`sys.dm_db_file_space_usage`/`sys.dm_db_log_space_usage`** follow the same tiered
+  rule as `sys.dm_db_index_usage_stats` above -- these two DMVs require the
+  server-level view even on-premises, so their Azure SQL Database equivalent is the same
+  tiered server-state rule, not the plain `VIEW DATABASE STATE` this catalog previously
+  (incorrectly) documented.
 - **`sys.dm_os_sys_info`** (`server.identity`): `cpu_count`/`physical_memory_kb` on Azure
   SQL Database "might return the number of logical CPUs/total physical memory of the
   machine hosting the database or elastic pool" per Microsoft's documentation -- they do
@@ -97,26 +110,46 @@ requirement; this table is a summary, not a substitute for either.
   and `sys.dm_os_job_object.process_memory_limit_mb` for the tenant's actual compute
   limits; both are Azure SQL Database-specific and intentionally out of scope for the
   cross-platform `server.identity` probe.
+- **`sys.dm_os_host_info`** (`server.host_info`) is **NOT SUPPORTED on Azure SQL
+  Database.** Microsoft's own documented platform list for this DMV is SQL Server and
+  Azure SQL Managed Instance only; it does not include Azure SQL Database, and calling
+  it there fails. `server.identity` deliberately does not join it, precisely so it keeps
+  working on Azure SQL Database; run `server.host_info` only after `server.identity`
+  confirms (via `engine_edition`) that the target is SQL Server or Managed Instance.
 - **Session/request/memory-grant DMVs** (`sys.dm_exec_sessions`,
   `sys.dm_exec_requests`, `sys.dm_exec_query_memory_grants`) require `VIEW DATABASE
   STATE` on Azure SQL Database rather than `VIEW SERVER STATE`, and are filtered to the
   current tenant database's own sessions; `scheduler_id`, `wait_order`, `pool_id`, and
   `group_id` are filtered to `NULL` in `sys.dm_exec_query_memory_grants` to avoid
   exposing cross-tenant placement information.
-- **`sys.dm_io_virtual_file_stats`** is restricted to the current database's own files
-  on Azure SQL Database.
+- **`sys.dm_io_virtual_file_stats`** itself is restricted to the current database's own
+  files on Azure SQL Database, but `io.file_io_stats` (the instance-wide probe file) is
+  **NOT SUPPORTED on Azure SQL Database** because it joins `sys.master_files`, which
+  Microsoft documents as available on SQL Server, SQL Managed Instance, and Analytics
+  Platform System only -- not Azure SQL Database. Use `io.file_io_stats_current_db` on
+  Azure SQL Database instead; it joins `sys.database_files` (a per-database catalog view
+  available everywhere) and is explicitly bounded to `DB_ID()`.
 - **`sys.dm_os_schedulers`** works, but the visible scheduler count reflects the
   database's assigned vCore/DTU allocation, not a physical host's processor count, and
   the required permission on Basic/S0/S1 tiers and elastic pools is narrower (server
   admin, Microsoft Entra admin, or `##MS_ServerStateReader##` membership) than on other
-  service objectives (`VIEW DATABASE STATE` or `##MS_ServerStateReader##`).
+  service objectives (`VIEW DATABASE STATE` or `##MS_ServerStateReader##`). Prefer
+  `scheduler.pressure_2019` on Azure SQL Database, since it always runs a current engine
+  and additionally reports `ideal_workers_limit`.
 - **`tempdb.usage`** still applies: every Azure SQL Database has its own private
-  `tempdb`.
+  `tempdb`. Microsoft documents that a T-SQL `USE` statement cannot change database
+  context on Azure SQL Database -- the client must "create a new connection to that
+  database" instead -- which is exactly the fresh-connection-from-the-pool pattern this
+  probe already requires; see the T-SQL differences page cited below.
 
 See `manifest.json`'s per-probe `azureSqlDatabase` field for the authoritative,
-per-probe statement. No probe in this catalog is flagged blanket-`unsupported` on Azure
-SQL Database as of this revision; several instead document narrower visibility, a
-different required permission, or a preference for a newer version-split variant.
+per-probe statement. `io.file_io_stats` and `server.host_info` are the two probes in
+this catalog flagged `unsupported` on Azure SQL Database, each because it calls a DMV or
+catalog view (`sys.master_files`, `sys.dm_os_host_info`) that Microsoft's own
+documentation does not list as available there; each has an Azure-safe alternative
+(`io.file_io_stats_current_db`) or an explicit precondition (`server.host_info` requires
+first checking `server.identity.engine_edition`). Every other probe is supported, though
+several document narrower visibility or a different required permission.
 
 ## Units
 
@@ -156,17 +189,34 @@ different required permission, or a preference for a newer version-split variant
   unless documented otherwise on the specific column.
 - `sys.dm_exec_requests.start_time` and `sys.dm_os_sys_info.sqlserver_start_time` are
   plain `datetime` in server local time (no offset).
-- `sys.dm_io_virtual_file_stats.sample_ms` and `sys.dm_os_schedulers`'s cumulative
-  columns are milliseconds since the Database Engine's last restart, not wall-clock
-  timestamps.
+- `sys.dm_os_schedulers.total_cpu_usage_ms`/`total_scheduler_delay_ms` are milliseconds
+  cumulative since the Database Engine's last start.
+- `sys.dm_io_virtual_file_stats.sample_ms` is documented by Microsoft as milliseconds
+  since **the computer (operating system) was started** -- it is NOT since the last
+  Database Engine restart, and the two clocks differ: the SQL Server/Managed Instance
+  service can restart (failover, service restart, container recreation) without the
+  underlying computer rebooting. The counters this DMV reports alongside `sample_ms`
+  (`num_of_reads`, `num_of_bytes_read`, etc.) are separately documented as reset
+  ("initialized to empty") whenever the SQL Server service itself starts -- a different,
+  typically more frequent event than a computer restart. A decreasing `sample_ms`
+  reliably proves a computer reboot happened; its absence does NOT prove the counters
+  have not reset, because an engine-only restart leaves `sample_ms` on its unaffected
+  computer-uptime clock while still zeroing the counters. See "Reset semantics" below for
+  how a collector must detect this instead.
 
 ## Reset semantics (cumulative counters)
 
 Most DMV counters in this catalog (`sys.dm_io_virtual_file_stats`,
-`sys.dm_os_schedulers.total_cpu_usage_ms`/`total_scheduler_delay_ms`,
-`sys.dm_db_index_usage_stats`) are **cumulative since the Database Engine's last
-restart**, or since the specific index's last rebuild/creation, whichever is more
-recent. `sys.dm_db_index_operational_stats` counters follow a different rule: they are
+`sys.dm_os_schedulers.total_cpu_usage_ms`/`total_scheduler_delay_ms`) are **cumulative
+since the Database Engine's last restart**. `sys.dm_db_index_usage_stats` follows a
+narrower, two-trigger rule per Microsoft's documentation: its counters are reset
+("initialized to empty") whenever the Database Engine restarts, and whenever the
+database itself is detached or shut down (for example because `AUTO_CLOSE` is `ON`) --
+the latter case removes all of that database's rows entirely, not merely zeroes them.
+No official Microsoft documentation attributes a reset of
+`sys.dm_db_index_usage_stats` to rebuilding, recreating, or otherwise altering an index;
+this catalog previously (incorrectly) documented rebuild as a reset trigger and no longer
+does. `sys.dm_db_index_operational_stats` counters follow yet another rule: they are
 maintained only while the heap/B-tree's metadata-cache entry for that object exists in
 memory, so they reset to zero whenever that metadata is (re)cached -- which includes,
 but is not limited to, an engine restart -- and they disappear entirely when the
@@ -174,11 +224,19 @@ underlying object, index, or partition is dropped or truncated; certain other DD
 against the object can also reset the counters to zero without dropping anything. Do
 not assume a long-standing `sys.dm_db_index_operational_stats` value implies a
 long-uninterrupted server uptime the way the other cumulative-since-restart counters
-in this catalog do. A collector computing a rate must:
+in this catalog do.
 
-1. Track the previous poll's counter value and its `sample_ms`/wall-clock time.
-2. Detect a restart (a lower reading than the previous poll, or `sample_ms` resetting
-   toward zero) and discard that delta instead of treating it as negative throughput.
+`sys.dm_io_virtual_file_stats` needs a restart-detection method that does not rely on
+`sample_ms`: per the "Timestamps" section above, `sample_ms` only reflects a computer
+(OS) restart, not a Database Engine-only restart, while the counters reset on the
+latter. A collector computing a rate must:
+
+1. Track the previous poll's counter value and (for `sys.dm_io_virtual_file_stats`) the
+   Database Engine's `sqlserver_start_time` from `server.identity`, not `sample_ms`.
+2. Detect a restart either by `sqlserver_start_time` changing between polls, or by any
+   individual counter reading lower than the previous poll's value for the same key
+   (file, scheduler, or index), and discard that delta instead of treating it as
+   negative throughput.
 3. Never assume a counter is a rate; every counter in this catalog is either a
    cumulative total or an instantaneous gauge (e.g. `current_tasks_count`), and the
    per-probe header comment says which.
@@ -239,9 +297,23 @@ silently truncated to an integer by T-SQL's `bigint`/`bigint` division rule.
   determined because of an internal latch-state transition, `-5` = the blocking latch
   owner is not tracked for this latch type (commonly benign, e.g. SH latches).
 - `sys.dm_db_index_usage_stats`: an index with **no row at all** has not been touched by
-  a compiled plan since the engine last restarted (or since the index was last
-  rebuilt/created) -- it does **not** mean the index is empty, unused forever, or safe
-  to drop without checking a longer observation window.
+  a compiled plan since the counters were last reset (Database Engine restart, or the
+  database being detached/shut down, e.g. via `AUTO_CLOSE`) -- it does **not** mean the
+  index is empty, unused forever, or safe to drop without checking a longer observation
+  window. It also does **not** mean the index was recently rebuilt; no official
+  documentation attributes a counter reset to rebuilding or recreating an index.
+- `sys.dm_exec_query_memory_grants`: `grant_time IS NULL` is the authoritative "still
+  waiting for a grant" signal (Microsoft documents it as `NULL` until the grant is
+  issued). `wait_time_ms` has the OPPOSITE null-timing: Microsoft documents it as `NULL`
+  once the memory is already granted, so it is populated only while a request is
+  waiting. Do not read the two columns as sharing one "NULL until granted" story.
+- `sessions.blocking_inputs`'s `idle_open_transaction` rows are deduplicated to exactly
+  one row per `session_id`: `sys.dm_tran_session_transactions` can return multiple rows
+  for the same session under MARS (multiple active result sets), and
+  `open_transaction_count` is documented as a per-session value repeated identically on
+  each of those rows, so this probe takes `MAX(open_transaction_count)` per session
+  rather than joining directly, which would otherwise emit duplicate idle-blocker facts
+  for one MARS session.
 - `sys.database_query_store_options`'s documented, authoritative signal for whether
   Query Store is enabled is `actual_state`/`actual_state_desc`. Microsoft's own
   documentation does not state that this view returns zero rows when Query Store was

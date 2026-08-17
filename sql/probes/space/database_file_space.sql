@@ -4,9 +4,14 @@
 --   sys.dm_db_file_space_usage only tracks data/ROWS files, not the log).
 -- Connection scope: database (assumes the client opened a connection to the target database).
 -- Minimum platform: SQL Server 2016 (13.x).
--- Permission: SQL Server 2016 (13.x) through 2019 (15.x) require VIEW DATABASE STATE.
---   SQL Server 2022 (16.x) and later require VIEW DATABASE PERFORMANCE STATE for the DMV; querying
---   sys.database_files itself only requires ordinary access to the database.
+-- Permission: sys.dm_db_file_space_usage requires VIEW SERVER STATE (SQL Server 2016-2019 (13.x-
+--   15.x)) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022 (16.x)+) -- despite its per-database
+--   output, Microsoft documents this as a server-level, not database-level, permission. On Azure
+--   SQL Database Basic/S0/S1 and elastic pools, the equivalent server-level views require the
+--   server admin, Microsoft Entra admin account, or ##MS_ServerStateReader## server-role
+--   membership; on other Azure SQL Database service objectives, VIEW DATABASE STATE or
+--   ##MS_ServerStateReader## membership is sufficient. Querying sys.database_files itself only
+--   requires ordinary access to the database.
 -- Result contract: one row per file in the current database. All *_mb columns are computed from
 --   8-KiB pages (1 MiB = 128 pages); size/max_size/growth on sys.database_files are already
 --   expressed in 8-KiB pages by that catalog view's own definition.

@@ -7,8 +7,11 @@
 -- Permission: SQL Server 2016 (13.x) through 2019 (15.x) require VIEW DATABASE STATE.
 --   SQL Server 2022 (16.x) and later require VIEW DATABASE PERFORMANCE STATE (or VIEW DATABASE
 --   STATE, which still covers it).
--- Result contract: zero rows if Query Store was never enabled for this database, otherwise exactly
---   one row describing the current configuration.
+-- Result contract: Microsoft's documentation for sys.database_query_store_options does not specify
+--   row-count behavior when Query Store has never been enabled for the database, so row absence is
+--   not treated here as a documented signal. actual_state / actual_state_desc = 0 / 'OFF' is the
+--   reliable, documented indicator that Query Store is not currently capturing data; when a row is
+--   returned, trust actual_state_desc over the mere presence of the row.
 -- Relative cost: trivial.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;

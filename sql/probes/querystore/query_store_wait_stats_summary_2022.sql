@@ -23,7 +23,8 @@
 --   exec_agg is grouped by (plan_id, runtime_stats_interval_id, execution_type, replica_group_id) and
 --   joined on all four keys -- grouping/joining without replica_group_id would sum execution counts
 --   across every replica into one total and apply that inflated total to each replica's wait row.
--- Relative cost: medium; bounded by the @StartTime/@EndTime window via the interval join.
+-- Relative cost: medium; each CTE now joins and filters by the @StartTime/@EndTime window itself,
+--   so aggregation never touches rows outside the requested interval.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
 SET LOCK_TIMEOUT 5000;
@@ -41,6 +42,10 @@ WITH wait_agg AS (
         MIN(ws.min_query_wait_time_ms)   AS min_query_wait_time_ms,
         MAX(ws.max_query_wait_time_ms)   AS max_query_wait_time_ms
     FROM sys.query_store_wait_stats AS ws
+    JOIN sys.query_store_runtime_stats_interval AS rsi
+        ON rsi.runtime_stats_interval_id = ws.runtime_stats_interval_id
+    WHERE rsi.start_time >= @StartTime
+      AND rsi.start_time < @EndTime
     GROUP BY
         ws.plan_id, ws.runtime_stats_interval_id, ws.execution_type,
         ws.execution_type_desc, ws.wait_category, ws.wait_category_desc, ws.replica_group_id
@@ -53,6 +58,10 @@ exec_agg AS (
         rs.replica_group_id,
         SUM(rs.count_executions) AS total_count_executions
     FROM sys.query_store_runtime_stats AS rs
+    JOIN sys.query_store_runtime_stats_interval AS rsi
+        ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
+    WHERE rsi.start_time >= @StartTime
+      AND rsi.start_time < @EndTime
     GROUP BY rs.plan_id, rs.runtime_stats_interval_id, rs.execution_type, rs.replica_group_id
 )
 SELECT
@@ -77,6 +86,4 @@ LEFT JOIN exec_agg AS ea
     ON ea.plan_id = wa.plan_id
    AND ea.runtime_stats_interval_id = wa.runtime_stats_interval_id
    AND ea.execution_type = wa.execution_type
-   AND ea.replica_group_id = wa.replica_group_id
-WHERE rsi.start_time >= @StartTime
-  AND rsi.start_time < @EndTime;
+   AND ea.replica_group_id = wa.replica_group_id;

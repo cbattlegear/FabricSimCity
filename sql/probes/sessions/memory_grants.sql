@@ -12,7 +12,13 @@
 --   DATABASE STATE in the database (scheduler_id, wait_order, pool_id, group_id are filtered to
 --   NULL there to avoid exposing cross-tenant placement information).
 -- Result contract: zero or more rows, one per (session_id, request_id) with a memory grant request.
---   Memory columns are KiB. grant_time/wait_time_ms are NULL until the grant is actually issued.
+--   Memory columns are KiB. grant_time IS NULL is the authoritative "still waiting for a grant"
+--   signal (Microsoft documents grant_time as "NULL if memory is not granted yet"); a non-NULL
+--   grant_time means the grant has been issued. wait_time_ms has the OPPOSITE null-timing from
+--   grant_time: Microsoft documents it as "NULL if the memory is already granted", i.e. it is
+--   populated only WHILE the request is waiting and reads NULL once granted -- do not read the two
+--   columns as sharing one "NULL until granted" story; grant_time flips from NULL to non-NULL at
+--   grant time, wait_time_ms flips from non-NULL to NULL at that same moment.
 -- Relative cost: low; in-memory query-execution state, no plan-cache scan.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;

@@ -7,11 +7,20 @@
 --   whichever database is current, so it must be run while connected to tempdb to get tempdb's
 --   breakdown; sys.dm_db_session_space_usage and sys.dm_db_task_space_usage report only tempdb
 --   allocations regardless of the current database, but are grouped here with the tempdb-context
---   requirement for a single, unambiguous connection-scope contract.
+--   requirement for a single, unambiguous connection-scope contract. Microsoft documents that a
+--   T-SQL USE statement cannot be used to change database context on Azure SQL Database -- the
+--   client must instead "create a new connection to that database" -- which is exactly the
+--   fresh-connection-from-the-pool pattern this probe requires; see the differences page cited in
+--   sql/README.md. Each Azure SQL Database has its own private, per-database tempdb, so this
+--   pattern works there the same as on SQL Server/Managed Instance.
 -- Minimum platform: SQL Server 2016 (13.x).
--- Permission: SQL Server 2019 (15.x) and earlier require VIEW SERVER STATE (or, on Azure SQL
---   Database, VIEW DATABASE STATE in tempdb). SQL Server 2022 (16.x) and later require VIEW SERVER
---   PERFORMANCE STATE.
+-- Permission: sys.dm_db_file_space_usage / sys.dm_db_session_space_usage / sys.dm_db_task_space_usage
+--   on SQL Server/Managed Instance require VIEW SERVER STATE (SQL Server 2016-2019 (13.x-15.x)) or
+--   VIEW SERVER PERFORMANCE STATE (SQL Server 2022 (16.x)+). On Azure SQL Database Basic/S0/S1 and
+--   elastic pools, the equivalent server-level views require the server admin, Microsoft Entra
+--   admin account, or ##MS_ServerStateReader## server-role membership; on other Azure SQL Database
+--   service objectives, VIEW DATABASE STATE (in tempdb) or ##MS_ServerStateReader## membership is
+--   sufficient.
 -- Parameters:
 --   @IncludeSystemSessions (bit, optional, default 0) -- when 0, session_id <= 50 (system
 --     sessions) are excluded from the session/task result sets.

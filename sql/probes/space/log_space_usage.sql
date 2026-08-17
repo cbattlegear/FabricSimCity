@@ -2,8 +2,13 @@
 -- Purpose: Transaction log size and utilization for the current database.
 -- Connection scope: database (assumes the client opened a connection to the target database).
 -- Minimum platform: SQL Server 2016 (13.x).
--- Permission: SQL Server 2016 (13.x) through 2019 (15.x) require VIEW DATABASE STATE.
---   SQL Server 2022 (16.x) and later require VIEW DATABASE PERFORMANCE STATE.
+-- Permission: sys.dm_db_log_space_usage requires VIEW SERVER STATE (SQL Server 2016-2019 (13.x-
+--   15.x)) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022 (16.x)+) -- despite its per-database
+--   output, Microsoft documents this as a server-level, not database-level, permission. On Azure
+--   SQL Database Basic/S0/S1 and elastic pools, the equivalent server-level views require the
+--   server admin, Microsoft Entra admin account, or ##MS_ServerStateReader## server-role
+--   membership; on other Azure SQL Database service objectives, VIEW DATABASE STATE or
+--   ##MS_ServerStateReader## membership is sufficient.
 -- Result contract: exactly one row for the current database. Sizes are converted from bytes to
 --   MiB; used_log_space_in_percent is already a 0-100 percentage as reported by the engine and is
 --   relative to total_log_size_in_bytes, not to any configured log growth limit.

@@ -23,7 +23,8 @@
 --   total_query_wait_time_ms and count_executions are both bigint; weighted_avg_query_wait_time_ms_per_execution
 --   explicitly CASTs the numerator to decimal(19,4) before dividing so the result is never silently
 --   truncated to an integer by T-SQL's bigint/bigint division rule.
--- Relative cost: medium; bounded by the @StartTime/@EndTime window via the interval join.
+-- Relative cost: medium; each CTE now joins and filters by the @StartTime/@EndTime window itself,
+--   so aggregation never touches rows outside the requested interval.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
 SET LOCK_TIMEOUT 5000;
@@ -40,6 +41,10 @@ WITH wait_agg AS (
         MIN(ws.min_query_wait_time_ms)   AS min_query_wait_time_ms,
         MAX(ws.max_query_wait_time_ms)   AS max_query_wait_time_ms
     FROM sys.query_store_wait_stats AS ws
+    JOIN sys.query_store_runtime_stats_interval AS rsi
+        ON rsi.runtime_stats_interval_id = ws.runtime_stats_interval_id
+    WHERE rsi.start_time >= @StartTime
+      AND rsi.start_time < @EndTime
     GROUP BY
         ws.plan_id, ws.runtime_stats_interval_id, ws.execution_type,
         ws.execution_type_desc, ws.wait_category, ws.wait_category_desc
@@ -51,6 +56,10 @@ exec_agg AS (
         rs.execution_type,
         SUM(rs.count_executions) AS total_count_executions
     FROM sys.query_store_runtime_stats AS rs
+    JOIN sys.query_store_runtime_stats_interval AS rsi
+        ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
+    WHERE rsi.start_time >= @StartTime
+      AND rsi.start_time < @EndTime
     GROUP BY rs.plan_id, rs.runtime_stats_interval_id, rs.execution_type
 )
 SELECT
@@ -73,6 +82,4 @@ JOIN sys.query_store_runtime_stats_interval AS rsi
 LEFT JOIN exec_agg AS ea
     ON ea.plan_id = wa.plan_id
    AND ea.runtime_stats_interval_id = wa.runtime_stats_interval_id
-   AND ea.execution_type = wa.execution_type
-WHERE rsi.start_time >= @StartTime
-  AND rsi.start_time < @EndTime;
+   AND ea.execution_type = wa.execution_type;

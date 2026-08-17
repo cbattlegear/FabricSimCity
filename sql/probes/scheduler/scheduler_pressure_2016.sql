@@ -1,10 +1,14 @@
--- Probe: scheduler.pressure
+-- Probe: scheduler.pressure_2016
 -- Purpose: Per-scheduler CPU/runnable-queue pressure signals, for detecting CPU scheduling
---   bottlenecks (as distinct from lock/latch/IO waits).
+--   bottlenecks (as distinct from lock/latch/IO waits). Base column set only.
 -- Connection scope: server (instance-wide).
--- Minimum platform: SQL Server 2016 (13.x) for total_cpu_usage_ms/total_scheduler_delay_ms; base
---   columns are stable back to SQL Server 2008 (10.0.x). ideal_workers_limit requires SQL Server
---   2019 (15.x)+ and reads NULL on 2016 (13.x)/2017 (14.x).
+-- Minimum platform: SQL Server 2016 (13.x) through 2018 (14.x) for this exact column set;
+--   total_cpu_usage_ms/total_scheduler_delay_ms are stable back to SQL Server 2016 (13.x), and the
+--   remaining base columns are stable back to SQL Server 2008 (10.0.x). This file deliberately omits
+--   ideal_workers_limit, which was added in SQL Server 2019 (15.x): selecting a column that does not
+--   yet exist on the connected engine raises "Invalid column name", it does not read back as NULL.
+--   Use scheduler_pressure_2019.sql on SQL Server 2019 (15.x)+ / Azure SQL Database to also collect
+--   ideal_workers_limit.
 -- Permission: On SQL Server / SQL Managed Instance, requires VIEW SERVER STATE (SQL Server 2019
 --   (15.x) and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022 (16.x)+). On Azure SQL
 --   Database Basic/S0/S1 and elastic pools, requires the server admin, Microsoft Entra admin
@@ -40,7 +44,6 @@ SELECT
     sch.context_switches_count,
     sch.preemptive_switches_count,
     sch.total_cpu_usage_ms,        -- SQL Server 2016 (13.x)+, cumulative since engine start
-    sch.total_scheduler_delay_ms,  -- SQL Server 2016 (13.x)+, cumulative since engine start
-    sch.ideal_workers_limit        -- SQL Server 2019 (15.x)+; NULL on older engines
+    sch.total_scheduler_delay_ms   -- SQL Server 2016 (13.x)+, cumulative since engine start
 FROM sys.dm_os_schedulers AS sch
 WHERE sch.status = 'VISIBLE ONLINE';

@@ -12,7 +12,15 @@
 --   sys.dm_exec_requests where blocking_session_id is a real, non-zero session id (raw sentinel
 --   values such as -2/-3/-4/-5 are preserved, not filtered out). 'idle_open_transaction' rows come
 --   from sleeping user sessions that still hold at least one open transaction and therefore could
---   be blocking others without showing up as a request themselves.
+--   be blocking others without showing up as a request themselves; this is exactly one row per
+--   session_id even under MARS. sys.dm_tran_session_transactions can return MULTIPLE rows for the
+--   same session_id (one per active transaction on a multi-active-result-set/MARS connection, or
+--   when a session is enlisted in more than one transaction context); a naive join would emit
+--   duplicate idle_open_transaction facts for one session. This probe pre-aggregates that DMV to
+--   one row per session_id via MAX(open_transaction_count) before joining, because
+--   open_transaction_count is documented as the count of open transactions FOR THE SESSION and is
+--   reported identically on every row for that session -- MAX (not SUM) collapses the duplicates
+--   to that one true per-session count without inflating it.
 -- Relative cost: low; in-memory session/request/transaction state.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
@@ -50,7 +58,16 @@ SELECT
     NULL                        AS command,
     NULL                        AS database_id
 FROM sys.dm_exec_sessions AS s
-JOIN sys.dm_tran_session_transactions AS tst
+JOIN (
+    -- Pre-aggregate to one row per session_id: sys.dm_tran_session_transactions can return
+    -- multiple rows for the same session under MARS, and open_transaction_count is a per-session
+    -- value repeated on each of those rows, so MAX collapses duplicates without inflating the count.
+    SELECT
+        tst.session_id,
+        MAX(tst.open_transaction_count) AS open_transaction_count
+    FROM sys.dm_tran_session_transactions AS tst
+    GROUP BY tst.session_id
+) AS tst
     ON tst.session_id = s.session_id
 WHERE s.is_user_process = 1
   AND s.status = 'sleeping'

@@ -14,12 +14,16 @@
 --   ##MS_ServerStateReader## / the VIEW DATABASE PERFORMANCE STATE permission on SQL Server 2022
 --   (16.x)-equivalent Azure SQL Database.
 -- Result contract: zero or more rows, one per (object_id, index_id) that has been touched by a
---   plan since the last engine restart. An index with NO row here has not been used at all since
---   startup -- it does not mean the index has zero rows or is otherwise empty. All counters are
---   cumulative since the last engine restart or the index's last rebuild/creation, whichever is
---   more recent, and are reset by either event; they must be delta'd across polls only within a
---   single uptime period. This DMV excludes memory-optimized and spatial indexes (see
---   sys.dm_db_xtp_index_stats for memory-optimized index usage).
+--   plan since the counters last reset. An index with NO row here has not been used at all since
+--   that reset -- it does not mean the index has zero rows or is otherwise empty. Microsoft
+--   documents the counters as reset ("initialized to empty") only in two cases: (1) whenever the
+--   Database Engine (re)starts, or (2) whenever the database is detached or shut down (for example
+--   because AUTO_CLOSE is ON) -- and in case (2) all rows for that database are removed entirely,
+--   not merely zeroed. No official documentation states that rebuilding or recreating an index
+--   resets its counters; do not assume a rebuild clears this history. Delta calculations must
+--   detect and discard a reset across engine restarts/AUTO_CLOSE cycles the same way other
+--   cumulative-since-restart probes in this catalog do. This DMV excludes memory-optimized and
+--   spatial indexes (see sys.dm_db_xtp_index_stats for memory-optimized index usage).
 -- Relative cost: trivial-to-low, bounded to the current database.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;

@@ -157,6 +157,41 @@ describe('sqlGuard: findForbiddenTokens', () => {
     const sql = '-- DROP TABLE would be forbidden if uncommented\nSELECT 1';
     assert.deepEqual(findForbiddenTokens(sql), []);
   });
+
+  test('flags SELECT ... INTO #temp FROM ... (creates a table)', () => {
+    const hits = findForbiddenTokens('SELECT session_id, status INTO #snap FROM sys.dm_exec_sessions;');
+    assert.ok(hits.includes('SELECT INTO (creates a table)'));
+  });
+
+  test('flags SELECT ... INTO with no FROM clause at all', () => {
+    const hits = findForbiddenTokens('SELECT 1 AS x INTO #t;');
+    assert.ok(hits.includes('SELECT INTO (creates a table)'));
+  });
+
+  test('flags a later statement\'s SELECT ... INTO even after an earlier statement has its own FROM', () => {
+    const sql = 'SELECT a FROM t; SELECT b INTO x FROM y;';
+    const hits = findForbiddenTokens(sql);
+    assert.ok(
+      hits.includes('SELECT INTO (creates a table)'),
+      'an earlier, unrelated FROM must not hide a later SELECT ... INTO in the same file',
+    );
+  });
+
+  test('does not false-positive on an identifier merely containing "into" as a substring', () => {
+    const sql = `
+      SELECT session_id, migrated_into_pool, session_into_pool
+      FROM sys.dm_exec_sessions;
+    `;
+    assert.deepEqual(findForbiddenTokens(sql), []);
+  });
+
+  test('does not false-positive on an ordinary SELECT ... FROM with no INTO', () => {
+    const sql = `
+      SELECT s.session_id, s.status
+      FROM sys.dm_exec_sessions AS s;
+    `;
+    assert.deepEqual(findForbiddenTokens(sql), []);
+  });
 });
 
 describe('sqlGuard: hasSelectResultPath', () => {
@@ -683,12 +718,26 @@ describe('regression: server.database_discovery on Azure SQL DB is nuanced, not 
     assert.match(probe.azureSqlDatabase.notes, /connection context|master/i);
   });
 
-  test('no probe in the manifest is flagged blanket-unsupported on Azure SQL Database', () => {
+  test('only the documented, platform-limited probes are flagged unsupported on Azure SQL Database', () => {
+    // Azure-unsupported is legitimate only for probes that call a DMV/catalog view Microsoft's own
+    // documentation does not list as available on Azure SQL Database (sys.master_files,
+    // sys.dm_os_host_info). Every other probe, including ones with narrower visibility or a
+    // different required permission, must remain supported: unsupported is not a catch-all escape
+    // hatch, and this test pins the exact allow-list so a future edit cannot silently widen it.
+    const allowedUnsupported = new Set(['io.file_io_stats', 'server.host_info']);
     const stillUnsupported = manifest.probes.filter((p) => p.azureSqlDatabase.unsupported === true);
+    for (const probe of stillUnsupported) {
+      assert.ok(
+        allowedUnsupported.has(probe.id),
+        `probe '${probe.id}' is flagged unsupported on Azure SQL Database but is not on the ` +
+          'documented allow-list (io.file_io_stats: sys.master_files; server.host_info: ' +
+          'sys.dm_os_host_info) -- verify against Microsoft Learn before adding it there',
+      );
+    }
     assert.deepEqual(
-      stillUnsupported.map((p) => p.id),
-      [],
-      'no probe should be blanket-unsupported on Azure SQL Database per the corrected review findings',
+      stillUnsupported.map((p) => p.id).sort(),
+      [...allowedUnsupported].sort(),
+      'the set of Azure-unsupported probes drifted from the documented allow-list',
     );
   });
 });
@@ -722,6 +771,281 @@ describe('regression: sys.database_query_store_options zero-row claim is not ove
 
   test('README treats actual_state/actual_state_desc as the authoritative enabled/disabled signal', () => {
     assert.match(readmeText, /actual_state_desc\s*=\s*'OFF'/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Regression tests for the third review round (11 additional defects).
+// ---------------------------------------------------------------------------
+
+describe('regression: scheduler.pressure is split into a 2016 base and a 2019+ variant', () => {
+  test('manifest declares scheduler.pressure_2016 and scheduler.pressure_2019 as version variants', () => {
+    for (const id of ['scheduler.pressure_2016', 'scheduler.pressure_2019']) {
+      const probe = probeById(id);
+      assert.equal(probe.versionVariantOf, 'scheduler.pressure', `probe '${id}'`);
+    }
+  });
+
+  test('the 2016 variant never selects ideal_workers_limit (SQL Server 2019+ only column)', () => {
+    const probe = probeById('scheduler.pressure_2016');
+    const source = readProbeSource(probe);
+    assert.doesNotMatch(
+      stripSqlComments(source),
+      /ideal_workers_limit/i,
+      'scheduler.pressure_2016 must not select ideal_workers_limit: that column does not exist ' +
+        'before SQL Server 2019 and raises Invalid column name, not NULL',
+    );
+  });
+
+  test('the 2019 variant selects ideal_workers_limit', () => {
+    const probe = probeById('scheduler.pressure_2019');
+    const source = readProbeSource(probe);
+    assert.match(stripSqlComments(source), /sch\.ideal_workers_limit/i);
+  });
+});
+
+describe('regression: Azure SQL Database platform-availability corrections', () => {
+  test('server.identity no longer joins sys.dm_os_host_info and remains Azure-supported', () => {
+    const probe = probeById('server.identity');
+    const source = readProbeSource(probe);
+    assert.doesNotMatch(
+      stripSqlComments(source),
+      /dm_os_host_info/i,
+      'server.identity must not depend on sys.dm_os_host_info: that DMV is not available on ' +
+        'Azure SQL Database and would break this otherwise cross-platform probe',
+    );
+    assert.equal(probe.azureSqlDatabase.unsupported, false);
+  });
+
+  test('server.host_info exists, carries sys.dm_os_host_info, and is flagged Azure-unsupported', () => {
+    const probe = probeById('server.host_info');
+    const source = readProbeSource(probe);
+    assert.match(stripSqlComments(source), /dm_os_host_info/i);
+    assert.equal(probe.azureSqlDatabase.unsupported, true);
+    assert.match(probe.azureSqlDatabase.notes, /dm_os_host_info/i);
+  });
+
+  test('io.file_io_stats is flagged Azure-unsupported because it joins sys.master_files', () => {
+    const probe = probeById('io.file_io_stats');
+    const source = readProbeSource(probe);
+    assert.match(stripSqlComments(source), /sys\.master_files/i);
+    assert.equal(probe.azureSqlDatabase.unsupported, true);
+    assert.match(probe.azureSqlDatabase.notes, /sys\.master_files/i);
+  });
+
+  test('io.file_io_stats_current_db is the Azure-safe variant, bounded to DB_ID() and sys.database_files', () => {
+    const probe = probeById('io.file_io_stats_current_db');
+    const source = readProbeSource(probe);
+    const stripped = stripSqlComments(source);
+    assert.match(stripped, /dm_io_virtual_file_stats\(\s*DB_ID\(\)/i);
+    assert.match(stripped, /sys\.database_files/i);
+    assert.doesNotMatch(stripped, /sys\.master_files/i);
+    assert.equal(probe.azureSqlDatabase.unsupported, false);
+  });
+
+  test('README no longer claims every probe is blanket-supported on Azure SQL Database', () => {
+    assert.doesNotMatch(
+      readmeText,
+      /No probe in this catalog is flagged blanket-`unsupported`/,
+      'README must acknowledge io.file_io_stats and server.host_info as legitimately unsupported',
+    );
+    assert.match(readmeText, /io\.file_io_stats.*NOT SUPPORTED on Azure SQL Database/is);
+    assert.match(readmeText, /server\.host_info.*NOT SUPPORTED on Azure SQL Database/is);
+  });
+});
+
+describe('regression: sys.dm_db_file_space_usage / sys.dm_db_log_space_usage require server-level permission', () => {
+  for (const id of ['space.database_file_space', 'space.log_space_usage']) {
+    test(`${id}: manifest requires VIEW SERVER STATE / VIEW SERVER PERFORMANCE STATE, not VIEW DATABASE (PERFORMANCE) STATE`, () => {
+      const probe = probeById(id);
+      assert.match(probe.requiredPermission, /VIEW SERVER STATE/);
+      assert.match(probe.requiredPermission, /VIEW SERVER PERFORMANCE STATE/);
+      assert.doesNotMatch(probe.requiredPermission, /VIEW DATABASE PERFORMANCE STATE/);
+    });
+
+    test(`${id}: probe file header requires VIEW SERVER STATE / VIEW SERVER PERFORMANCE STATE`, () => {
+      const probe = probeById(id);
+      const header = readProbeSource(probe).slice(0, 2000);
+      assert.match(header, /VIEW SERVER STATE/);
+      assert.match(header, /VIEW SERVER PERFORMANCE STATE/);
+    });
+  }
+
+  test('README permission table requires VIEW SERVER STATE for sys.dm_db_file_space_usage/sys.dm_db_log_space_usage', () => {
+    assert.doesNotMatch(
+      readmeText,
+      /\|\s*`sys\.dm_db_file_space_usage`,\s*`sys\.dm_db_log_space_usage`\s*\|\s*`VIEW DATABASE STATE`/,
+      'the old, incorrect VIEW DATABASE STATE row must not remain',
+    );
+    assert.match(
+      readmeText,
+      /sys\.dm_db_file_space_usage.*sys\.dm_db_log_space_usage.*VIEW SERVER STATE.*VIEW SERVER PERFORMANCE STATE/is,
+    );
+  });
+});
+
+describe('regression: Query Store options zero-row claim removed from probe files and manifest', () => {
+  for (const id of ['querystore.options_2016', 'querystore.options_2019']) {
+    test(`${id}: probe file no longer claims zero rows means Query Store was never enabled`, () => {
+      const probe = probeById(id);
+      const source = readProbeSource(probe);
+      assert.doesNotMatch(source, /zero rows if Query Store was never enabled/i);
+      assert.match(source, /actual_state/i);
+    });
+
+    test(`${id}: manifest resultContract no longer claims zero rows means Query Store was never enabled`, () => {
+      const probe = probeById(id);
+      assert.doesNotMatch(probe.resultContract, /zero rows if Query Store was never enabled/i);
+      assert.match(probe.resultContract, /actual_state/i);
+    });
+  }
+});
+
+describe('regression: sessions.memory_grants NULL contract for grant_time vs. wait_time_ms', () => {
+  test('probe header documents grant_time IS NULL as the waiting signal, not the wait_time_ms pairing', () => {
+    const probe = probeById('sessions.memory_grants');
+    const source = readProbeSource(probe);
+    assert.match(source, /grant_time IS NULL/i);
+    assert.doesNotMatch(
+      source,
+      /grant_time\/wait_time_ms are NULL until the grant is actually issued/i,
+      'the old, incorrect claim that both columns share one NULL-until-granted story must not remain',
+    );
+  });
+
+  test('probe header documents wait_time_ms as NULL once granted (the opposite timing of grant_time)', () => {
+    const probe = probeById('sessions.memory_grants');
+    const source = readProbeSource(probe);
+    assert.match(source, /wait_time_ms.*NULL if the memory is already granted|NULL.*once granted/is);
+  });
+
+  test('manifest resultContract states the grant_time / wait_time_ms inverse-null relationship', () => {
+    const probe = probeById('sessions.memory_grants');
+    assert.match(probe.resultContract, /grant_time IS NULL/i);
+    assert.match(probe.resultContract, /inverse/i);
+  });
+});
+
+describe('regression: sessions.blocking_inputs deduplicates idle-transaction facts under MARS', () => {
+  test('probe file aggregates sys.dm_tran_session_transactions to one row per session_id before joining', () => {
+    const probe = probeById('sessions.blocking_inputs');
+    const source = readProbeSource(probe);
+    const stripped = stripSqlComments(source);
+    assert.match(
+      stripped,
+      /MAX\(\s*tst\.open_transaction_count\s*\)[\s\S]*?GROUP BY\s+tst\.session_id/i,
+      'must pre-aggregate sys.dm_tran_session_transactions with MAX(open_transaction_count) ' +
+        'GROUP BY session_id so a MARS session cannot emit more than one idle_open_transaction row',
+    );
+  });
+
+  test('manifest resultContract documents the MARS dedup', () => {
+    const probe = probeById('sessions.blocking_inputs');
+    assert.match(probe.resultContract, /MARS/i);
+  });
+});
+
+describe('regression: sample_ms is computer uptime, not Database Engine restart', () => {
+  for (const id of ['io.file_io_stats', 'io.file_io_stats_current_db']) {
+    test(`${id}: probe header attributes sample_ms to computer (OS) uptime, not engine restart`, () => {
+      const probe = probeById(id);
+      const source = readProbeSource(probe);
+      assert.match(source, /sample_ms.*(computer|OS).*start/is);
+      assert.match(source, /sqlserver_start_time/i);
+    });
+  }
+
+  test('README Timestamps section attributes sample_ms to computer uptime', () => {
+    assert.match(readmeText, /sample_ms.*computer \(operating system\) was started/is);
+    assert.doesNotMatch(
+      readmeText,
+      /sample_ms.*milliseconds since the Database Engine's last restart/is,
+      'the old, incorrect claim must not remain',
+    );
+  });
+
+  test('README Reset semantics section recommends sqlserver_start_time or counter regression, not sample_ms alone', () => {
+    assert.match(readmeText, /sqlserver_start_time.*not\s+`?sample_ms`?/is);
+  });
+});
+
+describe('regression: index.usage_summary reset semantics do not claim rebuild resets counters', () => {
+  test('probe file no longer claims a reset on index rebuild', () => {
+    const probe = probeById('index.usage_summary');
+    const source = readProbeSource(probe);
+    assert.doesNotMatch(
+      source,
+      /cumulative since the last engine restart or (the )?index('s)? (last )?rebuild/i,
+      'no official documentation attributes a counter reset to rebuilding an index',
+    );
+    assert.match(source, /detach(ed)? or (is )?shut down|AUTO_CLOSE/i);
+  });
+
+  test('manifest resultContract no longer claims a reset on index rebuild', () => {
+    const probe = probeById('index.usage_summary');
+    assert.doesNotMatch(
+      probe.resultContract,
+      /since the last engine restart or index rebuild/i,
+      'no official documentation attributes a counter reset to rebuilding an index',
+    );
+  });
+
+  test('README no longer attributes an index-usage-stats reset to rebuilding an index', () => {
+    assert.doesNotMatch(
+      readmeText,
+      /index's last rebuild\/creation, whichever is more recent/i,
+      'the old, unsupported rebuild-reset claim must not remain',
+    );
+    assert.doesNotMatch(
+      readmeText,
+      /has not been touched by\s*\n?\s*a compiled plan since the engine last restarted \(or since the index was last\s*\n?\s*rebuilt\/created\)/i,
+    );
+  });
+});
+
+describe('regression: Query Store wait-stats CTEs are bounded by @StartTime/@EndTime before aggregation', () => {
+  for (const id of ['querystore.wait_stats_summary_2017', 'querystore.wait_stats_summary_2022']) {
+    test(`${id}: wait_agg CTE joins the interval table and filters by the time window before GROUP BY`, () => {
+      const probe = probeById(id);
+      const source = readProbeSource(probe);
+      const stripped = stripSqlComments(source);
+      const waitAggMatch = stripped.match(/wait_agg AS \(([\s\S]+?)\)\s*,\s*exec_agg/i);
+      assert.ok(waitAggMatch, `${id}: expected a wait_agg CTE followed by exec_agg`);
+      assert.match(
+        waitAggMatch[1],
+        /JOIN\s+sys\.query_store_runtime_stats_interval[\s\S]*WHERE[\s\S]*@StartTime[\s\S]*@EndTime[\s\S]*GROUP BY/i,
+        `${id}: wait_agg must join sys.query_store_runtime_stats_interval and filter by ` +
+          '@StartTime/@EndTime BEFORE its own GROUP BY, so aggregation never touches rows ' +
+          'outside the requested window',
+      );
+    });
+
+    test(`${id}: exec_agg CTE joins the interval table and filters by the time window before GROUP BY`, () => {
+      const probe = probeById(id);
+      const source = readProbeSource(probe);
+      const stripped = stripSqlComments(source);
+      const execAggMatch = stripped.match(/exec_agg AS \(([\s\S]+?)\)\s*SELECT/i);
+      assert.ok(execAggMatch, `${id}: expected an exec_agg CTE followed by the final SELECT`);
+      assert.match(
+        execAggMatch[1],
+        /JOIN\s+sys\.query_store_runtime_stats_interval[\s\S]*WHERE[\s\S]*@StartTime[\s\S]*@EndTime[\s\S]*GROUP BY/i,
+        `${id}: exec_agg must join sys.query_store_runtime_stats_interval and filter by ` +
+          '@StartTime/@EndTime BEFORE its own GROUP BY',
+      );
+    });
+  }
+});
+
+describe('regression: read-only guard rejects SELECT ... INTO across the whole probe catalog', () => {
+  test('no probe file in sql/probes/ contains a SELECT ... INTO shape', () => {
+    for (const probe of manifest.probes) {
+      const source = readProbeSource(probe);
+      const hits = findForbiddenTokens(source);
+      assert.ok(
+        !hits.includes('SELECT INTO (creates a table)'),
+        `${probe.file} must not contain a SELECT ... INTO shape`,
+      );
+    }
   });
 });
 
