@@ -348,6 +348,43 @@ here ever runs), and no probe infers causality across databases; every result se
 scoped to the single connection's server or database context, and any cross-database
 correlation is the calling application's responsibility, not this catalog's.
 
+## Capability negotiation probes
+
+The `capability/` probe family exists to let a collector decide *what it can safely ask
+for* before running any bulk telemetry probe, instead of inferring support only from a
+failed request. Every probe in this family is small, single-purpose, and either metadata
+(catalog views) or a permission self-check (`HAS_PERMS_BY_NAME`) -- never bulk data.
+
+- **`capability.server_permission_check`** / **`capability.database_permission_check`** --
+  report whether the connection's own effective permission set includes a named
+  server-scoped or database-scoped permission (via `HAS_PERMS_BY_NAME`), so a missing
+  grant can be classified as `PermissionDenied` directly rather than only discovered when
+  a much larger probe throws. Both are required on Azure SQL Database, which enforces the
+  database-scoped permission in place of the server-scoped one for most session/wait DMVs
+  (see the permissions table above).
+- **`capability.query_store_plan_metadata`** -- confirms, by reading `sys.all_columns`
+  metadata rather than trusting `@@VERSION`/major version alone, whether the connected
+  engine build's Query Store catalog views carry the columns that Parameter Sensitive Plan
+  optimization (PSP), Optional Parameter Plan Optimization (OPPO), and
+  readable-secondary-replica Query Store reporting depend on
+  (`sys.query_store_plan.plan_type_desc`, `sys.query_store_runtime_stats.replica_group_id`
+  -- both SQL Server 2022 (16.x)+). `SqlSimCity.Collection`'s negotiator combines this
+  metadata confirmation with the database's own `compatibility_level`: PSP additionally
+  requires compatibility level 160+, OPPO additionally requires compatibility level 170+,
+  and neither compatibility level nor engine major version alone is sufficient by itself.
+- **`capability.azure_resource_governance`** -- Azure SQL Database's own tenant-scoped
+  vCore CPU limit and process memory limit, used in place of `server.identity`'s
+  host-level `sys.dm_os_sys_info` counters (which Microsoft documents as possibly
+  reflecting the underlying machine or elastic pool, not the tenant's own assigned
+  capacity). Azure SQL Database only; the negotiator must not run this against SQL Server
+  on-premises or Azure SQL Managed Instance.
+
+These four probes back `SqlSimCity.Collection`'s `ICapabilityNegotiator` (see the root
+[README](../README.md#capability-negotiation)): a source-neutral gating layer that turns
+platform identity, database compatibility level, and this exact metadata into an explicit
+`Supported`/`Unsupported`/`PermissionDenied`/`Unavailable`/`NotProbed`/`Preview` verdict per
+feature, never a Boolean or numeric zero standing in for "unknown."
+
 ## Sources
 
 - [sys.database_query_store_options (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-database-query-store-options-transact-sql)
@@ -371,3 +408,5 @@ correlation is the calling application's responsibility, not this catalog's.
 - [sys.dm_user_db_resource_governance (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-user-db-resource-governor-azure-sql-database)
 - [sys.dm_os_job_object (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-os-job-object-transact-sql)
 - [T-SQL differences between SQL Server and Azure SQL Database](https://learn.microsoft.com/en-us/azure/azure-sql/database/transact-sql-tsql-differences-sql-server)
+- [HAS_PERMS_BY_NAME (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-functions/has-perms-by-name-transact-sql)
+- [sys.all_columns (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-all-columns-transact-sql)

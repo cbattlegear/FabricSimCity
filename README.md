@@ -6,7 +6,7 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 
 ## What works
 
-- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/healthz`, `/readyz`, a minimal `/hubs/current-snapshot` SignalR seam, and the production Vite bundle.
+- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/capabilities`, `/healthz`, `/readyz`, a minimal `/hubs/current-snapshot` SignalR seam, and the production Vite bundle.
 - Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
@@ -29,9 +29,12 @@ src/SqlSimCity.Contracts  versioned transport records and evidence enums
 src/SqlSimCity.Domain     fixture source and source seam
 src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
 src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
+src/SqlSimCity.Collection SQL probe catalog loader and capability negotiation layer
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
+sql/                      versioned probe catalog (manifest.json + probes/*.sql)
+fixtures/                 deterministic JSON fixtures for the atlas and capabilities APIs
 web/                      strict TypeScript React shell and three.js scene
- tests/                    serialization, fixture, endpoint, storage, connection, and mapping tests
+ tests/                    serialization, fixture, endpoint, storage, connection, catalog, and negotiation tests
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
@@ -98,6 +101,76 @@ Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`
 - an `ISqlConnectionFactory` that builds every connection through `SqlConnectionStringBuilder` only (a password or Entra token is never concatenated into the connection string); retains SQL-login credentials, and Entra credentials plus their `AccessTokenCallback` delegate, for the lifetime of their pool — reusing the exact same callback delegate per stable security context, since `AccessTokenCallback` is itself part of SqlClient's connection pool key (see the [official documentation](https://learn.microsoft.com/sql/connect/ado-net/sql/azure-active-directory-authentication#using-accesstokencallback)) — and provides explicit per-profile invalidation after password, certificate, or client-secret rotation, clearing each credential's pool before releasing its material; and a secret-free `SafeConnectionSettings` DTO for authorized UI and protected storage. `SafeConnectionSettings` contains operationally sensitive target and identity metadata, so it must not be logged or exposed indiscriminately.
 
 See [SECURITY.md](SECURITY.md) for the Kerberos keytab/SPN/DNS/clock-sync and Entra endpoint/IMDS deployment requirements.
+
+## Capability negotiation
+
+`SqlSimCity.Collection` is an implementation-ready capability negotiation layer for a
+future SQL Server/Azure SQL collector. It is deliberately **not the full atlas
+collector**: it decides what a target can safely be asked for, not how to gather bulk
+telemetry from it.
+
+- **Versioned, embedded probe catalog.** `sql/manifest.json` and every `sql/probes/**/*.sql`
+  file are embedded resources in `SqlSimCity.Collection.dll`, so a published container image
+  cannot start with a missing or partial catalog. `ProbeCatalog.Load` validates the manifest
+  version, unique probe IDs and files, safe relative paths (no `..`, no absolute or
+  drive-rooted paths, forward slashes only), that every referenced file actually exists,
+  that declared parameters match exactly what each `.sql` file references, and that every
+  `connectionScope`/`cadenceClass`/`relativeCost`/`versionVariantOf` value is one this
+  loader documents. Any inconsistency throws `ProbeCatalogValidationException` before the
+  application becomes ready. The existing JS manifest guard (`npm test`) still runs in CI
+  as an independent, source-of-truth-adjacent check; the .NET loader never shells out to
+  Node at runtime.
+- **Canonical capability contracts** (`SqlSimCity.Contracts.V1`) give every fact -- engine
+  platform, product version, edition, per-database compatibility level, Query Store
+  desired/actual state, read-only reason, capture mode, size, server-vs-database
+  visibility, waits, live sessions, plans/text, Parameter Sensitive Plan (PSP), Optional
+  Parameter Plan Optimization (OPPO), readable-secondary Query Store, Azure resource
+  metrics, and a source timestamp -- one of six explicit states: `Supported`,
+  `Unsupported`, `PermissionDenied`, `Unavailable`, `NotProbed`, `Preview`. A value that
+  could not be determined is always one of these states, never a false Boolean or a
+  numeric zero standing in for "unknown."
+- **Source-neutral negotiation.** `ICapabilityNegotiator`/`IProbeExecutor` let the full
+  gating algorithm (`CapabilityNegotiator`) be unit-tested with no SQL Server at all,
+  against either a `FixtureProbeExecutor` (backed by `fixtures/v1/target-capabilities.json`
+  and `fixtures/v1/database-query-store.json`) or a real `SqlClientProbeExecutor`
+  (`ISqlConnectionFactory`, opened connections, static catalog SQL only, named parameters,
+  command timeout from the connection profile, cancellation, no mutation).
+- **Version-and-metadata-gated feature selection.** Major engine version only narrows
+  which probe candidates are even safe to attempt; the actual verdict always requires
+  runtime confirmation from `capability.query_store_plan_metadata` plus the database's own
+  compatibility level. PSP requires compatibility level 160+ and confirmed plan-variant
+  metadata; OPPO requires compatibility level 170+, a supported platform, and the same
+  metadata confirmation; readable-secondary Query Store stays `Preview` and is
+  platform-policy dependent. Azure SQL Database's database IDs are never treated as
+  server-global, and its server-visibility state is explicitly reported as
+  database-scoped, not server-scoped.
+- **Tight failure classification.** `SqlExceptionClassifier` distinguishes permission
+  denial, missing object/column, transient connection failure, timeout/cancellation, and
+  Query Store `OFF`/`READ_ONLY`/`ERROR` states from each other and from an unknown/unhandled
+  error; nothing is broad-caught into a false `Supported`. Public diagnostics preserve the
+  non-secret SQL error number and severity class but never server name, query text, or
+  credentials. An exception this classifier does not recognize propagates unhandled rather
+  than being silently swallowed into `Unavailable`.
+- **Least-privilege guidance, never execution.** `LeastPrivilegeGuidanceGenerator`
+  produces the exact `GRANT`/role-membership *text* an operator would run for an observed
+  target/version/capability combination (`VIEW SERVER/DATABASE STATE` on SQL Server 2019,
+  `VIEW SERVER/DATABASE PERFORMANCE STATE` on 2022+, the tiered Azure SQL Database roles
+  above) -- SQLSimCity never executes a grant itself. Every identifier is quoted through a
+  tested `QUOTENAME`-equivalent helper (`SqlIdentifierQuoting`) so a hostile principal name
+  cannot break out of its bracketed identifier.
+- **A deterministic fixture negotiator today.** `FixtureProbeExecutor` maps
+  `fixtures/v1/target-capabilities.json` and `fixtures/v1/database-query-store.json` into
+  the same canonical `TargetCapabilityProfileV1` a live `SqlClientProbeExecutor` will
+  eventually produce, so API and frontend work can consume the real contract before any
+  live SQL Server connection exists. `/api/v1/capabilities` (read-only, versioned,
+  `Cache-Control: no-store`) exposes exactly this: one negotiated profile per known fixture
+  target. There is no corresponding write/mutation endpoint.
+
+`SqlSimCity.Collection.Tests` covers catalog tampering (missing/duplicate/unsafe-path/
+parameter/undocumented-variant), the full platform/compatibility matrix across SQL Server
+2019/2022/2025 and Azure SQL Database/Managed Instance, PSP/OPPO/secondary-replica gating,
+every Query Store operational state, exception classification, cancellation, parameter
+binding, least-privilege script quoting, and fixture-to-contract mapping.
 
 ## Security and privacy
 

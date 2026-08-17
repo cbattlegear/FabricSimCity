@@ -63,4 +63,36 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
         Assert.Equal($"{{\"status\":\"{expected}\"}}", body);
         Assert.DoesNotContain("fixture-target", body, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task CapabilitiesEndpointReturnsVersionedProfilePerFixtureTargetAndSecurityHeaders()
+    {
+        using var response = await _client.GetAsync(new Uri("/api/v1/capabilities", UriKind.Relative));
+        var snapshot = await response.Content.ReadFromJsonAsync<CapabilitiesSnapshotV1>(JsonOptions);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(snapshot);
+        Assert.Equal("1", snapshot.SchemaVersion);
+        Assert.Equal(5, snapshot.Targets.Count);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Contains("object-src 'none'", response.Headers.GetValues("Content-Security-Policy").Single(),
+            StringComparison.Ordinal);
+
+        var managedInstance = snapshot.Targets.Single(t => t.TargetId == "azure-sql-managed-instance");
+        Assert.Equal(CapabilityState.Unsupported, managedInstance.OptionalParameterPlanOptimization.State);
+
+        foreach (var target in snapshot.Targets)
+        {
+            Assert.NotEmpty(target.TargetId);
+            Assert.NotEqual(default, target.SourceTimestamp);
+        }
+    }
+
+    [Fact]
+    public async Task CapabilitiesEndpointOnlySupportsReadOnlyGet()
+    {
+        using var postResponse = await _client.PostAsync(new Uri("/api/v1/capabilities", UriKind.Relative), content: null);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, postResponse.StatusCode);
+    }
 }

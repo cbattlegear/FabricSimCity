@@ -650,6 +650,88 @@
       "resultSets": 1,
       "resultContract": "Zero or more rows, one per (object_id, index_id, partition_number). Wait columns are milliseconds; count columns are raw counts. Counters exist only as long as the metadata-cache entry for the heap/B-tree does; they reset to zero on metadata (re)caching (e.g. restart or failover) and disappear when the object/index/partition is dropped or truncated, and certain other DDL can reset them to zero without a drop -- this is not simply 'since last restart or rebuild'.",
       "relativeCost": "medium"
+    },
+    {
+      "id": "capability.server_permission_check",
+      "title": "Server-scoped effective permission check",
+      "file": "probes/capability/server_permission_check.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported, but Azure SQL Database enforces database-scoped VIEW DATABASE STATE in place of most server-scoped permissions; the negotiator must additionally run capability.database_permission_check there rather than relying on this probe alone."
+      },
+      "requiredPermission": "HAS_PERMS_BY_NAME(): none (public). It reports only the caller's own effective permission and never another principal's.",
+      "cadenceClass": "on_demand",
+      "parameters": [
+        {
+          "name": "@Permission",
+          "sqlDbType": "NVarChar",
+          "required": true,
+          "description": "Server-scoped permission name to evaluate, e.g. 'VIEW SERVER STATE' or 'VIEW SERVER PERFORMANCE STATE'."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Exactly one row: has_permission is 1/0/NULL (NULL when the securable/permission combination cannot be evaluated on this platform).",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "capability.database_permission_check",
+      "title": "Database-scoped effective permission check",
+      "file": "probes/capability/database_permission_check.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; this is the database-scoped counterpart required on Azure SQL Database, where most session/wait DMVs require VIEW DATABASE STATE rather than VIEW SERVER STATE."
+      },
+      "requiredPermission": "HAS_PERMS_BY_NAME(): none (public). It reports only the caller's own effective permission and never another principal's.",
+      "cadenceClass": "on_demand",
+      "parameters": [
+        {
+          "name": "@Permission",
+          "sqlDbType": "NVarChar",
+          "required": true,
+          "description": "Database-scoped permission name to evaluate, e.g. 'VIEW DATABASE STATE' or 'VIEW DATABASE PERFORMANCE STATE'."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Exactly one row: has_permission is 1/0/NULL (NULL when the securable/permission combination cannot be evaluated on this platform), always evaluated against the connection's own current database.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "capability.query_store_plan_metadata",
+      "title": "Query Store plan/runtime-stats catalog metadata for PSP/OPPO/secondary-replica detection",
+      "file": "probes/capability/query_store_plan_metadata.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; Azure SQL Database always runs a current engine, so both plan_type_desc and replica_group_id are present there."
+      },
+      "requiredPermission": "sys.all_columns / OBJECT_ID(): none (public). Reads catalog metadata only; no Query Store data rows are read.",
+      "cadenceClass": "on_demand",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero to four rows, one per (view_name, column_name) pair present on this engine build. Row absence for a given column is the reliable signal that the column, and the feature it backs, does not exist here; major version alone is never trusted for this.",
+      "relativeCost": "trivial"
+    },
+    {
+      "id": "capability.azure_resource_governance",
+      "title": "Azure SQL Database tenant CPU/memory compute limits",
+      "file": "probes/capability/azure_resource_governance.sql",
+      "connectionScope": "database",
+      "minPlatform": "Azure SQL Database",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; this probe exists specifically for Azure SQL Database and must not be run against SQL Server on-premises or Azure SQL Managed Instance, where sys.dm_user_db_resource_governance does not apply."
+      },
+      "requiredPermission": "sys.dm_user_db_resource_governance: VIEW DATABASE STATE (or VIEW DATABASE PERFORMANCE STATE) on Azure SQL Database. sys.dm_os_job_object: none additional beyond database connectivity there.",
+      "cadenceClass": "on_demand",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Zero or one row: cpu_limit (NULL for DTU-based databases) and process_memory_limit_mb for the current tenant database.",
+      "relativeCost": "trivial"
     }
   ]
 }

@@ -15,6 +15,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton<IAtlasSnapshotSource, FixtureAtlasSnapshotSource>();
+builder.Services.AddSingleton<ICapabilitiesSource, FixtureCapabilitiesSource>();
 builder.Services.AddProtectedStorage(builder.Configuration);
 
 var app = builder.Build();
@@ -48,6 +49,11 @@ app.UseStaticFiles();
 app.MapGet("/healthz", () => Results.Ok(new { status = "healthy" }));
 app.MapGet("/readyz", () => Results.Ok(new { status = "ready" }));
 app.MapGet("/api/v1/atlas", (IAtlasSnapshotSource source, HttpContext context) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(source.GetCurrent());
+});
+app.MapGet("/api/v1/capabilities", (ICapabilitiesSource source, HttpContext context) =>
 {
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(source.GetCurrent());
