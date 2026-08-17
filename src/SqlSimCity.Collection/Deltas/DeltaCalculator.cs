@@ -35,11 +35,17 @@ public static class DeltaCalculator
     /// counter for this target/counter pair (starts at 0/1 depending on caller convention); this
     /// method returns the epoch id that should be stored going forward -- incremented exactly when
     /// it detects a reset.
+    /// <paramref name="forceReset"/> lets a caller pre-detect a reset across a *group* of related
+    /// counters (e.g. every metric of one file, or CPU and delay of one scheduler) and apply it
+    /// uniformly: without this, a sibling counter that happens not to individually regress after a
+    /// real engine restart would otherwise compute a fabricated cross-restart delta while its
+    /// siblings correctly reset (requirement 8).
     /// </summary>
     public static (CounterDeltaV1 Delta, long NextEpochId) Compute(
         CounterObservation? previous,
         CounterObservation current,
-        long currentEpochId)
+        long currentEpochId,
+        bool forceReset = false)
     {
         if (previous is null)
         {
@@ -48,13 +54,17 @@ public static class DeltaCalculator
         }
 
         var prior = previous.Value;
-        var restarted = current.EpochMarkerTicks != prior.EpochMarkerTicks || current.Value < prior.Value;
-        if (restarted)
+        var individuallyRestarted = current.EpochMarkerTicks != prior.EpochMarkerTicks || current.Value < prior.Value;
+        if (individuallyRestarted || forceReset)
         {
             var reason = current.EpochMarkerTicks != prior.EpochMarkerTicks
                 ? "The engine's start time changed since the previous sample; this counter reset with the restart."
-                : "This counter read lower than the previous sample despite no observed engine restart; " +
-                  "treating it as a reset rather than reporting a fabricated negative rate.";
+                : individuallyRestarted
+                    ? "This counter read lower than the previous sample despite no observed engine restart; " +
+                      "treating it as a reset rather than reporting a fabricated negative rate."
+                    : "A related counter for the same entity detected an engine restart or counter reset this " +
+                      "cycle; every counter for that entity is reset together so this one cannot emit a " +
+                      "fabricated cross-restart delta.";
             return (new CounterDeltaV1(CounterEpochState.EpochReset, null, null, reason), currentEpochId + 1);
         }
 
