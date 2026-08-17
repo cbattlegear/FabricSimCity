@@ -118,4 +118,39 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
         Assert.DoesNotContain("connectionString", body, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
     }
+
+    [Fact]
+    public async Task QueryStoreHistoryIsPagedReadOnlyAndDisclosesSourceCaveat()
+    {
+        using var response = await _client.GetAsync(
+            new Uri("/api/v1/query-store/queries?metric=duration&pageSize=1", UriKind.Relative));
+        var body = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(body);
+        using var post = await _client.PostAsync(
+            new Uri("/api/v1/query-store/queries", UriKind.Relative), content: null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Single(document.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(JsonValueKind.String, document.RootElement.GetProperty("items")[0].GetProperty("executionCount").ValueKind);
+        Assert.Contains("no actual operator", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("query_plan", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
+    }
+
+    [Fact]
+    public async Task PlanApiReturnsNormalizedGraphAndStructuralComparisonOnly()
+    {
+        using var graphResponse = await _client.GetAsync(
+            new Uri("/api/v1/query-store/plans/sales%3A201", UriKind.Relative));
+        using var compareResponse = await _client.GetAsync(
+            new Uri("/api/v1/query-store/plans/compare?leftPlanId=sales%3A201&rightPlanId=sales%3A202", UriKind.Relative));
+        var graph = await graphResponse.Content.ReadAsStringAsync();
+        var comparison = await compareResponse.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, graphResponse.StatusCode);
+        Assert.Contains("\"nodes\"", graph, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShowPlanXML", graph, StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, compareResponse.StatusCode);
+        Assert.Contains("not a raw XML line diff", comparison, StringComparison.OrdinalIgnoreCase);
+    }
 }

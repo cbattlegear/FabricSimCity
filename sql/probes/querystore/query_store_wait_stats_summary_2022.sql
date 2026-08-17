@@ -44,7 +44,7 @@ WITH wait_agg AS (
     FROM sys.query_store_wait_stats AS ws
     JOIN sys.query_store_runtime_stats_interval AS rsi
         ON rsi.runtime_stats_interval_id = ws.runtime_stats_interval_id
-    WHERE rsi.start_time >= @StartTime
+    WHERE rsi.end_time > @StartTime
       AND rsi.start_time < @EndTime
     GROUP BY
         ws.plan_id, ws.runtime_stats_interval_id, ws.execution_type,
@@ -60,7 +60,7 @@ exec_agg AS (
     FROM sys.query_store_runtime_stats AS rs
     JOIN sys.query_store_runtime_stats_interval AS rsi
         ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
-    WHERE rsi.start_time >= @StartTime
+    WHERE rsi.end_time > @StartTime
       AND rsi.start_time < @EndTime
     GROUP BY rs.plan_id, rs.runtime_stats_interval_id, rs.execution_type, rs.replica_group_id
 )

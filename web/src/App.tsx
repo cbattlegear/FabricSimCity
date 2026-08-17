@@ -3,10 +3,11 @@ import { fetchAtlas } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { AtlasViewport } from './AtlasViewport'
 import LiveIncidents from './LiveIncidentsPanel'
+import { QueryStoreView } from './QueryStoreView'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
 
-type Tab = 'atlas' | 'live'
+type Tab = 'atlas' | 'queries' | 'live'
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AtlasSnapshot | null>(null)
@@ -69,8 +70,7 @@ export default function App() {
           </div>
         )}
       </header>
-
-      <div className="live-tabs" role="tablist" aria-label="View">
+      <div className="tabs" role="tablist" aria-label="Analysis views">
         <button
           type="button"
           role="tab"
@@ -78,7 +78,15 @@ export default function App() {
           aria-selected={tab === 'atlas'}
           aria-controls="panel-atlas"
           onClick={() => setTab('atlas')}
-        >Atlas</button>
+        >Server atlas</button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-queries"
+          aria-selected={tab === 'queries'}
+          aria-controls="panel-queries"
+          onClick={() => setTab('queries')}
+        >Query Store history</button>
         <button
           type="button"
           role="tab"
@@ -87,6 +95,10 @@ export default function App() {
           aria-controls="panel-live"
           onClick={() => setTab('live')}
         >Live incidents</button>
+      </div>
+
+      <div id="panel-queries" role="tabpanel" aria-labelledby="tab-queries" hidden={tab !== 'queries'}>
+        {tab === 'queries' && <QueryStoreView />}
       </div>
 
       <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>

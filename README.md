@@ -11,6 +11,7 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
 - A keyboard and screen-reader-friendly table contains the same records. Exact bytes and Query Store integer aggregates cross the wire as nonnegative decimal strings and are formatted with `BigInt`, avoiding JavaScript precision loss.
+- The Query Store history tab and read-only `/api/v1/query-store/*` endpoints expose paged query families, physical query/context splits, execution-type and replica-separated runtime, plan history, normalized compiled-plan trees, and structural plan comparison from sanitized fixtures.
 
 ## Accuracy boundary
 
@@ -38,6 +39,14 @@ web/                      strict TypeScript React shell and three.js scene
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
+
+## Query Store history
+
+Fixture mode includes deterministic, sanitized history covering active-interval duplicate aggregation, fractional count-weighted averages, regular/aborted/exception executions, replica groups, context splits, restricted text, force failures, PSP and SQL Server 2025 OPPO dispatcher/variant relationships. Dispatcher runtime is excluded while variant runtime retains its plan and rolls into the family.
+
+All list/detail routes are GET-only and return versioned contracts with decimal-string integers, explicit source/freshness/caveats, and opaque continuation tokens. Summary probes exclude SQL text and Showplan XML. The two single-record payload probes are on-demand only; `ProtectedQueryStoreRepository` writes those payloads only through `IProtectedRecordStore`. The Showplan parser prohibits DTDs and resolvers, enforces character/depth/node/text limits and cancellation, tolerates namespace version changes, and emits a normalized structural graph. Query Store supplies aggregate query runtime, not actual operator progress or actual operator metrics.
+
+Connected atlas mode never substitutes fixture Query Store history. Until the connected history source is explicitly enabled in a deployment, its history endpoint returns an explicit unavailable source with no numeric zero. The source-neutral incremental collector and protected sink seams are ready for that opt-in: per-database watermarks, overlap replay, retention/reset epochs, bounded pages/concurrency, cancellation, partial failures, and active-interval replacement are enforced independently of transport.
 
 ## Fixture and connected collection
 

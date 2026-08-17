@@ -20,7 +20,7 @@ SET LOCK_TIMEOUT 5000;
 SELECT TOP (@TopN)
     q.query_id,
     q.query_text_id,
-    qt.query_sql_text,
+    q.context_settings_id,
     q.object_id,
     q.query_hash,
     q.is_internal_query,
@@ -36,7 +36,5 @@ SELECT TOP (@TopN)
     q.avg_optimize_duration, -- microseconds
     q.avg_compile_memory_kb  -- KiB
 FROM sys.query_store_query AS q
-JOIN sys.query_store_query_text AS qt
-    ON qt.query_text_id = q.query_text_id
 WHERE q.last_execution_time >= @StartTime
 ORDER BY q.last_execution_time DESC;

@@ -1,5 +1,5 @@
 import * as signalR from '@microsoft/signalr'
-import type { AtlasSnapshot } from './contracts'
+import type { AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage } from './contracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import { assertAtlasSnapshot } from './atlas'
 import { assertLiveIncidentResponse, computeReconnectDelayMs } from './liveIncidents'
@@ -180,3 +180,27 @@ export function subscribeToLiveIncidents(
     })
   }
 }
+
+async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, { headers: { Accept: 'application/json' }, credentials: 'same-origin', signal })
+  if (!response.ok) throw new Error(`Query Store request failed with status ${response.status}`)
+  return response.json() as Promise<T>
+}
+
+export const fetchQueryFamilies = (metric: string, pageToken?: string | null, signal?: AbortSignal) =>
+  fetchJson<QueryFamilyPage>(
+    `/api/v1/query-store/queries?metric=${encodeURIComponent(metric)}&pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`,
+    signal,
+  )
+
+export const fetchQueryFamily = (familyId: string, signal?: AbortSignal) =>
+  fetchJson<QueryFamilyDetail>(`/api/v1/query-store/queries/${encodeURIComponent(familyId)}`, signal)
+
+export const fetchPlan = (planId: string, signal?: AbortSignal) =>
+  fetchJson<NormalizedShowplan>(`/api/v1/query-store/plans/${encodeURIComponent(planId)}`, signal)
+
+export const fetchPlanComparison = (left: string, right: string, signal?: AbortSignal) =>
+  fetchJson<PlanComparison>(
+    `/api/v1/query-store/plans/compare?leftPlanId=${encodeURIComponent(left)}&rightPlanId=${encodeURIComponent(right)}`,
+    signal,
+  )

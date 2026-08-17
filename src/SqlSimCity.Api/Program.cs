@@ -24,6 +24,14 @@ builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton(probeCatalog);
 builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
+if (AtlasConfiguration.IsConnected(builder.Configuration))
+{
+    builder.Services.AddSingleton<IQueryStoreHistorySource, UnavailableQueryStoreHistorySource>();
+}
+else
+{
+    builder.Services.AddSingleton<IQueryStoreHistorySource, FixtureQueryStoreHistorySource>();
+}
 builder.Services.AddProtectedStorage(builder.Configuration);
 
 // LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
@@ -115,6 +123,55 @@ app.MapGet("/api/v1/live", (LiveIncidentSamplerService sampler, HttpContext cont
 {
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(sampler.GetCurrentResponse());
+});
+
+var queryStore = app.MapGroup("/api/v1/query-store");
+queryStore.MapGet("/queries", (
+    IQueryStoreHistorySource source,
+    HttpContext context,
+    string? databaseId,
+    string? metric,
+    int? pageSize,
+    string? pageToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(source.GetQueries(databaseId, metric ?? "cpu", pageSize ?? 50, pageToken));
+});
+queryStore.MapGet("/queries/{familyId}", (
+    IQueryStoreHistorySource source, HttpContext context, string familyId) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return source.GetFamily(familyId) is { } family ? Results.Ok(family) : Results.NotFound();
+});
+queryStore.MapGet("/queries/{familyId}/timeline", (
+    IQueryStoreHistorySource source, HttpContext context, string familyId) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return source.GetFamily(familyId) is { } family
+        ? Results.Ok(new { schemaVersion = "1.0", items = family.Runtime })
+        : Results.NotFound();
+});
+queryStore.MapGet("/queries/{familyId}/plans", (
+    IQueryStoreHistorySource source, HttpContext context, string familyId) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return source.GetFamily(familyId) is { } family
+        ? Results.Ok(new { schemaVersion = "1.0", items = family.Plans })
+        : Results.NotFound();
+});
+queryStore.MapGet("/plans/{planId}", (
+    IQueryStoreHistorySource source, HttpContext context, string planId) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return source.GetPlan(planId) is { } plan ? Results.Ok(plan) : Results.NotFound();
+});
+queryStore.MapGet("/plans/compare", (
+    IQueryStoreHistorySource source, HttpContext context, string leftPlanId, string rightPlanId) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return source.ComparePlans(leftPlanId, rightPlanId) is { } comparison
+        ? Results.Ok(comparison)
+        : Results.NotFound();
 });
 app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 app.MapFallbackToFile("index.html");

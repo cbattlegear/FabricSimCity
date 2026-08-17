@@ -104,3 +104,101 @@ export interface AtlasSnapshot {
     reason: string
   } | null
 }
+
+export type QueryTextAvailability = 'Available' | 'Restricted' | 'Encrypted' | 'Missing'
+export type QueryStoreExecutionType = 'Regular' | 'Aborted' | 'Exception'
+
+export interface QueryStoreEvidence {
+  source: 'Fixture' | 'QueryStore'
+  status: DataStatus
+  observedAt: string | null
+  freshUntil: string | null
+  reason: string
+  caveat: string
+}
+
+export interface QueryFamilySummary {
+  familyId: string
+  databaseId: string
+  queryHash: string
+  normalizedTextFingerprint: string | null
+  text: { availability: QueryTextAvailability; normalizedText: string | null; reason: string }
+  physicalQueries: Array<{
+    queryId: string
+    queryTextId: string
+    context: { contextSettingsId: string; language: string | null; dateFormat: string | null; setOptions: string | null }
+  }>
+  executionCount: string
+  totalCpuMicroseconds: string
+  totalDurationMicroseconds: string
+  totalLogicalReads8KiBPages: string
+  totalWaitMilliseconds: string
+  firstObservedAt: string
+  lastObservedAt: string
+  evidence: QueryStoreEvidence
+}
+
+export interface RuntimeBucket {
+  planId: string
+  intervalId: string
+  intervalStart: string
+  intervalEnd: string
+  executionType: QueryStoreExecutionType
+  replicaGroupId: string
+  executionCount: string
+  averageDurationMicroseconds: number
+  averageCpuMicroseconds: number
+  averageLogicalReads8KiBPages: number
+  waitMilliseconds: Record<string, string>
+}
+
+export interface QueryPlanSummary {
+  planId: string
+  planType: 'Compiled' | 'Dispatcher' | 'Variant' | 'Unknown'
+  optimization: 'None' | 'ParameterSensitivePlan' | 'OptionalParameterPlanOptimization'
+  dispatcherPlanId: string | null
+  runtimeCounted: boolean
+  isForced: boolean
+  forceFailureCount: string
+  lastForceFailureReason: string | null
+  lastExecutionAt: string
+}
+
+export interface QueryFamilyDetail {
+  schemaVersion: string
+  family: QueryFamilySummary
+  plans: QueryPlanSummary[]
+  runtime: RuntimeBucket[]
+}
+
+export interface QueryFamilyPage {
+  schemaVersion: string
+  items: QueryFamilySummary[]
+  nextPageToken: string | null
+  pageSize: number
+  totalCount: string | null
+  evidence: QueryStoreEvidence | null
+}
+
+export interface NormalizedShowplan {
+  planId: string
+  structuralFingerprint: string
+  runtimeOverlayCaveat: string
+  nodes: Array<{
+    nodeId: number
+    parentNodeId: number | null
+    logicalOperation: string
+    physicalOperation: string
+    estimatedRows: number | null
+    parallel: boolean
+    objectReference: { database: string | null; schema: string | null; table: string | null; index: string | null } | null
+    predicate: string | null
+  }>
+}
+
+export interface PlanComparison {
+  structurallyEqual: boolean
+  changes: Array<{ path: string; changeKind: string; before: string | null; after: string | null }>
+  source: string
+  caveat: string
+}

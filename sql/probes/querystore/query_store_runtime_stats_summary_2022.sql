@@ -39,24 +39,24 @@ SELECT
     rs.execution_type_desc, -- 0=Regular,3=Aborted,4=Exception
     rs.replica_group_id,    -- SQL Server 2022 (16.x)+; foreign key to sys.query_store_replicas
     SUM(CONVERT(decimal(38,0), rs.count_executions))            AS total_count_executions,
-    SUM(CONVERT(decimal(38,0), rs.avg_duration) * CONVERT(decimal(38,0), rs.count_executions))
+    SUM(CONVERT(decimal(38,6), rs.avg_duration) * CONVERT(decimal(38,0), rs.count_executions))
         / NULLIF(SUM(CONVERT(decimal(38,0), rs.count_executions)), 0) AS weighted_avg_duration_us,
-    SUM(CONVERT(decimal(38,0), rs.avg_duration) * CONVERT(decimal(38,0), rs.count_executions)) AS total_duration_us,
+    SUM(CONVERT(decimal(38,6), rs.avg_duration) * CONVERT(decimal(38,0), rs.count_executions)) AS total_duration_us,
     MIN(rs.min_duration)                                        AS min_duration_us,
     MAX(rs.max_duration)                                        AS max_duration_us,
-    SUM(CONVERT(decimal(38,0), rs.avg_cpu_time) * CONVERT(decimal(38,0), rs.count_executions))
+    SUM(CONVERT(decimal(38,6), rs.avg_cpu_time) * CONVERT(decimal(38,0), rs.count_executions))
         / NULLIF(SUM(CONVERT(decimal(38,0), rs.count_executions)), 0) AS weighted_avg_cpu_time_us,
-    SUM(CONVERT(decimal(38,0), rs.avg_cpu_time) * CONVERT(decimal(38,0), rs.count_executions)) AS total_cpu_time_us,
-    SUM(CONVERT(decimal(38,0), rs.avg_logical_io_reads) * CONVERT(decimal(38,0), rs.count_executions))
+    SUM(CONVERT(decimal(38,6), rs.avg_cpu_time) * CONVERT(decimal(38,0), rs.count_executions)) AS total_cpu_time_us,
+    SUM(CONVERT(decimal(38,6), rs.avg_logical_io_reads) * CONVERT(decimal(38,0), rs.count_executions))
         / NULLIF(SUM(CONVERT(decimal(38,0), rs.count_executions)), 0) AS weighted_avg_logical_io_reads_pages,
-    SUM(CONVERT(decimal(38,0), rs.avg_logical_io_reads) * CONVERT(decimal(38,0), rs.count_executions)) AS total_logical_io_reads_pages,
+    SUM(CONVERT(decimal(38,6), rs.avg_logical_io_reads) * CONVERT(decimal(38,0), rs.count_executions)) AS total_logical_io_reads_pages,
     SUM(rs.avg_physical_io_reads * rs.count_executions)         AS total_physical_io_reads_pages,
     SUM(rs.avg_rowcount * rs.count_executions)                  AS total_rowcount,
     MAX(rs.last_execution_time)                                 AS last_execution_time
 FROM sys.query_store_runtime_stats AS rs
 JOIN sys.query_store_runtime_stats_interval AS rsi
     ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
-WHERE rsi.start_time >= @StartTime
+WHERE rsi.end_time > @StartTime
   AND rsi.start_time < @EndTime
 GROUP BY
     rs.plan_id,
