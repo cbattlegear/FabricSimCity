@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+**/TestResults/
+web/node_modules/
+web/dist/
+.vscode/
+.idea/
+*.user
+*.suo
+artifacts/

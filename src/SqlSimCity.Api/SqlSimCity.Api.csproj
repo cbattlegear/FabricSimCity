@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="..\SqlSimCity.Domain\SqlSimCity.Domain.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="Exists('..\..\web\dist')">
+    <Content Include="..\..\web\dist\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

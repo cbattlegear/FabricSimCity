@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+**/TestResults/
+web/node_modules/
+web/dist/
+.git/
+.vscode/
+.idea/
+artifacts/
