@@ -54,13 +54,30 @@ public static class ProtectedStorageServiceCollectionExtensions
             var keyRing = KeyRingLoader.Load(options.KeyFilePath);
             var timeProvider = sp.GetRequiredService<TimeProvider>();
             var retention = sp.GetRequiredService<RetentionOptions>();
-            return new SqliteProtectedRecordStore(
-                options.DataDirectory, options.DatabaseFileName, keyRing, retention, timeProvider,
-                options.MaxRecordKindLength, options.MaxPayloadBytes);
+            return CreateStore(options, keyRing, retention, timeProvider);
         });
         services.AddSingleton<IProtectedRecordStore>(sp => sp.GetRequiredService<SqliteProtectedRecordStore>());
         services.AddSingleton<IProtectedStorageInitializer>(sp => sp.GetRequiredService<SqliteProtectedRecordStore>());
 
         return services;
+    }
+
+    internal static SqliteProtectedRecordStore CreateStore(
+        ProtectedStorageOptions options,
+        KeyRing keyRing,
+        RetentionOptions retention,
+        TimeProvider timeProvider)
+    {
+        try
+        {
+            return new SqliteProtectedRecordStore(
+                options.DataDirectory!, options.DatabaseFileName, keyRing, retention, timeProvider,
+                options.MaxRecordKindLength, options.MaxPayloadBytes);
+        }
+        catch
+        {
+            keyRing.Dispose();
+            throw;
+        }
     }
 }

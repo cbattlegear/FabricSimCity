@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using SqlSimCity.Storage.Crypto;
 
 namespace SqlSimCity.Storage.Tests;
 
@@ -199,5 +200,25 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
         });
 
         Assert.Throws<KeyRingConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
+    }
+
+    [Fact]
+    public void FailedStoreConstructionDisposesLoadedKeyRing()
+    {
+        Directory.CreateDirectory(_directory);
+        var blockingFile = Path.Combine(_directory, "not-a-directory");
+        File.WriteAllText(blockingFile, "fixture");
+        var options = new ProtectedStorageOptions
+        {
+            Enabled = true,
+            DataDirectory = Path.Combine(blockingFile, "data"),
+        };
+        var sourceKey = KeyRingTestHelpers.NewKeyBytes();
+        using var keyRing = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = sourceKey });
+
+        Assert.ThrowsAny<IOException>(() =>
+            ProtectedStorageServiceCollectionExtensions.CreateStore(
+                options, keyRing, options.Retention, TimeProvider.System));
+        Assert.Throws<ObjectDisposedException>(() => keyRing.GetKey(1));
     }
 }
