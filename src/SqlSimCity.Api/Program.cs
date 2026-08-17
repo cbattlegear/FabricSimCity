@@ -3,7 +3,11 @@ using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
 using SqlSimCity.Domain;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    WebRootPath = WebRootResolver.Resolve(AppContext.BaseDirectory),
+});
 
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
@@ -41,3 +45,4 @@ app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 app.MapFallbackToFile("index.html");
 
 app.Run();
+

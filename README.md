@@ -60,7 +60,7 @@ npm ci
 npm run build
 Set-Location ..
 dotnet publish src\SqlSimCity.Api -c Release -o artifacts\publish
-dotnet artifacts\publish\SqlSimCity.Api.dll --urls http://127.0.0.1:8080
+dotnet C:\path\to\artifacts\publish\SqlSimCity.Api.dll --urls http://127.0.0.1:8080
 ```
 
 ## Container
@@ -95,3 +95,4 @@ docker build -t sqlsimcity:foundation .
 ## License
 
 Copyright 2026 SQLSimCity contributors. Licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
