@@ -6,7 +6,7 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 
 ## What works
 
-- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/atlas/status`, `/api/v1/capabilities`, health endpoints, a SignalR snapshot-notification seam, and the production Vite bundle.
+- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/atlas/status`, `/api/v1/capabilities`, `/api/v1/live`, health endpoints, a `/hubs/current-snapshot` SignalR hub, and the production Vite bundle.
 - Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
@@ -17,7 +17,7 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 The contract keeps three evidence classes separate:
 
 1. **Query Store aggregate history** describes a time window. It is not current execution activity. Duration is microseconds and logical reads are counts of 8-KiB pages.
-2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero.
+2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero. The live-incident sampler below is this class of evidence, taken on a bounded cadence, not a continuous trace: a request that starts and finishes between two samples never appears, and blocking that resolves between samples is invisible to it. See [Live incident sampling](#live-incident-sampling) for exactly what a cadence-based sample can and cannot show, and how it differs from Query Store's retained history.
 3. **Topology is inferred evidence.** Confirmed, probable, and unknown confidence carry rationale; the atlas is not claiming a complete dependency graph.
 
 There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. Connected mode executes only validated static SQL embedded in the application. It does not fetch plan XML or fabricate live traffic; live request activity is explicitly `NotProbed` until an `ILiveAtlasActivitySource` is supplied.
@@ -29,12 +29,12 @@ src/SqlSimCity.Contracts  versioned transport records and evidence enums
 src/SqlSimCity.Domain     fixture source and API source seam
 src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
 src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
-src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, and refresh coordinator
+src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, live-incident sampler, and refresh coordination
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 sql/                      versioned probe catalog (manifest.json + probes/*.sql)
-fixtures/                 deterministic JSON fixtures for the atlas and capabilities APIs
+fixtures/                 deterministic JSON fixtures for the atlas, capabilities, and live-incident APIs
 web/                      strict TypeScript React shell and three.js scene
- tests/                    serialization, fixture, endpoint, storage, connection, catalog, and negotiation tests
+ tests/                    serialization, fixture, endpoint, storage, connection, catalog, negotiation, and live-incident tests
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
@@ -181,16 +181,84 @@ parameter/undocumented-variant), the full platform/compatibility matrix across S
 every Query Store operational state, exception classification, cancellation, parameter
 binding, least-privilege script quoting, and fixture-to-contract mapping.
 
+## Live incident sampling
+
+`SqlSimCity.Collection`'s live-incident sampler is a second, independent evidence path from
+the capability negotiator above: it samples *current* activity — sessions, requests, blocking,
+memory grants, tempdb, file I/O, scheduler pressure, and log-space use — on a bounded cadence,
+rather than the Query Store aggregates negotiation decides how to request.
+
+- **What "sampled now" means, and what it is not.** Every live-incident snapshot carries its
+  own `sourceTimestamp` (when the target produced the data), `collectedAt` (when this process
+  observed it), and `freshUntil` (the cadence-derived staleness boundary), so a reader never
+  mistakes a sample for a live trace. A request, a lock wait, or a blocking chain that starts
+  and fully resolves *between* two samples is invisible to this path; short, fast queries are
+  the case most likely to be missed entirely. This is a materially different accuracy claim
+  from Query Store: Query Store retains and aggregates every execution across the whole
+  retention window, while polling only ever proves what was true at the instant of the last
+  sample. Neither the API nor the UI (`web/src/liveIncidents.ts`'s `POLLING_DISCLOSURE`)
+  describes this as complete query capture.
+- **Canonical, versioned contracts** (`LiveIncidentContractsV1` in
+  `src/SqlSimCity.Collection/LiveIncidents/`) cover sampled requests and per-task waits
+  (preserving `exec_context_id` so parallel workers are never collapsed onto their
+  coordinator's wait), a blocking graph with nodes/edges/roots/cycle state and the four
+  negative blocking-session sentinels (`-2` orphaned, `-3` deferred-recovery, `-4`
+  interleaved-checkpoint, `-5` untracked latch owner — `-5` is explicitly never described as a
+  blocking problem by itself), memory grants (`grant_time IS NULL` is the waiting state),
+  tempdb task/session/file use, cumulative file-I/O and scheduler counters expressed as a
+  delta against a same-epoch prior sample, log-space pressure, and explicit
+  `Unavailable`/`PermissionDenied`/`Timeout` reasons for anything a target does not expose.
+  Every bigint count or byte value crosses the wire as a decimal string, never a `number`, so
+  large counters survive JSON without silent precision loss.
+- **Cumulative counters are epoch-scoped, not free-running.** File I/O, scheduler, and log
+  counters only ever produce a rate across two samples of the same target *and* the same
+  epoch. A first sample, an engine restart/failover, or any observed counter regression starts
+  a new epoch and reports `FirstSample`/`EpochReset` explicitly instead of manufacturing a
+  negative or zero rate. `sample_ms` is the sampling process's own OS uptime, never the target
+  engine's uptime, and instantaneous gauges (scheduler queue depth, log-space percent) are
+  never treated as cumulative.
+- **Source-neutral collection.** `ILiveIncidentCollector`/`ILiveIncidentProbeExecutor` let the
+  blocking-graph reconstruction, delta math, and sampler cadence be fully unit-tested with no
+  SQL Server at all, against either the default `FixtureLiveIncidentCollector` (backed by
+  `fixtures/v1/live-cases.json`) or a real `SqlLiveIncidentProbeExecutor`
+  (`ISqlConnectionFactory`, static embedded probes, named parameters, bounded command timeouts,
+  and negotiated platform/capability scope). Azure SQL Database stays strictly
+  database-scoped; server-wide fields it cannot expose remain `Unavailable`, never zero.
+- **`LiveIncidentSampler`** runs on a configurable, bounded cadence (default 2-5 seconds), never
+  overlaps a cycle with the previous one still running, publishes one immutable latest snapshot
+  plus a monotonically increasing sequence number and missed/skipped-cycle counts, supports
+  pause/resume, and reconnects through a capped exponential backoff with deterministic jitter.
+  All of its cadence/backoff/shutdown behavior is driven by `TimeProvider`, so tests never
+  depend on wall-clock timing.
+- **API and UI.** `/api/v1/live` (`Cache-Control: no-store`) returns the current
+  `LiveIncidentResponseV1`; `/hubs/current-snapshot` pushes the same snapshot to connected
+  clients on every successful cycle, keeping only the single latest snapshot in memory (no
+  unbounded history). Both are read-only: there is no mutation endpoint anywhere in this path.
+  The React "Live Incidents" tab (`web/src/LiveIncidentsPanel.tsx`) is keyboard- and
+  screen-reader-accessible: freshness/collector state is a glyph plus text (never color alone),
+  motion respects `prefers-reduced-motion`, every parallel wait is listed individually, and
+  disappeared requests, sentinel blockers, and unavailable fields are called out explicitly
+  rather than silently omitted.
+
+`SqlSimCity.Collection.Tests`' live-incident suite covers blocking roots/chains/cycles/MARS
+dedup/sentinels, parallel-wait exposure, disappearing requests, memory-grant waiting state,
+first-sample/valid-delta/epoch-reset counter transitions, Azure scope, partial-permission and
+timeout handling, and cadence/no-overlap/pause/backoff/shutdown; `SqlSimCity.Api.Tests` covers
+the endpoint shape, exact-bigint serialization, GET-only enforcement, and the SignalR push/pull
+round-trip; `web/src/liveIncidents.test.ts` covers the same accessibility and disclosure
+guarantees on the frontend.
+
 ## Security and privacy
 
 SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. Fixture mode has no application network dependency after loading; connected mode contacts only its configured SQL target and explicit identity endpoints required by the selected authentication strategy.
 
-Collection is read-only and fails closed: unavailable secrets or identity providers never fall back to plaintext or anonymous access. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
+Atlas and live-incident collection are strictly read-only and fail closed: no probe or endpoint mutates the target, and unavailable secrets or identity providers never fall back to plaintext, anonymous access, or another authentication strategy. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
 
 ## Validation
 
 ```powershell
 dotnet test SqlSimCity.slnx
+node --test fixtures/v1/test/validate-fixtures.test.mjs
 Set-Location web
 npm test
 npm run typecheck

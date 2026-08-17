@@ -122,6 +122,6 @@ function formatBinary(value: bigint): string {
   return `${new Intl.NumberFormat('en-US').format(whole)}${fractionText} ${units[unitIndex]}`
 }
 
-function splitPascal(value: string): string {
+export function splitPascal(value: string): string {
   return value.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
 }

@@ -19,7 +19,12 @@ production connection strings, credentials, hosts, or customer data.
   Durations are microseconds, and the supplied weighted mean is derived from
   executions, not the mean of means.
 - `live-cases.json` models race-prone live DMV observations, wait task context,
-  blocking, plan availability, and Azure SQL Database scope.
+  blocking, plan availability, Azure SQL Database scope, memory grants
+  (including the `grant_time IS NULL` still-waiting state), tempdb file/
+  session/task usage, per-file cumulative I/O counters, per-scheduler
+  cumulative CPU/delay counters, transaction log space, and the server
+  identity fact (`sqlServerStartTimeUtc`) used as the counter-delta epoch
+  marker.
 - `cross-database-evidence.json` keeps confidence and rationale alongside each
   relationship instead of treating every inferred edge as fact.
 

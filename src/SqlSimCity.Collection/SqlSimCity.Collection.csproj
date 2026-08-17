@@ -13,6 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
     <ProjectReference Include="..\SqlSimCity.SqlServer\SqlSimCity.SqlServer.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Domain\SqlSimCity.Domain.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -38,6 +39,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="..\..\fixtures\v1\database-query-store.json">
       <LogicalName>fixtures/v1/database-query-store.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\fixtures\v1\live-cases.json">
+      <LogicalName>fixtures/v1/live-cases.json</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 

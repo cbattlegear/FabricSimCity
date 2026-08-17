@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
 using SqlSimCity.Collection.Atlas;
+using SqlSimCity.Collection.LiveIncidents;
 using SqlSimCity.Domain;
 using SqlSimCity.SqlServer;
 using SqlSimCity.SqlServer.Secrets;
@@ -56,6 +57,13 @@ else
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
 }
 
+// Default, no-credentials live-incident path (requirement 7): the fixture collector, never a real
+// SQL Server connection, backs /api/v1/live and the SignalR push until an operator opts a real
+// ILiveIncidentCollector in.
+builder.Services.AddSingleton<ILiveIncidentCollector, FixtureLiveIncidentCollector>();
+builder.Services.AddSingleton<LiveIncidentSamplerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
+
 var app = builder.Build();
 
 // Protected storage is opt-in and fails closed: when enabled, a missing/invalid
@@ -100,6 +108,11 @@ app.MapGet("/api/v1/capabilities", (ICapabilitiesSource source, HttpContext cont
 {
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(source.GetCurrent());
+});
+app.MapGet("/api/v1/live", (LiveIncidentSamplerService sampler, HttpContext context) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(sampler.GetCurrentResponse());
 });
 app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 app.MapFallbackToFile("index.html");

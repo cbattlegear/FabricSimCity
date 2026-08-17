@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchAtlas } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { AtlasViewport } from './AtlasViewport'
+import LiveIncidents from './LiveIncidentsPanel'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
+
+type Tab = 'atlas' | 'live'
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AtlasSnapshot | null>(null)
@@ -11,6 +14,7 @@ export default function App() {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [tab, setTab] = useState<Tab>('atlas')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -66,6 +70,30 @@ export default function App() {
         )}
       </header>
 
+      <div className="live-tabs" role="tablist" aria-label="View">
+        <button
+          type="button"
+          role="tab"
+          id="tab-atlas"
+          aria-selected={tab === 'atlas'}
+          aria-controls="panel-atlas"
+          onClick={() => setTab('atlas')}
+        >Atlas</button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-live"
+          aria-selected={tab === 'live'}
+          aria-controls="panel-live"
+          onClick={() => setTab('live')}
+        >Live incidents</button>
+      </div>
+
+      <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>
+        {tab === 'live' && <LiveIncidents />}
+      </div>
+
+      <div id="panel-atlas" role="tabpanel" aria-labelledby="tab-atlas" hidden={tab !== 'atlas'}>
       {error ? (
         <section className="error" role="alert">
           <h2>Atlas unavailable</h2>
@@ -176,6 +204,7 @@ export default function App() {
           </section>
         </>
       )}
+      </div>
     </main>
   )
 }

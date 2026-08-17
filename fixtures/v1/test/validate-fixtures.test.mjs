@@ -135,6 +135,23 @@ test('live cases separate disappearing requests, unavailable plans, parallel con
   assert.equal(live.azureSqlDatabaseScope.visibilityScope, 'current-database-only');
 });
 
+test('live cases carry memory grants, tempdb, file I/O, scheduler, and log-space samples', () => {
+  const waiting = live.memoryGrants.find((grant) => grant.grantTime === null);
+  assert.ok(waiting, 'at least one memory grant must model the still-waiting (grant_time IS NULL) state');
+  assert.ok(waiting.waitTimeMs > 0);
+  const granted = live.memoryGrants.find((grant) => grant.grantTime !== null);
+  assert.ok(granted.grantedMemoryKb > 0);
+  assert.equal(live.tempdbUsage.files.length > 0, true);
+  assert.equal(live.tempdbUsage.sessions.length > 0, true);
+  assert.equal(live.tempdbUsage.tasks.length > 0, true);
+  assert.ok(live.fileIo.every((file) => file.numOfBytesRead > 0 && file.sampleMs > 0));
+  assert.deepEqual(new Set(live.fileIo.map((file) => file.typeDesc)), new Set(['ROWS', 'LOG']));
+  assert.ok(live.schedulerPressure.length >= 2);
+  assert.ok(live.schedulerPressure.every((scheduler) => typeof scheduler.idealWorkersLimit === 'number'));
+  assert.ok(live.logSpace.usedLogSpacePercent > 0 && live.logSpace.usedLogSpacePercent < 100);
+  asTime(live.serverIdentity.sqlServerStartTimeUtc);
+});
+
 test('cross-database edges carry every confidence with rationale and match atlas edges', () => {
   const confidences = new Set(evidence.evidence.map((row) => row.confidence));
   assert.deepEqual(confidences, new Set(['confirmed', 'probable', 'unknown']));
