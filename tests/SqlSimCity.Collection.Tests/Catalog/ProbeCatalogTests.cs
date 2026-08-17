@@ -276,4 +276,40 @@ public class ProbeCatalogTests
         Assert.Contains("more than one probe", ex.Message, StringComparison.Ordinal);
         Assert.Contains("undocumented connectionScope", ex.Message, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("SELECT 1; DROP TABLE dbo.t;")]
+    [InlineData("SELECT 1; EXEC sp_executesql N'SELECT 2';")]
+    [InlineData("SELECT 1 INTO #copy FROM sys.objects;")]
+    [InlineData("DECLARE @x int; SELECT @x;")]
+    [InlineData("SET XACT_ABORT ON; SELECT 1;")]
+    public void LoadRejectsUnsafeStaticSql(string sql)
+    {
+        var probeJson = FakeProbeCatalogResourceSource.ValidProbeJson();
+        var source = new FakeProbeCatalogResourceSource()
+            .With("sql/manifest.json", FakeProbeCatalogResourceSource.BaseManifestWithProbes($"[{probeJson}]"))
+            .With("sql/probes/test/probe.sql", sql);
+
+        var ex = Assert.Throws<ProbeCatalogException>(() => ProbeCatalog.Load(source));
+
+        Assert.Contains("read-only SQL validation", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadAllowsDocumentedSafeSetsAndIgnoresMutationWordsInComments()
+    {
+        var probeJson = FakeProbeCatalogResourceSource.ValidProbeJson();
+        var source = new FakeProbeCatalogResourceSource()
+            .With("sql/manifest.json", FakeProbeCatalogResourceSource.BaseManifestWithProbes($"[{probeJson}]"))
+            .With("sql/probes/test/probe.sql", """
+                -- DROP TABLE dbo.t;
+                SET NOCOUNT ON;
+                SET DEADLOCK_PRIORITY LOW;
+                SET LOCK_TIMEOUT 5000;
+                WITH source AS (SELECT 1 AS value)
+                SELECT value FROM source;
+                """);
+
+        Assert.NotNull(ProbeCatalog.Load(source));
+    }
 }

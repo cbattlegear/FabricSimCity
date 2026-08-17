@@ -8,10 +8,8 @@ namespace SqlSimCity.Collection.Catalog;
 /// referenced <c>sql/probes/**/*.sql</c> file) at process startup. Validation covers manifest
 /// version support, unique probe IDs/files, safe relative file paths, file existence, declared
 /// parameters matching the ones a probe file actually references, connection scopes, and
-/// version-variant metadata. Any inconsistency throws <see cref="ProbeCatalogException"/>
-/// collecting every problem found, so a container can never start against a missing or
-/// corrupted catalog. The heavier mutating-token and static-shape guard remains the Node-based
-/// <c>test/validate-manifest.test.mjs</c> CI check; this loader does not shell out to Node.
+/// version-variant metadata, and the complete read-only static SQL shape. Any inconsistency throws
+/// <see cref="ProbeCatalogException"/> so runtime execution fails closed even when Node CI was skipped.
 /// </summary>
 public sealed class ProbeCatalog
 {
@@ -355,6 +353,11 @@ public sealed class ProbeCatalog
             using var stream = source.OpenResource(resourceName);
             using var reader = new StreamReader(stream);
             commandText = reader.ReadToEnd();
+
+            foreach (var shapeError in SqlTextScanner.ValidateReadOnlyShape(commandText))
+            {
+                errors.Add($"probe '{id}' failed read-only SQL validation: {shapeError}.");
+            }
 
             var declared = new HashSet<string>(parameters.Select(p => p.Name), StringComparer.Ordinal);
             var referenced = SqlTextScanner.ExtractParameterNames(commandText);

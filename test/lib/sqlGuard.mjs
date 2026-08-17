@@ -162,7 +162,12 @@ export function hasSelectResultPath(sql) {
     const firstWordMatch = statement.match(/^\s*([A-Za-z_]+)/);
     const firstWord = firstWordMatch ? firstWordMatch[1].toUpperCase() : '';
 
-    if (firstWord === 'SET') continue;
+    if (firstWord === 'SET') {
+      if (!/^SET\s+(NOCOUNT\s+ON|DEADLOCK_PRIORITY\s+LOW|LOCK_TIMEOUT\s+\d+)\s*$/i.test(statement)) {
+        return { ok: false, reason: `unsafe SET statement '${statement}'` };
+      }
+      continue;
+    }
     if (firstWord === 'SELECT' || firstWord === 'WITH') {
       sawSelect = true;
       continue;

@@ -200,6 +200,12 @@ describe('sqlGuard: hasSelectResultPath', () => {
     assert.equal(result.ok, true);
   });
 
+  test('rejects undocumented SET options', () => {
+    const result = hasSelectResultPath('SET XACT_ABORT ON; SELECT 1;');
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /unsafe SET/);
+  });
+
   test('accepts a leading CTE (WITH ... SELECT)', () => {
     const result = hasSelectResultPath('SET NOCOUNT ON; WITH c AS (SELECT 1 AS a) SELECT a FROM c;');
     assert.equal(result.ok, true);
@@ -1048,4 +1054,3 @@ describe('regression: read-only guard rejects SELECT ... INTO across the whole p
     }
   });
 });
-

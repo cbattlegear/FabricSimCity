@@ -4,17 +4,29 @@ using System.Text.RegularExpressions;
 namespace SqlSimCity.Collection.Catalog;
 
 /// <summary>
-/// A minimal, dependency-free C# port of the comment-stripping and named-parameter-extraction
-/// logic in <c>test/lib/sqlGuard.mjs</c>, used so <see cref="ProbeCatalog"/> can validate that
-/// every manifest-declared parameter is referenced by its probe file (and vice versa) without
-/// shelling out to Node at runtime. The full mutating-token/SELECT-shape guard remains a
-/// Node-based CI check only (see <c>test/validate-manifest.test.mjs</c>); this class exists only
-/// for the parameter-matching check the .NET loader performs at startup.
+/// Dependency-free runtime port of <c>test/lib/sqlGuard.mjs</c>. It strips comments, validates
+/// named parameters, rejects mutating/dynamic SQL, and permits only documented session SETs plus
+/// static SELECT/CTE result paths.
 /// </summary>
 public static partial class SqlTextScanner
 {
     [GeneratedRegex(@"(?<!@)@([A-Za-z_][A-Za-z0-9_]*)")]
     private static partial Regex ParameterPattern();
+
+    [GeneratedRegex(@"\b(ALTER|DBCC|EXEC|EXECUTE|INSERT|UPDATE|DELETE|MERGE|TRUNCATE|CREATE|DROP|GRANT|DENY|REVOKE|USE)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ForbiddenStatementPattern();
+
+    [GeneratedRegex(@"\b(OPENROWSET|OPENQUERY|OPENDATASOURCE|sp_executesql|sp_query_store_\w+|xp_cmdshell)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ForbiddenFacilityPattern();
+
+    [GeneratedRegex(@"QUERY_STORE\s*(CLEAR|=\s*OFF)", RegexOptions.IgnoreCase)]
+    private static partial Regex QueryStoreMutationPattern();
+
+    [GeneratedRegex(@"\bSELECT\b(?:(?!\bFROM\b)[\s\S])*?\bINTO\b", RegexOptions.IgnoreCase)]
+    private static partial Regex SelectIntoPattern();
+
+    [GeneratedRegex(@"^SET\s+(NOCOUNT\s+ON|DEADLOCK_PRIORITY\s+LOW|LOCK_TIMEOUT\s+\d+)\s*$", RegexOptions.IgnoreCase)]
+    private static partial Regex SafeSetPattern();
 
     /// <summary>Strips <c>-- line</c> and <c>/* block */</c> comments, preserving string literal content.</summary>
     public static string StripComments(string sql)
@@ -97,5 +109,58 @@ public static partial class SqlTextScanner
         }
 
         return names;
+    }
+
+    public static IReadOnlyList<string> ValidateReadOnlyShape(string sql)
+    {
+        var stripped = StripComments(sql);
+        var errors = new List<string>();
+        if (ForbiddenStatementPattern().IsMatch(stripped))
+        {
+            errors.Add("contains a mutating or dynamic statement keyword");
+        }
+        if (ForbiddenFacilityPattern().IsMatch(stripped))
+        {
+            errors.Add("contains a dynamic or external SQL facility");
+        }
+        if (QueryStoreMutationPattern().IsMatch(stripped))
+        {
+            errors.Add("contains Query Store maintenance");
+        }
+        if (SelectIntoPattern().IsMatch(stripped))
+        {
+            errors.Add("contains SELECT INTO");
+        }
+
+        var statements = stripped.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var sawResult = false;
+        foreach (var statement in statements)
+        {
+            var firstWord = Regex.Match(statement, @"^\s*([A-Za-z_]+)").Groups[1].Value;
+            if (firstWord.Equals("SET", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!SafeSetPattern().IsMatch(statement))
+                {
+                    errors.Add($"contains undocumented SET statement '{statement}'");
+                }
+                continue;
+            }
+
+            if (firstWord.Equals("SELECT", StringComparison.OrdinalIgnoreCase) ||
+                firstWord.Equals("WITH", StringComparison.OrdinalIgnoreCase))
+            {
+                sawResult = true;
+                continue;
+            }
+
+            errors.Add($"contains unsafe top-level statement shape '{firstWord}'");
+        }
+
+        if (!sawResult)
+        {
+            errors.Add("contains no SELECT/CTE result path");
+        }
+
+        return errors;
     }
 }
