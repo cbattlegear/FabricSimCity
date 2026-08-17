@@ -123,12 +123,80 @@ public class EntraCredentialCachingTests
         var profile = ServicePrincipalCertificateProfile();
 
         var result = await factory.OpenAsync(profile, CancellationToken.None);
-        await factory.InvalidateEntraProfileAsync(profile);
+        var invalidation = factory.InvalidateEntraProfileAsync(profile);
 
         var lease = Assert.Single(leases.Leases);
-        Assert.Equal(1, pools.ClearCount);
+        Assert.False(invalidation.IsCompleted);
+        Assert.Equal(0, pools.ClearCount);
         Assert.False(lease.IsDisposed);
         result.Connection.Dispose();
+        await invalidation;
+        Assert.Equal(1, pools.ClearCount);
+        Assert.True(lease.IsDisposed);
+    }
+
+    [Fact]
+    public async Task ShutdownAccountsForInFlightEntraCredentialCreation()
+    {
+        var leases = new TrackingEntraLeaseFactory(blockFirstCreate: true, withCertificate: true);
+        var pools = new TrackingEntraPoolController(leases.Leases);
+        var factory = new SqlConnectionFactory(
+            new UnusedSqlLoginCredentialLeaseFactory(), new RecordingCallbackOpener(), pools, entraLeaseFactory: leases);
+
+        var open = factory.OpenAsync(ServicePrincipalCertificateProfile(), CancellationToken.None);
+        Assert.Equal(1, leases.CreateCount);
+
+        var shutdown = factory.DisposeAsync().AsTask();
+        Assert.False(shutdown.IsCompleted);
+        leases.CompleteFirstCreate();
+
+        await shutdown;
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => open);
+        Assert.True(leases.Leases.Single().IsDisposed);
+        Assert.Equal(0, pools.ClearCount);
+    }
+
+    [Fact]
+    public async Task EntraInvalidationMakesConcurrentOpenUseReplacementCallback()
+    {
+        var leases = new TrackingEntraLeaseFactory(withCertificate: true);
+        var pools = new TrackingEntraPoolController(leases.Leases);
+        using var factory = new SqlConnectionFactory(
+            new UnusedSqlLoginCredentialLeaseFactory(), new RecordingCallbackOpener(), pools, entraLeaseFactory: leases);
+        var profile = ServicePrincipalCertificateProfile();
+        var first = await factory.OpenAsync(profile, CancellationToken.None);
+
+        var invalidation = factory.InvalidateEntraProfileAsync(profile);
+        Assert.False(invalidation.IsCompleted);
+        var second = await factory.OpenAsync(profile, CancellationToken.None);
+
+        Assert.Equal(2, leases.CreateCount);
+        Assert.NotSame(first.Connection.AccessTokenCallback, second.Connection.AccessTokenCallback);
+        Assert.Equal(0, pools.ClearCount);
+
+        first.Dispose();
+        await invalidation;
+        Assert.Equal(1, pools.ClearCount);
+        Assert.True(leases.Leases[0].IsDisposed);
+        Assert.False(leases.Leases[1].IsDisposed);
+        second.Dispose();
+    }
+
+    [Fact]
+    public async Task RetiringEntraLeaseRejectsRent()
+    {
+        var lease = new EntraCredentialLease(new RecordingTokenCredential([]), CreateSelfSignedCertificate());
+        Assert.True(lease.TryRent());
+
+        lease.BeginRetirement();
+
+        Assert.False(lease.TryRent());
+        lease.Release();
+        await lease.RetireAsync(
+            new TrackingEntraPoolController([lease]),
+            SqlConnectionFactory.BuildConnectionStringBuilder(ManagedIdentityProfile()).ConnectionString,
+            clearPool: false,
+            CancellationToken.None);
         Assert.True(lease.IsDisposed);
     }
 
@@ -166,12 +234,41 @@ public class EntraCredentialCachingTests
         var lease = Assert.Single(leases.Leases);
         Assert.False(lease.IsDisposed);
 
-        // The failure is not a permanent dead end: once the pool controller
-        // stops failing, the same lease still retires successfully instead
-        // of being stuck "half retired" from the earlier failed attempt.
         pools.FailNextClear = false;
-        await factory.InvalidateEntraProfileAsync(profile);
+        await factory.DisposeAsync();
         Assert.True(lease.IsDisposed);
+    }
+
+    [Fact]
+    public async Task SimultaneousEntraInvalidationAndShutdownRetireLeaseOnce()
+    {
+        var leases = new TrackingEntraLeaseFactory(withCertificate: true);
+        var pools = new TrackingEntraPoolController(leases.Leases);
+        var factory = new SqlConnectionFactory(
+            new UnusedSqlLoginCredentialLeaseFactory(), new RecordingCallbackOpener(), pools, entraLeaseFactory: leases);
+        var profile = ServicePrincipalCertificateProfile();
+        var result = await factory.OpenAsync(profile, CancellationToken.None);
+
+        Task[] invalidations =
+        [
+            factory.InvalidateEntraProfileAsync(profile),
+            factory.InvalidateEntraProfileAsync(profile),
+            factory.InvalidateEntraProfileAsync(profile),
+        ];
+        Task[] shutdowns =
+        [
+            factory.DisposeAsync().AsTask(),
+            factory.DisposeAsync().AsTask(),
+            factory.DisposeAsync().AsTask(),
+        ];
+        Assert.All(invalidations.Concat(shutdowns), task => Assert.False(task.IsCompleted));
+
+        result.Dispose();
+        await Task.WhenAll(invalidations.Concat(shutdowns));
+
+        Assert.Equal(1, pools.ClearCount);
+        Assert.True(leases.Leases.Single().IsDisposed);
+        Assert.Equal(1, leases.Leases.Single().DisposeCount);
     }
 
     [Fact]
@@ -191,6 +288,10 @@ public class EntraCredentialCachingTests
         Assert.Single(ex.InnerExceptions);
         var lease = Assert.Single(leases.Leases);
         Assert.False(lease.IsDisposed);
+
+        pools.FailNextClear = false;
+        await factory.DisposeAsync();
+        Assert.True(lease.IsDisposed);
     }
 
     [Fact]
@@ -345,13 +446,15 @@ public class EntraCredentialCachingTests
             _leases = leases;
         }
 
-        public int ClearCount { get; private set; }
+        private int _clearCount;
+
+        public int ClearCount => Volatile.Read(ref _clearCount);
 
         public List<bool> CertificateWasDisposedWhenCleared { get; } = [];
 
         public void ClearPool(SqlConnection connection)
         {
-            ClearCount++;
+            Interlocked.Increment(ref _clearCount);
             var callback = connection.AccessTokenCallback;
             var lease = _leases.Single(lease => ReferenceEquals(lease.Callback, callback));
             CertificateWasDisposedWhenCleared.Add(lease.IsDisposed);

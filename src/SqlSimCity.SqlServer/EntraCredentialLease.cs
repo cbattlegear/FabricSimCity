@@ -57,19 +57,14 @@ internal sealed class DefaultEntraCredentialLeaseFactory : IEntraCredentialLease
 /// security context. Retirement clears the pool before disposing the owned
 /// certificate, and defers disposal while returned results use it, mirroring
 /// <see cref="SqlLoginCredentialLease"/>. If the pool clear itself fails, the
-/// certificate is deliberately kept valid (fail-closed) and the failure
-/// propagates to the caller instead of being swallowed -- see
-/// <see cref="Retire"/>.
+/// certificate is deliberately kept valid (fail-closed), non-rentable, and
+/// reachable for a later cleanup retry.
 /// </summary>
-internal sealed class EntraCredentialLease : IDisposable, IPooledCredentialLease
+internal sealed class EntraCredentialLease : PooledCredentialLease
 {
     private const string DefaultScopeSuffix = "/.default";
 
-    private readonly object _gate = new();
     private X509Certificate2? _ownedCertificate;
-    private int _activeConnections;
-    private bool _retired;
-    private bool _disposed;
 
     public EntraCredentialLease(TokenCredential credential, X509Certificate2? ownedCertificate)
     {
@@ -88,95 +83,19 @@ internal sealed class EntraCredentialLease : IDisposable, IPooledCredentialLease
     /// </summary>
     public Func<SqlAuthenticationParameters, CancellationToken, Task<SqlAuthenticationToken>> Callback { get; }
 
-    internal bool IsDisposed
+    protected override void ClearPool(ISqlConnectionPoolController poolController, string connectionString)
     {
-        get
+        using var connection = new SqlConnection(connectionString)
         {
-            lock (_gate)
-            {
-                return _disposed;
-            }
-        }
+            AccessTokenCallback = Callback,
+        };
+        poolController.ClearPool(connection);
     }
 
-    public void Rent()
+    protected override void DisposeMaterial()
     {
-        lock (_gate)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            _activeConnections++;
-        }
-    }
-
-    public void Release()
-    {
-        lock (_gate)
-        {
-            if (_activeConnections == 0)
-            {
-                throw new InvalidOperationException("Entra credential lease released more times than it was rented.");
-            }
-
-            _activeConnections--;
-            DisposeIfRetiredAndUnused();
-        }
-    }
-
-    /// <summary>
-    /// Clears this lease's SqlClient pool, then disposes the owned
-    /// certificate (if any) once no returned result is still using it. If
-    /// <paramref name="poolController"/> throws, this lease is left exactly
-    /// as it was -- not marked retired, and the certificate not disposed --
-    /// so a lingering pool that could not be cleared is never paired with a
-    /// credential someone might try to reuse after its certificate was
-    /// disposed. The exception propagates to the caller, which must not
-    /// swallow it: see <see cref="SqlConnectionFactory.DisposeAsync"/> and
-    /// <see cref="SqlConnectionFactory.InvalidateEntraProfileAsync"/>.
-    /// </summary>
-    public void Retire(ISqlConnectionPoolController poolController, string connectionString)
-    {
-        ArgumentNullException.ThrowIfNull(poolController);
-        ArgumentNullException.ThrowIfNull(connectionString);
-
-        lock (_gate)
-        {
-            if (_retired)
-            {
-                return;
-            }
-        }
-
-        using (var connection = new SqlConnection(connectionString) { AccessTokenCallback = Callback })
-        {
-            poolController.ClearPool(connection);
-        }
-
-        lock (_gate)
-        {
-            _retired = true;
-            DisposeIfRetiredAndUnused();
-        }
-    }
-
-    public void Dispose()
-    {
-        lock (_gate)
-        {
-            _retired = true;
-            DisposeIfRetiredAndUnused();
-        }
-    }
-
-    private void DisposeIfRetiredAndUnused()
-    {
-        if (!_retired || _activeConnections != 0 || _disposed)
-        {
-            return;
-        }
-
         _ownedCertificate?.Dispose();
         _ownedCertificate = null;
-        _disposed = true;
     }
 
     /// <summary>
@@ -229,7 +148,7 @@ internal readonly record struct EntraCredentialCacheKey(
     string? FederatedTokenFilePath,
     string? CertificateSecretFileName,
     string? CertificatePasswordSecretFileName,
-    string? ClientSecretFileName)
+    string? ClientSecretFileName) : ICredentialCacheKey
 {
     public static EntraCredentialCacheKey From(
         ConnectionProfile profile,

@@ -27,9 +27,11 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
     private readonly IEntraCredentialLeaseFactory _entraLeaseFactory;
     private readonly ISqlConnectionPoolController _poolController;
     private readonly object _credentialGate = new();
-    private readonly Dictionary<SqlLoginCredentialCacheKey, Lazy<Task<SqlLoginCredentialLease>>> _credentialLeases = [];
-    private readonly Dictionary<EntraCredentialCacheKey, Lazy<Task<EntraCredentialLease>>> _entraLeases = [];
-    private bool _disposed;
+    private readonly Dictionary<SqlLoginCredentialCacheKey, CredentialCacheEntry<SqlLoginCredentialLease>> _credentialLeases = [];
+    private readonly Dictionary<EntraCredentialCacheKey, CredentialCacheEntry<EntraCredentialLease>> _entraLeases = [];
+    private readonly List<PendingRetirement<SqlLoginCredentialCacheKey, SqlLoginCredentialLease>> _pendingSqlLoginRetirements = [];
+    private readonly List<PendingRetirement<EntraCredentialCacheKey, EntraCredentialLease>> _pendingEntraRetirements = [];
+    private bool _shutdownStarted;
 
     public SqlConnectionFactory(ISecretFileProvider secretProvider)
         : this(secretProvider, new DefaultSqlConnectionOpener())
@@ -99,10 +101,14 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
 
     /// <summary>
     /// Invalidates one SQL-login credential after an operator rotates its mounted
-    /// secret. Returned results retain the old password until they are disposed;
-    /// callers must dispose every result before expecting the password to zero.
+    /// secret. Retirement waits for every returned result to be disposed before
+    /// clearing the old pool and zeroing the password. Use a bounded cancellation
+    /// token when the caller cannot wait indefinitely, then retry cleanup after
+    /// outstanding results have been disposed.
     /// </summary>
-    public async Task InvalidateSqlLoginProfileAsync(ConnectionProfile profile)
+    public async Task InvalidateSqlLoginProfileAsync(
+        ConnectionProfile profile,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
         ThrowIfDisposed();
@@ -115,7 +121,11 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
         }
 
         var key = SqlLoginCredentialCacheKey.From(profile, BuildConnectionStringBuilder(profile), authentication);
-        await InvalidateLeaseAsync(_credentialLeases, key, lease => lease.Retire(_poolController, key.ConnectionString))
+        await InvalidateLeaseAsync(
+                _credentialLeases,
+                _pendingSqlLoginRetirements,
+                key,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -123,11 +133,13 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
     /// Invalidates one Entra credential/callback after an operator rotates its
     /// mounted certificate or client secret, or wants to force a managed- or
     /// workload-identity profile to acquire a fresh <c>TokenCredential</c>.
-    /// Returned results retain the old credential and any owned certificate
-    /// until they are disposed; callers must dispose every result before
-    /// expecting owned certificate material to be released.
+    /// Retirement waits for every returned result to be disposed before clearing
+    /// the old pool and releasing owned certificate material. A bounded
+    /// cancellation token leaves retirement pending and non-rentable for retry.
     /// </summary>
-    public async Task InvalidateEntraProfileAsync(ConnectionProfile profile)
+    public async Task InvalidateEntraProfileAsync(
+        ConnectionProfile profile,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
         ThrowIfDisposed();
@@ -140,51 +152,72 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
         }
 
         var key = EntraCredentialCacheKey.From(profile, BuildConnectionStringBuilder(profile), authentication);
-        await InvalidateLeaseAsync(_entraLeases, key, lease => lease.Retire(_poolController, key.ConnectionString))
+        await InvalidateLeaseAsync(
+                _entraLeases,
+                _pendingEntraRetirements,
+                key,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Retires the cached lease for <paramref name="key"/> and removes it from
-    /// <paramref name="cache"/> only once <paramref name="retire"/> succeeds.
-    /// If <paramref name="retire"/> throws (a pool-clear failure), the lease
-    /// is deliberately left in the cache exactly as it was -- still valid,
-    /// still the one every subsequent open reuses -- instead of being evicted
-    /// out from under a pool that could not actually be cleared, which would
-    /// otherwise both orphan the unretired lease's credential material forever
-    /// and silently start a second, duplicate pool on the next open. The
-    /// exception still propagates to the caller, and a later retry of this
-    /// same invalidation finds the identical lease and can retire it once the
-    /// underlying failure is resolved.
+    /// Atomically removes and marks the cached entry before waiting for active
+    /// results. Failed cleanup remains pending for retry and can never make the
+    /// old lease rentable again.
     /// </summary>
     private async Task InvalidateLeaseAsync<TKey, TLease>(
-        Dictionary<TKey, Lazy<Task<TLease>>> cache,
+        Dictionary<TKey, CredentialCacheEntry<TLease>> cache,
+        List<PendingRetirement<TKey, TLease>> pendingRetirements,
         TKey key,
-        Action<TLease> retire)
-        where TKey : notnull
+        CancellationToken cancellationToken)
+        where TKey : notnull, ICredentialCacheKey
         where TLease : class, IPooledCredentialLease
     {
-        Lazy<Task<TLease>>? lazyLease;
+        List<PendingRetirement<TKey, TLease>> matching;
         lock (_credentialGate)
         {
-            cache.TryGetValue(key, out lazyLease);
-        }
-
-        if (lazyLease is null || !lazyLease.IsValueCreated)
-        {
-            return;
-        }
-
-        var lease = await lazyLease.Value.ConfigureAwait(false);
-        retire(lease);
-
-        lock (_credentialGate)
-        {
-            if (cache.TryGetValue(key, out var current) && ReferenceEquals(current, lazyLease))
+            ThrowIfShutdownStarted();
+            if (cache.Remove(key, out var entry))
             {
-                cache.Remove(key);
+                entry.BeginRetirement();
+                pendingRetirements.Add(new PendingRetirement<TKey, TLease>(key, entry));
             }
+
+            matching = pendingRetirements
+                .Where(pending => EqualityComparer<TKey>.Default.Equals(pending.Key, key))
+                .ToList();
         }
+
+        var failures = await CleanupRetirementsAsync(
+                pendingRetirements,
+                matching,
+                cancellationToken)
+            .ConfigureAwait(false);
+        ThrowCleanupFailures(failures);
+    }
+
+    public async Task RetryPendingCleanupAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        List<PendingRetirement<SqlLoginCredentialCacheKey, SqlLoginCredentialLease>> sqlLogin;
+        List<PendingRetirement<EntraCredentialCacheKey, EntraCredentialLease>> entra;
+        lock (_credentialGate)
+        {
+            sqlLogin = [.. _pendingSqlLoginRetirements];
+            entra = [.. _pendingEntraRetirements];
+        }
+
+        var failures = await CleanupRetirementsAsync(
+                _pendingSqlLoginRetirements,
+                sqlLogin,
+                cancellationToken)
+            .ConfigureAwait(false);
+        failures.AddRange(await CleanupRetirementsAsync(
+                _pendingEntraRetirements,
+                entra,
+                cancellationToken)
+            .ConfigureAwait(false));
+        ThrowCleanupFailures(failures);
     }
 
     public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
@@ -196,61 +229,38 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
     /// every such failure is collected and re-thrown as an
     /// <see cref="AggregateException"/> once shutdown finishes -- shutdown
     /// never silently leaves a credential whose pool could not be cleared
-    /// without reporting it. A lease whose creation itself failed (for
-    /// example a missing secret file) owned no credential material and is
-    /// skipped without being treated as a failure.
+    /// without reporting it. Failed retirements remain reachable so another
+    /// <see cref="DisposeAsync"/> or <see cref="RetryPendingCleanupAsync"/> call
+    /// can retry them.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        List<KeyValuePair<SqlLoginCredentialCacheKey, Lazy<Task<SqlLoginCredentialLease>>>> sqlLoginLeases;
-        List<KeyValuePair<EntraCredentialCacheKey, Lazy<Task<EntraCredentialLease>>>> entraLeases;
         lock (_credentialGate)
         {
-            if (_disposed)
+            if (!_shutdownStarted)
             {
-                return;
+                _shutdownStarted = true;
+                MoveToPending(_credentialLeases, _pendingSqlLoginRetirements);
+                MoveToPending(_entraLeases, _pendingEntraRetirements);
             }
-
-            _disposed = true;
-            sqlLoginLeases = [.. _credentialLeases];
-            entraLeases = [.. _entraLeases];
-            _credentialLeases.Clear();
-            _entraLeases.Clear();
         }
 
-        List<Exception>? retireFailures = null;
-
-        foreach (var (key, lazyLease) in sqlLoginLeases)
+        List<Exception> retireFailures;
+        try
         {
-            if (!lazyLease.IsValueCreated)
-            {
-                continue;
-            }
-
-            var failure = await RetireDuringShutdownAsync(lazyLease.Value, lease => lease.Retire(_poolController, key.ConnectionString))
-                .ConfigureAwait(false);
-            if (failure is not null)
-            {
-                (retireFailures ??= []).Add(failure);
-            }
+            await RetryPendingCleanupAsync().ConfigureAwait(false);
+            return;
         }
-
-        foreach (var (key, lazyLease) in entraLeases)
+        catch (AggregateException ex)
         {
-            if (!lazyLease.IsValueCreated)
-            {
-                continue;
-            }
-
-            var failure = await RetireDuringShutdownAsync(lazyLease.Value, lease => lease.Retire(_poolController, key.ConnectionString))
-                .ConfigureAwait(false);
-            if (failure is not null)
-            {
-                (retireFailures ??= []).Add(failure);
-            }
+            retireFailures = [.. ex.InnerExceptions];
+        }
+        catch (Exception ex)
+        {
+            retireFailures = [ex];
         }
 
-        if (retireFailures is { Count: > 0 })
+        if (retireFailures.Count > 0)
         {
             throw new AggregateException(
                 "One or more credential pools could not be cleared during factory shutdown; their credentials remain valid and undisposed.",
@@ -259,35 +269,35 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
     }
 
     /// <summary>
-    /// Awaits one cached lease's creation task and retires it, returning the
-    /// retirement failure (if any) instead of throwing so
-    /// <see cref="DisposeAsync"/> can keep retiring the remaining leases and
-    /// still report every failure it encountered.
+    /// Attempts pending retirements while retaining every failed entry for retry.
     /// </summary>
-    private static async Task<Exception?> RetireDuringShutdownAsync<TLease>(Task<TLease> leaseTask, Action<TLease> retire)
+    private async Task<List<Exception>> CleanupRetirementsAsync<TKey, TLease>(
+        List<PendingRetirement<TKey, TLease>> pendingRetirements,
+        IReadOnlyList<PendingRetirement<TKey, TLease>> retirements,
+        CancellationToken cancellationToken)
+        where TKey : notnull, ICredentialCacheKey
+        where TLease : class, IPooledCredentialLease
     {
-        TLease lease;
-        try
+        List<Exception> failures = [];
+        foreach (var pending in retirements)
         {
-            lease = await leaseTask.ConfigureAwait(false);
-        }
-        catch
-        {
-            // Lease creation itself failed (for example a missing or unreadable
-            // secret file); no credential material was ever produced, so there
-            // is nothing to retire or report.
-            return null;
+            try
+            {
+                await pending.Entry
+                    .RetireAsync(_poolController, pending.Key.ConnectionString, cancellationToken)
+                    .ConfigureAwait(false);
+                lock (_credentialGate)
+                {
+                    pendingRetirements.Remove(pending);
+                }
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
         }
 
-        try
-        {
-            retire(lease);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex;
-        }
+        return failures;
     }
 
     private async Task<(SqlConnection Connection, Action? ReleaseCredentialLease)> CreateConnectionAsync(
@@ -301,6 +311,7 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
             {
                 var lease = await RentLeaseAsync(
                         _credentialLeases,
+                        _pendingSqlLoginRetirements,
                         SqlLoginCredentialCacheKey.From(profile, builder, sqlLogin),
                         () => _credentialLeaseFactory.CreateAsync(sqlLogin, CancellationToken.None),
                         cancellationToken)
@@ -324,6 +335,7 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
             {
                 var lease = await RentLeaseAsync(
                         _entraLeases,
+                        _pendingEntraRetirements,
                         EntraCredentialCacheKey.From(profile, builder, entra),
                         () => _entraLeaseFactory.CreateAsync(entra, CancellationToken.None),
                         cancellationToken)
@@ -364,30 +376,31 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
     /// once.
     /// </summary>
     private async Task<TLease> RentLeaseAsync<TKey, TLease>(
-        Dictionary<TKey, Lazy<Task<TLease>>> cache,
+        Dictionary<TKey, CredentialCacheEntry<TLease>> cache,
+        List<PendingRetirement<TKey, TLease>> pendingRetirements,
         TKey key,
         Func<Task<TLease>> createLease,
         CancellationToken cancellationToken)
-        where TKey : notnull
+        where TKey : notnull, ICredentialCacheKey
         where TLease : class, IPooledCredentialLease
     {
         while (true)
         {
-            Lazy<Task<TLease>> lazyLease;
+            CredentialCacheEntry<TLease> entry;
             lock (_credentialGate)
             {
-                ThrowIfDisposed();
-                if (!cache.TryGetValue(key, out lazyLease!))
+                ThrowIfShutdownStarted();
+                if (!cache.TryGetValue(key, out entry!))
                 {
-                    lazyLease = new Lazy<Task<TLease>>(createLease, LazyThreadSafetyMode.ExecutionAndPublication);
-                    cache.Add(key, lazyLease);
+                    entry = new CredentialCacheEntry<TLease>(createLease);
+                    cache.Add(key, entry);
                 }
             }
 
             TLease lease;
             try
             {
-                lease = await lazyLease.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+                lease = await entry.CreationTask.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -397,26 +410,170 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
             {
                 lock (_credentialGate)
                 {
-                    if (cache.TryGetValue(key, out var current) && ReferenceEquals(current, lazyLease))
+                    if (cache.TryGetValue(key, out var current) && ReferenceEquals(current, entry))
                     {
                         cache.Remove(key);
+                        entry.BeginRetirement();
                     }
                 }
 
                 throw;
             }
 
+            PendingRetirement<TKey, TLease>? rejectedRetirement = null;
             lock (_credentialGate)
             {
-                ThrowIfDisposed();
-                if (cache.TryGetValue(key, out var current) && ReferenceEquals(current, lazyLease))
+                ThrowIfShutdownStarted();
+                if (cache.TryGetValue(key, out var current) && ReferenceEquals(current, entry))
                 {
-                    lease.Rent();
-                    return lease;
+                    if (entry.TryRent(lease))
+                    {
+                        return lease;
+                    }
+
+                    cache.Remove(key);
+                    entry.BeginRetirement();
+                    rejectedRetirement = new PendingRetirement<TKey, TLease>(key, entry);
+                    pendingRetirements.Add(rejectedRetirement);
                 }
+            }
+
+            if (rejectedRetirement is not null)
+            {
+                var failures = await CleanupRetirementsAsync(
+                        pendingRetirements,
+                        [rejectedRetirement],
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ThrowCleanupFailures(failures);
             }
         }
     }
+
+    private static void MoveToPending<TKey, TLease>(
+        Dictionary<TKey, CredentialCacheEntry<TLease>> cache,
+        List<PendingRetirement<TKey, TLease>> pendingRetirements)
+        where TKey : notnull
+        where TLease : class, IPooledCredentialLease
+    {
+        foreach (var (key, entry) in cache)
+        {
+            entry.BeginRetirement();
+            pendingRetirements.Add(new PendingRetirement<TKey, TLease>(key, entry));
+        }
+
+        cache.Clear();
+    }
+
+    private static void ThrowCleanupFailures(List<Exception> failures)
+    {
+        if (failures.Count == 0)
+        {
+            return;
+        }
+
+        if (failures.Count == 1)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        }
+
+        throw new AggregateException("One or more credential retirements failed.", failures);
+    }
+
+    private sealed class CredentialCacheEntry<TLease>
+        where TLease : class, IPooledCredentialLease
+    {
+        private readonly object _gate = new();
+        private TLease? _lease;
+        private bool _retirementStarted;
+        private bool _everRented;
+
+        public CredentialCacheEntry(Func<Task<TLease>> createLease)
+        {
+            ArgumentNullException.ThrowIfNull(createLease);
+            CreationTask = CaptureAsync(createLease());
+        }
+
+        public Task<TLease> CreationTask { get; }
+
+        public bool TryRent(TLease lease)
+        {
+            lock (_gate)
+            {
+                if (_retirementStarted || !ReferenceEquals(_lease, lease) || !lease.TryRent())
+                {
+                    return false;
+                }
+
+                _everRented = true;
+                return true;
+            }
+        }
+
+        public void BeginRetirement()
+        {
+            lock (_gate)
+            {
+                if (_retirementStarted)
+                {
+                    return;
+                }
+
+                _retirementStarted = true;
+                _lease?.BeginRetirement();
+            }
+        }
+
+        public async ValueTask RetireAsync(
+            ISqlConnectionPoolController poolController,
+            string connectionString,
+            CancellationToken cancellationToken)
+        {
+            BeginRetirement();
+
+            TLease lease;
+            try
+            {
+                lease = await CreationTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // A failed creation task produced no lease material to retire.
+                return;
+            }
+
+            bool clearPool;
+            lock (_gate)
+            {
+                clearPool = _everRented;
+            }
+
+            await lease
+                .RetireAsync(poolController, connectionString, clearPool, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        private async Task<TLease> CaptureAsync(Task<TLease> creationTask)
+        {
+            var lease = await creationTask.ConfigureAwait(false);
+            lock (_gate)
+            {
+                _lease = lease;
+                if (_retirementStarted)
+                {
+                    lease.BeginRetirement();
+                }
+            }
+
+            return lease;
+        }
+    }
+
+    private sealed record PendingRetirement<TKey, TLease>(
+        TKey Key,
+        CredentialCacheEntry<TLease> Entry)
+        where TKey : notnull
+        where TLease : class, IPooledCredentialLease;
 
     private ISecretFileProvider GetSecretProvider() =>
         _secretProvider ?? throw new InvalidOperationException(
@@ -426,9 +583,12 @@ public sealed class SqlConnectionFactory : ISqlConnectionFactory
     {
         lock (_credentialGate)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfShutdownStarted();
         }
     }
+
+    private void ThrowIfShutdownStarted() =>
+        ObjectDisposedException.ThrowIf(_shutdownStarted, this);
 
     /// <summary>
     /// Builds the connection string in isolation from authentication so it can

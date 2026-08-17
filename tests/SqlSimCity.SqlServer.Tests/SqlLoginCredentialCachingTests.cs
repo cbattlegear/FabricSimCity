@@ -110,12 +110,78 @@ public class SqlLoginCredentialCachingTests
         var profile = SqlLoginProfile();
 
         var result = await factory.OpenAsync(profile, CancellationToken.None);
-        await factory.InvalidateSqlLoginProfileAsync(profile);
+        var invalidation = factory.InvalidateSqlLoginProfileAsync(profile);
 
         var lease = Assert.Single(leases.Leases);
-        Assert.Equal(1, pools.ClearCount);
+        Assert.False(invalidation.IsCompleted);
+        Assert.Equal(0, pools.ClearCount);
         Assert.False(lease.IsDisposed);
         result.Connection.Dispose();
+        await invalidation;
+        Assert.Equal(1, pools.ClearCount);
+        Assert.True(lease.IsDisposed);
+    }
+
+    [Fact]
+    public async Task ShutdownAccountsForCreationThatHasStartedButHasNotCompleted()
+    {
+        var leases = new TrackingLeaseFactory(blockFirstCreate: true);
+        var pools = new TrackingPoolController(leases.Leases);
+        var factory = new SqlConnectionFactory(leases, new RecordingOpener(), pools);
+
+        var open = factory.OpenAsync(SqlLoginProfile(), CancellationToken.None);
+        Assert.Equal(1, leases.CreateCount);
+
+        var shutdown = factory.DisposeAsync().AsTask();
+        Assert.False(shutdown.IsCompleted);
+        leases.CompleteFirstCreate();
+
+        await shutdown;
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => open);
+        Assert.True(leases.Leases.Single().IsDisposed);
+        Assert.Equal(0, pools.ClearCount);
+    }
+
+    [Fact]
+    public async Task InvalidationPreventsConcurrentOpenFromRentingOldLease()
+    {
+        var leases = new TrackingLeaseFactory();
+        var pools = new TrackingPoolController(leases.Leases);
+        using var factory = new SqlConnectionFactory(leases, new RecordingOpener(), pools);
+        var profile = SqlLoginProfile();
+        var first = await factory.OpenAsync(profile, CancellationToken.None);
+
+        var invalidation = factory.InvalidateSqlLoginProfileAsync(profile);
+        Assert.False(invalidation.IsCompleted);
+        var second = await factory.OpenAsync(profile, CancellationToken.None);
+
+        Assert.Equal(2, leases.CreateCount);
+        Assert.NotSame(first.Connection.Credential, second.Connection.Credential);
+        Assert.Equal(0, pools.ClearCount);
+
+        first.Dispose();
+        await invalidation;
+        Assert.Equal(1, pools.ClearCount);
+        Assert.True(leases.Leases[0].IsDisposed);
+        Assert.False(leases.Leases[1].IsDisposed);
+        second.Dispose();
+    }
+
+    [Fact]
+    public async Task RetiringLeaseRejectsRent()
+    {
+        var lease = new SqlLoginCredentialLease("reader", Password());
+        Assert.True(lease.TryRent());
+
+        lease.BeginRetirement();
+
+        Assert.False(lease.TryRent());
+        lease.Release();
+        await lease.RetireAsync(
+            new TrackingPoolController([lease]),
+            SqlConnectionFactory.BuildConnectionStringBuilder(SqlLoginProfile()).ConnectionString,
+            clearPool: false,
+            CancellationToken.None);
         Assert.True(lease.IsDisposed);
     }
 
@@ -151,16 +217,12 @@ public class SqlLoginCredentialCachingTests
         var lease = Assert.Single(leases.Leases);
         Assert.False(lease.IsDisposed);
 
-        // The failure is not a permanent dead end: the same lease is still
-        // cached and still reused by the next open, and a later retry of
-        // invalidation retires it once the underlying failure clears.
-        using (await factory.OpenAsync(profile, CancellationToken.None))
-        {
-        }
-
-        Assert.Equal(1, leases.CreateCount);
+        // The failed lease remains non-rentable while a replacement is used.
+        using var replacement = await factory.OpenAsync(profile, CancellationToken.None);
+        Assert.Equal(2, leases.CreateCount);
+        Assert.NotSame(lease.Credential, replacement.Connection.Credential);
         pools.FailNextClear = false;
-        await factory.InvalidateSqlLoginProfileAsync(profile);
+        await factory.RetryPendingCleanupAsync();
         Assert.True(lease.IsDisposed);
     }
 
@@ -180,6 +242,41 @@ public class SqlLoginCredentialCachingTests
         Assert.Single(ex.InnerExceptions);
         var lease = Assert.Single(leases.Leases);
         Assert.False(lease.IsDisposed);
+
+        pools.FailNextClear = false;
+        await factory.DisposeAsync();
+        Assert.True(lease.IsDisposed);
+    }
+
+    [Fact]
+    public async Task SimultaneousInvalidationAndShutdownRetireLeaseOnce()
+    {
+        var leases = new TrackingLeaseFactory();
+        var pools = new TrackingPoolController(leases.Leases);
+        var factory = new SqlConnectionFactory(leases, new RecordingOpener(), pools);
+        var profile = SqlLoginProfile();
+        var result = await factory.OpenAsync(profile, CancellationToken.None);
+
+        Task[] invalidations =
+        [
+            factory.InvalidateSqlLoginProfileAsync(profile),
+            factory.InvalidateSqlLoginProfileAsync(profile),
+            factory.InvalidateSqlLoginProfileAsync(profile),
+        ];
+        Task[] shutdowns =
+        [
+            factory.DisposeAsync().AsTask(),
+            factory.DisposeAsync().AsTask(),
+            factory.DisposeAsync().AsTask(),
+        ];
+        Assert.All(invalidations.Concat(shutdowns), task => Assert.False(task.IsCompleted));
+
+        result.Dispose();
+        await Task.WhenAll(invalidations.Concat(shutdowns));
+
+        Assert.Equal(1, pools.ClearCount);
+        Assert.True(leases.Leases.Single().IsDisposed);
+        Assert.Equal(1, leases.Leases.Single().DisposeCount);
     }
 
     private static ConnectionProfile SqlLoginProfile(
@@ -189,6 +286,14 @@ public class SqlLoginCredentialCachingTests
         TestProfiles.Build(
             id: new ConnectionProfileId(id),
             authentication: new SqlLoginAuthenticationStrategy(username, new SecretFileReference(secretFile)));
+
+    private static SecureString Password()
+    {
+        var password = new SecureString();
+        password.AppendChar('p');
+        password.MakeReadOnly();
+        return password;
+    }
 
     private sealed class TrackingLeaseFactory : ISqlLoginCredentialLeaseFactory
     {
@@ -235,13 +340,6 @@ public class SqlLoginCredentialCachingTests
             _firstCreate.SetResult(Leases.Single());
         }
 
-        private static SecureString Password()
-        {
-            var password = new SecureString();
-            password.AppendChar('p');
-            password.MakeReadOnly();
-            return password;
-        }
     }
 
     private sealed class TrackingPoolController : ISqlConnectionPoolController
@@ -253,13 +351,15 @@ public class SqlLoginCredentialCachingTests
             _leases = leases;
         }
 
-        public int ClearCount { get; private set; }
+        private int _clearCount;
+
+        public int ClearCount => Volatile.Read(ref _clearCount);
 
         public List<bool> PasswordWasDisposedWhenCleared { get; } = [];
 
         public void ClearPool(SqlConnection connection)
         {
-            ClearCount++;
+            Interlocked.Increment(ref _clearCount);
             var credential = connection.Credential;
             var lease = _leases.Single(lease => ReferenceEquals(lease.Credential, credential));
             PasswordWasDisposedWhenCleared.Add(lease.IsDisposed);

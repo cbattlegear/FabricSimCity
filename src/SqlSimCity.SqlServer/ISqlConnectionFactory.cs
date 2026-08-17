@@ -12,9 +12,13 @@ public interface ISqlConnectionFactory : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Removes a cached SQL-login credential after the mounted password rotates.
-    /// The associated pool is cleared before the old password is disposed.
+    /// The associated pool is cleared after active results drain and before the
+    /// old password is disposed. A bounded cancellation token leaves cleanup
+    /// pending for <see cref="RetryPendingCleanupAsync"/>.
     /// </summary>
-    Task InvalidateSqlLoginProfileAsync(ConnectionProfile profile);
+    Task InvalidateSqlLoginProfileAsync(
+        ConnectionProfile profile,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Removes a cached Entra credential/callback after its mounted
@@ -23,5 +27,13 @@ public interface ISqlConnectionFactory : IDisposable, IAsyncDisposable
     /// its next open. The associated pool is cleared before any owned
     /// certificate material is disposed.
     /// </summary>
-    Task InvalidateEntraProfileAsync(ConnectionProfile profile);
+    Task InvalidateEntraProfileAsync(
+        ConnectionProfile profile,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Retries pool cleanup retained after an earlier invalidation or shutdown
+    /// failure. This remains available after shutdown has started.
+    /// </summary>
+    Task RetryPendingCleanupAsync(CancellationToken cancellationToken = default);
 }

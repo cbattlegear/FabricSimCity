@@ -58,5 +58,15 @@ public sealed class SqlConnectionOpenResult : IDisposable, IAsyncDisposable
     private void ReleaseCredentialLease() =>
         Interlocked.Exchange(ref _releaseCredentialLease, null)?.Invoke();
 
-    private void OnConnectionDisposed(object? sender, EventArgs eventArgs) => ReleaseCredentialLease();
+    private void OnConnectionDisposed(object? sender, EventArgs eventArgs)
+    {
+        try
+        {
+            ReleaseCredentialLease();
+        }
+        catch
+        {
+            // A connection's Disposed event must never mask the user's disposal.
+        }
+    }
 }
