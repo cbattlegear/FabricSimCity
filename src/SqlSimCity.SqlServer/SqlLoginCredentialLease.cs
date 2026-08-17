@@ -12,6 +12,20 @@ internal interface ISqlLoginCredentialLeaseFactory
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// A reference-counted, retireable credential lease shared by
+/// <see cref="SqlLoginCredentialLease"/> and <c>EntraCredentialLease</c> so
+/// <see cref="SqlConnectionFactory"/> can rent, release, and retire either
+/// kind through one generic caching code path
+/// (<see cref="SqlConnectionFactory"/>'s private <c>RentLeaseAsync</c>).
+/// </summary>
+internal interface IPooledCredentialLease
+{
+    void Rent();
+
+    void Release();
+}
+
 internal interface ISqlConnectionPoolController
 {
     void ClearPool(SqlConnection connection);
@@ -62,9 +76,12 @@ internal sealed class SecretFileSqlLoginCredentialLeaseFactory : ISqlLoginCreden
 /// <summary>
 /// Owns one SQL-login credential and its read-only password for as long as its
 /// SqlClient pool can open physical connections. Retirement clears the pool
-/// before zeroing the password, and defers zeroing while returned results use it.
+/// before zeroing the password, and defers zeroing while returned results use
+/// it. If the pool clear itself fails, the password is deliberately kept
+/// valid (fail-closed) and the failure propagates to the caller instead of
+/// being swallowed -- see <see cref="Retire"/>.
 /// </summary>
-internal sealed class SqlLoginCredentialLease : IDisposable
+internal sealed class SqlLoginCredentialLease : IDisposable, IPooledCredentialLease
 {
     private readonly object _gate = new();
     private SecureString? _password;
@@ -117,6 +134,16 @@ internal sealed class SqlLoginCredentialLease : IDisposable
         }
     }
 
+    /// <summary>
+    /// Clears this lease's SqlClient pool, then zeros the password once no
+    /// returned result is still using it. If <paramref name="poolController"/>
+    /// throws, this lease is left exactly as it was -- not marked retired, and
+    /// the password not zeroed -- so a lingering pool that could not be
+    /// cleared is never paired with a credential someone might try to reuse
+    /// after it was disposed. The exception propagates to the caller, which
+    /// must not swallow it: see <see cref="SqlConnectionFactory.DisposeAsync"/>
+    /// and <see cref="SqlConnectionFactory.InvalidateSqlLoginProfileAsync"/>.
+    /// </summary>
     public void Retire(ISqlConnectionPoolController poolController, string connectionString)
     {
         ArgumentNullException.ThrowIfNull(poolController);
@@ -128,8 +155,6 @@ internal sealed class SqlLoginCredentialLease : IDisposable
             {
                 return;
             }
-
-            _retired = true;
         }
 
         using (var connection = new SqlConnection(connectionString, Credential))
@@ -139,6 +164,7 @@ internal sealed class SqlLoginCredentialLease : IDisposable
 
         lock (_gate)
         {
+            _retired = true;
             DisposeIfRetiredAndUnused();
         }
     }

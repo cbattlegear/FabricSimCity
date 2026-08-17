@@ -15,4 +15,13 @@ public interface ISqlConnectionFactory : IDisposable, IAsyncDisposable
     /// The associated pool is cleared before the old password is disposed.
     /// </summary>
     Task InvalidateSqlLoginProfileAsync(ConnectionProfile profile);
+
+    /// <summary>
+    /// Removes a cached Entra credential/callback after its mounted
+    /// certificate or client secret rotates, or to force a managed- or
+    /// workload-identity profile to acquire a fresh <c>TokenCredential</c> on
+    /// its next open. The associated pool is cleared before any owned
+    /// certificate material is disposed.
+    /// </summary>
+    Task InvalidateEntraProfileAsync(ConnectionProfile profile);
 }

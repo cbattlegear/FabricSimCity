@@ -6,8 +6,10 @@ namespace SqlSimCity.SqlServer.Auth;
 /// Service principal authentication using a client certificate (PKCS#12/PFX).
 /// Maps only to <c>Azure.Identity.ClientCertificateCredential</c>. The
 /// certificate bytes and its optional PFX password are resolved once per
-/// connection attempt through <c>ISecretFileProvider</c>; this type never holds
-/// plaintext certificate or password material itself, only references.
+/// cached Entra security context (profile plus tenant/client/certificate
+/// reference) through <c>ISecretFileProvider</c>, not once per connection --
+/// see <see cref="EntraCredentialLease"/>; this type never holds plaintext
+/// certificate or password material itself, only references.
 /// </summary>
 public sealed class ServicePrincipalCertificateAuthenticationStrategy : EntraAuthenticationStrategy
 {

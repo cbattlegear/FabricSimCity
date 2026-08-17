@@ -12,30 +12,33 @@ public class EntraTokenCredentialFactoryTests
     public async Task CreateAsyncManagedIdentitySystemAssignedProducesManagedIdentityCredential()
     {
         var strategy = new ManagedIdentityAuthenticationStrategy();
-        var credential = await EntraTokenCredentialFactory.CreateAsync(
+        var material = await EntraTokenCredentialFactory.CreateAsync(
             strategy, new InMemorySecretFileProvider(), CancellationToken.None);
 
-        Assert.IsType<ManagedIdentityCredential>(credential);
+        Assert.IsType<ManagedIdentityCredential>(material.Credential);
+        Assert.Null(material.OwnedCertificate);
     }
 
     [Fact]
     public async Task CreateAsyncManagedIdentityUserAssignedProducesManagedIdentityCredential()
     {
         var strategy = new ManagedIdentityAuthenticationStrategy(Guid.NewGuid().ToString());
-        var credential = await EntraTokenCredentialFactory.CreateAsync(
+        var material = await EntraTokenCredentialFactory.CreateAsync(
             strategy, new InMemorySecretFileProvider(), CancellationToken.None);
 
-        Assert.IsType<ManagedIdentityCredential>(credential);
+        Assert.IsType<ManagedIdentityCredential>(material.Credential);
+        Assert.Null(material.OwnedCertificate);
     }
 
     [Fact]
     public async Task CreateAsyncWorkloadIdentityProducesWorkloadIdentityCredential()
     {
         var strategy = new WorkloadIdentityAuthenticationStrategy(Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
-        var credential = await EntraTokenCredentialFactory.CreateAsync(
+        var material = await EntraTokenCredentialFactory.CreateAsync(
             strategy, new InMemorySecretFileProvider(), CancellationToken.None);
 
-        Assert.IsType<WorkloadIdentityCredential>(credential);
+        Assert.IsType<WorkloadIdentityCredential>(material.Credential);
+        Assert.Null(material.OwnedCertificate);
     }
 
     [Fact]
@@ -45,9 +48,10 @@ public class EntraTokenCredentialFactoryTests
         var strategy = new ServicePrincipalSecretAuthenticationStrategy(
             Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), new SecretFileReference("client-secret"));
 
-        var credential = await EntraTokenCredentialFactory.CreateAsync(strategy, secrets, CancellationToken.None);
+        var material = await EntraTokenCredentialFactory.CreateAsync(strategy, secrets, CancellationToken.None);
 
-        Assert.IsType<ClientSecretCredential>(credential);
+        Assert.IsType<ClientSecretCredential>(material.Credential);
+        Assert.Null(material.OwnedCertificate);
         Assert.Equal(1, secrets.ReadCount);
     }
 
@@ -66,9 +70,11 @@ public class EntraTokenCredentialFactoryTests
             new SecretFileReference("client.pfx"),
             new SecretFileReference("cert-password"));
 
-        var credential = await EntraTokenCredentialFactory.CreateAsync(strategy, secrets, CancellationToken.None);
+        var material = await EntraTokenCredentialFactory.CreateAsync(strategy, secrets, CancellationToken.None);
+        using var owned = material.OwnedCertificate;
 
-        Assert.IsType<ClientCertificateCredential>(credential);
+        Assert.IsType<ClientCertificateCredential>(material.Credential);
+        Assert.NotNull(owned);
     }
 
     [Fact]
@@ -82,9 +88,11 @@ public class EntraTokenCredentialFactoryTests
         var strategy = new ServicePrincipalCertificateAuthenticationStrategy(
             Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), new SecretFileReference("client.pfx"));
 
-        var credential = await EntraTokenCredentialFactory.CreateAsync(strategy, secrets, CancellationToken.None);
+        var material = await EntraTokenCredentialFactory.CreateAsync(strategy, secrets, CancellationToken.None);
+        using var owned = material.OwnedCertificate;
 
-        Assert.IsType<ClientCertificateCredential>(credential);
+        Assert.IsType<ClientCertificateCredential>(material.Credential);
+        Assert.NotNull(owned);
     }
 
     [Fact]

@@ -134,6 +134,54 @@ public class SqlLoginCredentialCachingTests
         Assert.False(leases.Leases.Single().IsDisposed);
     }
 
+    [Fact]
+    public async Task PoolClearFailureDuringInvalidationPropagatesAndKeepsPasswordValid()
+    {
+        var leases = new TrackingLeaseFactory();
+        var pools = new FailingPoolController();
+        using var factory = new SqlConnectionFactory(leases, new RecordingOpener(), pools);
+        var profile = SqlLoginProfile();
+
+        using (await factory.OpenAsync(profile, CancellationToken.None))
+        {
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => factory.InvalidateSqlLoginProfileAsync(profile));
+
+        var lease = Assert.Single(leases.Leases);
+        Assert.False(lease.IsDisposed);
+
+        // The failure is not a permanent dead end: the same lease is still
+        // cached and still reused by the next open, and a later retry of
+        // invalidation retires it once the underlying failure clears.
+        using (await factory.OpenAsync(profile, CancellationToken.None))
+        {
+        }
+
+        Assert.Equal(1, leases.CreateCount);
+        pools.FailNextClear = false;
+        await factory.InvalidateSqlLoginProfileAsync(profile);
+        Assert.True(lease.IsDisposed);
+    }
+
+    [Fact]
+    public async Task FactoryDisposalSurfacesPoolClearFailureInsteadOfSwallowingIt()
+    {
+        var leases = new TrackingLeaseFactory();
+        var pools = new FailingPoolController();
+        var factory = new SqlConnectionFactory(leases, new RecordingOpener(), pools);
+
+        using (await factory.OpenAsync(SqlLoginProfile(), CancellationToken.None))
+        {
+        }
+
+        var ex = await Assert.ThrowsAsync<AggregateException>(() => factory.DisposeAsync().AsTask());
+
+        Assert.Single(ex.InnerExceptions);
+        var lease = Assert.Single(leases.Leases);
+        Assert.False(lease.IsDisposed);
+    }
+
     private static ConnectionProfile SqlLoginProfile(
         string id = "sql-login-profile",
         string username = "svc-reader",
@@ -215,6 +263,19 @@ public class SqlLoginCredentialCachingTests
             var credential = connection.Credential;
             var lease = _leases.Single(lease => ReferenceEquals(lease.Credential, credential));
             PasswordWasDisposedWhenCleared.Add(lease.IsDisposed);
+        }
+    }
+
+    private sealed class FailingPoolController : ISqlConnectionPoolController
+    {
+        public bool FailNextClear { get; set; } = true;
+
+        public void ClearPool(SqlConnection connection)
+        {
+            if (FailNextClear)
+            {
+                throw new InvalidOperationException("simulated pool clear failure");
+            }
         }
     }
 
