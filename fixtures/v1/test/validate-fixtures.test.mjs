@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
-const fixtureDir = join(process.cwd(), 'fixtures', 'v1');
+const fixtureDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const load = (name) => JSON.parse(readFileSync(join(fixtureDir, name), 'utf8'));
 const capabilities = load('target-capabilities.json');
 const queryStore = load('database-query-store.json');
