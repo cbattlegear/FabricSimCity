@@ -5,9 +5,15 @@
 -- Permission: SERVERPROPERTY() requires no special permission.
 --   sys.dm_os_sys_info / sys.dm_os_host_info: SQL Server 2019 (15.x) and earlier require
 --   VIEW SERVER STATE; SQL Server 2022 (16.x) and later require VIEW SERVER PERFORMANCE STATE.
--- Azure SQL Database: supported (EngineEdition = 5). cpu_count / physical_memory_kb reflect the
---   assigned vCore/DTU tier, not a physical host, and sqlserver_start_time reflects the most
---   recent failover/restart of the tenant, not necessarily the physical node uptime.
+-- Azure SQL Database: supported (EngineEdition = 5). cpu_count / physical_memory_kb from
+--   sys.dm_os_sys_info "might return the number of logical CPUs/total physical memory of the
+--   machine hosting the database or elastic pool" per Microsoft's own documentation -- they are
+--   NOT reliable indicators of the tenant's assigned vCore/DTU capacity and must not be treated as
+--   such. For the tenant's actual compute limit, query sys.dm_user_db_resource_governance.cpu_limit
+--   (vCore purchasing model only; NULL for DTU databases) and sys.dm_os_job_object.process_memory_limit_mb
+--   separately -- both are Azure SQL Database-specific DMVs deliberately out of scope for this
+--   cross-platform probe. sqlserver_start_time reflects the most recent failover/restart of the
+--   tenant, not necessarily the physical node uptime.
 -- Result contract: exactly one row describing the connected instance.
 -- Relative cost: trivial (in-memory server state, no per-database scan).
 SET NOCOUNT ON;

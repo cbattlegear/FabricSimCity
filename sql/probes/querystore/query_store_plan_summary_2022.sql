@@ -5,7 +5,7 @@
 -- Minimum platform: SQL Server 2022 (16.x). has_compile_replay_script, is_optimized_plan_forcing_disabled,
 --   plan_type, and plan_type_desc do not exist before SQL Server 2022 (16.x) and querying them on an
 --   older engine raises "Invalid column name". Use plan_summary_2016.sql for SQL Server 2016 (13.x)
---   through 2019 (15.x).
+--   only, or plan_summary_2017.sql for SQL Server 2017 (14.x) through 2019 (15.x).
 -- Permission: Requires VIEW DATABASE PERFORMANCE STATE on the database (SQL Server 2022 (16.x)+).
 -- Parameters:
 --   @StartTime (datetimeoffset(7), required) -- inclusive lower bound on last_execution_time.

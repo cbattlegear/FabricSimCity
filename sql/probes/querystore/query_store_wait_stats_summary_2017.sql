@@ -20,6 +20,9 @@
 --   total_count_executions rather than inventing a weight from wait-time columns alone.
 --   All wait-time columns are MILLISECONDS -- unlike Query Store's duration/CPU columns, which are
 --   microseconds. Do not mix the two units when comparing wait time against duration/CPU time.
+--   total_query_wait_time_ms and count_executions are both bigint; weighted_avg_query_wait_time_ms_per_execution
+--   explicitly CASTs the numerator to decimal(19,4) before dividing so the result is never silently
+--   truncated to an integer by T-SQL's bigint/bigint division rule.
 -- Relative cost: medium; bounded by the @StartTime/@EndTime window via the interval join.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
@@ -63,7 +66,7 @@ SELECT
     wa.min_query_wait_time_ms,
     wa.max_query_wait_time_ms,
     ea.total_count_executions,
-    wa.total_query_wait_time_ms / NULLIF(ea.total_count_executions, 0) AS weighted_avg_query_wait_time_ms_per_execution
+    CAST(wa.total_query_wait_time_ms AS decimal(19,4)) / NULLIF(ea.total_count_executions, 0) AS weighted_avg_query_wait_time_ms_per_execution
 FROM wait_agg AS wa
 JOIN sys.query_store_runtime_stats_interval AS rsi
     ON rsi.runtime_stats_interval_id = wa.runtime_stats_interval_id

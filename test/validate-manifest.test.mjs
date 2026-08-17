@@ -430,3 +430,298 @@ test('every .sql file under sql/probes/ is referenced by exactly one manifest pr
   const missing = [...manifestFiles].filter((f) => !allFiles.includes(f));
   assert.deepEqual(missing, [], `manifest references files that do not exist: ${missing.join(', ')}`);
 });
+
+// ---------------------------------------------------------------------------
+// 5. Targeted regression tests for defects found in review. Each test pins the exact fact that
+//    was wrong, not just a generic shape/token check, so the specific defect cannot silently
+//    reappear.
+// ---------------------------------------------------------------------------
+
+function probeById(id) {
+  const probe = manifest.probes.find((p) => p.id === id);
+  assert.ok(probe, `manifest is missing probe '${id}'`);
+  return probe;
+}
+
+function readProbeSource(probe) {
+  return readFileSync(path.join(sqlDir, probe.file), 'utf8');
+}
+
+const readmePath = path.join(sqlDir, 'README.md');
+const readmeText = readFileSync(readmePath, 'utf8');
+
+describe('regression: index.usage_summary requires VIEW SERVER (PERFORMANCE) STATE', () => {
+  test('manifest.requiredPermission documents VIEW SERVER STATE / VIEW SERVER PERFORMANCE STATE', () => {
+    const probe = probeById('index.usage_summary');
+    assert.match(
+      probe.requiredPermission,
+      /VIEW SERVER STATE/,
+      'manifest must not claim sys.dm_db_index_usage_stats needs no special permission',
+    );
+    assert.match(probe.requiredPermission, /VIEW SERVER PERFORMANCE STATE/);
+    assert.doesNotMatch(probe.requiredPermission, /^None beyond ordinary/i);
+  });
+
+  test('probe file header documents VIEW SERVER STATE / VIEW SERVER PERFORMANCE STATE, not "no special permission"', () => {
+    const probe = probeById('index.usage_summary');
+    const source = readProbeSource(probe);
+    const header = source.slice(0, 1500);
+    assert.match(header, /VIEW SERVER STATE/);
+    assert.match(header, /VIEW SERVER PERFORMANCE STATE/);
+    assert.doesNotMatch(
+      header,
+      /no special permission beyond ordinary/i,
+      'header must not claim this DMV needs no special permission',
+    );
+  });
+
+  test('README permission table documents VIEW SERVER STATE / VIEW SERVER PERFORMANCE STATE for sys.dm_db_index_usage_stats', () => {
+    const tableRow = readmeText
+      .split('\n')
+      .find((line) => line.includes('sys.dm_db_index_usage_stats') && line.includes('|'));
+    assert.ok(tableRow, 'README permission table is missing a sys.dm_db_index_usage_stats row');
+    assert.match(tableRow, /VIEW SERVER STATE/);
+    assert.match(tableRow, /VIEW SERVER PERFORMANCE STATE/);
+  });
+});
+
+describe('regression: index.operational_stats permission, reset semantics, and NULL fail-safe', () => {
+  test('manifest.requiredPermission documents CONTROL on the specified object', () => {
+    const probe = probeById('index.operational_stats');
+    assert.match(probe.requiredPermission, /\bCONTROL\b/, 'manifest must document CONTROL permission');
+    assert.doesNotMatch(probe.requiredPermission, /^None beyond ordinary/i);
+  });
+
+  test('manifest resultContract describes metadata-cache-driven resets, not just restart/rebuild', () => {
+    const probe = probeById('index.operational_stats');
+    assert.match(probe.resultContract, /metadata.cache/i);
+    assert.doesNotMatch(
+      probe.resultContract,
+      /^Zero or more rows, one per \(object_id, index_id, partition_number\)\. Wait columns are milliseconds; count columns are raw counts\. Cumulative since the last engine restart or index rebuild, whichever is more recent\.$/,
+      'resultContract still uses the old, inaccurate "since last restart or rebuild" wording verbatim',
+    );
+  });
+
+  test('probe file guards @ObjectId with COALESCE(..., -1) so NULL cannot become a wildcard scan', () => {
+    const probe = probeById('index.operational_stats');
+    const source = readProbeSource(probe);
+    assert.match(
+      source,
+      /sys\.dm_db_index_operational_stats\(\s*DB_ID\(\)\s*,\s*COALESCE\(\s*@ObjectId\s*,\s*-1\s*\)/i,
+      'the TVF call must wrap @ObjectId in COALESCE(@ObjectId, -1) so a NULL parameter cannot trigger full-database enumeration',
+    );
+  });
+
+  test('probe file header explains why 0 is not a safe NULL sentinel', () => {
+    const probe = probeById('index.operational_stats');
+    const source = readProbeSource(probe);
+    assert.match(
+      source,
+      /object_id = 0.*(wildcard|NOT a safe sentinel)|NOT a safe sentinel.*object_id/is,
+      'header must document that 0 is also wildcard-equivalent, not just NULL',
+    );
+  });
+
+  test('probe file header no longer claims counters reset only "since last restart or rebuild"', () => {
+    const probe = probeById('index.operational_stats');
+    const source = readProbeSource(probe);
+    const header = source.slice(0, 3200);
+    assert.match(header, /metadata.cache/i);
+    assert.doesNotMatch(
+      header,
+      /cumulative since the last engine restart or the index's last rebuild, whichever is more recent/i,
+    );
+  });
+});
+
+describe('regression: query_store_plan_summary version split (2016 vs 2017 vs 2022)', () => {
+  test('the 2016 variant never selects plan_forcing_type (SQL Server 2017+ only column)', () => {
+    const probe = probeById('querystore.plan_summary_2016');
+    const source = readProbeSource(probe);
+    assert.doesNotMatch(
+      stripSqlComments(source),
+      /plan_forcing_type/i,
+      'querystore.plan_summary_2016 must not select plan_forcing_type/plan_forcing_type_desc: those columns ' +
+        'do not exist on SQL Server 2016 and raise Invalid column name, not NULL',
+    );
+  });
+
+  test('a 2017 variant exists and selects plan_forcing_type but not the 2022-only PSP columns', () => {
+    const probe = probeById('querystore.plan_summary_2017');
+    const source = readProbeSource(probe);
+    const stripped = stripSqlComments(source);
+    assert.match(stripped, /plan_forcing_type/i);
+    assert.doesNotMatch(stripped, /has_compile_replay_script|is_optimized_plan_forcing_disabled|plan_type_desc/i);
+  });
+
+  test('the 2022 variant still carries the 2022-only parameter-sensitive-plan columns', () => {
+    const probe = probeById('querystore.plan_summary_2022');
+    const source = readProbeSource(probe);
+    assert.match(stripSqlComments(source), /plan_type_desc/i);
+  });
+
+  test('manifest declares all three plan_summary variants chained via versionVariantOf', () => {
+    for (const id of ['querystore.plan_summary_2016', 'querystore.plan_summary_2017', 'querystore.plan_summary_2022']) {
+      const probe = probeById(id);
+      assert.equal(probe.versionVariantOf, 'querystore.plan_summary', `probe '${id}'`);
+    }
+  });
+});
+
+describe('regression: query_store_runtime_stats_summary version split (2016 vs 2022 replica_group_id)', () => {
+  test('the 2016 variant never selects replica_group_id (SQL Server 2022+ only column)', () => {
+    const probe = probeById('querystore.runtime_stats_summary_2016');
+    const source = readProbeSource(probe);
+    assert.doesNotMatch(
+      stripSqlComments(source),
+      /replica_group_id/i,
+      'querystore.runtime_stats_summary_2016 must not select replica_group_id: that column does not exist ' +
+        'before SQL Server 2022 and raises Invalid column name',
+    );
+  });
+
+  test('the 2022 variant selects AND groups by replica_group_id', () => {
+    const probe = probeById('querystore.runtime_stats_summary_2022');
+    const source = readProbeSource(probe);
+    const stripped = stripSqlComments(source);
+    assert.match(stripped, /rs\.replica_group_id/i);
+    const groupByMatch = stripped.match(/GROUP BY([\s\S]+?);/i);
+    assert.ok(groupByMatch, 'expected a GROUP BY clause');
+    assert.match(groupByMatch[1], /replica_group_id/i, 'GROUP BY must include replica_group_id');
+  });
+
+  test('manifest declares both runtime_stats_summary variants chained via versionVariantOf', () => {
+    for (const id of ['querystore.runtime_stats_summary_2016', 'querystore.runtime_stats_summary_2022']) {
+      const probe = probeById(id);
+      assert.equal(probe.versionVariantOf, 'querystore.runtime_stats_summary', `probe '${id}'`);
+    }
+  });
+});
+
+describe('regression: query_store_wait_stats_summary replica grouping and division truncation', () => {
+  test('2022 exec_agg CTE groups by replica_group_id and the outer join keys on it', () => {
+    const probe = probeById('querystore.wait_stats_summary_2022');
+    const source = readProbeSource(probe);
+    const stripped = stripSqlComments(source);
+
+    const execAggMatch = stripped.match(/exec_agg AS \(([\s\S]+?)\)\s*(?:,|SELECT)/i);
+    assert.ok(execAggMatch, 'expected an exec_agg CTE');
+    assert.match(
+      execAggMatch[1],
+      /GROUP BY[\s\S]*replica_group_id/i,
+      'exec_agg must GROUP BY replica_group_id, otherwise one replica-agnostic execution total is ' +
+        'applied to every per-replica wait row',
+    );
+
+    assert.match(
+      stripped,
+      /ea\.replica_group_id\s*=\s*wa\.replica_group_id/i,
+      'the join from wait_agg to exec_agg must include replica_group_id as a join key',
+    );
+  });
+
+  for (const id of ['querystore.wait_stats_summary_2017', 'querystore.wait_stats_summary_2022']) {
+    test(`${id}: weighted-average-per-execution expression casts to decimal/float before dividing`, () => {
+      const probe = probeById(id);
+      const source = readProbeSource(probe);
+      const stripped = stripSqlComments(source);
+      assert.match(
+        stripped,
+        /CAST\(\s*wa\.total_query_wait_time_ms\s+AS\s+(?:DECIMAL\(\s*\d+\s*,\s*\d+\s*\)|FLOAT(?:\(\d+\))?)\s*\)\s*\/\s*NULLIF\(\s*ea\.total_count_executions/i,
+        `${id} must CAST the bigint numerator to a decimal/float type before dividing by ` +
+          'total_count_executions, otherwise T-SQL performs bigint/bigint integer division and truncates ' +
+          'the per-execution average',
+      );
+    });
+  }
+});
+
+describe('regression: server.identity does not overclaim Azure SQL DB capacity from host DMVs', () => {
+  test('probe header does not claim cpu_count/physical_memory_kb reflect the assigned vCore/DTU tier', () => {
+    const probe = probeById('server.identity');
+    const source = readProbeSource(probe);
+    assert.doesNotMatch(
+      source,
+      /reflect the\s*\n?\s*--?\s*assigned vCore\/DTU tier/i,
+      'sys.dm_os_sys_info cpu_count/physical_memory_kb may reflect the host/elastic-pool machine on ' +
+        'Azure SQL Database, not the tenant capacity -- this claim must not appear',
+    );
+    assert.match(
+      source,
+      /host(ing)? the database or elastic pool|dm_user_db_resource_governance/i,
+      'probe header must point at the host-machine caveat and/or the correct tenant-capacity DMVs',
+    );
+  });
+
+  test('probe header cites the correct tenant-capacity sources', () => {
+    const probe = probeById('server.identity');
+    const source = readProbeSource(probe);
+    assert.match(source, /dm_user_db_resource_governance/i);
+    assert.match(source, /dm_os_job_object/i);
+  });
+
+  test('README Azure scope section states host-reported values do NOT reflect tenant capacity', () => {
+    assert.doesNotMatch(
+      readmeText,
+      /cpu_count\s*\/\s*physical_memory_kb reflect the assigned vCore\/DTU tier/i,
+      'the old false claim (without a "do not") must not reappear verbatim',
+    );
+    assert.match(
+      readmeText,
+      /do\s*\n?\s*not reflect the tenant's assigned vCore\/DTU capacity/i,
+      'README must explicitly state these host-level columns are not a tenant-capacity indicator',
+    );
+    assert.match(readmeText, /dm_user_db_resource_governance/i);
+    assert.match(readmeText, /dm_os_job_object/i);
+  });
+});
+
+describe('regression: server.database_discovery on Azure SQL DB is nuanced, not blanket unsupported', () => {
+  test('manifest no longer flags database_discovery unsupported on Azure SQL Database', () => {
+    const probe = probeById('server.database_discovery');
+    assert.equal(probe.azureSqlDatabase.unsupported, false);
+    assert.match(probe.azureSqlDatabase.notes, /connection context|master/i);
+  });
+
+  test('no probe in the manifest is flagged blanket-unsupported on Azure SQL Database', () => {
+    const stillUnsupported = manifest.probes.filter((p) => p.azureSqlDatabase.unsupported === true);
+    assert.deepEqual(
+      stillUnsupported.map((p) => p.id),
+      [],
+      'no probe should be blanket-unsupported on Azure SQL Database per the corrected review findings',
+    );
+  });
+});
+
+describe('regression: Microsoft Learn URLs use the canonical DMV doc path', () => {
+  test('README contains no legacy /system-dynamic-management-views/ links', () => {
+    assert.doesNotMatch(
+      readmeText,
+      /system-dynamic-management-views/,
+      'DMV doc links must use the canonical /system-dynamic-management-objects/ path',
+    );
+  });
+
+  test('every learn.microsoft.com URL in README uses a recognized, non-legacy path segment', () => {
+    const urls = [...readmeText.matchAll(/https:\/\/learn\.microsoft\.com\S+(?=[)\s])/g)].map((m) => m[0]);
+    assert.ok(urls.length > 0, 'expected at least one Microsoft Learn citation in README');
+    for (const url of urls) {
+      assert.doesNotMatch(url, /system-dynamic-management-views/, url);
+    }
+  });
+});
+
+describe('regression: sys.database_query_store_options zero-row claim is not overstated', () => {
+  test('README does not claim the view returns zero rows when Query Store was never enabled', () => {
+    assert.doesNotMatch(
+      readmeText,
+      /returning\s+\*{0,2}zero rows\*{0,2}\s+means Query Store has\s*\n?\s*never been enabled/i,
+      'this exact claim is not supported by Microsoft documentation and must not appear',
+    );
+  });
+
+  test('README treats actual_state/actual_state_desc as the authoritative enabled/disabled signal', () => {
+    assert.match(readmeText, /actual_state_desc\s*=\s*'OFF'/i);
+  });
+});
+

@@ -6,8 +6,13 @@
 --   Database only the current database's rows are visible anyway (rows for other databases are
 --   silently filtered by the engine, not returned as an error).
 -- Minimum platform: SQL Server 2016 (13.x).
--- Permission: no special permission beyond ordinary access to the database; this DMV is not gated
---   by VIEW SERVER STATE / VIEW DATABASE STATE the way most other DMVs in this catalog are.
+-- Permission: SQL Server/Managed Instance -- VIEW SERVER STATE (SQL Server 2016 (13.x) through
+--   2019 (15.x)) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022 (16.x)+).
+--   Azure SQL Database -- Basic/S0/S1 tiers and databases in an elastic pool require the server
+--   admin account, an Azure AD/Entra admin account, or membership in the ##MS_ServerStateReader##
+--   server role; other (higher) service tiers require VIEW DATABASE STATE, or membership in
+--   ##MS_ServerStateReader## / the VIEW DATABASE PERFORMANCE STATE permission on SQL Server 2022
+--   (16.x)-equivalent Azure SQL Database.
 -- Result contract: zero or more rows, one per (object_id, index_id) that has been touched by a
 --   plan since the last engine restart. An index with NO row here has not been used at all since
 --   startup -- it does not mean the index has zero rows or is otherwise empty. All counters are

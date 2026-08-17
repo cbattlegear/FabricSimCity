@@ -63,18 +63,40 @@ diagnostic probes generally follow this pattern:
 | Server/session/task/scheduler/memory-grant/file-IO DMVs (`sys.dm_exec_sessions`, `sys.dm_exec_requests`, `sys.dm_os_waiting_tasks`, `sys.dm_os_schedulers`, `sys.dm_exec_query_memory_grants`, `sys.dm_io_virtual_file_stats`, `sys.dm_db_task_space_usage`, `sys.dm_db_session_space_usage`) | `VIEW SERVER STATE` | `VIEW SERVER PERFORMANCE STATE` |
 | Query Store catalog views (`sys.database_query_store_options`, `sys.query_store_*`) | `VIEW DATABASE STATE` | `VIEW DATABASE PERFORMANCE STATE` (or `VIEW DATABASE STATE`, which still covers it) |
 | `sys.dm_db_file_space_usage`, `sys.dm_db_log_space_usage` | `VIEW DATABASE STATE` | `VIEW DATABASE PERFORMANCE STATE` |
-| `sys.dm_db_index_usage_stats`, `sys.dm_db_index_operational_stats` | none beyond ordinary database access | none beyond ordinary database access |
+| `sys.dm_db_index_usage_stats` | `VIEW SERVER STATE` (server/MI); Azure SQL DB: server admin/Entra admin/`##MS_ServerStateReader##` on Basic/S0/S1/elastic pool, else `VIEW DATABASE STATE`/`##MS_ServerStateReader##` | `VIEW SERVER PERFORMANCE STATE` (server/MI); same Azure SQL DB rules as the prior column |
+| `sys.dm_db_index_operational_stats` (single object, this catalog's usage) | `CONTROL` on the specified object | `CONTROL` on the specified object |
 | `sys.databases`, `SERVERPROPERTY()` | none (public) | none (public) |
+
+Whole-database or whole-server calls to `sys.dm_db_index_operational_stats` (passing `NULL`
+for `@ObjectId`/`@DatabaseId`, which this catalog's probe deliberately never does) instead
+require `VIEW DATABASE STATE`/`VIEW DATABASE PERFORMANCE STATE` or
+`VIEW SERVER STATE`/`VIEW SERVER PERFORMANCE STATE` respectively, and those grants/denies
+override a per-object `CONTROL` grant/deny.
 
 Each probe file's header comment and the matching `manifest.json` entry state its exact
 requirement; this table is a summary, not a substitute for either.
 
 ### Azure SQL Database scope limitations
 
-- **`sys.databases`** (`server.database_discovery`) only returns `master` and the
-  currently connected user database -- it cannot enumerate every database on the
-  logical server. A collector targeting Azure SQL Database must iterate a
-  known list of database names, opening one connection per database.
+- **`sys.databases`** (`server.database_discovery`) visibility depends on connection
+  context and permission, not a blanket restriction. Connected to `master` with
+  sufficient permission (server admin, Microsoft Entra admin, or an equivalent role),
+  it can enumerate every database visible on the logical server. Connected to a user
+  database instead, it returns only `master` and that database itself. A collector that
+  needs full-server enumeration on Azure SQL Database should open its `master`
+  connection specifically for this probe.
+- **`sys.dm_db_index_usage_stats`** requires the server admin account, a Microsoft Entra
+  admin account, or `##MS_ServerStateReader##` server-role membership on Basic/S0/S1
+  tiers and databases in an elastic pool; other service tiers require `VIEW DATABASE
+  STATE` or `##MS_ServerStateReader##` membership.
+- **`sys.dm_os_sys_info`** (`server.identity`): `cpu_count`/`physical_memory_kb` on Azure
+  SQL Database "might return the number of logical CPUs/total physical memory of the
+  machine hosting the database or elastic pool" per Microsoft's documentation -- they do
+  not reflect the tenant's assigned vCore/DTU capacity. Use
+  `sys.dm_user_db_resource_governance.cpu_limit` (vCore purchasing model; `NULL` for DTU)
+  and `sys.dm_os_job_object.process_memory_limit_mb` for the tenant's actual compute
+  limits; both are Azure SQL Database-specific and intentionally out of scope for the
+  cross-platform `server.identity` probe.
 - **Session/request/memory-grant DMVs** (`sys.dm_exec_sessions`,
   `sys.dm_exec_requests`, `sys.dm_exec_query_memory_grants`) require `VIEW DATABASE
   STATE` on Azure SQL Database rather than `VIEW SERVER STATE`, and are filtered to the
@@ -92,8 +114,9 @@ requirement; this table is a summary, not a substitute for either.
   `tempdb`.
 
 See `manifest.json`'s per-probe `azureSqlDatabase` field for the authoritative,
-per-probe statement (`unsupported: true` only for `server.database_discovery`; every
-other probe is supported with the notes above).
+per-probe statement. No probe in this catalog is flagged blanket-`unsupported` on Azure
+SQL Database as of this revision; several instead document narrower visibility, a
+different required permission, or a preference for a newer version-split variant.
 
 ## Units
 
@@ -141,10 +164,17 @@ other probe is supported with the notes above).
 
 Most DMV counters in this catalog (`sys.dm_io_virtual_file_stats`,
 `sys.dm_os_schedulers.total_cpu_usage_ms`/`total_scheduler_delay_ms`,
-`sys.dm_db_index_usage_stats`, `sys.dm_db_index_operational_stats`) are **cumulative
-since the Database Engine's last restart**, or since the specific index's last
-rebuild/creation for the index DMVs, whichever is more recent. A collector computing a
-rate must:
+`sys.dm_db_index_usage_stats`) are **cumulative since the Database Engine's last
+restart**, or since the specific index's last rebuild/creation, whichever is more
+recent. `sys.dm_db_index_operational_stats` counters follow a different rule: they are
+maintained only while the heap/B-tree's metadata-cache entry for that object exists in
+memory, so they reset to zero whenever that metadata is (re)cached -- which includes,
+but is not limited to, an engine restart -- and they disappear entirely when the
+underlying object, index, or partition is dropped or truncated; certain other DDL
+against the object can also reset the counters to zero without dropping anything. Do
+not assume a long-standing `sys.dm_db_index_operational_stats` value implies a
+long-uninterrupted server uptime the way the other cumulative-since-restart counters
+in this catalog do. A collector computing a rate must:
 
 1. Track the previous poll's counter value and its `sample_ms`/wall-clock time.
 2. Detect a restart (a lower reading than the previous poll, or `sample_ms` resetting
@@ -162,14 +192,18 @@ scoped to an aggregation interval (`interval_length_minutes` in
 
 Per Microsoft's own documentation, `sys.query_store_runtime_stats` and
 `sys.query_store_wait_stats` can each return **more than one row** for the same
-`(plan_id, runtime_stats_interval_id, execution_type[, wait_category])` key when that
-interval is still the *currently active* one: typically one row already flushed to
-disk and one or more rows still in memory. `querystore/query_store_runtime_stats_summary.sql`
-and both `querystore/query_store_wait_stats_summary_*.sql` files `GROUP BY` exactly that
-key and `SUM()` across it, so each row returned to the caller is already the correct,
-de-duplicated total for its interval -- do not re-aggregate client-side by anything
-looser than that key, and do not `AVG()` across rows that share the key (that would
-silently halve a total that Query Store itself considers a single logical interval).
+`(plan_id, runtime_stats_interval_id, execution_type[, wait_category][, replica_group_id])`
+key when that interval is still the *currently active* one: typically one row already
+flushed to disk and one or more rows still in memory. Both
+`querystore/query_store_runtime_stats_summary_2016.sql`/`_2022.sql` and both
+`querystore/query_store_wait_stats_summary_2017.sql`/`_2022.sql` files `GROUP BY` exactly
+that key (including `replica_group_id` in the 2022+ variants) and `SUM()` across it, so
+each row returned to the caller is already the correct, de-duplicated total for its
+interval -- do not re-aggregate client-side by anything looser than that key, and do not
+`AVG()` across rows that share the key (that would silently halve a total that Query
+Store itself considers a single logical interval). On SQL Server 2022 (16.x)+, never drop
+`replica_group_id` from that key: doing so combines a primary replica's runtime/wait
+statistics with a secondary readable replica's under one inflated total.
 
 "Weighted" total/average means execution-count-weighted:
 `weighted_avg_duration_us = SUM(avg_duration * count_executions) / SUM(count_executions)`,
@@ -177,7 +211,11 @@ which is different from a naive `AVG(avg_duration)` across intervals or plans, b
 each interval's `avg_duration` already represents a different number of executions.
 `sys.query_store_wait_stats` has no `count_executions` column of its own, so the wait
 probes join `sys.query_store_runtime_stats`'s execution count in separately (as
-`total_count_executions`) rather than inventing a weight from wait-time columns alone.
+`total_count_executions`, grouped by `replica_group_id` too on the 2022+ variant) rather
+than inventing a weight from wait-time columns alone. `total_query_wait_time_ms` and
+`count_executions` are both `bigint`; both wait-stats probes explicitly `CAST` the
+numerator to `decimal(19,4)` before dividing so the per-execution average is never
+silently truncated to an integer by T-SQL's `bigint`/`bigint` division rule.
 
 ## Null / unavailable meanings
 
@@ -185,9 +223,13 @@ probes join `sys.query_store_runtime_stats`'s execution count in separately (as
   targeting the 2016 base view is simply absent from the result set (the file doesn't
   select it) rather than `NULL` -- use `querystore.options_2019` when those columns are
   needed.
-- `sys.query_store_plan.plan_forcing_type` is `NULL` on SQL Server 2016 (13.x) even
-  when queried from the 2016-targeted probe file, because the column itself was
-  introduced in SQL Server 2017 (14.x); it is not an indicator of "no forcing" on 2016.
+- `sys.query_store_plan.plan_forcing_type`/`plan_forcing_type_desc` do not exist as
+  columns before SQL Server 2017 (14.x) -- selecting them on SQL Server 2016 (13.x)
+  raises "Invalid column name", not `NULL`. `querystore.plan_summary_2016` is a true
+  SQL Server 2016-only column set that omits them entirely; use
+  `querystore.plan_summary_2017` (SQL Server 2017 (14.x) through 2019 (15.x)) or
+  `querystore.plan_summary_2022` (SQL Server 2022 (16.x)+) when forcing-type columns
+  are needed.
 - `sys.dm_exec_requests.blocking_session_id` (and the same-named column in
   `sys.dm_os_waiting_tasks`): `NULL` or `0` means "not blocked, or the blocking
   session's identity is unavailable" -- these two cases are indistinguishable from this
@@ -200,9 +242,12 @@ probes join `sys.query_store_runtime_stats`'s execution count in separately (as
   a compiled plan since the engine last restarted (or since the index was last
   rebuilt/created) -- it does **not** mean the index is empty, unused forever, or safe
   to drop without checking a longer observation window.
-- `sys.database_query_store_options` returning **zero rows** means Query Store has
-  never been enabled for that database, which is different from `actual_state_desc =
-  'OFF'` (explicitly disabled after having been on).
+- `sys.database_query_store_options`'s documented, authoritative signal for whether
+  Query Store is enabled is `actual_state`/`actual_state_desc`. Microsoft's own
+  documentation does not state that this view returns zero rows when Query Store was
+  never enabled for a database; do not rely on row absence as a proxy for that -- check
+  `actual_state_desc = 'OFF'` (or the query returning no row at all, which this catalog
+  treats as "unknown/not queryable" rather than "never enabled") explicitly instead.
 
 ## Cadence and overhead boundaries
 
@@ -238,16 +283,19 @@ correlation is the calling application's responsibility, not this catalog's.
 - [sys.query_store_plan (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-plan-transact-sql)
 - [sys.query_store_runtime_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-runtime-stats-transact-sql)
 - [sys.query_store_wait_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-wait-stats-transact-sql)
-- [sys.dm_exec_requests (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-requests-transact-sql)
-- [sys.dm_os_waiting_tasks (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-waiting-tasks-transact-sql)
-- [sys.dm_exec_query_memory_grants (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-query-memory-grants-transact-sql)
-- [sys.dm_tran_session_transactions (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-tran-session-transactions-transact-sql)
-- [sys.dm_db_task_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-task-space-usage-transact-sql)
-- [sys.dm_db_session_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-session-space-usage-transact-sql)
-- [sys.dm_db_file_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-file-space-usage-transact-sql)
-- [sys.dm_db_log_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-log-space-usage-transact-sql)
-- [sys.dm_io_virtual_file_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-io-virtual-file-stats-transact-sql)
-- [sys.dm_os_schedulers (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-schedulers-transact-sql)
-- [sys.dm_db_index_usage_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-index-usage-stats-transact-sql)
-- [sys.dm_db_index_operational_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-index-operational-stats-transact-sql)
+- [sys.dm_exec_requests (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-exec-requests-transact-sql)
+- [sys.dm_os_waiting_tasks (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-os-waiting-tasks-transact-sql)
+- [sys.dm_exec_query_memory_grants (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-exec-query-memory-grants-transact-sql)
+- [sys.dm_tran_session_transactions (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-tran-session-transactions-transact-sql)
+- [sys.dm_db_task_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-db-task-space-usage-transact-sql)
+- [sys.dm_db_session_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-db-session-space-usage-transact-sql)
+- [sys.dm_db_file_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-db-file-space-usage-transact-sql)
+- [sys.dm_db_log_space_usage (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-db-log-space-usage-transact-sql)
+- [sys.dm_io_virtual_file_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-io-virtual-file-stats-transact-sql)
+- [sys.dm_os_schedulers (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-os-schedulers-transact-sql)
+- [sys.dm_db_index_usage_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-db-index-usage-stats-transact-sql)
+- [sys.dm_db_index_operational_stats (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-db-index-operational-stats-transact-sql)
+- [sys.dm_os_sys_info (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-os-sys-info-transact-sql)
+- [sys.dm_user_db_resource_governance (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-user-db-resource-governor-azure-sql-database)
+- [sys.dm_os_job_object (Transact-SQL)](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-objects/sys-dm-os-job-object-transact-sql)
 - [T-SQL differences between SQL Server and Azure SQL Database](https://learn.microsoft.com/en-us/azure/azure-sql/database/transact-sql-tsql-differences-sql-server)

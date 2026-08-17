@@ -6,11 +6,14 @@
 -- Minimum platform: SQL Server 2016 (13.x).
 -- Permission: VIEW ANY DATABASE, granted to public by default since SQL Server 2016 SP1; a login
 --   without visibility into a given database will not see its row at all (no error, silent filter).
--- Azure SQL Database scope limitation: sys.databases on Azure SQL Database only returns the
---   `master` pseudo-database and the single user database the connection is opened against -- it
---   cannot enumerate every database on the logical server. Database discovery across an Azure SQL
---   Database logical server requires calling this probe once per known database name, or using the
---   Azure Resource Manager / `sys.databases` in `master` from a connection opened to `master`.
+-- Azure SQL Database scope: supported, but row visibility depends on connection context and
+--   permission -- not a blanket unsupported case. Connected to the `master` database with sufficient
+--   permission (server admin, Microsoft Entra admin, or an equivalent role), sys.databases can
+--   enumerate every database visible on the logical server. Connected to a user database instead,
+--   sys.databases returns only the `master` pseudo-row and the current database itself; it cannot
+--   enumerate sibling databases from that context. Run this probe against a `master` connection when
+--   full-server enumeration is required; when only a user-database connection is available, treat
+--   the result as scoped to that database plus `master`, not the whole logical server.
 -- Result contract: zero or more rows, one per visible database.
 -- Relative cost: trivial.
 SET NOCOUNT ON;

@@ -1,11 +1,13 @@
--- Probe: querystore.runtime_stats_summary
+-- Probe: querystore.runtime_stats_summary_2016
 -- Purpose: Query Store runtime execution statistics, aggregated per plan/interval/execution-type
 --   and rolled up into weighted totals across the requested time window.
 -- Connection scope: database (assumes the client opened a connection to the target database).
--- Minimum platform: SQL Server 2016 (13.x). Column set is stable through SQL Server 2022 (16.x)+
---   and Azure SQL Database; no version split is required for this probe.
--- Permission: SQL Server 2016 (13.x) through 2019 (15.x) require VIEW DATABASE STATE.
---   SQL Server 2022 (16.x) and later require VIEW DATABASE PERFORMANCE STATE.
+-- Minimum platform: SQL Server 2016 (13.x). Column set here is stable through SQL Server 2019
+--   (15.x)/Azure SQL Database. It intentionally omits replica_group_id, which does not exist as a
+--   column before SQL Server 2022 (16.x) and raises "Invalid column name" if selected there. Use
+--   runtime_stats_summary_2022.sql on SQL Server 2022 (16.x)+ to keep secondary-replica runtime
+--   stats separated by replica instead of silently summed together.
+-- Permission: Requires VIEW DATABASE STATE on the database.
 -- Parameters:
 --   @StartTime (datetimeoffset(7), required) -- inclusive lower bound on interval start_time.
 --   @EndTime   (datetimeoffset(7), required) -- exclusive upper bound on interval start_time.

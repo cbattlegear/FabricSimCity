@@ -17,6 +17,12 @@
 --   per that grouping; this probe SUMs across them so each output row is already de-duplicated.
 --   All wait-time columns are MILLISECONDS -- unlike Query Store's duration/CPU columns, which are
 --   microseconds.
+--   total_query_wait_time_ms and count_executions are both bigint; weighted_avg_query_wait_time_ms_per_execution
+--   explicitly CASTs the numerator to decimal(19,4) before dividing so the result is never silently
+--   truncated to an integer by T-SQL's bigint/bigint division rule.
+--   exec_agg is grouped by (plan_id, runtime_stats_interval_id, execution_type, replica_group_id) and
+--   joined on all four keys -- grouping/joining without replica_group_id would sum execution counts
+--   across every replica into one total and apply that inflated total to each replica's wait row.
 -- Relative cost: medium; bounded by the @StartTime/@EndTime window via the interval join.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
@@ -44,9 +50,10 @@ exec_agg AS (
         rs.plan_id,
         rs.runtime_stats_interval_id,
         rs.execution_type,
+        rs.replica_group_id,
         SUM(rs.count_executions) AS total_count_executions
     FROM sys.query_store_runtime_stats AS rs
-    GROUP BY rs.plan_id, rs.runtime_stats_interval_id, rs.execution_type
+    GROUP BY rs.plan_id, rs.runtime_stats_interval_id, rs.execution_type, rs.replica_group_id
 )
 SELECT
     wa.plan_id,
@@ -62,7 +69,7 @@ SELECT
     wa.min_query_wait_time_ms,
     wa.max_query_wait_time_ms,
     ea.total_count_executions,
-    wa.total_query_wait_time_ms / NULLIF(ea.total_count_executions, 0) AS weighted_avg_query_wait_time_ms_per_execution
+    CAST(wa.total_query_wait_time_ms AS decimal(19,4)) / NULLIF(ea.total_count_executions, 0) AS weighted_avg_query_wait_time_ms_per_execution
 FROM wait_agg AS wa
 JOIN sys.query_store_runtime_stats_interval AS rsi
     ON rsi.runtime_stats_interval_id = wa.runtime_stats_interval_id
@@ -70,5 +77,6 @@ LEFT JOIN exec_agg AS ea
     ON ea.plan_id = wa.plan_id
    AND ea.runtime_stats_interval_id = wa.runtime_stats_interval_id
    AND ea.execution_type = wa.execution_type
+   AND ea.replica_group_id = wa.replica_group_id
 WHERE rsi.start_time >= @StartTime
   AND rsi.start_time < @EndTime;
