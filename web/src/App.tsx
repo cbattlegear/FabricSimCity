@@ -169,7 +169,8 @@ function DetailPanel({ database }: { database: DatabaseAtlasItem | null }) {
         <div><dt>Blocked sessions</dt><dd>{metric(database.liveActivity.blockedSessions)}</dd></div>
         <div><dt>Batch requests/sec</dt><dd>{metric(database.liveActivity.batchRequestsPerSecond)}</dd></div>
         <div><dt>Query executions</dt><dd>{metric(database.queryStore.executionCount)}</dd></div>
-        <div><dt>Average duration</dt><dd>{metric(database.queryStore.averageDurationMilliseconds, ' ms')}</dd></div>
+        <div><dt>Logical reads (8-KiB pages)</dt><dd>{metric(database.queryStore.logicalReads8KiBPages)}</dd></div>
+        <div><dt>Average duration</dt><dd>{metric(database.queryStore.averageDurationMicroseconds, ' µs')}</dd></div>
       </dl>
       <div className="source-note"><strong>Live source</strong><p>{evidenceText(database.liveActivity.evidence)}</p></div>
       <div className="source-note"><strong>Historical source</strong><p>{evidenceText(database.queryStore.evidence)}</p></div>

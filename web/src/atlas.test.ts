@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessibleDatabaseLabel, databaseSide, evidenceText, isFreshLive, sizeToSide } from './atlas'
+import { accessibleDatabaseLabel, databaseSide, evidenceText, formatBytes, isFreshLive, sizeToSide } from './atlas'
 import type { DatabaseAtlasItem, Evidence } from './contracts'
 
 const observed = '2026-08-17T16:59:52Z'
@@ -15,7 +15,7 @@ function evidence(status: Evidence['status'] = 'Available'): Evidence {
   }
 }
 
-function database(bytes: number | null, status: 'Known' | 'Unknown' = 'Known'): DatabaseAtlasItem {
+function database(bytes: string | null, status: 'Known' | 'Unknown' = 'Known'): DatabaseAtlasItem {
   const sizeEvidence: Evidence = {
     source: 'Fixture',
     status: status === 'Known' ? 'Available' : 'Unknown',
@@ -37,8 +37,8 @@ function database(bytes: number | null, status: 'Known' | 'Unknown' = 'Known'): 
     },
     queryStore: {
       executionCount: 0,
-      logicalReads: 0,
-      averageDurationMilliseconds: 0,
+      logicalReads8KiBPages: 0,
+      averageDurationMicroseconds: 0,
       windowStart: observed,
       windowEnd: generated,
       capability: 'Available',
@@ -60,19 +60,28 @@ describe('allocated size mapping', () => {
 
   it('preserves order and equality', () => {
     expect(sizeToSide(10)).toBeLessThan(sizeToSide(10_000))
-    expect(databaseSide(database(256 * 1024))).toBe(databaseSide(database(256 * 1024)))
+    expect(databaseSide(database('262144'))).toBe(databaseSide(database('262144')))
   })
 
   it('keeps unknown separate from known zero', () => {
     expect(databaseSide(database(null, 'Unknown'))).toBeNull()
-    expect(databaseSide(database(0))).toBe(12)
+    expect(databaseSide(database('0'))).toBe(12)
+    expect(formatBytes(database('0').allocated)).toBe('0 bytes')
     expect(() => sizeToSide(-1)).toThrow(RangeError)
+  })
+
+  it('retains exact labels above Number.MAX_SAFE_INTEGER', () => {
+    const value = '9007199254740993'
+    const label = formatBytes(database(value).allocated)
+
+    expect(label).toContain('9,007,199,254,740,993 bytes')
+    expect(BigInt(value)).toBe(9007199254740993n)
   })
 })
 
 describe('evidence semantics and accessible text', () => {
   it('permits motion only for a fresh available live sample', () => {
-    const item = database(1024)
+    const item = database('1024')
     expect(isFreshLive(item, generated)).toBe(true)
     item.liveActivity.evidence.status = 'Stale'
     expect(isFreshLive(item, generated)).toBe(false)
@@ -82,7 +91,7 @@ describe('evidence semantics and accessible text', () => {
   })
 
   it('names the source, status, exact bytes, and untrusted-looking name as text', () => {
-    const item = database(1024)
+    const item = database('1024')
     const label = accessibleDatabaseLabel(item)
     expect(label).toContain('test <database>')
     expect(label).toContain('1,024 bytes (1 KiB)')

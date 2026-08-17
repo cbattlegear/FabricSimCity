@@ -15,7 +15,7 @@ public sealed record EvidenceV1(
     string Reason);
 
 public sealed record ByteMeasurementV1(
-    long? Bytes,
+    string? Bytes,
     MeasurementStatus Status,
     string? Reason,
     EvidenceV1 Evidence);
@@ -29,8 +29,8 @@ public sealed record LiveActivityV1(
 
 public sealed record QueryStoreHistoryV1(
     long? ExecutionCount,
-    long? LogicalReads,
-    decimal? AverageDurationMilliseconds,
+    long? LogicalReads8KiBPages,
+    decimal? AverageDurationMicroseconds,
     DateTimeOffset? WindowStart,
     DateTimeOffset? WindowEnd,
     QueryStoreCapability Capability,

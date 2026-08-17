@@ -32,6 +32,13 @@ public sealed class ApiEndpointTests : IClassFixture<WebApplicationFactory<ApiAs
         Assert.NotNull(snapshot);
         Assert.Equal("1.0", snapshot.SchemaVersion);
         Assert.Equal(8, snapshot.Databases.Count);
+        var rawJson = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(rawJson);
+        var firstDatabase = document.RootElement.GetProperty("databases")[0];
+        Assert.Equal(JsonValueKind.String, firstDatabase.GetProperty("allocated").GetProperty("bytes").ValueKind);
+        var queryStore = firstDatabase.GetProperty("queryStore");
+        Assert.True(queryStore.TryGetProperty("logicalReads8KiBPages", out _));
+        Assert.True(queryStore.TryGetProperty("averageDurationMicroseconds", out _));
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.Contains("object-src 'none'", response.Headers.GetValues("Content-Security-Policy").Single(),
             StringComparison.Ordinal);

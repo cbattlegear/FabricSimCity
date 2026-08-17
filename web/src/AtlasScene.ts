@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { databaseSide, isFreshLive } from './atlas'
+import { layoutStableIds, stableHash } from './atlasLayout'
 import type { AtlasSnapshot, DatabaseAtlasItem, EdgeConfidence } from './contracts'
 
 type AtlasSceneCallbacks = {
@@ -12,7 +13,7 @@ type Beacon = { mesh: THREE.Mesh; phase: number }
 export class AtlasScene {
   private readonly renderer: THREE.WebGLRenderer
   private readonly scene = new THREE.Scene()
-  private readonly camera = new THREE.PerspectiveCamera(36, 1, 1, 1200)
+  private readonly camera = new THREE.PerspectiveCamera(36, 1, 1, 2200)
   private readonly raycaster = new THREE.Raycaster()
   private readonly pointer = new THREE.Vector2()
   private readonly interactive: THREE.Object3D[] = []
@@ -31,7 +32,7 @@ export class AtlasScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.setClearColor(0x080c12, 1)
-    this.camera.position.set(175, 205, 235)
+    this.camera.position.set(560, 680, 820)
     this.camera.lookAt(0, 0, 0)
 
     this.scene.add(new THREE.HemisphereLight(0xc9e9ff, 0x17202a, 1.7))
@@ -39,7 +40,7 @@ export class AtlasScene {
     key.position.set(-80, 160, 100)
     this.scene.add(key)
 
-    const grid = new THREE.GridHelper(520, 26, 0x38516a, 0x1a2735)
+    const grid = new THREE.GridHelper(1040, 52, 0x38516a, 0x1a2735)
     grid.position.y = -0.2
     this.scene.add(grid)
 
@@ -56,13 +57,14 @@ export class AtlasScene {
     this.clearAtlasObjects()
     const centers = new Map<string, THREE.Vector3>()
 
-    snapshot.databases.forEach((database, index) => {
-      const column = index % 4
-      const row = Math.floor(index / 4)
-      const center = new THREE.Vector3((column - 1.5) * 125, 0, (row - 0.5) * 130)
+    const layout = layoutStableIds(snapshot.databases.map(database => database.databaseId))
+    for (const database of snapshot.databases) {
+      const position = layout.get(database.databaseId)
+      if (!position) continue
+      const center = new THREE.Vector3(position.x, 0, position.z)
       centers.set(database.databaseId, center)
-      this.addDatabase(database, center, snapshot.generatedAt, index)
-    })
+      this.addDatabase(database, center, snapshot.generatedAt)
+    }
 
     for (const edge of snapshot.edges) {
       const from = centers.get(edge.fromDatabaseId)
@@ -95,22 +97,19 @@ export class AtlasScene {
     this.renderer.dispose()
   }
 
-  private addDatabase(database: DatabaseAtlasItem, center: THREE.Vector3, generatedAt: string, index: number): void {
+  private addDatabase(database: DatabaseAtlasItem, center: THREE.Vector3, generatedAt: string): void {
     const side = databaseSide(database)
     const isUnknown = side === null
     const footprint = side ?? 24
-    const usedRatio = database.allocated.bytes && database.used.bytes !== null
-      ? Math.min(1, database.used.bytes / database.allocated.bytes)
-      : 0
-    const height = isUnknown ? 3 : 7 + usedRatio * 24
+    const height = isUnknown ? 3 : 18
     const geometry = new THREE.BoxGeometry(footprint, height, footprint)
     const material = new THREE.MeshStandardMaterial({
-      color: isUnknown ? 0x637080 : colorFor(index),
+      color: isUnknown ? 0x637080 : colorFor(database.databaseId),
       roughness: 0.72,
       metalness: 0.08,
       transparent: isUnknown,
       opacity: isUnknown ? 0.48 : 1,
-      emissive: isUnknown ? 0x000000 : colorFor(index),
+      emissive: isUnknown ? 0x000000 : colorFor(database.databaseId),
       emissiveIntensity: 0.08,
     })
     const block = new THREE.Mesh(geometry, material)
@@ -129,7 +128,7 @@ export class AtlasScene {
     this.scene.add(outline)
 
     if (isUnknown) this.addUnknownMark(center)
-    if (isFreshLive(database, generatedAt)) this.addBeacon(center, height, index)
+    if (isFreshLive(database, generatedAt)) this.addBeacon(center, height, database.databaseId)
   }
 
   private addUnknownMark(center: THREE.Vector3): void {
@@ -145,7 +144,7 @@ export class AtlasScene {
     }
   }
 
-  private addBeacon(center: THREE.Vector3, height: number, index: number): void {
+  private addBeacon(center: THREE.Vector3, height: number, databaseId: string): void {
     const beacon = new THREE.Mesh(
       new THREE.SphereGeometry(2.8, 16, 10),
       new THREE.MeshBasicMaterial({ color: 0x72f4c4 }),
@@ -153,7 +152,7 @@ export class AtlasScene {
     beacon.position.set(center.x, height + 5, center.z)
     beacon.userData.atlasObject = true
     this.scene.add(beacon)
-    this.beacons.push({ mesh: beacon, phase: index * 0.7 })
+    this.beacons.push({ mesh: beacon, phase: (stableHash(databaseId) % 1000) / 100 })
   }
 
   private addEdge(from: THREE.Vector3, to: THREE.Vector3, confidence: EdgeConfidence): void {
@@ -251,6 +250,7 @@ export class AtlasScene {
   }
 }
 
-function colorFor(index: number): number {
-  return [0x39c6a3, 0x45a7e6, 0xe9a84c, 0xb48be8, 0x57bd70, 0xde6f73, 0x7bb7b2, 0xd58cb7][index % 8] ?? 0x45a7e6
+function colorFor(databaseId: string): number {
+  const palette = [0x39c6a3, 0x45a7e6, 0xe9a84c, 0xb48be8, 0x57bd70, 0xde6f73, 0x7bb7b2, 0xd58cb7]
+  return palette[stableHash(databaseId) % palette.length] ?? 0x45a7e6
 }

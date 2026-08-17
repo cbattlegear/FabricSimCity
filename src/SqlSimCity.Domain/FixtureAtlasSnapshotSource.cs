@@ -1,3 +1,4 @@
+using System.Globalization;
 using SqlSimCity.Contracts.V1;
 
 namespace SqlSimCity.Domain;
@@ -19,7 +20,7 @@ public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
                     DataStatus.Unsupported, "Query Store history is not available for this system database.")),
             Database("sales", "sales", Bytes(512L * 1024 * 1024 * 1024), Bytes(407L * 1024 * 1024 * 1024),
                 Live(42, 13, 2, 184.25m, DataStatus.Available, "Live DMV sample is within its freshness window."),
-                QueryStore(821_300, 21.4m, QueryStoreCapability.Available, QueryStoreHealth.Healthy,
+                QueryStore(821_300, 21_400m, QueryStoreCapability.Available, QueryStoreHealth.Healthy,
                     DataStatus.Available, "Query Store is readable and collecting.")),
             Database("ledger", "ledger", Bytes(256L * 1024 * 1024 * 1024), Bytes(201L * 1024 * 1024 * 1024),
                 Live(18, 7, 1, 92m, DataStatus.Stale, "The last DMV sample is older than the freshness window."),
@@ -27,11 +28,11 @@ public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
                     DataStatus.PermissionDenied, "The fixture principal cannot read Query Store views.")),
             Database("warehouse", "warehouse", Bytes(256L * 1024 * 1024 * 1024), Bytes(119L * 1024 * 1024 * 1024),
                 Live(11, 4, 0, 37.5m, DataStatus.Available, "Live DMV sample is within its freshness window."),
-                QueryStore(315_004, 68.2m, QueryStoreCapability.Available, QueryStoreHealth.Healthy,
+                QueryStore(315_004, 68_200m, QueryStoreCapability.Available, QueryStoreHealth.Healthy,
                     DataStatus.Available, "Query Store is readable and collecting.")),
             Database("telemetry", "telemetry", Bytes(2L * 1024 * 1024 * 1024 * 1024), Bytes(1_731L * 1024 * 1024 * 1024),
                 Live(null, null, null, null, DataStatus.Disconnected, "The fixture target connection is unavailable."),
-                QueryStore(1_202_009, 4.8m, QueryStoreCapability.Available, QueryStoreHealth.Stale,
+                QueryStore(1_202_009, 4_800m, QueryStoreCapability.Available, QueryStoreHealth.Stale,
                     DataStatus.Stale, "Historical aggregates predate the current connection outage.")),
             Database("archive", "archive", UnknownBytes("Allocation metadata was not visible to the fixture principal."),
                 UnknownBytes("Used bytes cannot be derived without allocation metadata."),
@@ -44,7 +45,7 @@ public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
                     DataStatus.Disabled, "Query Store is disabled for this database.")),
             Database("crm", "crm", Bytes(64L * 1024 * 1024 * 1024), Bytes(51L * 1024 * 1024 * 1024),
                 Live(null, null, null, null, DataStatus.Unknown, "The fixture contains no live sample for this database."),
-                QueryStore(76_201, 12.7m, QueryStoreCapability.Available, QueryStoreHealth.ReadOnly,
+                QueryStore(76_201, 12_700m, QueryStoreCapability.Available, QueryStoreHealth.ReadOnly,
                     DataStatus.Available, "Query Store is readable but currently in read-only mode.")),
         };
 
@@ -73,7 +74,7 @@ public sealed class FixtureAtlasSnapshotSource : IAtlasSnapshotSource
         QueryStoreHistoryV1 queryStore) =>
         new($"fixture-target-primary/database/{id}", name, allocated, used, live, queryStore);
 
-    private static ByteMeasurementV1 Bytes(long value) => new(value, MeasurementStatus.Known, null,
+    private static ByteMeasurementV1 Bytes(long value) => new(value.ToString(CultureInfo.InvariantCulture), MeasurementStatus.Known, null,
         new EvidenceV1(EvidenceSource.Fixture, DataStatus.Available, CapturedAt, CapturedAt.AddHours(1),
             "Exact bytes supplied by the deterministic fixture."));
 

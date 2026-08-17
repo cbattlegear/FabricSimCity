@@ -45,4 +45,3 @@ app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 app.MapFallbackToFile("index.html");
 
 app.Run();
-

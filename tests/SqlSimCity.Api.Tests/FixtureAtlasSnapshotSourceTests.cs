@@ -24,7 +24,7 @@ public sealed class FixtureAtlasSnapshotSourceTests
         var scratch = Database("scratch");
 
         Assert.Equal(ledger.Allocated.Bytes, warehouse.Allocated.Bytes);
-        Assert.Equal(0, scratch.Allocated.Bytes);
+        Assert.Equal("0", scratch.Allocated.Bytes);
         Assert.Equal(MeasurementStatus.Known, scratch.Allocated.Status);
         Assert.Null(archive.Allocated.Bytes);
         Assert.Equal(MeasurementStatus.Unknown, archive.Allocated.Status);

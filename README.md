@@ -10,13 +10,13 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 - Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
-- A keyboard and screen-reader-friendly table contains the same records and exact bytes.
+- A keyboard and screen-reader-friendly table contains the same records. Exact bytes cross the wire as nonnegative decimal strings and are formatted with `BigInt`, avoiding JavaScript precision loss.
 
 ## Accuracy boundary
 
 The contract keeps three evidence classes separate:
 
-1. **Query Store aggregate history** describes a time window. It is not current execution activity.
+1. **Query Store aggregate history** describes a time window. It is not current execution activity. Duration is microseconds and logical reads are counts of 8-KiB pages.
 2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero.
 3. **Topology is inferred evidence.** Confirmed, probable, and unknown confidence carry rationale; the atlas is not claiming a complete dependency graph.
 
@@ -95,4 +95,3 @@ docker build -t sqlsimcity:foundation .
 ## License
 
 Copyright 2026 SQLSimCity contributors. Licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-

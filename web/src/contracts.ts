@@ -14,7 +14,7 @@ export interface Evidence {
 }
 
 export interface ByteMeasurement {
-  bytes: number | null
+  bytes: string | null
   status: MeasurementStatus
   reason: string | null
   evidence: Evidence
@@ -30,8 +30,8 @@ export interface LiveActivity {
 
 export interface QueryStoreHistory {
   executionCount: number | null
-  logicalReads: number | null
-  averageDurationMilliseconds: number | null
+  logicalReads8KiBPages: number | null
+  averageDurationMicroseconds: number | null
   windowStart: string | null
   windowEnd: string | null
   capability: QueryStoreCapability
