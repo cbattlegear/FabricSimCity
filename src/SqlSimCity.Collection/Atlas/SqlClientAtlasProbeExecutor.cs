@@ -1,11 +1,13 @@
 using System.Data;
 using System.Globalization;
 using System.Numerics;
+using Azure.Identity;
 using Microsoft.Data.SqlClient;
 using SqlSimCity.Collection.Catalog;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.SqlServer;
+using SqlSimCity.SqlServer.Secrets;
 
 namespace SqlSimCity.Collection.Atlas;
 
@@ -33,7 +35,7 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
 
     public async Task<AtlasTargetIdentity> GetTargetIdentityAsync(CancellationToken cancellationToken)
     {
-        var row = await ExecuteAsync("server.identity", "master", _profile.InitialDatabase, null, async (reader, ct) =>
+        var row = await ExecuteAsync("server.identity", "master", null, null, async (reader, ct) =>
         {
             if (!await reader.ReadAsync(ct).ConfigureAwait(false))
                 throw new ProbeObjectUnavailableException("The server identity probe returned no row.", null, null);
@@ -41,7 +43,7 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
                 Platform(Convert.ToInt32(reader["engine_edition"], CultureInfo.InvariantCulture)),
                 Convert.ToString(reader["product_version"], CultureInfo.InvariantCulture) ?? "",
                 Convert.ToString(reader["edition"], CultureInfo.InvariantCulture) ?? "",
-                reader["sqlserver_start_time"] is DBNull ? null : AsOffset(reader["sqlserver_start_time"]),
+                reader["sqlserver_start_time"] is DBNull ? null : ResetEpochToken(reader["sqlserver_start_time"]),
                 _timeProvider.GetUtcNow());
         }, cancellationToken).ConfigureAwait(false);
         return row with { SourceTimestamp = _timeProvider.GetUtcNow() };
@@ -71,25 +73,41 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         var identity = await ReadIdentityAsync(databaseName, cancellationToken).ConfigureAwait(false);
-        var (space, spaceRows) = await ReadSpaceAsync(databaseName, cancellationToken).ConfigureAwait(false);
-        var options = await ReadQueryStoreOptionsAsync(databaseName, selection.QueryStoreOptionsProbeId, cancellationToken)
-            .ConfigureAwait(false);
-        var queryStoreReadable = options.ActualState.Equals("ON", StringComparison.OrdinalIgnoreCase) ||
-                                 options.ActualState.Equals("READ_WRITE", StringComparison.OrdinalIgnoreCase) ||
-                                 options.ActualState.Equals("READ_ONLY", StringComparison.OrdinalIgnoreCase);
-        var runtimeSelection = queryStoreReadable
-            ? await ResolveRuntimeProbeAsync(databaseName, selection.QueryStoreRuntimeProbeId, cancellationToken)
-                .ConfigureAwait(false)
-            : (ProbeId: selection.QueryStoreRuntimeProbeId, Rows: 0);
-        var (queryStore, queryRows) = queryStoreReadable
-            ? await ReadQueryStoreRuntimeAsync(databaseName, runtimeSelection.ProbeId,
-                queryStoreWindowStart, queryStoreWindowEnd, options, cancellationToken).ConfigureAwait(false)
-            : (WithOptions(new AtlasQueryStoreResult(
-                options.ActualState, options.ReadOnlyReason, null, null, null, null, null, null), options), 0);
-        var (io, ioRows) = await ReadIoAsync(databaseName, selection.FileIoProbeId, cancellationToken).ConfigureAwait(false);
+        var space = await CaptureComponentAsync(
+            () => ReadSpaceAsync(databaseName, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        var options = await CaptureComponentAsync(
+            () => ReadQueryStoreOptionsAsync(databaseName, selection.QueryStoreOptionsProbeId, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        AtlasComponentOutcome<AtlasQueryStoreWorkloadResult> workload;
+        if (options.Value is not { } queryStoreOptions)
+        {
+            workload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
+                options.Status, "Query Store workload was not probed because options were unavailable.");
+        }
+        else if (!IsQueryStoreReadable(queryStoreOptions.ActualState))
+        {
+            workload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
+                DataStatus.Disabled, $"Query Store workload was not probed while state was {queryStoreOptions.ActualState}.");
+        }
+        else
+        {
+            workload = await CaptureComponentAsync(async () =>
+            {
+                var resolved = await ResolveWorkloadProbeAsync(
+                    databaseName, selection.QueryStoreWorkloadProbeId, cancellationToken).ConfigureAwait(false);
+                var summary = await ReadQueryStoreWorkloadAsync(
+                    databaseName, resolved.ProbeId, queryStoreWindowStart, queryStoreWindowEnd, cancellationToken)
+                    .ConfigureAwait(false);
+                return new ComponentValue<AtlasQueryStoreWorkloadResult>(
+                    summary.Value, summary.Rows + resolved.Rows);
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        var io = await CaptureComponentAsync(
+            () => ReadIoAsync(databaseName, selection.FileIoProbeId, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
         return new AtlasDatabaseProbeResult(
-            identity, space, queryStore, io, _timeProvider.GetUtcNow(),
-            2 + spaceRows + runtimeSelection.Rows + queryRows + ioRows);
+            identity, space, options, workload, io, _timeProvider.GetUtcNow(), 1);
     }
 
     private Task<AtlasDatabaseIdentity> ReadIdentityAsync(string databaseName, CancellationToken cancellationToken) =>
@@ -104,7 +122,7 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
                 Convert.ToBoolean(reader["is_query_store_on"], CultureInfo.InvariantCulture));
         }, cancellationToken);
 
-    private async Task<(AtlasSpaceResult Value, int Rows)> ReadSpaceAsync(
+    private async Task<ComponentValue<AtlasSpaceResult>> ReadSpaceAsync(
         string databaseName,
         CancellationToken cancellationToken)
     {
@@ -128,32 +146,40 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
             return (Allocated: Unsigned(reader["total_log_size_bytes"]), Used: Unsigned(reader["used_log_space_bytes"]));
         }, cancellationToken).ConfigureAwait(false);
 
-        return (AggregateSpace(files, log.Allocated, log.Used), files.Count + 1);
+        return new ComponentValue<AtlasSpaceResult>(
+            AggregateSpace(files, log.Allocated, log.Used), files.Count + 1);
     }
 
-    private Task<QueryStoreOptions> ReadQueryStoreOptionsAsync(
+    private async Task<ComponentValue<AtlasQueryStoreOptionsResult>> ReadQueryStoreOptionsAsync(
         string databaseName,
         string probeId,
-        CancellationToken cancellationToken) =>
-        ExecuteAsync(probeId, "database", databaseName, null, async (reader, ct) =>
+        CancellationToken cancellationToken)
+    {
+        var value = await ExecuteAsync(probeId, "database", databaseName, null, async (reader, ct) =>
         {
             if (!await reader.ReadAsync(ct).ConfigureAwait(false))
                 throw new ProbeObjectUnavailableException("The Query Store options probe returned no row.", null, null);
-            return new QueryStoreOptions(
+            return new AtlasQueryStoreOptionsResult(
                 Convert.ToString(reader["actual_state_desc"], CultureInfo.InvariantCulture) ?? "UNKNOWN",
-                Convert.ToInt32(reader["readonly_reason"], CultureInfo.InvariantCulture),
-                Convert.ToString(reader["desired_state_desc"], CultureInfo.InvariantCulture),
-                Convert.ToString(reader["query_capture_mode_desc"], CultureInfo.InvariantCulture),
-                (Unsigned(reader["current_storage_size_mb"]) * 1_048_576).ToString(CultureInfo.InvariantCulture),
-                (Unsigned(reader["max_storage_size_mb"]) * 1_048_576).ToString(CultureInfo.InvariantCulture));
-        }, cancellationToken);
+                Convert.ToInt32(reader["readonly_reason"], CultureInfo.InvariantCulture))
+            {
+                DesiredState = Convert.ToString(reader["desired_state_desc"], CultureInfo.InvariantCulture),
+                CaptureMode = Convert.ToString(reader["query_capture_mode_desc"], CultureInfo.InvariantCulture),
+                CurrentStorageBytes = (Unsigned(reader["current_storage_size_mb"]) * 1_048_576)
+                    .ToString(CultureInfo.InvariantCulture),
+                MaxStorageBytes = (Unsigned(reader["max_storage_size_mb"]) * 1_048_576)
+                    .ToString(CultureInfo.InvariantCulture),
+            };
+        }, cancellationToken).ConfigureAwait(false);
+        return new ComponentValue<AtlasQueryStoreOptionsResult>(value, 1);
+    }
 
-    private async Task<(string ProbeId, int Rows)> ResolveRuntimeProbeAsync(
+    private async Task<(string ProbeId, int Rows)> ResolveWorkloadProbeAsync(
         string databaseName,
         string selectedProbeId,
         CancellationToken cancellationToken)
     {
-        if (!selectedProbeId.Equals("querystore.runtime_stats_summary_2022", StringComparison.Ordinal))
+        if (!selectedProbeId.Equals("querystore.database_workload_summary_2022", StringComparison.Ordinal))
             return (selectedProbeId, 0);
 
         var metadata = await ExecuteAsync(
@@ -168,65 +194,73 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         var hasReplicaGroupId = QueryStorePlanMetadataResult.FromColumnNames(metadata).HasReplicaGroupId;
         return (hasReplicaGroupId
             ? selectedProbeId
-            : "querystore.runtime_stats_summary_2016", metadata.Count);
+            : "querystore.database_workload_summary_2016", metadata.Count);
     }
 
-    private async Task<(AtlasQueryStoreResult Value, int Rows)> ReadQueryStoreRuntimeAsync(
+    private async Task<ComponentValue<AtlasQueryStoreWorkloadResult>> ReadQueryStoreWorkloadAsync(
         string databaseName,
         string probeId,
         DateTimeOffset start,
         DateTimeOffset end,
-        QueryStoreOptions options,
         CancellationToken cancellationToken)
     {
         var aggregate = await ExecuteAsync(probeId, "database", databaseName,
             new Dictionary<string, object?> { ["@StartTime"] = start, ["@EndTime"] = end },
             async (reader, ct) =>
             {
-                var count = BigInteger.Zero;
-                var duration = BigInteger.Zero;
-                var cpu = BigInteger.Zero;
-                var reads = BigInteger.Zero;
-                var rows = 0;
+                var rows = new List<AtlasQueryStoreAggregateRow>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    rows++;
-                    count += Unsigned(reader["total_count_executions"]);
-                    duration += Unsigned(reader["total_duration_us"]);
-                    cpu += Unsigned(reader["total_cpu_time_us"]);
-                    reads += Unsigned(reader["total_logical_io_reads_pages"]);
+                    rows.Add(new AtlasQueryStoreAggregateRow(
+                        Convert.ToInt32(reader["execution_type"], CultureInfo.InvariantCulture),
+                        Unsigned(reader["execution_count"]),
+                        Unsigned(reader["total_duration_us"]),
+                        Unsigned(reader["total_cpu_us"]),
+                        Unsigned(reader["logical_reads_pages"])));
                 }
-                return (count, duration, cpu, reads, rows);
+                return rows;
             }, cancellationToken).ConfigureAwait(false);
 
-        return (WithOptions(new AtlasQueryStoreResult(
-            options.ActualState,
-            options.ReadOnlyReason,
-            aggregate.count.ToString(CultureInfo.InvariantCulture),
-            aggregate.duration.ToString(CultureInfo.InvariantCulture),
-            aggregate.cpu.ToString(CultureInfo.InvariantCulture),
-            aggregate.reads.ToString(CultureInfo.InvariantCulture),
-            start,
-            end), options), aggregate.rows);
+        return new ComponentValue<AtlasQueryStoreWorkloadResult>(
+            AggregateWorkload(aggregate, start, end), aggregate.Count);
     }
 
-    private async Task<(IReadOnlyList<AtlasFileIoCounter> Value, int Rows)> ReadIoAsync(
+    internal static AtlasQueryStoreWorkloadResult AggregateWorkload(
+        IEnumerable<AtlasQueryStoreAggregateRow> rows,
+        DateTimeOffset start,
+        DateTimeOffset end)
+    {
+        var values = rows.ToArray();
+        static BigInteger Sum(
+            IEnumerable<AtlasQueryStoreAggregateRow> source,
+            int executionType,
+            Func<AtlasQueryStoreAggregateRow, BigInteger> selector) =>
+            source.Where(row => row.ExecutionType == executionType)
+                .Aggregate(BigInteger.Zero, (total, row) => total + selector(row));
+
+        return new AtlasQueryStoreWorkloadResult(
+            Sum(values, 0, row => row.ExecutionCount).ToString(CultureInfo.InvariantCulture),
+            Sum(values, 0, row => row.TotalDurationMicroseconds).ToString(CultureInfo.InvariantCulture),
+            Sum(values, 0, row => row.TotalCpuMicroseconds).ToString(CultureInfo.InvariantCulture),
+            Sum(values, 0, row => row.LogicalReads8KiBPages).ToString(CultureInfo.InvariantCulture),
+            start,
+            end)
+        {
+            AbortedExecutionCount = Sum(values, 3, row => row.ExecutionCount).ToString(CultureInfo.InvariantCulture),
+            ExceptionExecutionCount = Sum(values, 4, row => row.ExecutionCount).ToString(CultureInfo.InvariantCulture),
+        };
+    }
+
+    private async Task<ComponentValue<IReadOnlyList<AtlasFileIoCounter>>> ReadIoAsync(
         string databaseName,
         string probeId,
         CancellationToken cancellationToken)
     {
-        var scope = probeId.Equals("io.file_io_stats_current_db", StringComparison.Ordinal)
-            ? "database"
-            : "server";
-        var rows = await ExecuteAsync(probeId, scope, databaseName, null, async (reader, ct) =>
+        var rows = await ExecuteAsync(probeId, "database", databaseName, null, async (reader, ct) =>
         {
             var values = new List<AtlasFileIoCounter>();
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                if (scope == "server" &&
-                    !string.Equals(Convert.ToString(reader["database_name"], CultureInfo.InvariantCulture),
-                        databaseName, StringComparison.OrdinalIgnoreCase))
-                    continue;
                 values.Add(new AtlasFileIoCounter(
                     Convert.ToInt32(reader["file_id"], CultureInfo.InvariantCulture),
                     Unsigned(reader["num_of_bytes_read"]).ToString(CultureInfo.InvariantCulture),
@@ -235,7 +269,7 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
             }
             return values;
         }, cancellationToken).ConfigureAwait(false);
-        return (rows, rows.Count);
+        return new ComponentValue<IReadOnlyList<AtlasFileIoCounter>>(rows, rows.Count);
     }
 
     private async Task<T> ExecuteAsync<T>(
@@ -250,7 +284,7 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         if (!probe.ConnectionScope.Equals(expectedScope, StringComparison.Ordinal))
             throw new InvalidOperationException($"Probe '{probeId}' does not have the required connection scope.");
         var profile = expectedScope == "master"
-            ? _profile.WithInitialDatabase(databaseName ?? "master")
+            ? _profile.WithInitialDatabase("master")
             : expectedScope == "database" && databaseName is not null
                 ? _profile.WithInitialDatabase(databaseName)
                 : _profile;
@@ -263,6 +297,21 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         {
             throw SqlExceptionClassifier.Classify(ex, probeId);
         }
+        catch (SecretResolutionException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "A configured authentication secret was unavailable.", null, null, ex);
+        }
+        catch (CredentialUnavailableException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "The configured Microsoft Entra credential was unavailable.", null, null, ex);
+        }
+        catch (AuthenticationFailedException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "The configured Microsoft Entra authentication failed.", null, null, ex);
+        }
 
         await using (opened.ConfigureAwait(false))
         await using (var command = opened.Connection.CreateCommand())
@@ -270,14 +319,11 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
             command.CommandType = CommandType.Text;
             command.CommandText = probe.CommandText;
             command.CommandTimeout = profile.Timeouts.CommandTimeoutSeconds;
-            foreach (var parameter in probe.Parameters)
+            var parameters = SqlClientProbeExecutor.BuildParameters(probe, values);
+            if (parameters.Length > 0)
             {
-                if (values is null || !values.TryGetValue(parameter.Name, out var value))
-                    throw new InvalidOperationException($"Probe '{probeId}' requires parameter '{parameter.Name}'.");
-                command.Parameters.Add(new SqlParameter(parameter.Name, value ?? DBNull.Value));
+                command.Parameters.AddRange(parameters);
             }
-            if ((values?.Count ?? 0) != probe.Parameters.Count)
-                throw new InvalidOperationException($"Probe '{probeId}' received undeclared parameters.");
             try
             {
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -294,17 +340,19 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
     {
         var text = Convert.ToString(value, CultureInfo.InvariantCulture);
         if (!BigInteger.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed < 0)
-            throw new InvalidOperationException("A SQL probe returned an invalid unsigned integer.");
+            throw new ProbeDataFormatException("A SQL probe returned an invalid unsigned integer.");
         return parsed;
     }
 
-    private static DateTimeOffset AsOffset(object value) => value switch
-    {
-        DateTimeOffset offset => offset,
-        DateTime dateTime => new DateTimeOffset(DateTime.SpecifyKind(dateTime, DateTimeKind.Utc)),
-        _ => DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!,
-            CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal),
-    };
+    private static string ResetEpochToken(object value) =>
+        "sqlserver-local:" + Convert.ToDateTime(value, CultureInfo.InvariantCulture)
+            .ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff", CultureInfo.InvariantCulture);
+
+    private static bool IsQueryStoreReadable(string state) =>
+        state.Equals("ON", StringComparison.OrdinalIgnoreCase) ||
+        state.Equals("READ_WRITE", StringComparison.OrdinalIgnoreCase) ||
+        state.Equals("READ_ONLY", StringComparison.OrdinalIgnoreCase) ||
+        state.Equals("READ_CAPTURE_SECONDARY", StringComparison.OrdinalIgnoreCase);
 
     private static EnginePlatform Platform(int engineEdition) => engineEdition switch
     {
@@ -314,14 +362,35 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         _ => EnginePlatform.Unsupported,
     };
 
-    private static AtlasQueryStoreResult WithOptions(AtlasQueryStoreResult result, QueryStoreOptions options) =>
-        result with
+    private static async Task<AtlasComponentOutcome<T>> CaptureComponentAsync<T>(
+        Func<Task<ComponentValue<T>>> collect,
+        CancellationToken cancellationToken)
+    {
+        try
         {
-            DesiredState = options.DesiredState,
-            CaptureMode = options.CaptureMode,
-            CurrentStorageBytes = options.CurrentStorageBytes,
-            MaxStorageBytes = options.MaxStorageBytes,
-        };
+            var result = await collect().ConfigureAwait(false);
+            return AtlasComponentOutcome.Success(result.Value, result.Rows, "Probe completed.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return AtlasComponentOutcome.Failure<T>(DataStatus.Unknown, "The component probe timed out.");
+        }
+        catch (ProbeNotProbedException ex)
+        {
+            return AtlasComponentOutcome.Skipped<T>(DataStatus.Unsupported, ex.Reason);
+        }
+        catch (ProbeExecutionException ex)
+        {
+            var status = ex switch
+            {
+                ProbePermissionDeniedException => DataStatus.PermissionDenied,
+                ProbeTransientConnectionException or ProbeDatabaseUnavailableException or ProbeAuthenticationException
+                    => DataStatus.Disconnected,
+                _ => DataStatus.Unknown,
+            };
+            return AtlasComponentOutcome.Failure<T>(status, ex.Reason);
+        }
+    }
 
     internal static AtlasSpaceResult AggregateSpace(
         IEnumerable<DatabaseFileSpaceValue> files,
@@ -339,13 +408,13 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
             logUsed.ToString(CultureInfo.InvariantCulture));
     }
 
-    private sealed record QueryStoreOptions(
-        string ActualState,
-        int ReadOnlyReason,
-        string? DesiredState,
-        string? CaptureMode,
-        string CurrentStorageBytes,
-        string MaxStorageBytes);
+    private sealed record ComponentValue<T>(T Value, int Rows);
 }
 
 internal sealed record DatabaseFileSpaceValue(string Type, BigInteger Allocated, BigInteger? Used);
+internal sealed record AtlasQueryStoreAggregateRow(
+    int ExecutionType,
+    BigInteger ExecutionCount,
+    BigInteger TotalDurationMicroseconds,
+    BigInteger TotalCpuMicroseconds,
+    BigInteger LogicalReads8KiBPages);

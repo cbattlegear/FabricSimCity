@@ -252,7 +252,7 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         }
     }
 
-    private static SqlParameter[] BuildParameters(
+    internal static SqlParameter[] BuildParameters(
         Catalog.ProbeDefinition probe,
         IReadOnlyDictionary<string, object?>? values)
     {

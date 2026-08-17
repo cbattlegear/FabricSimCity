@@ -4,7 +4,7 @@ public enum MeasurementStatus { Known, Unknown }
 public enum EvidenceSource { Fixture, LiveDmvSample, QueryStoreAggregate, InferredTopology, LiveDmvCumulative, NotProbed }
 public enum DataStatus { Available, Stale, Disconnected, PermissionDenied, Disabled, Unsupported, Unknown }
 public enum QueryStoreCapability { Available, Disabled, PermissionDenied, Unsupported, Unknown }
-public enum QueryStoreHealth { Healthy, ReadOnly, Error, Stale, Unavailable, Unknown }
+public enum QueryStoreHealth { Healthy, ReadOnly, ReadableSecondary, Error, Stale, Unavailable, Unknown }
 public enum EdgeConfidence { Confirmed, Probable, Unknown }
 
 public sealed record EvidenceV1(
@@ -44,6 +44,8 @@ public sealed record QueryStoreHistoryV1(
     public string? CaptureMode { get; init; }
     public string? CurrentStorageBytes { get; init; }
     public string? MaxStorageBytes { get; init; }
+    public string? AbortedExecutionCount { get; init; }
+    public string? ExceptionExecutionCount { get; init; }
 }
 
 public sealed record FileIoV1(
@@ -52,7 +54,7 @@ public sealed record FileIoV1(
     string? ReadBytesPerSecond,
     string? WriteBytesPerSecond,
     string? SampleMilliseconds,
-    DateTimeOffset? ResetEpoch,
+    string? ResetEpochToken,
     EvidenceV1 Evidence);
 
 public sealed record DatabaseAtlasItemV1(
@@ -98,8 +100,8 @@ public sealed record AtlasCollectionMetadataV1(
     AtlasCollectorMode Mode,
     AtlasCollectorState State,
     long Sequence,
-    DateTimeOffset CollectedAt,
-    DateTimeOffset SourceTimestamp,
+    DateTimeOffset? CollectedAt,
+    DateTimeOffset? SourceTimestamp,
     DateTimeOffset? StaleAfter,
     bool IsStale,
     int DatabaseCount,

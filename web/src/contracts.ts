@@ -2,7 +2,7 @@ export type MeasurementStatus = 'Known' | 'Unknown'
 export type EvidenceSource = 'Fixture' | 'LiveDmvSample' | 'QueryStoreAggregate' | 'InferredTopology' | 'LiveDmvCumulative' | 'NotProbed'
 export type DataStatus = 'Available' | 'Stale' | 'Disconnected' | 'PermissionDenied' | 'Disabled' | 'Unsupported' | 'Unknown'
 export type QueryStoreCapability = 'Available' | 'Disabled' | 'PermissionDenied' | 'Unsupported' | 'Unknown'
-export type QueryStoreHealth = 'Healthy' | 'ReadOnly' | 'Error' | 'Stale' | 'Unavailable' | 'Unknown'
+export type QueryStoreHealth = 'Healthy' | 'ReadOnly' | 'ReadableSecondary' | 'Error' | 'Stale' | 'Unavailable' | 'Unknown'
 export type EdgeConfidence = 'Confirmed' | 'Probable' | 'Unknown'
 
 export interface Evidence {
@@ -44,6 +44,8 @@ export interface QueryStoreHistory {
   captureMode?: string | null
   currentStorageBytes?: string | null
   maxStorageBytes?: string | null
+  abortedExecutionCount?: string | null
+  exceptionExecutionCount?: string | null
 }
 
 export interface FileIo {
@@ -52,7 +54,7 @@ export interface FileIo {
   readBytesPerSecond: string | null
   writeBytesPerSecond: string | null
   sampleMilliseconds: string | null
-  resetEpoch: string | null
+  resetEpochToken: string | null
   evidence: Evidence
 }
 
@@ -90,8 +92,8 @@ export interface AtlasSnapshot {
     mode: 'Fixture' | 'Connected'
     state: 'Ready' | 'Collecting' | 'Paused' | 'BackingOff' | 'Degraded' | 'Disconnected'
     sequence: number
-    collectedAt: string
-    sourceTimestamp: string
+    collectedAt: string | null
+    sourceTimestamp: string | null
     staleAfter: string | null
     isStale: boolean
     databaseCount: number

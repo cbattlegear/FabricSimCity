@@ -53,9 +53,9 @@ public sealed class AtlasCollectorTests
         Assert.Equal("27021597764222979", exact.QueryStore.TotalDurationMicroseconds);
         Assert.Equal("9007199254740993", exact.QueryStore.ExecutionCount);
         Assert.All(executor.Selections, selection =>
-            Assert.Equal("querystore.runtime_stats_summary_2022", selection.QueryStoreRuntimeProbeId));
+            Assert.Equal("querystore.database_workload_summary_2022", selection.QueryStoreWorkloadProbeId));
         Assert.All(executor.Selections, selection =>
-            Assert.Equal("io.file_io_stats", selection.FileIoProbeId));
+            Assert.Equal("io.file_io_stats_current_db", selection.FileIoProbeId));
     }
 
     [Fact]
@@ -92,7 +92,10 @@ public sealed class AtlasCollectorTests
             Databases = [new AtlasDatabaseIdentity("db", "ONLINE", 160, true)],
             Result = name => DatabaseResult(name) with
             {
-                FileIo = [new AtlasFileIoCounter(1, bytes.ToString(CultureInfo.InvariantCulture), (bytes * 2).ToString(CultureInfo.InvariantCulture), sample)],
+                FileIo = AtlasComponentOutcome.Success<IReadOnlyList<AtlasFileIoCounter>>(
+                    [new AtlasFileIoCounter(1, bytes.ToString(CultureInfo.InvariantCulture), (bytes * 2).ToString(CultureInfo.InvariantCulture), sample)],
+                    1,
+                    "I/O available."),
             },
         };
         var collector = Collector(executor);
@@ -101,7 +104,7 @@ public sealed class AtlasCollectorTests
         bytes = 1_100;
         sample = 2_000;
         var second = await collector.CollectAsync(2, CancellationToken.None);
-        executor.Target = executor.Target with { SqlServerStartTime = executor.Target.SqlServerStartTime!.Value.AddMinutes(1) };
+        executor.Target = executor.Target with { SqlServerResetEpochToken = "sqlserver-local:2026-08-17T12:01:00" };
         bytes = 2_100;
         sample = 3_000;
         var reset = await collector.CollectAsync(3, CancellationToken.None);
@@ -126,7 +129,10 @@ public sealed class AtlasCollectorTests
             Databases = [new AtlasDatabaseIdentity("db", "ONLINE", 160, true)],
             Result = name => DatabaseResult(name) with
             {
-                QueryStore = DatabaseResult(name).QueryStore with { ActualState = state, ReadOnlyReason = 65536 },
+                QueryStoreOptions = AtlasComponentOutcome.Success(
+                    DatabaseResult(name).QueryStoreOptions.Value! with { ActualState = state, ReadOnlyReason = 65536 },
+                    1,
+                    "Options available."),
             },
         };
 
@@ -136,6 +142,98 @@ public sealed class AtlasCollectorTests
         Assert.Equal(health, result.Snapshot.Databases[0].QueryStore.Health);
         if (state == "READ_ONLY")
             Assert.Contains("max_storage_size_mb", result.Snapshot.Databases[0].QueryStore.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PreservesStorageAndIoWhenQueryStoreOptionsAreDenied()
+    {
+        var executor = new FakeExecutor
+        {
+            Databases = [new AtlasDatabaseIdentity("db", "ONLINE", 160, true)],
+            Result = name => DatabaseResult(name) with
+            {
+                QueryStoreOptions = AtlasComponentOutcome.Failure<AtlasQueryStoreOptionsResult>(
+                    DataStatus.PermissionDenied,
+                    "Query Store options permission denied."),
+                QueryStoreWorkload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
+                    DataStatus.PermissionDenied,
+                    "Workload depends on options."),
+            },
+        };
+
+        var result = await Collector(executor).CollectAsync(1, CancellationToken.None);
+        var database = Assert.Single(result.Snapshot.Databases);
+
+        Assert.Equal("9007199254740993", database.Allocated.Bytes);
+        Assert.Equal("100", database.FileIo!.BytesRead);
+        Assert.Equal(QueryStoreCapability.PermissionDenied, database.QueryStore.Capability);
+        Assert.Null(database.QueryStore.ExecutionCount);
+        Assert.Equal(1, result.Status.FailureCount);
+        Assert.Equal(1, result.Status.SkipCount);
+        Assert.Equal(AtlasCollectorState.Degraded, result.Status.State);
+    }
+
+    [Fact]
+    public async Task PreservesQueryStoreStateWhenHistoryAndIoFail()
+    {
+        var executor = new FakeExecutor
+        {
+            Databases = [new AtlasDatabaseIdentity("db", "ONLINE", 160, true)],
+            Result = name => DatabaseResult(name) with
+            {
+                QueryStoreWorkload = AtlasComponentOutcome.Failure<AtlasQueryStoreWorkloadResult>(
+                    DataStatus.Unknown,
+                    "Query Store workload timed out."),
+                FileIo = AtlasComponentOutcome.Failure<IReadOnlyList<AtlasFileIoCounter>>(
+                    DataStatus.PermissionDenied,
+                    "I/O permission denied."),
+            },
+        };
+
+        var result = await Collector(executor).CollectAsync(1, CancellationToken.None);
+        var database = Assert.Single(result.Snapshot.Databases);
+
+        Assert.Equal("9007199254740993", database.Allocated.Bytes);
+        Assert.Equal(QueryStoreCapability.Available, database.QueryStore.Capability);
+        Assert.Equal(QueryStoreHealth.Healthy, database.QueryStore.Health);
+        Assert.Contains("Workload history failed", database.QueryStore.Reason, StringComparison.Ordinal);
+        Assert.Null(database.QueryStore.ExecutionCount);
+        Assert.Null(database.FileIo!.BytesRead);
+        Assert.Equal(DataStatus.PermissionDenied, database.FileIo.Evidence.Status);
+        Assert.Equal(2, result.Status.FailureCount);
+    }
+
+    [Fact]
+    public async Task ReadableSecondaryKeepsRegularWorkloadSeparateFromFailures()
+    {
+        var workload = new AtlasQueryStoreWorkloadResult(
+            "10", "10000", "2000", "3000",
+            ParseDate("2026-08-16T13:00:00Z"), ParseDate("2026-08-17T13:00:00Z"))
+        {
+            AbortedExecutionCount = "9000",
+            ExceptionExecutionCount = "7",
+        };
+        var executor = new FakeExecutor
+        {
+            Databases = [new AtlasDatabaseIdentity("db", "ONLINE", 160, true)],
+            Result = name => DatabaseResult(name) with
+            {
+                QueryStoreOptions = AtlasComponentOutcome.Success(
+                    new AtlasQueryStoreOptionsResult("READ_CAPTURE_SECONDARY", 0),
+                    1,
+                    "Options available."),
+                QueryStoreWorkload = AtlasComponentOutcome.Success(workload, 3, "Workload available."),
+            },
+        };
+
+        var result = await Collector(executor).CollectAsync(1, CancellationToken.None);
+        var queryStore = Assert.Single(result.Snapshot.Databases).QueryStore;
+
+        Assert.Equal(QueryStoreHealth.ReadableSecondary, queryStore.Health);
+        Assert.Equal(1000m, queryStore.AverageDurationMicroseconds);
+        Assert.Equal("10", queryStore.ExecutionCount);
+        Assert.Equal("9000", queryStore.AbortedExecutionCount);
+        Assert.Equal("7", queryStore.ExceptionExecutionCount);
     }
 
     [Fact]
@@ -162,6 +260,7 @@ public sealed class AtlasCollectorTests
         Assert.Equal(AtlasCollectorState.BackingOff, status.State);
         Assert.Equal(1, status.ConsecutiveFailures);
         Assert.NotNull(status.NextAttemptAt);
+        Assert.Equal(1, coordinator.GetStatus().SkipCount);
     }
 
     [Fact]
@@ -187,18 +286,21 @@ public sealed class AtlasCollectorTests
 
         Assert.False(overlapping);
         Assert.True(await first);
+        Assert.Equal(1, coordinator.GetStatus().SkipCount);
+        Assert.True(await coordinator.TryRefreshAsync(CancellationToken.None));
+        Assert.Equal(0, coordinator.GetStatus().SkipCount);
     }
 
     [Theory]
-    [InlineData("13.0.1", "querystore.options_2016", "querystore.runtime_stats_summary_2016")]
-    [InlineData("15.0.1", "querystore.options_2019", "querystore.runtime_stats_summary_2016")]
-    [InlineData("16.0.1", "querystore.options_2019", "querystore.runtime_stats_summary_2022")]
+    [InlineData("13.0.1", "querystore.options_2016", "querystore.database_workload_summary_2016")]
+    [InlineData("15.0.1", "querystore.options_2019", "querystore.database_workload_summary_2016")]
+    [InlineData("16.0.1", "querystore.options_2019", "querystore.database_workload_summary_2022")]
     public void ProbeVariantsFollowNegotiatedMajorVersion(string version, string options, string runtime)
     {
         var selection = AtlasCollector.SelectProbes(Target() with { ProductVersion = version });
 
         Assert.Equal(options, selection.QueryStoreOptionsProbeId);
-        Assert.Equal(runtime, selection.QueryStoreRuntimeProbeId);
+        Assert.Equal(runtime, selection.QueryStoreWorkloadProbeId);
     }
 
     [Fact]
@@ -225,6 +327,21 @@ public sealed class AtlasCollectorTests
 
         Assert.True(coordinator.GetStatus().IsStale);
         Assert.True(coordinator.GetCurrent().Collection!.IsStale);
+    }
+
+    [Fact]
+    public void PendingConnectedMetadataUsesUnavailableTimestamps()
+    {
+        var options = new AtlasCollectionOptions();
+        using var coordinator = new AtlasRefreshCoordinator(
+            Collector(new FakeExecutor(), options),
+            options,
+            new ExponentialReconnectBackoff(TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(1), new FixedJitter()));
+
+        var metadata = coordinator.GetCurrent().Collection!;
+
+        Assert.Null(metadata.CollectedAt);
+        Assert.Null(metadata.SourceTimestamp);
     }
 
     [Fact]
@@ -265,6 +382,26 @@ public sealed class AtlasCollectorTests
         Assert.Equal("44", result.LogUsedBytes);
     }
 
+    [Fact]
+    public void QueryStoreAggregateUsesOnlyRegularRowsForSteadyStateTotals()
+    {
+        var result = SqlClientAtlasProbeExecutor.AggregateWorkload(
+        [
+            new AtlasQueryStoreAggregateRow(0, new BigInteger(10), new BigInteger(10_000), new BigInteger(2_000), new BigInteger(3_000)),
+            new AtlasQueryStoreAggregateRow(3, new BigInteger(9_000), new BigInteger(9_000), new BigInteger(9_000), new BigInteger(9_000)),
+            new AtlasQueryStoreAggregateRow(4, new BigInteger(7), new BigInteger(7), new BigInteger(7), new BigInteger(7)),
+        ],
+        ParseDate("2026-08-16T13:00:00Z"),
+        ParseDate("2026-08-17T13:00:00Z"));
+
+        Assert.Equal("10", result.ExecutionCount);
+        Assert.Equal("10000", result.TotalDurationMicroseconds);
+        Assert.Equal("2000", result.TotalCpuMicroseconds);
+        Assert.Equal("3000", result.LogicalReads8KiBPages);
+        Assert.Equal("9000", result.AbortedExecutionCount);
+        Assert.Equal("7", result.ExceptionExecutionCount);
+    }
+
     private static AtlasCollector Collector(
         FakeExecutor executor,
         AtlasCollectionOptions? options = null,
@@ -272,19 +409,32 @@ public sealed class AtlasCollectorTests
         new(executor, new NotProbedLiveAtlasActivitySource(), options ?? new AtlasCollectionOptions(), timeProvider);
 
     private static AtlasTargetIdentity Target(EnginePlatform platform = EnginePlatform.SqlServerOnPremises) =>
-        new(platform, "16.0.1000.1", "Developer", ParseDate("2026-08-17T12:00:00Z"),
+        new(platform, "16.0.1000.1", "Developer", "sqlserver-local:2026-08-17T12:00:00",
             ParseDate("2026-08-17T13:00:00Z"));
 
     private static AtlasDatabaseProbeResult DatabaseResult(string name) => new(
         new AtlasDatabaseIdentity(name, "ONLINE", 160, true),
-        new AtlasSpaceResult("9007199254740993", "4503599627370496", "1048576", "524288"),
-        new AtlasQueryStoreResult(
-            "ON", 0, "9007199254740993", "27021597764222979", "18014398509481986",
+        AtlasComponentOutcome.Success(
+            new AtlasSpaceResult("9007199254740993", "4503599627370496", "1048576", "524288"),
+            3,
+            "Space available."),
+        AtlasComponentOutcome.Success(
+            new AtlasQueryStoreOptionsResult("ON", 0),
+            1,
+            "Options available."),
+        AtlasComponentOutcome.Success(
+            new AtlasQueryStoreWorkloadResult(
+            "9007199254740993", "27021597764222979", "18014398509481986",
             "72057594037927944", ParseDate("2026-08-16T13:00:00Z"),
             ParseDate("2026-08-17T13:00:00Z")),
-        [new AtlasFileIoCounter(1, "100", "200", 1000)],
+            1,
+            "Workload available."),
+        AtlasComponentOutcome.Success<IReadOnlyList<AtlasFileIoCounter>>(
+            [new AtlasFileIoCounter(1, "100", "200", 1000)],
+            1,
+            "I/O available."),
         ParseDate("2026-08-17T13:00:00Z"),
-        5);
+        1);
 
     private static DateTimeOffset ParseDate(string value) =>
         DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
@@ -345,7 +495,7 @@ public sealed class AtlasCollectorTests
             MaximumActive = Math.Max(MaximumActive, active);
             try
             {
-                Entered?.SetResult();
+                Entered?.TrySetResult();
                 if (Block is not null) await Block.WaitAsync(cancellationToken);
                 if (Delay > TimeSpan.Zero) await Task.Delay(Delay, cancellationToken);
                 return Result(databaseName);

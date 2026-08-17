@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessibleDatabaseLabel, collectorSummary, databaseSide, evidenceText, formatBytes, formatDecimalCount, formatFill, isFreshLive, sizeToSide } from './atlas'
+import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, databaseSide, evidenceText, formatBytes, formatDecimalCount, formatFill, isFreshLive, sizeToSide } from './atlas'
 import type { DatabaseAtlasItem, Evidence } from './contracts'
 
 const observed = '2026-08-17T16:59:52Z'
@@ -102,7 +102,12 @@ describe('evidence semantics and accessible text', () => {
       rowCount: 450,
       reason: 'One database failed.',
     })
+
     expect(summary).toBe('sequence 7 · 99 databases · 450 rows · 1250 ms · stale · 1 partial failure(s)')
+  })
+
+  it('marks a retained snapshot degraded without mislabeling the SQL source', () => {
+    expect(collectorDisplayState(undefined, true)).toEqual({ state: 'Refresh failed', degraded: true })
   })
 
   it('permits motion only for a fresh available live sample', () => {

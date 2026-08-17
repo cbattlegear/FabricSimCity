@@ -45,6 +45,7 @@ public sealed class AtlasRefreshCoordinator : IDisposable
     private AtlasSnapshotV1? _snapshot;
     private AtlasCollectorStatusV1 _status;
     private long _sequence;
+    private int _skippedCycles;
     private bool _paused;
 
     public AtlasRefreshCoordinator(
@@ -98,8 +99,16 @@ public sealed class AtlasRefreshCoordinator : IDisposable
 
     public async Task<bool> TryRefreshAsync(CancellationToken cancellationToken)
     {
-        if (IsPaused || !await _cycle.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        if (IsPaused)
+        {
+            RecordSkippedCycle("Collection cycle skipped while paused.");
             return false;
+        }
+        if (!await _cycle.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        {
+            RecordSkippedCycle("Collection cycle skipped because another cycle is running.");
+            return false;
+        }
         try
         {
             lock (_gate)
@@ -124,13 +133,21 @@ public sealed class AtlasRefreshCoordinator : IDisposable
                         Reason = result.Status.Reason,
                     };
                 }
+
                 else
                 {
                     _snapshot = result.Snapshot;
-                    _status = result.Status with { ConsecutiveFailures = 0, NextAttemptAt = null };
+                    _status = result.Status with
+                    {
+                        SkipCount = SaturatingAdd(result.Status.SkipCount, _skippedCycles),
+                        ConsecutiveFailures = 0,
+                        NextAttemptAt = null,
+                    };
+                    _skippedCycles = 0;
                     published = _snapshot;
                 }
             }
+
             if (published is not null)
                 SnapshotPublished?.Invoke(published);
             return true;
@@ -138,6 +155,36 @@ public sealed class AtlasRefreshCoordinator : IDisposable
         finally
         {
             _cycle.Release();
+        }
+    }
+
+    public void RecordUnexpectedCycleFailure(string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        lock (_gate)
+        {
+            var failures = _status.ConsecutiveFailures + 1;
+            _status = _status with
+            {
+                State = _snapshot is null ? AtlasCollectorState.BackingOff : AtlasCollectorState.Degraded,
+                FailureCount = _status.FailureCount + 1,
+                ConsecutiveFailures = failures,
+                NextAttemptAt = _timeProvider.GetUtcNow() + _backoff.GetDelay(failures),
+                Reason = reason,
+            };
+        }
+    }
+
+    public void RecordNotificationFailure()
+    {
+        lock (_gate)
+        {
+            _status = _status with
+            {
+                State = AtlasCollectorState.Degraded,
+                FailureCount = _status.FailureCount + 1,
+                Reason = "Snapshot collection succeeded, but its SignalR notification failed.",
+            };
         }
     }
 
@@ -156,12 +203,14 @@ public sealed class AtlasRefreshCoordinator : IDisposable
             }
 
             var stale = IsStale(_status);
-            return _snapshot with
+            var currentStatus = _status with
             {
-                Collection = _snapshot.Collection is null
-                    ? Metadata(_status)
-                    : _snapshot.Collection with { IsStale = stale, State = stale ? AtlasCollectorState.Degraded : _status.State },
+                IsStale = stale,
+                State = stale && _status.State == AtlasCollectorState.Ready
+                    ? AtlasCollectorState.Degraded
+                    : _status.State,
             };
+            return _snapshot with { Collection = Metadata(currentStatus) };
         }
     }
 
@@ -183,9 +232,22 @@ public sealed class AtlasRefreshCoordinator : IDisposable
     private bool IsStale(AtlasCollectorStatusV1 status) =>
         status.StaleAfter is null || _timeProvider.GetUtcNow() > status.StaleAfter;
 
+    private void RecordSkippedCycle(string reason)
+    {
+        lock (_gate)
+        {
+            if (_skippedCycles < int.MaxValue)
+                _skippedCycles++;
+            _status = _status with { SkipCount = SaturatingAdd(_status.SkipCount, 1), Reason = reason };
+        }
+    }
+
+    private static int SaturatingAdd(int left, int right) =>
+        left > int.MaxValue - right ? int.MaxValue : left + right;
+
     private static AtlasCollectionMetadataV1 Metadata(AtlasCollectorStatusV1 status) => new(
-        status.Mode, status.State, status.Sequence, status.LastCollectedAt ?? DateTimeOffset.MinValue,
-        status.SourceTimestamp ?? DateTimeOffset.MinValue, status.StaleAfter, status.IsStale,
+        status.Mode, status.State, status.Sequence, status.LastCollectedAt,
+        status.SourceTimestamp, status.StaleAfter, status.IsStale,
         status.DatabaseCount, status.FailureCount, status.SkipCount, status.LastDurationMilliseconds, status.Reason)
     {
         RowCount = status.RowCount,

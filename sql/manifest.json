@@ -319,6 +319,70 @@
       "relativeCost": "medium"
     },
     {
+      "id": "querystore.database_workload_summary_2016",
+      "title": "Bounded database Query Store workload summary",
+      "file": "probes/querystore/query_store_database_workload_summary_2016.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "versionVariantOf": "querystore.database_workload_summary",
+      "versionVariantNotes": "Base variant without replica_group_id. Atlas consumes this bounded database aggregate rather than plan-by-interval detail.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported; use the 2022 variant when replica_group_id metadata is present."
+      },
+      "requiredPermission": "VIEW DATABASE STATE on the database.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on runtime-stats interval start_time."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive upper bound on runtime-stats interval start_time."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most one exact decimal aggregate row per execution_type after active-interval duplicate consolidation. Regular, Aborted, and Exception rows remain separate. Duration/CPU are microseconds and logical reads are 8-KiB pages. No query text or plan XML.",
+      "relativeCost": "medium"
+    },
+    {
+      "id": "querystore.database_workload_summary_2022",
+      "title": "Bounded replica-aware Query Store workload summary",
+      "file": "probes/querystore/query_store_database_workload_summary_2022.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2022 (16.x)",
+      "versionVariantOf": "querystore.database_workload_summary",
+      "versionVariantNotes": "Uses replica_group_id during active-interval consolidation before producing one database-wide row per execution type. Use the 2016 variant when metadata does not expose that column.",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported when capability metadata confirms replica_group_id."
+      },
+      "requiredPermission": "VIEW DATABASE PERFORMANCE STATE on the database.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@StartTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Inclusive lower bound on runtime-stats interval start_time."
+        },
+        {
+          "name": "@EndTime",
+          "sqlDbType": "DateTimeOffset",
+          "required": true,
+          "description": "Exclusive upper bound on runtime-stats interval start_time."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "At most one exact decimal database-wide aggregate row per execution_type after replica-aware active-interval duplicate consolidation. Regular, Aborted, and Exception rows remain separate. No query text or plan XML.",
+      "relativeCost": "medium"
+    },
+    {
       "id": "querystore.wait_stats_summary_2017",
       "title": "Query Store wait statistics (base, SQL Server 2017-2019)",
       "file": "probes/querystore/query_store_wait_stats_summary_2017.sql",

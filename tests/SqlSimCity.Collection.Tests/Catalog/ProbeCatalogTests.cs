@@ -18,6 +18,19 @@ public class ProbeCatalogTests
         Assert.False(string.IsNullOrWhiteSpace(probe.CommandText));
     }
 
+    [Theory]
+    [InlineData("querystore.database_workload_summary_2016")]
+    [InlineData("querystore.database_workload_summary_2022")]
+    public void AtlasWorkloadProbesAggregateServerSideWithoutBulkPayloads(string probeId)
+    {
+        var sql = ProbeCatalog.Load().Get(probeId).CommandText;
+
+        Assert.Contains("GROUP BY execution_type", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("SUM(execution_count)", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("query_store_query_text", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("query_plan", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void GetUnknownIdThrows()
     {

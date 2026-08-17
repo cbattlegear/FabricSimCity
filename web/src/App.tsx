@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchAtlas } from './api'
-import { accessibleDatabaseLabel, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
+import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { AtlasViewport } from './AtlasViewport'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
@@ -10,6 +10,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -23,10 +24,13 @@ export default function App() {
           ? current
           : atlas.databases[0]?.databaseId ?? null)
         setError(null)
+        setRefreshError(null)
       })
       .catch(reason => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
-        if (!loaded) setError(reason instanceof Error ? reason.message : 'The atlas could not be loaded')
+        const message = reason instanceof Error ? reason.message : 'The atlas could not be loaded'
+        if (!loaded) setError(message)
+        else setRefreshError(message)
       })
       .finally(() => {
         if (!controller.signal.aborted) refreshTimer = window.setTimeout(load, 30_000)
@@ -45,6 +49,7 @@ export default function App() {
     [snapshot, selectedId],
   )
   const hovered = snapshot?.databases.find(database => database.databaseId === hoveredId) ?? null
+  const sourceState = collectorDisplayState(snapshot?.collection, refreshError !== null)
 
   return (
     <main>
@@ -55,8 +60,8 @@ export default function App() {
         </div>
         {snapshot && (
           <div className="capture" aria-label={`Snapshot generated ${new Date(snapshot.generatedAt).toLocaleString()}`}>
-            <span className={`capture-dot ${snapshot.collection?.isStale || snapshot.collection?.failureCount ? 'is-degraded' : ''}`} aria-hidden="true" />
-            {snapshot.collection?.mode ?? 'Fixture'} · {snapshot.collection?.state ?? 'Ready'} · {new Date(snapshot.generatedAt).toLocaleTimeString()}
+            <span className={`capture-dot ${sourceState.degraded ? 'is-degraded' : ''}`} aria-hidden="true" />
+            {snapshot.collection?.mode ?? 'Fixture'} · {sourceState.state} · {new Date(snapshot.generatedAt).toLocaleTimeString()}
           </div>
         )}
       </header>
@@ -72,6 +77,13 @@ export default function App() {
         </section>
       ) : (
         <>
+          {refreshError && (
+            <section className="collector-status is-degraded" role="alert" aria-label="Atlas refresh status">
+              <strong>Atlas refresh failed</strong>
+              <span>The API could not refresh this page. The last successful snapshot is retained and may be stale.</span>
+              <small>{refreshError}</small>
+            </section>
+          )}
           {snapshot.collection && (
             <section className={`collector-status ${snapshot.collection.failureCount > 0 || snapshot.collection.isStale ? 'is-degraded' : ''}`} aria-label="Atlas collector status">
               <strong>{snapshot.collection.mode} source · {snapshot.collection.state}</strong>
@@ -193,6 +205,8 @@ function DetailPanel({ database }: { database: DatabaseAtlasItem | null }) {
         <div><dt>Blocked sessions</dt><dd>{metric(database.liveActivity.blockedSessions)}</dd></div>
         <div><dt>Batch requests/sec</dt><dd>{metric(database.liveActivity.batchRequestsPerSecond)}</dd></div>
         <div><dt>Query executions</dt><dd>{formatDecimalCount(database.queryStore.executionCount)}</dd></div>
+        <div><dt>Aborted executions</dt><dd>{formatDecimalCount(database.queryStore.abortedExecutionCount ?? null)}</dd></div>
+        <div><dt>Exception executions</dt><dd>{formatDecimalCount(database.queryStore.exceptionExecutionCount ?? null)}</dd></div>
         <div><dt>Logical reads (8-KiB pages)</dt><dd>{formatDecimalCount(database.queryStore.logicalReads8KiBPages)}</dd></div>
         <div><dt>Average duration</dt><dd>{metric(database.queryStore.averageDurationMicroseconds, ' µs')}</dd></div>
         <div><dt>Total duration</dt><dd>{formatDecimalCount(database.queryStore.totalDurationMicroseconds ?? null)} µs</dd></div>

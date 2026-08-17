@@ -4,6 +4,7 @@
     <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
     <ProjectReference Include="..\SqlSimCity.Storage\SqlSimCity.Storage.csproj" />
     <ProjectReference Include="..\SqlSimCity.Collection\SqlSimCity.Collection.csproj" />
+    <InternalsVisibleTo Include="SqlSimCity.Api.Tests" />
   </ItemGroup>
   <ItemGroup Condition="Exists('..\..\web\dist')">
     <Content Include="..\..\web\dist\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />

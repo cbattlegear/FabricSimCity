@@ -69,3 +69,7 @@ public sealed class ProbeNotProbedException(string reason, int? sqlErrorNumber =
 /// </summary>
 public sealed class ProbeUnknownException(string reason, int? sqlErrorNumber, byte? sqlErrorClass, Exception? innerException = null)
     : ProbeExecutionException(reason, sqlErrorNumber, sqlErrorClass, innerException);
+
+/// <summary>A probe returned a value that cannot be represented by its declared result contract.</summary>
+public sealed class ProbeDataFormatException(string reason, Exception? innerException = null)
+    : ProbeExecutionException(reason, null, null, innerException);

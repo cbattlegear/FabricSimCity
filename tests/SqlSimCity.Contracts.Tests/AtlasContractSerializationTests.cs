@@ -94,4 +94,37 @@ public sealed class AtlasContractSerializationTests
         Assert.Contains("\"reason\":\"VIEW DATABASE STATE is unavailable\"", json, StringComparison.Ordinal);
         Assert.Contains("\"observedAt\":null", json, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ConnectedFollowUpFieldsRemainExplicitAndLossless()
+    {
+        const string exactCount = "9007199254740993";
+        var evidence = new EvidenceV1(
+            EvidenceSource.QueryStoreAggregate, DataStatus.Available, null, null, "readable secondary");
+        var history = new QueryStoreHistoryV1(
+            "10", "20", 1000m, null, null,
+            QueryStoreCapability.Available, QueryStoreHealth.ReadableSecondary, "readable secondary", evidence)
+        {
+            AbortedExecutionCount = exactCount,
+            ExceptionExecutionCount = "7",
+        };
+        var metadata = new AtlasCollectionMetadataV1(
+            AtlasCollectorMode.Connected, AtlasCollectorState.Disconnected, 0,
+            null, null, null, true, 0, 1, 0, 0, "Pending.");
+        var io = new FileIoV1("1", "2", null, null, "1000",
+            "sqlserver-local:2026-08-17T12:00:00.0000000", evidence);
+
+        using var historyDocument = JsonDocument.Parse(JsonSerializer.Serialize(history, Options));
+        using var metadataDocument = JsonDocument.Parse(JsonSerializer.Serialize(metadata, Options));
+        using var ioDocument = JsonDocument.Parse(JsonSerializer.Serialize(io, Options));
+
+        Assert.Equal("ReadableSecondary", historyDocument.RootElement.GetProperty("health").GetString());
+        Assert.Equal(exactCount, historyDocument.RootElement.GetProperty("abortedExecutionCount").GetString());
+        Assert.Equal(JsonValueKind.String,
+            historyDocument.RootElement.GetProperty("abortedExecutionCount").ValueKind);
+        Assert.Equal(JsonValueKind.Null, metadataDocument.RootElement.GetProperty("collectedAt").ValueKind);
+        Assert.Equal(JsonValueKind.Null, metadataDocument.RootElement.GetProperty("sourceTimestamp").ValueKind);
+        Assert.StartsWith("sqlserver-local:",
+            ioDocument.RootElement.GetProperty("resetEpochToken").GetString(), StringComparison.Ordinal);
+    }
 }

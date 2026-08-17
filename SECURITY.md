@@ -2,7 +2,7 @@
 
 ## Foundation threat model
 
-This repository currently serves deterministic fixtures. `SqlSimCity.Api` has no SQL Server connector, credentials, login, user account, analytics, or telemetry wired into it. A separate, opt-in `SqlSimCity.SqlServer` library (see below) provides source-neutral connection and authentication building blocks for a future collector, but nothing in the running application calls it yet. An optional encrypted protected storage layer exists (see below) but is disabled by default and unused by this release's fixture path. The intended future collector is read-only, but that intent is not yet a security control.
+The application defaults to deterministic fixture mode, which creates no SQL connection. Operators may explicitly enable connected mode with a validated read-only target profile and file-mounted credentials. Connected collection runs only embedded, manifest-validated static probes; it does not accept SQL text through the API. The application has no login, user account, analytics, or telemetry. Optional encrypted protected storage is disabled by default and is not used by atlas collection.
 
 The application exposes operational-shaped evidence to every client that can reach it. **There is no authentication or authorization.** Run the default Compose configuration on loopback or another explicitly trusted network only. Do not publish port 8080 on all interfaces or place the service on the public internet.
 
@@ -10,7 +10,7 @@ Security headers enforce a same-origin baseline: no permissive CORS, no remote s
 
 ## Data and storage
 
-The `/data` mount now hosts an optional encrypted protected storage layer for future SQL Server collection metadata. It is **disabled by default**; this release ships no SQL Server connector and nothing writes to `/data` unless an operator explicitly enables it and provides a key. A standard Docker named volume is not application-level encryption by itself; protected storage's AES-256-GCM envelope is what makes retained bytes unreadable without the key, and the volume must still be backed up and access-controlled like any other data at rest.
+The `/data` mount hosts an optional encrypted protected storage layer. It is **disabled by default**, and atlas collection does not persist snapshots there. Nothing writes to `/data` unless an operator explicitly enables protected storage and provides a key. A standard Docker named volume is not application-level encryption by itself; protected storage's AES-256-GCM envelope is what makes retained bytes unreadable without the key, and the volume must still be backed up and access-controlled like any other data at rest.
 
 ### Enabling protected storage
 
@@ -73,19 +73,19 @@ Default retention is 7 days for `Detail`-resolution records and 90 days for `Hou
 
 Protected storage runs SQLite in WAL (write-ahead log) journal mode, which relies on shared-memory locking between the `-wal` and `-shm` sidecar files it creates next to the main database file. This is safe and performant on a local filesystem-backed volume, which is what this repository's `compose.yaml` uses (a standard Docker named volume). **Do not mount `/data` from a network filesystem (NFS, CIFS/SMB, or similar) unless it is verified to support the POSIX advisory locking SQLite's WAL mode requires** — unsupported locking on a network mount can corrupt the database or silently disable the concurrency guarantees WAL is meant to provide.
 
-### Still missing: SQL Server collection
+### Connected SQL Server collection
 
-`SqlSimCity.SqlServer` (see below) is a connection and authentication library only: it opens a validated, authenticated `SqlConnection` and nothing else. It is not wired into `SqlSimCity.Api`, executes no SQL, and does not discover topology, retain history, or perform collection. Everything below remains true of the running application until a collector is built on top of this library:
+Connected mode uses `SqlSimCity.SqlServer` through an injected connection factory and `SqlSimCity.Collection` through injected probe executors. It collects database identity, exact space usage, bounded Query Store aggregates, and cumulative file I/O. It does not collect query text, plan XML, or live request traffic. Deployment must:
 
 - use a least-privilege, read-only SQL Server principal and document every required permission;
 - keep target secrets out of images, source, logs, URLs, and atlas responses;
 - introduce authentication and authorization before non-loopback deployment;
-- write any retained per-target credentials or collected evidence through protected storage rather than a new unencrypted table;
+- write any future retained collected evidence through protected storage rather than a new unencrypted table;
 - fail closed when authentication, key retrieval, integrity validation, or encrypted storage is unavailable, matching protected storage's existing fail-closed behavior;
 - distinguish permission denial, unsupported capability, disconnection, staleness, and unknown data rather than substituting zero;
 - avoid logging query text or other potentially sensitive workload content by default.
 
-Supported host targets are Linux containers on x86-64 and ARM64 using official .NET 10 images. Browser targets are current Chromium, Firefox, and Safari. Real SQL Server versions are not yet supported because this release performs no collection; future support claims require versioned fixtures and integration verification.
+Supported host targets are Linux containers on x86-64 and ARM64 using official .NET 10 images. Browser targets are current Chromium, Firefox, and Safari. Connected collection supports SQL Server 2016+, Azure SQL Managed Instance, and explicit known-database lists on Azure SQL Database; target-specific integration remains the operator's responsibility.
 
 ## SQL Server connection and authentication
 

@@ -59,12 +59,12 @@ public sealed class AtlasCollector
         Array.Sort(results, static (left, right) => left.Index.CompareTo(right.Index));
 
         var items = results.Select(result => result.Item).ToArray();
-        var failures = results.Count(result => result.Failed);
-        var skips = results.Count(result => result.Skipped);
+        var failures = results.Sum(result => result.FailureCount);
+        var skips = results.Sum(result => result.SkipCount);
         var duration = (long)_timeProvider.GetElapsedTime(started).TotalMilliseconds;
         var state = failures > 0 ? AtlasCollectorState.Degraded : AtlasCollectorState.Ready;
         var reason = failures > 0
-            ? $"{failures} database collection(s) failed; successful databases remain available."
+            ? $"{failures} database component collection(s) failed; successful evidence remains available."
             : "Connected atlas collection completed.";
         var staleAfter = collectedAt + _options.StaleAfter;
         var rowCount = results.Sum(result => (long)result.RowCount) + 1L +
@@ -138,11 +138,16 @@ public sealed class AtlasCollector
             var databaseId = StableDatabaseId(identity);
             var activity = await _activity.GetActivityAsync(
                 databaseId, identity.Name, collectedAt, cancellationToken).ConfigureAwait(false);
-            return new IndexedResult(index, Project(databaseId, result, target, activity, collectedAt), false, false, result.RowCount);
+            return new IndexedResult(
+                index,
+                Project(databaseId, result, target, activity, collectedAt),
+                result.FailureCount,
+                result.SkipCount,
+                result.RowCount);
         }
         catch (ProbeNotProbedException ex)
         {
-            return new IndexedResult(index, Unavailable(discovered, collectedAt, ex.Reason, DataStatus.Unsupported), false, true, 0);
+            return new IndexedResult(index, Unavailable(discovered, collectedAt, ex.Reason, DataStatus.Unsupported), 0, 1, 0);
         }
         catch (ProbeExecutionException ex)
         {
@@ -152,12 +157,12 @@ public sealed class AtlasCollector
                 ProbeTransientConnectionException or ProbeDatabaseUnavailableException => DataStatus.Disconnected,
                 _ => DataStatus.Unknown,
             };
-            return new IndexedResult(index, Unavailable(discovered, collectedAt, ex.Reason, status), true, false, 0);
+            return new IndexedResult(index, Unavailable(discovered, collectedAt, ex.Reason, status), 1, 0, 0);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return new IndexedResult(index, Unavailable(discovered, collectedAt,
-                "The database probe timed out.", DataStatus.Unknown), true, false, 0);
+                "The database probe timed out.", DataStatus.Unknown), 1, 0, 0);
         }
         finally
         {
@@ -173,35 +178,72 @@ public sealed class AtlasCollector
         DateTimeOffset collectedAt)
     {
         var source = result.SourceTimestamp;
-        var evidence = new EvidenceV1(
-            EvidenceSource.LiveDmvSample, DataStatus.Available, source,
-            collectedAt + _options.StaleAfter, "Exact bytes collected from database-scoped catalog and DMV probes.");
-        var queryStore = ProjectQueryStore(result.QueryStore, collectedAt);
+        var spaceEvidence = ComponentEvidence(
+            EvidenceSource.LiveDmvSample, result.Space, source, collectedAt,
+            "Exact bytes collected from database-scoped catalog and DMV probes.");
+        var unknownSpace = new ByteMeasurementV1(
+            null, MeasurementStatus.Unknown, result.Space.Reason, spaceEvidence);
+        var allocated = result.Space.Value is { } space
+            ? KnownBytes(space.DataAllocatedBytes, spaceEvidence)
+            : unknownSpace;
+        var used = result.Space.Value is { } usedSpace
+            ? KnownBytes(usedSpace.DataUsedBytes, spaceEvidence)
+            : unknownSpace;
+        var queryStore = ProjectQueryStore(result.QueryStoreOptions, result.QueryStoreWorkload, collectedAt, source);
         return new DatabaseAtlasItemV1(
             databaseId,
             result.Identity.Name,
-            KnownBytes(result.Space.DataAllocatedBytes, evidence),
-            KnownBytes(result.Space.DataUsedBytes, evidence),
+            allocated,
+            used,
             activity,
             queryStore)
         {
             State = result.Identity.State,
             CompatibilityLevel = result.Identity.CompatibilityLevel,
-            LogAllocated = KnownBytes(result.Space.LogAllocatedBytes, evidence),
-            LogUsed = KnownBytes(result.Space.LogUsedBytes, evidence),
-            FileIo = ProjectIo(databaseId, result.FileIo, target.SqlServerStartTime, source, collectedAt),
+            LogAllocated = result.Space.Value is { } logSpace
+                ? KnownBytes(logSpace.LogAllocatedBytes, spaceEvidence)
+                : unknownSpace,
+            LogUsed = result.Space.Value is { } logUsed
+                ? KnownBytes(logUsed.LogUsedBytes, spaceEvidence)
+                : unknownSpace,
+            FileIo = result.FileIo.Value is { } io
+                ? ProjectIo(databaseId, io, target.SqlServerResetEpochToken, source, collectedAt)
+                : UnavailableIo(result.FileIo, source, collectedAt),
         };
     }
 
-    private QueryStoreHistoryV1 ProjectQueryStore(AtlasQueryStoreResult value, DateTimeOffset collectedAt)
+    private QueryStoreHistoryV1 ProjectQueryStore(
+        AtlasComponentOutcome<AtlasQueryStoreOptionsResult> optionsOutcome,
+        AtlasComponentOutcome<AtlasQueryStoreWorkloadResult> workloadOutcome,
+        DateTimeOffset collectedAt,
+        DateTimeOffset source)
     {
-        var state = value.ActualState.ToUpperInvariant();
+        if (optionsOutcome.Value is not { } options)
+        {
+            var unavailableCapability = optionsOutcome.Status switch
+            {
+                DataStatus.PermissionDenied => QueryStoreCapability.PermissionDenied,
+                DataStatus.Unsupported => QueryStoreCapability.Unsupported,
+                _ => QueryStoreCapability.Unknown,
+            };
+            var unavailableEvidence = ComponentEvidence(
+                EvidenceSource.QueryStoreAggregate, optionsOutcome, source, collectedAt,
+                optionsOutcome.Reason);
+            return new QueryStoreHistoryV1(
+                null, null, null, null, null, unavailableCapability, QueryStoreHealth.Unavailable,
+                optionsOutcome.Reason, unavailableEvidence);
+        }
+
+        var value = workloadOutcome.Value;
+        var state = options.ActualState.ToUpperInvariant();
         var (capability, health, status, reason) = state switch
         {
             "ON" or "READ_WRITE" => (QueryStoreCapability.Available, QueryStoreHealth.Healthy, DataStatus.Available,
                 "Query Store is readable and collecting."),
             "READ_ONLY" => (QueryStoreCapability.Available, QueryStoreHealth.ReadOnly, DataStatus.Available,
-                QueryStoreReadOnlyReason.Describe(value.ReadOnlyReason)),
+                QueryStoreReadOnlyReason.Describe(options.ReadOnlyReason)),
+            "READ_CAPTURE_SECONDARY" => (QueryStoreCapability.Available, QueryStoreHealth.ReadableSecondary,
+                DataStatus.Available, "Query Store is readable on a secondary replica and captures secondary workload."),
             "OFF" => (QueryStoreCapability.Disabled, QueryStoreHealth.Unavailable, DataStatus.Disabled,
                 "Query Store is OFF for this database."),
             "ERROR" => (QueryStoreCapability.Available, QueryStoreHealth.Error, DataStatus.Unknown,
@@ -209,34 +251,41 @@ public sealed class AtlasCollector
             _ => (QueryStoreCapability.Unknown, QueryStoreHealth.Unknown, DataStatus.Unknown,
                 "Query Store returned an unrecognized operational state."),
         };
+        if (value is null && workloadOutcome.IsFailure && capability == QueryStoreCapability.Available)
+        {
+            status = workloadOutcome.Status;
+            reason = $"{reason} Workload history failed: {workloadOutcome.Reason}";
+        }
         var evidence = new EvidenceV1(
-            EvidenceSource.QueryStoreAggregate, status, value.WindowEnd,
+            EvidenceSource.QueryStoreAggregate, status, value?.WindowEnd ?? source,
             collectedAt + _options.StaleAfter, reason);
-        var count = capability == QueryStoreCapability.Available ? value.ExecutionCount : null;
+        var count = capability == QueryStoreCapability.Available ? value?.ExecutionCount : null;
         return new QueryStoreHistoryV1(
             count,
-            capability == QueryStoreCapability.Available ? value.LogicalReads8KiBPages : null,
-            WeightedAverage(value.TotalDurationMicroseconds, count),
-            value.WindowStart,
-            value.WindowEnd,
+            capability == QueryStoreCapability.Available ? value?.LogicalReads8KiBPages : null,
+            WeightedAverage(value?.TotalDurationMicroseconds, count),
+            value?.WindowStart,
+            value?.WindowEnd,
             capability,
             health,
             reason,
             evidence)
         {
-            TotalDurationMicroseconds = capability == QueryStoreCapability.Available ? value.TotalDurationMicroseconds : null,
-            TotalCpuMicroseconds = capability == QueryStoreCapability.Available ? value.TotalCpuMicroseconds : null,
-            DesiredState = value.DesiredState,
-            CaptureMode = value.CaptureMode,
-            CurrentStorageBytes = value.CurrentStorageBytes,
-            MaxStorageBytes = value.MaxStorageBytes,
+            TotalDurationMicroseconds = capability == QueryStoreCapability.Available ? value?.TotalDurationMicroseconds : null,
+            TotalCpuMicroseconds = capability == QueryStoreCapability.Available ? value?.TotalCpuMicroseconds : null,
+            DesiredState = options.DesiredState,
+            CaptureMode = options.CaptureMode,
+            CurrentStorageBytes = options.CurrentStorageBytes,
+            MaxStorageBytes = options.MaxStorageBytes,
+            AbortedExecutionCount = value?.AbortedExecutionCount,
+            ExceptionExecutionCount = value?.ExceptionExecutionCount,
         };
     }
 
     private FileIoV1 ProjectIo(
         string databaseId,
         IReadOnlyList<AtlasFileIoCounter> counters,
-        DateTimeOffset? resetEpoch,
+        string? resetEpoch,
         DateTimeOffset source,
         DateTimeOffset collectedAt)
     {
@@ -288,6 +337,25 @@ public sealed class AtlasCollector
                 collectedAt + _options.StaleAfter, reason));
     }
 
+    private FileIoV1 UnavailableIo(
+        AtlasComponentOutcome<IReadOnlyList<AtlasFileIoCounter>> outcome,
+        DateTimeOffset source,
+        DateTimeOffset collectedAt) => new(
+        null, null, null, null, null, null,
+        ComponentEvidence(EvidenceSource.LiveDmvCumulative, outcome, source, collectedAt, outcome.Reason));
+
+    private EvidenceV1 ComponentEvidence<T>(
+        EvidenceSource evidenceSource,
+        AtlasComponentOutcome<T> outcome,
+        DateTimeOffset source,
+        DateTimeOffset collectedAt,
+        string successReason) => new(
+        evidenceSource,
+        outcome.Status,
+        outcome.IsSuccess ? source : null,
+        outcome.IsSuccess ? collectedAt + _options.StaleAfter : null,
+        outcome.IsSuccess ? successReason : outcome.Reason);
+
     private DatabaseAtlasItemV1 Unavailable(
         AtlasDatabaseIdentity database,
         DateTimeOffset collectedAt,
@@ -317,7 +385,7 @@ public sealed class AtlasCollector
             collectedAt, [], [])
         {
             Collection = new AtlasCollectionMetadataV1(
-                AtlasCollectorMode.Connected, AtlasCollectorState.Disconnected, sequence, collectedAt, collectedAt,
+                AtlasCollectorMode.Connected, AtlasCollectorState.Disconnected, sequence, collectedAt, null,
                 null, true, 0, 1, 0, duration, reason),
         };
         var status = new AtlasCollectorStatusV1(
@@ -336,10 +404,8 @@ public sealed class AtlasCollector
             target.Platform == EnginePlatform.AzureSqlDatabase || major >= 15
                 ? "querystore.options_2019"
                 : "querystore.options_2016",
-            modern ? "querystore.runtime_stats_summary_2022" : "querystore.runtime_stats_summary_2016",
-            target.Platform == EnginePlatform.AzureSqlDatabase
-                ? "io.file_io_stats_current_db"
-                : "io.file_io_stats");
+            modern ? "querystore.database_workload_summary_2022" : "querystore.database_workload_summary_2016",
+            "io.file_io_stats_current_db");
     }
 
     private string StableDatabaseId(AtlasDatabaseIdentity database) =>
@@ -376,10 +442,15 @@ public sealed class AtlasCollector
         _ => "Unsupported",
     };
 
-    private sealed record IndexedResult(int Index, DatabaseAtlasItemV1 Item, bool Failed, bool Skipped, int RowCount);
+    private sealed record IndexedResult(
+        int Index,
+        DatabaseAtlasItemV1 Item,
+        int FailureCount,
+        int SkipCount,
+        int RowCount);
     private sealed record FileCounters(BigInteger BytesRead, BigInteger BytesWritten);
     private sealed record PreviousIoSample(
         IReadOnlyDictionary<int, FileCounters> Files,
         long SampleMilliseconds,
-        DateTimeOffset? ResetEpoch);
+        string? ResetEpoch);
 }

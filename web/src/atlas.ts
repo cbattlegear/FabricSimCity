@@ -87,6 +87,17 @@ export function collectorSummary(collection: NonNullable<AtlasSnapshot['collecti
   return details.join(' · ')
 }
 
+export function collectorDisplayState(
+  collection: AtlasSnapshot['collection'],
+  refreshFailed: boolean,
+): { state: string; degraded: boolean } {
+  if (refreshFailed) return { state: 'Refresh failed', degraded: true }
+  return {
+    state: collection?.state ?? 'Ready',
+    degraded: collection?.isStale === true || (collection?.failureCount ?? 0) > 0,
+  }
+}
+
 export function assertAtlasSnapshot(value: unknown): AtlasSnapshot {
   if (!value || typeof value !== 'object') throw new Error('Atlas response is not an object')
   const candidate = value as Partial<AtlasSnapshot>

@@ -3,6 +3,7 @@ using SqlSimCity.Collection.Probes;
 using SqlSimCity.Collection.Tests.Catalog;
 using SqlSimCity.SqlServer;
 using SqlSimCity.SqlServer.Auth;
+using System.Data;
 
 namespace SqlSimCity.Collection.Tests.Probes;
 
@@ -79,6 +80,35 @@ public sealed class SqlClientProbeExecutorTests
             () => executor.CheckServerPermissionAsync("VIEW SERVER STATE", CancellationToken.None));
 
         Assert.Empty(factory.OpenedProfiles);
+    }
+
+    [Fact]
+    public void WorkloadParametersUseManifestNamesAndSqlTypes()
+    {
+        var probe = ProbeCatalog.Load().Get("querystore.database_workload_summary_2022");
+        var start = new DateTimeOffset(2026, 8, 16, 12, 0, 0, TimeSpan.Zero);
+        var end = start.AddDays(1);
+
+        var parameters = SqlClientProbeExecutor.BuildParameters(
+            probe,
+            new Dictionary<string, object?> { ["@StartTime"] = start, ["@EndTime"] = end });
+
+        Assert.Equal(["@StartTime", "@EndTime"], parameters.Select(parameter => parameter.ParameterName));
+        Assert.All(parameters, parameter => Assert.Equal(SqlDbType.DateTimeOffset, parameter.SqlDbType));
+        Assert.Equal([start, end], parameters.Select(parameter => parameter.Value));
+        Assert.Throws<InvalidOperationException>(() =>
+            SqlClientProbeExecutor.BuildParameters(
+                probe,
+                new Dictionary<string, object?> { ["@StartTime"] = start }));
+        Assert.Throws<InvalidOperationException>(() =>
+            SqlClientProbeExecutor.BuildParameters(
+                probe,
+                new Dictionary<string, object?>
+                {
+                    ["@StartTime"] = start,
+                    ["@EndTime"] = end,
+                    ["@SqlText"] = "SELECT secret",
+                }));
     }
 
     private static ConnectionProfile BuildProfile(string database) => new(

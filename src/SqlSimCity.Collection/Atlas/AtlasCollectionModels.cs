@@ -46,7 +46,7 @@ public sealed record AtlasTargetIdentity(
     EnginePlatform Platform,
     string ProductVersion,
     string Edition,
-    DateTimeOffset? SqlServerStartTime,
+    string? SqlServerResetEpochToken,
     DateTimeOffset SourceTimestamp);
 
 public sealed record AtlasDatabaseIdentity(
@@ -58,7 +58,7 @@ public sealed record AtlasDatabaseIdentity(
 
 public sealed record AtlasProbeSelection(
     string QueryStoreOptionsProbeId,
-    string QueryStoreRuntimeProbeId,
+    string QueryStoreWorkloadProbeId,
     string FileIoProbeId);
 
 public sealed record AtlasSpaceResult(
@@ -67,9 +67,17 @@ public sealed record AtlasSpaceResult(
     string LogAllocatedBytes,
     string LogUsedBytes);
 
-public sealed record AtlasQueryStoreResult(
+public sealed record AtlasQueryStoreOptionsResult(
     string ActualState,
-    int ReadOnlyReason,
+    int ReadOnlyReason)
+{
+    public string? DesiredState { get; init; }
+    public string? CaptureMode { get; init; }
+    public string? CurrentStorageBytes { get; init; }
+    public string? MaxStorageBytes { get; init; }
+}
+
+public sealed record AtlasQueryStoreWorkloadResult(
     string? ExecutionCount,
     string? TotalDurationMicroseconds,
     string? TotalCpuMicroseconds,
@@ -77,10 +85,8 @@ public sealed record AtlasQueryStoreResult(
     DateTimeOffset? WindowStart,
     DateTimeOffset? WindowEnd)
 {
-    public string? DesiredState { get; init; }
-    public string? CaptureMode { get; init; }
-    public string? CurrentStorageBytes { get; init; }
-    public string? MaxStorageBytes { get; init; }
+    public string? AbortedExecutionCount { get; init; }
+    public string? ExceptionExecutionCount { get; init; }
 }
 
 public sealed record AtlasFileIoCounter(
@@ -91,11 +97,43 @@ public sealed record AtlasFileIoCounter(
 
 public sealed record AtlasDatabaseProbeResult(
     AtlasDatabaseIdentity Identity,
-    AtlasSpaceResult Space,
-    AtlasQueryStoreResult QueryStore,
-    IReadOnlyList<AtlasFileIoCounter> FileIo,
+    AtlasComponentOutcome<AtlasSpaceResult> Space,
+    AtlasComponentOutcome<AtlasQueryStoreOptionsResult> QueryStoreOptions,
+    AtlasComponentOutcome<AtlasQueryStoreWorkloadResult> QueryStoreWorkload,
+    AtlasComponentOutcome<IReadOnlyList<AtlasFileIoCounter>> FileIo,
     DateTimeOffset SourceTimestamp,
-    int RowCount);
+    int IdentityRowCount)
+{
+    public int RowCount => IdentityRowCount + Space.RowCount + QueryStoreOptions.RowCount +
+                           QueryStoreWorkload.RowCount + FileIo.RowCount;
+    public int FailureCount => (Space.IsFailure ? 1 : 0) + (QueryStoreOptions.IsFailure ? 1 : 0) +
+                               (QueryStoreWorkload.IsFailure ? 1 : 0) + (FileIo.IsFailure ? 1 : 0);
+    public int SkipCount => (Space.IsSkipped ? 1 : 0) + (QueryStoreOptions.IsSkipped ? 1 : 0) +
+                            (QueryStoreWorkload.IsSkipped ? 1 : 0) + (FileIo.IsSkipped ? 1 : 0);
+}
+
+public sealed record AtlasComponentOutcome<T>(
+    T? Value,
+    DataStatus Status,
+    string Reason,
+    int RowCount,
+    bool IsSkipped)
+{
+    public bool IsSuccess => Value is not null && Status == DataStatus.Available;
+    public bool IsFailure => Value is null && !IsSkipped;
+}
+
+public static class AtlasComponentOutcome
+{
+    public static AtlasComponentOutcome<T> Success<T>(T value, int rowCount, string reason) =>
+        new(value, DataStatus.Available, reason, rowCount, false);
+
+    public static AtlasComponentOutcome<T> Failure<T>(DataStatus status, string reason) =>
+        new(default, status, reason, 0, false);
+
+    public static AtlasComponentOutcome<T> Skipped<T>(DataStatus status, string reason) =>
+        new(default, status, reason, 0, true);
+}
 
 public sealed record AtlasCollectionResult(
     AtlasSnapshotV1 Snapshot,
