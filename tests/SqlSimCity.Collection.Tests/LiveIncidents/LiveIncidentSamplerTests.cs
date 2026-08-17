@@ -166,6 +166,173 @@ public class LiveIncidentSamplerTests
     }
 
     [Fact]
+    public async Task FailedCycleNeverLeaksTheRawExceptionMessageAndClassifiesItGenerically()
+    {
+        var time = new FakeTimeProvider();
+        var collector = new StubLiveIncidentCollector
+        {
+            OnCollect = (_, _) => throw new InvalidOperationException("password=hunter2;server=prod-db-01"),
+        };
+        await using var sampler = new LiveIncidentSampler(collector, new LiveIncidentSamplerOptions { Cadence = TimeSpan.FromSeconds(2) }, time, new FixedJitter(0.5));
+
+        await sampler.StartAsync();
+        await SettleAsync();
+
+        var reason = sampler.GetStatus().LastErrorReason;
+        Assert.NotNull(reason);
+        Assert.DoesNotContain("hunter2", reason);
+        Assert.DoesNotContain("prod-db-01", reason);
+        Assert.DoesNotContain("InvalidOperationException", reason);
+
+        await sampler.StopAsync();
+    }
+
+    [Fact]
+    public async Task LongBackoffAccountsForEveryMissedCadenceSlotNotJustOne()
+    {
+        var time = new FakeTimeProvider();
+        var collector = new StubLiveIncidentCollector { OnCollect = (_, _) => throw new InvalidOperationException("boom") };
+        var options = new LiveIncidentSamplerOptions
+        {
+            Cadence = TimeSpan.FromSeconds(2),
+            InitialBackoff = TimeSpan.FromSeconds(10), // 5 ordinary 2s cadence slots
+            MaxBackoff = TimeSpan.FromSeconds(60),
+            BackoffMultiplier = 2.0,
+            JitterFraction = 0.0,
+        };
+        await using var sampler = new LiveIncidentSampler(collector, options, time, new FixedJitter(0.5));
+
+        await sampler.StartAsync();
+        await SettleAsync();
+
+        // A single failed cycle backing off for 10s at a 2s cadence silently consumes 5 cadence
+        // slots, not just the one cycle that actually ran and failed (requirement 12).
+        Assert.Equal(5, sampler.GetStatus().SkippedCycles);
+
+        await sampler.StopAsync();
+    }
+
+    [Theory]
+    [InlineData(0, 60, 2.0, 0.2)] // InitialBackoff not positive
+    [InlineData(1, 0, 2.0, 0.2)] // MaxBackoff not positive
+    [InlineData(10, 5, 2.0, 0.2)] // MaxBackoff < InitialBackoff
+    [InlineData(1, 60, 0.5, 0.2)] // BackoffMultiplier < 1
+    [InlineData(1, 60, 2.0, 1.5)] // JitterFraction out of [0, 1]
+    [InlineData(1, 60, 2.0, -0.1)] // JitterFraction out of [0, 1]
+    public void InvalidBackoffOptionCombinationsAreRejectedBeforeTheSamplerCanRun(
+        int initialBackoffSeconds, int maxBackoffSeconds, double multiplier, double jitterFraction)
+    {
+        var options = new LiveIncidentSamplerOptions
+        {
+            InitialBackoff = TimeSpan.FromSeconds(initialBackoffSeconds),
+            MaxBackoff = TimeSpan.FromSeconds(maxBackoffSeconds),
+            BackoffMultiplier = multiplier,
+            JitterFraction = jitterFraction,
+        };
+        var collector = new StubLiveIncidentCollector();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new LiveIncidentSampler(collector, options));
+    }
+
+    [Fact]
+    public void SharedRandomJitterSourceProducesFractionsWithinRangeAndIsNotAFixedConstant()
+    {
+        var jitter = new SharedRandomJitterSource();
+        var values = Enumerable.Range(0, 30).Select(_ => jitter.NextFraction()).ToList();
+        Assert.All(values, v => Assert.InRange(v, 0.0, 1.0));
+        Assert.True(values.Distinct().Count() > 1, "SharedRandomJitterSource must not return the same fraction on every call (that would retry in lockstep across instances).");
+    }
+
+    [Fact]
+    public async Task StatusAndSnapshotReadsFromAnotherThreadDuringActiveCyclingNeverThrowOrTear()
+    {
+        // Requirement 10: GetStatus()/LatestSnapshot must be safely readable from a concurrent
+        // thread while the loop is actively publishing new state, with no torn/inconsistent
+        // combination of fields and no exception from unsynchronized access.
+        var time = new FakeTimeProvider();
+        var collector = new StubLiveIncidentCollector();
+        await using var sampler = new LiveIncidentSampler(collector, new LiveIncidentSamplerOptions { Cadence = TimeSpan.FromSeconds(2) }, time);
+
+        await sampler.StartAsync();
+        await SettleAsync();
+
+        using var stop = new CancellationTokenSource();
+        var reader = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                var status = sampler.GetStatus();
+                Assert.True(status.Sequence >= 0);
+                _ = sampler.LatestSnapshot;
+                await Task.Yield();
+            }
+        });
+
+        for (var i = 0; i < 5; i++)
+        {
+            await AdvanceAndSettleAsync(time, TimeSpan.FromSeconds(2));
+        }
+
+        await stop.CancelAsync();
+        await reader; // no exception propagated from the concurrent reader loop
+
+        Assert.True(sampler.GetStatus().Sequence >= 5);
+        await sampler.StopAsync();
+    }
+
+    [Fact]
+    public async Task StatusTransitionCallbackFiresOnPauseAndResumeButNotOnEveryRoutineCycle()
+    {
+        var time = new FakeTimeProvider();
+        var collector = new StubLiveIncidentCollector();
+        var transitions = new List<SamplerRunState>();
+        await using var sampler = new LiveIncidentSampler(
+            collector,
+            new LiveIncidentSamplerOptions { Cadence = TimeSpan.FromSeconds(2) },
+            time,
+            onStatusChanged: status => transitions.Add(status.State));
+
+        await sampler.StartAsync();
+        await SettleAsync();
+        Assert.Contains(SamplerRunState.Running, transitions); // Stopped -> Running on start
+
+        transitions.Clear();
+        await AdvanceAndSettleAsync(time, TimeSpan.FromSeconds(2));
+        await AdvanceAndSettleAsync(time, TimeSpan.FromSeconds(2));
+        Assert.Empty(transitions); // steady-state successful cycles are not "transitions"
+
+        sampler.Pause();
+        Assert.Contains(SamplerRunState.Paused, transitions);
+
+        transitions.Clear();
+        sampler.Resume();
+        Assert.Contains(SamplerRunState.Running, transitions);
+
+        await sampler.StopAsync();
+    }
+
+    [Fact]
+    public async Task StopAsyncWithATimeoutReturnsPromptlyEvenIfTheLoopHasNotYetFinishedTearingDown()
+    {
+        var time = new FakeTimeProvider();
+        var stuck = new TaskCompletionSource<LiveIncidentSnapshotV1>();
+        var collector = new StubLiveIncidentCollector
+        {
+            OnCollect = (_, _) => stuck.Task, // never completes: simulates a stuck collection cycle
+        };
+        var sampler = new LiveIncidentSampler(collector, new LiveIncidentSamplerOptions { Cadence = TimeSpan.FromSeconds(2) }, time);
+
+        await sampler.StartAsync();
+        await SettleAsync();
+
+        var stopTask = sampler.StopAsync(TimeSpan.FromSeconds(1));
+        time.Advance(TimeSpan.FromSeconds(1));
+        var completed = await Task.WhenAny(stopTask, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(stopTask, completed); // the bounded overload must not block on the stuck cycle
+
+        stuck.SetResult(StubLiveIncidentCollector.MinimalSnapshot(1)); // let the background loop finish so it doesn't leak
+    }
+    [Fact]
     public async Task StopAsyncCancelsTheLoopCleanlyWithNoFurtherCyclesAfterward()
     {
         var time = new FakeTimeProvider();
