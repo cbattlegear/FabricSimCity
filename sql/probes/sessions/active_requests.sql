@@ -13,8 +13,9 @@
 --     request are returned; when 1, idle user sessions are included too.
 --   @MinElapsedMs (int, optional, default 0) -- lower bound on total_elapsed_time for the request;
 --     use to focus on long-running requests only.
---   @DatabaseId (int, optional, default NULL) -- when supplied, restricts requests to this
---     database_id; NULL returns requests against any database visible to the caller.
+--   @DatabaseId (int, optional, default NULL) -- when supplied, restricts active requests to their
+--     request database and idle sessions to their current session database; NULL returns all
+--     visible user sessions/requests.
 -- Result contract: zero or more rows, one per (session_id, request_id). current_statement_text is
 --   the substring of the batch actually executing right now, resolved via statement offsets;
 --   batch_text is the full submitted batch. Both are NULL for idle sessions with no sql_handle.
@@ -22,6 +23,9 @@
 --   real, active request_id 0, which is an ordinary (not sentinel) value for a session's first or
 --   only concurrently executing request. The application layer must never coerce a NULL
 --   request_id into 0; see LiveIncidentCollector.MapActiveRequest.
+--   database_id/database_name use the active request database when present and the session's
+--   current database for an idle row, allowing a per-database atlas to count idle sessions without
+--   assigning them to database zero or treating them as unknown.
 -- Excludes the caller's own session (@@SPID): the collector's polling connection would otherwise
 --   appear as a permanently "idle" or churning session in its own sample every cycle.
 -- Relative cost: low; in-memory session/request state, no page or plan-cache scan.
@@ -51,8 +55,8 @@ SELECT
     r.writes,
     r.logical_reads,            -- 8-KiB pages
     r.open_transaction_count,
-    r.database_id,
-    DB_NAME(r.database_id)      AS database_name,
+    COALESCE(r.database_id, s.database_id) AS database_id,
+    DB_NAME(COALESCE(r.database_id, s.database_id)) AS database_name,
     st.text                     AS batch_text,
     SUBSTRING(
         st.text,
@@ -72,4 +76,4 @@ WHERE s.is_user_process = 1
   AND s.session_id <> @@SPID
   AND (@IncludeIdleSessions = 1 OR r.session_id IS NOT NULL)
   AND (r.request_id IS NULL OR r.total_elapsed_time >= @MinElapsedMs)
-  AND (@DatabaseId IS NULL OR r.database_id = @DatabaseId);
+  AND (@DatabaseId IS NULL OR COALESCE(r.database_id, s.database_id) = @DatabaseId);

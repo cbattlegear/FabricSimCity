@@ -512,11 +512,11 @@
           "sqlDbType": "Int",
           "required": false,
           "default": null,
-          "description": "When supplied, restricts to requests against this database_id. NULL returns requests against any visible database."
+          "description": "When supplied, restricts active requests to their request database and idle sessions to their current session database. NULL returns all visible user sessions/requests."
         }
       ],
       "resultSets": 1,
-      "resultContract": "Zero or more rows, one per (session_id, request_id). current_statement_text is the offset-resolved substring of the executing statement; batch_text is the full submitted batch. No plan XML is fetched.",
+      "resultContract": "Zero or more rows, one per (session_id, request_id). Idle rows have NULL request_id and use the session's current database_id/name; active rows use the request database. current_statement_text is the offset-resolved substring of the executing statement; batch_text is the full submitted batch. No plan XML is fetched.",
       "relativeCost": "low"
     },
     {

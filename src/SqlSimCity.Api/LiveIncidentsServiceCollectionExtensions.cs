@@ -23,6 +23,8 @@ namespace SqlSimCity.Api;
 /// </summary>
 public static class LiveIncidentsServiceCollectionExtensions
 {
+    public const string ConnectionFactoryServiceKey = "LiveIncidents";
+
     public static IServiceCollection AddLiveIncidents(
         this IServiceCollection services,
         IConfiguration configuration,
@@ -85,11 +87,18 @@ public static class LiveIncidentsServiceCollectionExtensions
             MaxSecretSizeBytes = connection.Secrets.MaxSecretSizeBytes,
         };
 
-        services.AddSingleton<ISecretFileProvider>(new FileSecretFileProvider(secretOptions));
-        services.AddSingleton<ISqlConnectionFactory>(sp =>
-            new SqlConnectionFactory(sp.GetRequiredService<ISecretFileProvider>()));
+        services.AddKeyedSingleton<ISecretFileProvider>(
+            ConnectionFactoryServiceKey,
+            new FileSecretFileProvider(secretOptions));
+        services.AddKeyedSingleton<ISqlConnectionFactory>(
+            ConnectionFactoryServiceKey,
+            (sp, _) => new SqlConnectionFactory(
+                sp.GetRequiredKeyedService<ISecretFileProvider>(ConnectionFactoryServiceKey)));
         services.AddSingleton<ILiveIncidentProbeExecutor>(sp =>
-            new SqlLiveIncidentProbeExecutor(sp.GetRequiredService<ISqlConnectionFactory>(), profile, probeCatalog));
+            new SqlLiveIncidentProbeExecutor(
+                sp.GetRequiredKeyedService<ISqlConnectionFactory>(ConnectionFactoryServiceKey),
+                profile,
+                probeCatalog));
         services.AddSingleton<ILiveIncidentCollector>(sp =>
             new LiveIncidentCollector(
                 sp.GetRequiredService<ILiveIncidentProbeExecutor>(),

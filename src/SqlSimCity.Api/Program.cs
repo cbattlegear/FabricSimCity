@@ -26,6 +26,12 @@ builder.Services.AddSingleton(probeCatalog);
 builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
 builder.Services.AddProtectedStorage(builder.Configuration);
 
+// LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
+// SqlConnectionFactory-backed collector in and fails closed before the host serves traffic.
+builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
+builder.Services.AddSingleton<LiveIncidentSamplerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
+
 if (AtlasConfiguration.IsConnected(builder.Configuration))
 {
     var atlasOptions = AtlasConfiguration.BuildCollectionOptions(builder.Configuration);
@@ -37,7 +43,10 @@ if (AtlasConfiguration.IsConnected(builder.Configuration))
     builder.Services.AddSingleton<ISqlConnectionFactory>(services =>
         new SqlConnectionFactory(services.GetRequiredService<FileSecretFileProvider>()));
     builder.Services.AddSingleton<IAtlasProbeExecutor, SqlClientAtlasProbeExecutor>();
-    builder.Services.AddSingleton<ILiveAtlasActivitySource, NotProbedLiveAtlasActivitySource>();
+    builder.Services.AddSingleton<ILiveAtlasActivitySource>(services =>
+        new LiveIncidentAtlasActivitySource(
+            () => services.GetRequiredService<LiveIncidentSamplerService>().GetCurrentResponse(),
+            atlasOptions.TargetId));
     builder.Services.AddSingleton<AtlasCollector>();
     builder.Services.AddSingleton<IReconnectJitter, RandomReconnectJitter>();
     builder.Services.AddSingleton<IReconnectBackoff>(services =>
@@ -56,13 +65,6 @@ else
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
 }
-
-// LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
-// SqlConnectionFactory-backed collector in, and fails closed here -- before the host is even
-// built, let alone serving traffic -- if that configuration is missing or invalid.
-builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
-builder.Services.AddSingleton<LiveIncidentSamplerService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
 
 var app = builder.Build();
 

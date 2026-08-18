@@ -764,6 +764,18 @@ describe('regression: server.database_discovery on Azure SQL DB is nuanced, not 
     assert.match(probe.azureSqlDatabase.notes, /connection context|master/i);
   });
 
+  describe('regression: active request rows retain an idle session database', () => {
+    test('uses the session database when no request row exists', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.active_requests')));
+      assert.match(source, /COALESCE\(\s*r\.database_id\s*,\s*s\.database_id\s*\)\s+AS\s+database_id/i);
+      assert.match(source, /DB_NAME\(\s*COALESCE\(\s*r\.database_id\s*,\s*s\.database_id\s*\)\s*\)/i);
+      assert.match(
+        source,
+        /@DatabaseId\s+IS\s+NULL\s+OR\s+COALESCE\(\s*r\.database_id\s*,\s*s\.database_id\s*\)\s*=\s*@DatabaseId/i,
+      );
+    });
+  });
+
   test('only the documented, platform-limited probes are flagged unsupported on Azure SQL Database', () => {
     // Azure-unsupported is legitimate only for probes that call a DMV/catalog view Microsoft's own
     // documentation does not list as available on Azure SQL Database (sys.master_files,

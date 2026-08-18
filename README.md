@@ -20,7 +20,7 @@ The contract keeps three evidence classes separate:
 2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero. The live-incident sampler below is this class of evidence, taken on a bounded cadence, not a continuous trace: a request that starts and finishes between two samples never appears, and blocking that resolves between samples is invisible to it. See [Live incident sampling](#live-incident-sampling) for exactly what a cadence-based sample can and cannot show, and how it differs from Query Store's retained history.
 3. **Topology is inferred evidence.** Confirmed, probable, and unknown confidence carry rationale; the atlas is not claiming a complete dependency graph.
 
-There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. Connected mode executes only validated static SQL embedded in the application. It does not fetch plan XML or fabricate live traffic; live request activity is explicitly `NotProbed` until an `ILiveAtlasActivitySource` is supplied.
+There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. Connected mode executes only validated static SQL embedded in the application. It does not fetch plan XML or fabricate live traffic. When the live sampler and atlas target IDs match, the atlas projects only the latest available request sample; otherwise activity remains explicitly unavailable.
 
 ## Architecture
 

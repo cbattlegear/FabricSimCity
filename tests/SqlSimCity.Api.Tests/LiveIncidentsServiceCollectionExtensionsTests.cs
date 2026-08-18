@@ -56,7 +56,8 @@ public sealed class LiveIncidentsServiceCollectionExtensionsTests
 
         Assert.IsType<LiveIncidentCollector>(provider.GetRequiredService<ILiveIncidentCollector>());
         Assert.IsType<SqlLiveIncidentProbeExecutor>(provider.GetRequiredService<ILiveIncidentProbeExecutor>());
-        Assert.IsType<SqlConnectionFactory>(provider.GetRequiredService<ISqlConnectionFactory>());
+        Assert.IsType<SqlConnectionFactory>(provider.GetRequiredKeyedService<ISqlConnectionFactory>(
+            LiveIncidentsServiceCollectionExtensions.ConnectionFactoryServiceKey));
     }
 
     [Fact]
@@ -70,7 +71,8 @@ public sealed class LiveIncidentsServiceCollectionExtensionsTests
         var services = new ServiceCollection();
         services.AddLiveIncidents(configuration, LoadCatalog());
         var provider = services.BuildServiceProvider();
-        var factory = provider.GetRequiredService<ISqlConnectionFactory>();
+        var factory = provider.GetRequiredKeyedService<ISqlConnectionFactory>(
+            LiveIncidentsServiceCollectionExtensions.ConnectionFactoryServiceKey);
 
         await provider.DisposeAsync();
 
@@ -84,6 +86,25 @@ public sealed class LiveIncidentsServiceCollectionExtensionsTests
             new SqlServer.Auth.ManagedIdentityAuthenticationStrategy());
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => factory.OpenAsync(profile, CancellationToken.None));
+    }
+
+    [Fact]
+    public void ConnectedModeDoesNotReplaceAnotherCollectorsConnectionFactory()
+    {
+        var services = new ServiceCollection();
+        var existing = new SqlConnectionFactory(new SqlServer.Secrets.FileSecretFileProvider(
+            new SqlServer.Secrets.SecretFileProviderOptions
+            {
+                SecretsDirectory = Path.GetTempPath(),
+            }));
+        services.AddSingleton<ISqlConnectionFactory>(existing);
+
+        services.AddLiveIncidents(BuildConfiguration(ValidConnectedConfiguration()), LoadCatalog());
+        using var provider = services.BuildServiceProvider();
+
+        Assert.Same(existing, provider.GetRequiredService<ISqlConnectionFactory>());
+        Assert.NotSame(existing, provider.GetRequiredKeyedService<ISqlConnectionFactory>(
+            LiveIncidentsServiceCollectionExtensions.ConnectionFactoryServiceKey));
     }
 
     [Fact]
