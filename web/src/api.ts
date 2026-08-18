@@ -49,6 +49,7 @@ export function subscribeToLiveIncidents(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let reportedState: LiveFeedConnectionState | null = null
+  let startPromise: Promise<void> | null = null
 
   const connection = new signalR.HubConnectionBuilder()
     .withUrl('/hubs/current-snapshot')
@@ -111,8 +112,10 @@ export function subscribeToLiveIncidents(
   const connect = async () => {
     if (disposed) return
     report('reconnecting')
+    const attempt = connection.start()
+    startPromise = attempt
     try {
-      await connection.start()
+      await attempt
     } catch (error) {
       if (disposed) return
       console.error('Live incident push channel could not be started; polling over REST instead', error)
@@ -120,6 +123,8 @@ export function subscribeToLiveIncidents(
       startPolling()
       scheduleReconnect()
       return
+    } finally {
+      if (startPromise === attempt) startPromise = null
     }
     if (disposed) {
       connection.stop().catch(() => {})
@@ -175,9 +180,11 @@ export function subscribeToLiveIncidents(
       reconnectTimer = null
     }
     stopPolling()
-    connection.stop().catch(() => {
-      // Best-effort: the connection may already be closed (e.g. component unmounted after an error).
-    })
+    if (startPromise === null) {
+      connection.stop().catch(() => {
+        // Best-effort: the connection may already be closed (e.g. component unmounted after an error).
+      })
+    }
   }
 }
 

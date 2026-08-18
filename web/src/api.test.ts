@@ -334,4 +334,18 @@ describe('subscribeToLiveIncidents: disposal', () => {
     expect(updates).toHaveLength(0)
     expect(connection.invoke).not.toHaveBeenCalled()
   })
+
+  it('waits for an in-flight negotiation before stopping the connection', async () => {
+    let resolveStart: () => void = () => {}
+    connection.start.mockImplementationOnce(() => new Promise<void>(resolve => { resolveStart = resolve }))
+    const dispose = subscribe()
+    await vi.advanceTimersByTimeAsync(0)
+
+    dispose()
+    expect(connection.stop).not.toHaveBeenCalled()
+
+    resolveStart()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(connection.stop).toHaveBeenCalledTimes(1)
+  })
 })

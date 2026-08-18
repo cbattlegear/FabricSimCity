@@ -2,7 +2,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
-    <ProjectReference Include="..\SqlSimCity.Collection\SqlSimCity.Collection.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -5,9 +5,10 @@ using System.Text.Json;
 using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
 using SqlSimCity.Storage;
 
-namespace SqlSimCity.Domain;
+namespace SqlSimCity.Collection.QueryStore;
 
 public sealed class ConnectedQueryStoreHistorySource(
     ProtectedQueryStoreRepository repository,
