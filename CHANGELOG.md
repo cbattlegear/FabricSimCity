@@ -22,11 +22,14 @@ First MVP release candidate. There is no tagged release yet.
   (`ObservationEnvelopeV1`), signs each request with HMAC-SHA-256 (constant-time verification, bounded
   clock skew, connector allowlist, key rotation, and durable replay-nonce protection), and buffers a
   bounded AES-256-GCM-encrypted spool when the central server is unavailable. Central ingestion is
-  opt-in and disabled by default (`EdgeIngestion:Enabled`); when enabled it adds one bounded
+  opt-in and disabled by default (`Acquisition:Mode=Edge` plus `EdgeIngestion:Enabled`); when enabled it adds one bounded
   `POST /api/v1/edge/ingest` plus read-only `GET /api/v1/edge/status`/`/targets` endpoints, validates
-  schema/digest/signature/sequence/epoch with atomic idempotent persistence and compression-bomb
-  guards, and reassembles delivered chunks into immutable observation generations. No live SQL target
-  was validated; the path is exercised against fixtures and a fake collector only.
+  schema/digest/signature/sequence/epoch/standard-payload contracts with atomic publication, bounded
+  idempotency indexes, a dedicated per-client edge rate limit, and compression-bomb guards. One complete,
+  allowlisted target generation projects through the existing Atlas, capabilities, Query Store,
+  database-city, live, and findings APIs; partial next generations remain invisible. The UI shows a
+  compact Edge source/status/target panel and labels live evidence as a static point-in-time sample.
+  No live SQL target was validated; the shipping connector provider is fixture-backed.
 - Fixture-mode and opt-in read-only connected server **atlas** (`/api/v1/atlas`,
   `/api/v1/atlas/status`) with a three.js scene backed by a keyboard- and
   screen-reader-accessible database evidence table.
@@ -67,6 +70,12 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Fixed
 
+- Rejected edge batches no longer create phantom targets, reserve ownership, mutate partial groups,
+  advance generation state, or consume idempotency entries; both accepted-batch indexes now evict
+  coherently at a deterministic bound.
+- The local Edge Compose example now uses a genuinely loopback HTTP connection by sharing the central
+  service network namespace; production delivery remains HTTPS-only.
+- Both runtime images now declare the repository's Apache-2.0 license and contain `LICENSE`/`NOTICE`.
 - A rejected lazy-chunk import no longer unmounts the application: every lazy
   surface is wrapped in an error boundary that renders a focused, announced
   alert with a reload action.

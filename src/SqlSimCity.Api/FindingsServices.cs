@@ -19,12 +19,14 @@ public static class FindingsServices
     public static IServiceCollection AddFindings(this IServiceCollection services)
     {
         services.AddSingleton(new FindingsEngine(FindingRules.Default()));
-        services.AddSingleton<IFindingsEvidenceProvider>(sp => new SourceBackedFindingsEvidenceProvider(
-            sp.GetRequiredService<IAtlasSnapshotSource>(),
-            sp.GetRequiredService<IQueryStoreHistorySource>(),
-            sp.GetRequiredService<ICapabilitiesSource>(),
-            () => sp.GetRequiredService<ILiveIncidentResponseSource>().GetCurrentResponse().Snapshot,
-            TimeProvider.System));
+        services.AddSingleton<IFindingsEvidenceProvider>(sp =>
+            (IFindingsEvidenceProvider?)sp.GetService<EdgeAcquisitionSource>() ??
+            new SourceBackedFindingsEvidenceProvider(
+                sp.GetRequiredService<IAtlasSnapshotSource>(),
+                sp.GetRequiredService<IQueryStoreHistorySource>(),
+                sp.GetRequiredService<ICapabilitiesSource>(),
+                () => sp.GetRequiredService<ILiveIncidentResponseSource>().GetCurrentResponse().Snapshot,
+                TimeProvider.System));
         services.AddSingleton<FindingsService>();
         return services;
     }

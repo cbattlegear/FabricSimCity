@@ -23,6 +23,8 @@ public static class EdgeJson
             // stable regardless of the producing platform.
             WriteIndented = false,
             DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+            RespectNullableAnnotations = true,
+            RespectRequiredConstructorParameters = true,
         };
         options.Converters.Add(new JsonStringEnumConverter());
         return options;

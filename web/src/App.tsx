@@ -1,8 +1,8 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { fetchArchiveInfo, fetchAtlas } from './api'
+import { fetchArchiveInfo, fetchAtlas, fetchEdgeSourceInfo } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { ChunkErrorBoundary } from './ChunkErrorBoundary'
-import type { ArchiveInfo, AtlasSnapshot, DatabaseAtlasItem } from './contracts'
+import type { ArchiveInfo, AtlasSnapshot, DatabaseAtlasItem, EdgeSourceInfo } from './contracts'
 import './App.css'
 
 const AtlasViewport = lazy(() => import('./AtlasViewport').then(m => ({ default: m.AtlasViewport })))
@@ -26,16 +26,22 @@ export default function App() {
   })
   const [queryFamilyId, setQueryFamilyId] = useState<string | null>(null)
   const [archiveInfo, setArchiveInfo] = useState<ArchiveInfo | null>(null)
+  const [edgeInfo, setEdgeInfo] = useState<EdgeSourceInfo | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
     let refreshTimer: number | undefined
     let loaded = false
     let archiveDetected = false
-    const load = () => Promise.all([fetchAtlas(controller.signal), fetchArchiveInfo(controller.signal)])
-      .then(([atlas, archive]) => {
+    const load = () => Promise.all([
+      fetchAtlas(controller.signal),
+      fetchArchiveInfo(controller.signal),
+      fetchEdgeSourceInfo(controller.signal),
+    ])
+      .then(([atlas, archive, edge]) => {
         setSnapshot(atlas)
         setArchiveInfo(archive)
+        setEdgeInfo(edge)
         archiveDetected = archive !== null
         loaded = true
         setSelectedId(current => current && atlas.databases.some(database => database.databaseId === current)
@@ -113,6 +119,7 @@ export default function App() {
         </p>
       </aside>
       {archiveInfo && <ArchiveInfoPanel info={archiveInfo} />}
+      {edgeInfo && <EdgeSourcePanel info={edgeInfo} />}
       <div className="tabs" role="tablist" aria-label="Analysis views">
         <button
           type="button"
@@ -157,7 +164,7 @@ export default function App() {
       </div>
 
       <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>
-        {tab === 'live' && <LazySurface label="Live incidents" fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents importedArchive={archiveInfo !== null} /></LazySurface>}
+        {tab === 'live' && <LazySurface label="Live incidents" fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents importedArchive={archiveInfo !== null} edgeSource={edgeInfo !== null} edgeGeneration={edgeInfo?.publicationGeneration ?? null} /></LazySurface>}
       </div>
 
       <div id="panel-atlas" role="tabpanel" aria-labelledby="tab-atlas" hidden={tab !== 'atlas'}>
@@ -320,6 +327,28 @@ function ArchiveInfoPanel({ info }: { info: ArchiveInfo }) {
         </p>
       )}
     </details>
+  )
+}
+
+function EdgeSourcePanel({ info }: { info: EdgeSourceInfo }) {
+  const degraded = info.state !== 'Available'
+  return (
+    <section
+      className={`edge-source-panel ${degraded ? 'is-degraded' : ''}`}
+      aria-labelledby="edge-source-title"
+    >
+      <div className="edge-source-heading">
+        <strong id="edge-source-title">EdgeConnector · {info.state}</strong>
+        <span>generation {info.sequence ?? 'awaiting first complete batch'}</span>
+      </div>
+      <dl className="edge-source-facts">
+        <div><dt>Target</dt><dd>{info.targetId}</dd></div>
+        <div><dt>Connector</dt><dd>{info.connectorId ?? 'not connected'}</dd></div>
+        <div><dt>Captured</dt><dd>{info.capturedAt ? new Date(info.capturedAt).toLocaleString() : 'not yet'}</dd></div>
+        <div><dt>Sections</dt><dd>{info.sections.join(', ') || 'awaiting a complete generation'}</dd></div>
+      </dl>
+      <p>{info.qualification}</p>
+    </section>
   )
 }
 

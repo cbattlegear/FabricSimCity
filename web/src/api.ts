@@ -1,5 +1,5 @@
 import * as signalR from '@microsoft/signalr'
-import type { ArchiveInfo, AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
+import type { ArchiveInfo, AtlasSnapshot, EdgeSourceInfo, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import type { DatabaseCityPage, DatabaseCitySummarySnapshot } from './databaseCityContracts'
 import { assertAtlasSnapshot } from './atlas'
@@ -26,6 +26,17 @@ export async function fetchArchiveInfo(signal?: AbortSignal): Promise<ArchiveInf
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`Archive info request failed with status ${response.status}`)
   return response.json() as Promise<ArchiveInfo>
+}
+
+export async function fetchEdgeSourceInfo(signal?: AbortSignal): Promise<EdgeSourceInfo | null> {
+  const response = await fetch('/api/v1/edge/source', {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    signal,
+  })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`Edge source request failed with status ${response.status}`)
+  return response.json() as Promise<EdgeSourceInfo>
 }
 
 export async function fetchLiveIncidents(signal?: AbortSignal): Promise<LiveIncidentResponse> {

@@ -49,7 +49,7 @@ try
 
     var bootId = Guid.NewGuid().ToString("N");
     var epochId = bootId; // A fresh process boot is a fresh epoch; the central resets deltas accordingly.
-    var provider = new FixtureObservationProvider(options.FixturesDirectory);
+    var provider = new FixtureObservationProvider(options.FixturesDirectory, options.TargetId);
     var collector = new ConnectorObservationCollector(options, provider, bootId, epochId);
 
     using var cts = new CancellationTokenSource();

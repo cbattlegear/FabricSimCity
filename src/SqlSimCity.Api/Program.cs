@@ -17,7 +17,9 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 });
 
 var probeCatalog = ApplicationInitialization.LoadProbeCatalog();
-var archiveMode = ArchiveServices.IsArchiveMode(builder.Configuration);
+var acquisitionMode = ArchiveServices.GetAcquisitionMode(builder.Configuration);
+var archiveMode = acquisitionMode == AcquisitionMode.Archive;
+var edgeMode = acquisitionMode == AcquisitionMode.Edge;
 
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
@@ -26,15 +28,25 @@ builder.Services.AddSignalR().AddJsonProtocol(options =>
 builder.Services.AddSingleton(probeCatalog);
 builder.Services.AddProtectedStorage(builder.Configuration);
 var queryStoreConnected = QueryStoreHistoryConfiguration.IsConnected(builder.Configuration);
+var atlasConnected = AtlasConfiguration.IsConnected(builder.Configuration);
+var liveConnected = string.Equals(
+    builder.Configuration["LiveIncidents:Mode"], "Connected", StringComparison.OrdinalIgnoreCase);
+var edgeIngestionEnabled = builder.Configuration.GetValue<bool>("EdgeIngestion:Enabled");
+var protectedStorageEnabled = builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled");
 if (archiveMode && (
         queryStoreConnected ||
-        AtlasConfiguration.IsConnected(builder.Configuration) ||
-        string.Equals(builder.Configuration["LiveIncidents:Mode"], "Connected", StringComparison.OrdinalIgnoreCase) ||
-        builder.Configuration.GetValue<bool>("EdgeIngestion:Enabled") ||
-        builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled")))
+        atlasConnected ||
+        liveConnected ||
+        edgeIngestionEnabled ||
+        protectedStorageEnabled))
     throw new InvalidOperationException(
         "Acquisition:Mode=Archive cannot be combined with connected Atlas, Query Store, live incidents, edge ingestion, or protected storage.");
-if (queryStoreConnected && !AtlasConfiguration.IsConnected(builder.Configuration))
+if (edgeMode && (!edgeIngestionEnabled || queryStoreConnected || atlasConnected || liveConnected || protectedStorageEnabled))
+    throw new InvalidOperationException(
+        "Acquisition:Mode=Edge requires edge ingestion and cannot be combined with connected Atlas, Query Store, live incidents, or protected storage.");
+if (!edgeMode && edgeIngestionEnabled)
+    throw new InvalidOperationException("Edge ingestion may be enabled only when Acquisition:Mode=Edge.");
+if (queryStoreConnected && !atlasConnected)
     throw new InvalidOperationException("Connected Query Store history requires Atlas:Mode=Connected so both share one validated profile and authentication strategy.");
 if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled"))
     throw new InvalidOperationException("Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden.");
@@ -45,6 +57,10 @@ builder.Services.AddEdgeIngestion(builder.Configuration);
 if (archiveMode)
 {
     builder.Services.AddArchiveSource(builder.Configuration);
+}
+else if (edgeMode)
+{
+    builder.Services.AddEdgeAcquisitionSource(builder.Configuration);
 }
 else
 {
@@ -61,7 +77,7 @@ else
 }
 builder.Services.AddFindings();
 
-if (!archiveMode && AtlasConfiguration.IsConnected(builder.Configuration))
+if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
 {
     var atlasOptions = AtlasConfiguration.BuildCollectionOptions(builder.Configuration);
     var connectionProfile = AtlasConfiguration.BuildProfile(builder.Configuration);
@@ -111,7 +127,7 @@ if (!archiveMode && AtlasConfiguration.IsConnected(builder.Configuration))
         builder.Services.AddSingleton<IQueryStoreHistorySource, UnavailableQueryStoreHistorySource>();
     }
 }
-else if (!archiveMode)
+else if (acquisitionMode == AcquisitionMode.Fixture)
 {
     builder.Services.AddSingleton<FixtureAtlasSnapshotSource>();
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
@@ -270,9 +286,12 @@ queryStore.MapGet("/status", async (
     return Results.Ok(await source.GetStatusAsync(cancellationToken));
 });
 app.MapDatabaseCity();
-if (archiveMode)
+if (archiveMode || edgeMode)
 {
-    app.MapArchiveInfo();
+    if (archiveMode)
+        app.MapArchiveInfo();
+    else
+        app.MapGet("/api/v1/archive", () => Results.NotFound());
     app.MapMethods("/hubs/current-snapshot", ["GET", "POST"], () => Results.NotFound());
     app.MapMethods("/hubs/current-snapshot/{**rest}", ["GET", "POST"], () => Results.NotFound());
 }
@@ -283,6 +302,18 @@ else
 }
 app.MapFindings();
 app.MapEdgeIngestion();
+if (edgeMode)
+{
+    app.MapGet("/api/v1/edge/source", (EdgeAcquisitionSource source, HttpContext context) =>
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        return Results.Ok(source.Info);
+    });
+}
+else
+{
+    app.MapGet("/api/v1/edge/source", () => Results.NotFound());
+}
 app.MapFallbackToFile("index.html");
 
 app.Run();

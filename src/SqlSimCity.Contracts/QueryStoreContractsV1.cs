@@ -4,7 +4,7 @@ public enum QueryTextAvailability { Available, Restricted, Encrypted, Missing }
 public enum QueryStoreExecutionType { Regular, Aborted, Exception }
 public enum QueryPlanType { Compiled, Dispatcher, Variant, Unknown }
 public enum QueryOptimizationKind { None, ParameterSensitivePlan, OptionalParameterPlanOptimization }
-public enum QueryStoreSource { Fixture, QueryStore, ImportedArchive }
+public enum QueryStoreSource { Fixture, QueryStore, ImportedArchive, EdgeConnector }
 
 public sealed record QueryStoreEvidenceV1(
     QueryStoreSource Source,

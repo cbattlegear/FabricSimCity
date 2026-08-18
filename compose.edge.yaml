@@ -20,28 +20,32 @@ services:
         REVISION: local
     # In a real deployment, terminate TLS at a reverse proxy in front of this and set AllowedHosts.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${SQLSIMCITY_EDGE_PORT:-8080}:8080"
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     volumes:
       - sqlsimcity-central-data:/data
-      # Durable replay-nonce journal must survive restarts so the replay window never reopens.
-      - sqlsimcity-central-nonces:/nonces
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     environment:
       ASPNETCORE_ENVIRONMENT: Production
+      Acquisition__Mode: Edge
+      Acquisition__Edge__TargetId: sql-prod-east
+      Acquisition__Edge__StaleAfterSeconds: "90"
+      Acquisition__Edge__DisconnectAfterSeconds: "300"
       Atlas__Mode: Fixture
       # Opt-in edge ingestion. When disabled (default) the app is strictly GET-only.
       EdgeIngestion__Enabled: "true"
       EdgeIngestion__SecretCatalogFile: /run/secrets/edge-connector-catalog
       EdgeIngestion__SecretsDirectory: /run/secrets
-      EdgeIngestion__NonceJournalPath: /nonces/edge-nonces.log
+      # The image owns /data as its non-root uid; this journal survives restarts on the named volume.
+      EdgeIngestion__NonceJournalPath: /data/edge-nonces.log
       EdgeIngestion__ClockSkewSeconds: "300"
       EdgeIngestion__MaxBatchBytes: "4194304"
+      EdgeIngestion__RateLimitPermitPerMinute: "120"
     secrets:
       - edge-connector-catalog
       - edge-a-hmac
@@ -57,6 +61,9 @@ services:
         VERSION: 0.0.0-local
         REVISION: local
     read_only: true
+    # The local example shares the central container's network namespace. This makes 127.0.0.1
+    # genuinely loopback while keeping production deployments HTTPS-only.
+    network_mode: "service:sqlsimcity-central"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
     volumes:
@@ -71,10 +78,10 @@ services:
       SQLSIMCITY_EDGE_CONNECTOR_ID: edge-a
       SQLSIMCITY_EDGE_TARGET_ID: sql-prod-east
       SQLSIMCITY_EDGE_KEY_ID: "2026-08"
-      # HTTPS is required in production. This example targets the central service in-network; replace
-      # with the https:// reverse-proxy URL and remove ALLOW_LOOPBACK_HTTP outside local development.
-      SQLSIMCITY_EDGE_INGEST_ENDPOINT: http://sqlsimcity-central:8080/api/v1/edge/ingest
-      SQLSIMCITY_EDGE_ALLOW_LOOPBACK_HTTP: "false"
+      # HTTPS remains required in production. Plain HTTP is allowed here only because the connector
+      # shares the central service namespace and 127.0.0.1 is therefore true loopback.
+      SQLSIMCITY_EDGE_INGEST_ENDPOINT: http://127.0.0.1:8080/api/v1/edge/ingest
+      SQLSIMCITY_EDGE_ALLOW_LOOPBACK_HTTP: "true"
       SQLSIMCITY_EDGE_SIGNING_SECRET_FILE: /run/secrets/edge-a-hmac
       SQLSIMCITY_EDGE_SPOOL_KEY_FILE: /run/secrets/edge-spool-key
       SQLSIMCITY_EDGE_SPOOL_DIR: /spool
@@ -90,12 +97,13 @@ services:
       - edge-a-hmac
       - edge-spool-key
     depends_on:
-      - sqlsimcity-central
+      sqlsimcity-central:
+        condition: service_started
+        restart: true
     restart: unless-stopped
 
 volumes:
   sqlsimcity-central-data:
-  sqlsimcity-central-nonces:
   sqlsimcity-edge-spool:
 
 # Provide these files out of band; do NOT commit them.

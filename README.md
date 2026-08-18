@@ -35,6 +35,8 @@ src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, live-
 src/SqlSimCity.Findings   pure deterministic findings rule engine, rules, and bounded evidence provider
 src/SqlSimCity.Archive    hostile-input archive format, validator, and source-neutral offline adapters
 src/SqlSimCity.Archive.Tool deterministic local preview/export/validation CLI
+src/SqlSimCity.Edge       signed envelope, replay defense, encrypted spool, atomic generation store
+src/SqlSimCity.Edge.Connector outward-only fixture connector and delivery runtime
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 sql/                      versioned probe catalog (manifest.json + probes/*.sql)
 fixtures/                 deterministic JSON fixtures for the atlas, capabilities, and live-incident APIs
@@ -91,6 +93,29 @@ Mount the configured archive file read-only in containers. Archive mode validate
 before the host is built, registers no SQL connection factory or live sampler, disables the live
 SignalR hub, and labels the one imported live sample static/stale. See
 [the archive format and operator guide](docs/archive-format.md).
+
+## Edge acquisition
+
+`Acquisition:Mode=Edge` is a strict, opt-in single-target source mode for an outward-only connector.
+It requires `EdgeIngestion:Enabled=true` and an exact `Acquisition:Edge:TargetId`; it refuses to start
+with archive mode, local connected Atlas/Query Store/live collection, or protected storage. The
+receiver endpoint is absent by default.
+
+A projection becomes visible only after Atlas, capabilities, Query Store, database-city, and live
+sections for one connector, target, epoch, boot, and sequence are complete. Until then the previous
+complete generation remains current. The ordinary Atlas, capabilities, Query Store, database-city,
+live, and findings APIs then serve that one generation through source-neutral adapters; findings are
+reevaluated centrally. Source timestamps, freshness boundaries, and reset epochs are retained.
+Connector-captured live evidence is always labelled as a static point-in-time sample: the central
+service starts no SQL collector, live sampler, or SignalR trace in Edge mode.
+
+The UI shows the allowlisted target, connector, generation, state, captured time, included sections,
+and the point-in-time qualification. It never renders envelope bodies. The no-built-in-login warning
+remains visible on desktop and mobile.
+
+The local `compose.edge.yaml` example shares the central service network namespace and connects to
+`http://127.0.0.1:8080`; plain HTTP is allowed only for that explicit loopback example. Production
+connector endpoints remain HTTPS-only. See [the edge connector operator guide](docs/edge-connector.md).
 
 Example non-secret settings are in `compose.yaml`. Authentication supports the explicit strategies in `SqlSimCity.SqlServer`. Passwords, certificates, and client secrets are file references under `Atlas:SecretsDirectory` (`/run/secrets` by default), never configuration values. For SQL Server 2016–2019 grant the collector login `VIEW SERVER STATE` and `VIEW DATABASE STATE` in each collected database; SQL Server 2022+ uses `VIEW SERVER PERFORMANCE STATE` and `VIEW DATABASE PERFORMANCE STATE`. Also grant `CONNECT` to each database and preserve the default `VIEW ANY DATABASE` only when server discovery is desired. Azure SQL Database should use the smallest documented database-scoped permission/role that exposes the required DMVs for its service tier. SQLSimCity never executes grants.
 

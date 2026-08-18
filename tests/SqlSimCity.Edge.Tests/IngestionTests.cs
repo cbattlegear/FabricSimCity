@@ -64,6 +64,17 @@ public sealed class IngestionTests
     }
 
     [Fact]
+    public void Null_envelope_element_is_rejected_without_throwing()
+    {
+        var batch = new ObservationBatchV1(
+            "1.0", "c", "b1", new string('a', 64),
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, [null!]);
+
+        Assert.False(EdgeBatchValidator.TryValidate(batch, Limits, out _, out var result));
+        Assert.Equal(IngestionOutcome.Rejected, result.Outcome);
+    }
+
+    [Fact]
     public void Oversized_chunk_is_rejected()
     {
         var limits = new IngestionLimits { MaxChunkPayloadBytes = 16 };
@@ -202,6 +213,77 @@ public sealed class IngestionTests
         Assert.True(EdgeBatchValidator.TryValidate(batch, Limits, out var chunks, out _));
         Assert.Equal(IngestionOutcome.Rejected, store.Ingest(batch, chunks).Outcome);
         Assert.Null(store.GetSection("t", ObservationSection.Atlas));
+    }
+
+    [Fact]
+    public void Late_oversize_rejection_leaves_no_target_or_owner()
+    {
+        var store = new EdgeObservationStore(maxSectionBytes: 8);
+        var rejected = Batch(
+            "connector-a",
+            "rejected",
+            Chunk(Json("{}"), connectorId: "connector-a", targetId: "unclaimed", section: ObservationSection.Atlas),
+            Chunk(Json("123456789"), connectorId: "connector-a", targetId: "unclaimed",
+                groupId: "g2", section: ObservationSection.Live));
+        Assert.True(EdgeBatchValidator.TryValidate(rejected, Limits, out var rejectedChunks, out _));
+
+        Assert.Equal(IngestionOutcome.Rejected, store.Ingest(rejected, rejectedChunks).Outcome);
+        Assert.Empty(store.GetTargets());
+
+        var accepted = Batch(
+            "connector-b",
+            "accepted",
+            Chunk(Json("{}"), connectorId: "connector-b", targetId: "unclaimed"));
+        EdgeBatchValidator.TryValidate(accepted, Limits, out var acceptedChunks, out _);
+        Assert.Equal(IngestionOutcome.Accepted, store.Ingest(accepted, acceptedChunks).Outcome);
+        Assert.Equal("connector-b", Assert.Single(store.GetTargets()).ConnectorId);
+    }
+
+    [Fact]
+    public void Conflicting_second_chunk_rejects_without_consuming_it()
+    {
+        var store = new EdgeObservationStore(maxSectionBytes: 16);
+        var first = Batch("c", "first", Chunk(Json("HELLO"), groupId: "g", index: 0, count: 2));
+        var conflict = Batch("c", "conflict", Chunk(Json("ODD"), groupId: "g", index: 1, count: 3));
+        var second = Batch("c", "second", Chunk(Json("WORLD"), groupId: "g", index: 1, count: 2));
+        EdgeBatchValidator.TryValidate(first, Limits, out var firstChunks, out _);
+        EdgeBatchValidator.TryValidate(conflict, Limits, out var conflictingChunks, out _);
+        EdgeBatchValidator.TryValidate(second, Limits, out var secondChunks, out _);
+
+        Assert.Equal(IngestionOutcome.Accepted, store.Ingest(first, firstChunks).Outcome);
+        Assert.Equal(IngestionOutcome.Conflict, store.Ingest(conflict, conflictingChunks).Outcome);
+        Assert.Equal(IngestionOutcome.Accepted, store.Ingest(second, secondChunks).Outcome);
+        Assert.Equal("HELLOWORLD", Encoding.UTF8.GetString(
+            store.GetSection("t", ObservationSection.Atlas)!.Content));
+    }
+
+    [Fact]
+    public void Accepted_batch_indexes_are_coherently_bounded()
+    {
+        const int retention = 4;
+        var store = new EdgeObservationStore(idempotencyHistoryLimit: retention);
+        var batches = Enumerable.Range(0, 50)
+            .Select(index => Batch(
+                "c",
+                $"batch-{index:D2}",
+                Chunk(Json($"{{\"v\":{index}}}"), targetId: $"target-{index:D2}")))
+            .ToArray();
+
+        foreach (var batch in batches)
+        {
+            EdgeBatchValidator.TryValidate(batch, Limits, out var chunks, out _);
+            Assert.Equal(IngestionOutcome.Accepted, store.Ingest(batch, chunks).Outcome);
+        }
+
+        Assert.Equal(retention, store.AcceptedIdempotencyCount);
+        Assert.Equal(retention, store.AcceptedBatchIdCount);
+
+        EdgeBatchValidator.TryValidate(batches[^1], Limits, out var newestChunks, out _);
+        Assert.Equal(IngestionOutcome.DuplicateAccepted, store.Ingest(batches[^1], newestChunks).Outcome);
+        EdgeBatchValidator.TryValidate(batches[0], Limits, out var evictedChunks, out _);
+        Assert.Equal(IngestionOutcome.Accepted, store.Ingest(batches[0], evictedChunks).Outcome);
+        Assert.Equal(retention, store.AcceptedIdempotencyCount);
+        Assert.Equal(retention, store.AcceptedBatchIdCount);
     }
 
     [Fact]

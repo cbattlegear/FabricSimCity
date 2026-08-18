@@ -20,7 +20,7 @@ public static class EdgeIngestionEndpoints
 
         var group = app.MapGroup("/api/v1/edge");
 
-        group.MapPost("/ingest", IngestAsync);
+        group.MapPost("/ingest", IngestAsync).RequireRateLimiting("edge-ingest");
 
         group.MapGet("/status", (EdgeIngestionContext ctx, HttpContext http) =>
         {
@@ -41,7 +41,10 @@ public static class EdgeIngestionEndpoints
             if (!Enum.TryParse<ObservationSection>(section, ignoreCase: true, out var parsed))
                 return Results.BadRequest(new { error = "Unknown observation section." });
 
-            var generation = ctx.Store.GetSection(targetId, parsed);
+            var generation = ctx.Store.GetPublishedGeneration(targetId) is { } published &&
+                             published.Sections.TryGetValue(parsed, out var completeSection)
+                ? completeSection
+                : null;
             if (generation is null)
                 return Results.NotFound();
 
@@ -130,9 +133,25 @@ public static class EdgeIngestionEndpoints
 
         if (batch is null)
             return Results.BadRequest(new { error = "Batch body is empty." });
+        if (!string.Equals(
+                batch.ConnectorId,
+                headers[EdgeSignatureHeaders.Connector].ToString(),
+                StringComparison.Ordinal))
+        {
+            return Results.Json(
+                new { error = "Request authentication failed." },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
 
         if (!EdgeBatchValidator.TryValidate(batch, ctx.Limits, out var chunks, out var validation))
             return Results.Json(new { error = validation.Reason }, statusCode: StatusCodes.Status422UnprocessableEntity);
+        if (chunks.Any(chunk =>
+                !string.Equals(chunk.TargetId, ctx.Options.AllowedTargetId, StringComparison.Ordinal)))
+        {
+            return Results.Json(
+                new { error = "Batch target is not allowlisted for this Edge acquisition source." },
+                statusCode: StatusCodes.Status422UnprocessableEntity);
+        }
 
         var result = ctx.Store.Ingest(batch, chunks);
         return result.Outcome switch

@@ -10,9 +10,9 @@ This document covers deployment, security, and operations. For the transport con
 see the `SqlSimCity.Edge` and `SqlSimCity.Edge.Connector` projects.
 
 > **No live SQL target validated.** As with the rest of SQLSimCity, the connector ships with a
-> deterministic fixture observation provider and has been validated end to end against fixtures and a
-> fake HTTP collector only. The connected `SqlSimCity.Collection` provider is the intended production
-> path; no real SQL Server was contacted during development.
+> deterministic fixture observation provider and has been validated end to end against fixtures.
+> A connector adapter backed by live `SqlSimCity.Collection` collectors does not ship yet; no real SQL
+> Server was contacted during development.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ see the `SqlSimCity.Edge` and `SqlSimCity.Edge.Connector` projects.
 [ SQL Server ] <-- read-only --> [ edge connector ]  --HTTPS + HMAC-->  [ central SQLSimCity ]
                                    |  bounded encrypted spool                 |  opt-in POST /api/v1/edge/ingest
                                    |  outward only, no inbound API            |  verify -> validate -> ingest
-                                                                              |  assemble generations -> read endpoints
+                                                                              |  complete generation -> existing APIs
 ```
 
 - The connector packages evidence into a versioned **observation envelope** (`ObservationEnvelopeV1`)
@@ -30,8 +30,9 @@ see the `SqlSimCity.Edge` and `SqlSimCity.Edge.Connector` projects.
   the producing seam before they reach the envelope.
 - Delivery is **durable and ordered**: every batch is sealed into a bounded AES-256-GCM spool first,
   then drained oldest-first. Offline windows never lose evidence up to the spool bound.
-- The central server ingests only when **explicitly enabled**. The normal application stays GET-only;
-  ingestion adds exactly one bounded `POST /api/v1/edge/ingest`.
+- The central server ingests only in explicit `Acquisition:Mode=Edge`. The normal application stays
+  GET-only; Edge mode adds exactly one bounded `POST /api/v1/edge/ingest` and requires one exact
+  allowlisted target id.
 
 ## Security model
 
@@ -54,22 +55,27 @@ see the `SqlSimCity.Edge` and `SqlSimCity.Edge.Connector` projects.
   written atomically (temp + rename), one writer, no symlink/traversal/special files. A wrong or
   corrupt key fails closed.
 - **Central hardening.** The ingest endpoint enforces strict `Content-Type`/`Content-Length`, a body
-  bound, a rate limit, schema/digest/signature/sequence/epoch validation, safe gzip decompression
-  (compression-bomb guarded), atomic all-or-nothing persistence, idempotent duplicate acceptance, and
-  conflict rejection. Curated errors never echo secrets, headers, or payloads.
+  bound, the global API limit plus a configured per-client edge limit,
+  schema/digest/signature/sequence/epoch/standard-payload validation, safe gzip decompression
+  (compression-bomb guarded), atomic all-or-nothing publication, bounded idempotent duplicate
+  acceptance, and conflict rejection. Curated errors never echo secrets, headers, or payloads.
 
 ## Central configuration (`EdgeIngestion` section)
 
-Disabled by default. Enable with:
+Disabled by default. Set `Acquisition:Mode=Edge`, configure the single source target, then enable:
 
 | Setting | Meaning |
 | --- | --- |
 | `EdgeIngestion:Enabled` | `true` to map the ingestion endpoint. |
+| `Acquisition:Edge:TargetId` | Exact target id this source projects; all other targets are rejected. |
+| `Acquisition:Edge:StaleAfterSeconds` | Fallback staleness age when a section has no `FreshUntil` (default 90). |
+| `Acquisition:Edge:DisconnectAfterSeconds` | Generation age that marks the source disconnected (default 300). |
 | `EdgeIngestion:SecretCatalogFile` | Path to the connector allowlist/secret catalog JSON. |
 | `EdgeIngestion:SecretsDirectory` | Directory holding the per-connector secret files. |
 | `EdgeIngestion:NonceJournalPath` | Durable replay-nonce journal path (persist across restarts). |
 | `EdgeIngestion:ClockSkewSeconds` | Allowed timestamp skew (default 300). |
 | `EdgeIngestion:MaxBatchBytes` | Maximum accepted batch body size (default 4 MiB). |
+| `EdgeIngestion:RateLimitPermitPerMinute` | Per-client ingest limit, in addition to the global API limiter (default 120). |
 
 ### Connector secret catalog
 
@@ -127,18 +133,36 @@ The connector uses the same read-only collection as connected central mode. Gran
 + `VIEW DATABASE PERFORMANCE STATE` (SQL Server 2022+), plus `CONNECT` to each collected database.
 SQLSimCity never executes grants. See the main `README.md` and `SECURITY.md`.
 
-## Central read endpoints
+## Central projection and status
 
-When enabled, the central server also exposes read-only, `no-store` status:
+When Edge mode is enabled, the central server exposes read-only, `no-store` status:
 
 - `GET /api/v1/edge/status` and `GET /api/v1/edge/targets` — per-target status (connector id, last
   sequence, epoch, freshness, published sections). Generic; no secrets.
 - `GET /api/v1/edge/targets/{targetId}/sections/{section}` — the reconstructed observation generation
   for one delivered section.
+- `GET /api/v1/edge/source` — the selected target's compact source/status projection.
 
-The central UI adds a source/status panel from these; existing analysis surfaces are unchanged. A
-connector that stops delivering goes stale/disconnected in status; the central Live UI does not claim
-a continuous trace from a cadence-based edge feed.
+Atlas, capabilities, Query Store, database-city, live, and findings use the same existing API routes
+in Edge mode. They switch atomically only when all five standard sections share one connector, target,
+epoch, boot, and sequence; a partial next generation is never projected. The UI shows a compact
+source/status/target panel and Edge source labels. A connector that stops delivering goes
+stale/disconnected. Imported live evidence is always a static point-in-time sample; the central
+service starts no sampler, SQL collection, or SignalR trace.
+
+The replay nonce journal is durable across central restarts. Accepted observation generations and
+bounded idempotency indexes are in-memory; after a central restart the source waits for the connector's
+next generation. A nonce already accepted before restart remains rejected, so replay protection never
+reopens. Treat this as a current availability limitation, not a delivery guarantee.
+
+## Runnable local Compose
+
+`compose.edge.yaml` shares the connector's network namespace with `sqlsimcity-central` and uses
+`http://127.0.0.1:8080`. `SQLSIMCITY_EDGE_ALLOW_LOOPBACK_HTTP=true` is safe only in that concrete
+shared-loopback example. Do not copy it to a bridged service name or remote host; production remains
+HTTPS-only. Because a shared network namespace has the central container's lifecycle, restart the
+Compose services together after an explicit central-container recreation; the connector's encrypted
+spool survives and drains after the paired restart.
 
 ## Spool backup is not a delivery guarantee
 

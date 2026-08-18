@@ -11,12 +11,19 @@ COPY src/SqlSimCity.Contracts/SqlSimCity.Contracts.csproj src/SqlSimCity.Contrac
 COPY src/SqlSimCity.Contracts/packages.lock.json src/SqlSimCity.Contracts/
 COPY src/SqlSimCity.Domain/SqlSimCity.Domain.csproj src/SqlSimCity.Domain/
 COPY src/SqlSimCity.Domain/packages.lock.json src/SqlSimCity.Domain/
+COPY src/SqlSimCity.Storage/SqlSimCity.Storage.csproj src/SqlSimCity.Storage/
+COPY src/SqlSimCity.Storage/packages.lock.json src/SqlSimCity.Storage/
+COPY src/SqlSimCity.SqlServer/SqlSimCity.SqlServer.csproj src/SqlSimCity.SqlServer/
+COPY src/SqlSimCity.SqlServer/packages.lock.json src/SqlSimCity.SqlServer/
+COPY src/SqlSimCity.Collection/SqlSimCity.Collection.csproj src/SqlSimCity.Collection/
+COPY src/SqlSimCity.Collection/packages.lock.json src/SqlSimCity.Collection/
 COPY src/SqlSimCity.Edge/SqlSimCity.Edge.csproj src/SqlSimCity.Edge/
 COPY src/SqlSimCity.Edge/packages.lock.json src/SqlSimCity.Edge/
 COPY src/SqlSimCity.Edge.Connector/SqlSimCity.Edge.Connector.csproj src/SqlSimCity.Edge.Connector/
 COPY src/SqlSimCity.Edge.Connector/packages.lock.json src/SqlSimCity.Edge.Connector/
 RUN dotnet restore src/SqlSimCity.Edge.Connector/SqlSimCity.Edge.Connector.csproj --locked-mode
 COPY src/ src/
+COPY sql/ sql/
 COPY fixtures/ fixtures/
 RUN dotnet publish src/SqlSimCity.Edge.Connector/SqlSimCity.Edge.Connector.csproj \
     --configuration Release \
@@ -33,7 +40,7 @@ ARG REVISION=unknown
 ARG SOURCE=https://github.com/cbattlegear/SQLSimCity
 LABEL org.opencontainers.image.created=$BUILD_DATE \
       org.opencontainers.image.description="SQLSimCity outward-only edge connector" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.revision=$REVISION \
       org.opencontainers.image.source=$SOURCE \
       org.opencontainers.image.title="SQLSimCity Edge Connector" \
@@ -43,6 +50,7 @@ WORKDIR /app
 # mounted secrets. It writes only to the spool directory (a mounted volume) and /tmp.
 COPY --from=build --chown=$APP_UID:$APP_UID /app/publish ./
 COPY --from=build --chown=$APP_UID:$APP_UID /source/fixtures ./fixtures
+COPY --chown=$APP_UID:$APP_UID LICENSE NOTICE /app/legal/
 RUN mkdir /spool && chown $APP_UID:$APP_UID /spool
 ENV DOTNET_EnableDiagnostics=0 \
     SQLSIMCITY_EDGE_FIXTURES_DIR=/app/fixtures/v1 \

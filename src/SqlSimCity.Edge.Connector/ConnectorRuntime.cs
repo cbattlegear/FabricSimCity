@@ -42,7 +42,8 @@ public sealed class ConnectorRuntime(
         {
             try
             {
-                var batch = collector.CollectBatch(timeProvider.GetUtcNow());
+                var batch = await collector.CollectBatchAsync(
+                    timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
                 if (batch is not null)
                 {
                     var outcome = pump.Submit(batch);

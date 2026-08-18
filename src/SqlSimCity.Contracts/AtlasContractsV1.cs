@@ -1,7 +1,7 @@
 namespace SqlSimCity.Contracts.V1;
 
 public enum MeasurementStatus { Known, Unknown }
-public enum EvidenceSource { Fixture, LiveDmvSample, QueryStoreAggregate, InferredTopology, LiveDmvCumulative, CatalogSnapshot, NotProbed, ImportedArchive }
+public enum EvidenceSource { Fixture, LiveDmvSample, QueryStoreAggregate, InferredTopology, LiveDmvCumulative, CatalogSnapshot, NotProbed, ImportedArchive, EdgeConnector }
 public enum DataStatus { Available, Stale, Disconnected, PermissionDenied, Disabled, Unsupported, Unknown }
 public enum QueryStoreCapability { Available, Disabled, PermissionDenied, Unsupported, Unknown }
 public enum QueryStoreHealth { Healthy, ReadOnly, ReadableSecondary, Error, Stale, Unavailable, Unknown }
@@ -93,7 +93,7 @@ public sealed record AtlasSnapshotV1(
     public AtlasCollectionMetadataV1? Collection { get; init; }
 }
 
-public enum AtlasCollectorMode { Fixture, Connected, Archive }
+public enum AtlasCollectorMode { Fixture, Connected, Archive, Edge }
 public enum AtlasCollectorState { Ready, Collecting, Paused, BackingOff, Degraded, Disconnected }
 
 public sealed record AtlasCollectionMetadataV1(

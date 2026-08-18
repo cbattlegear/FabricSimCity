@@ -1,89 +1,165 @@
-using System.Text.Json;
+using SqlSimCity.Collection.LiveIncidents;
+using SqlSimCity.Collection.Negotiation;
+using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
 using SqlSimCity.Edge.Envelope;
 
 namespace SqlSimCity.Edge.Connector;
 
-/// <summary>One section's content plus its source freshness, produced for a single collection cycle.</summary>
 public sealed record ObservationInput(ObservationSection Section, ObservationFreshnessV1 Freshness, object Payload);
 
-/// <summary>Produces the source-neutral observations a connector packages each cycle.</summary>
 public interface IObservationProvider
 {
-    IReadOnlyList<ObservationInput> Collect(DateTimeOffset now);
+    Task<IReadOnlyList<ObservationInput>> CollectAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
 }
 
-/// <summary>
-/// The default observation provider. It reuses the exact validated V1 contracts: the atlas snapshot
-/// comes from <see cref="FixtureAtlasSnapshotSource"/> (the same source-neutral contract a connected
-/// collector produces), and the capability and live sections are shipped from the canonical
-/// <c>fixtures/v1</c> documents. No raw SQL, plan XML, host name, or credential is ever packaged; the
-/// connector only forwards already-sanitized, normalized contract evidence. In a real deployment this
-/// provider is swapped for one backed by the connected <c>SqlSimCity.Collection</c> collectors near
-/// SQL Server; the transport, spool, signing, and central ingestion paths are identical either way.
-/// </summary>
 public sealed class FixtureObservationProvider : IObservationProvider
 {
     private readonly FixtureAtlasSnapshotSource _atlas = new();
-    private readonly string _fixturesDirectory;
-    private readonly TimeSpan _liveFreshness;
+    private readonly FixtureQueryStoreHistorySource _queryStore = new();
+    private readonly FixtureDatabaseCitySource _databaseCity = new();
+    private readonly string _targetId;
 
-    public FixtureObservationProvider(string fixturesDirectory, TimeSpan? liveFreshness = null)
+    public FixtureObservationProvider(string fixturesDirectory, string targetId)
     {
-        _fixturesDirectory = fixturesDirectory ?? throw new ArgumentNullException(nameof(fixturesDirectory));
-        _liveFreshness = liveFreshness ?? TimeSpan.FromSeconds(30);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fixturesDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetId);
+        if (!Directory.Exists(fixturesDirectory))
+            throw new DirectoryNotFoundException("The configured fixture directory does not exist.");
+        _targetId = targetId;
     }
 
-    public IReadOnlyList<ObservationInput> Collect(DateTimeOffset now)
+    public async Task<IReadOnlyList<ObservationInput>> CollectAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
-        var inputs = new List<ObservationInput>();
-
-        var snapshot = _atlas.GetCurrent();
-        inputs.Add(new ObservationInput(
-            ObservationSection.Atlas,
-            new ObservationFreshnessV1(snapshot.GeneratedAt, now, null),
-            snapshot));
-
-        if (TryReadFixture("target-capabilities.json", out var capabilities))
+        var atlas = _atlas.GetCurrent();
+        atlas = atlas with
         {
-            inputs.Add(new ObservationInput(
+            Target = atlas.Target with { TargetId = _targetId },
+        };
+        var atlasFreshness = new ObservationFreshnessV1(
+            atlas.Collection?.SourceTimestamp ?? atlas.GeneratedAt,
+            now,
+            atlas.Collection?.StaleAfter);
+
+        var capabilities = await BuildCapabilitiesAsync(now, cancellationToken).ConfigureAwait(false);
+        var queryStore = await BuildQueryStoreAsync(cancellationToken).ConfigureAwait(false);
+        var city = await BuildDatabaseCityAsync(cancellationToken).ConfigureAwait(false);
+        var liveSnapshot = await new FixtureLiveIncidentCollector(new FixedTimeProvider(now))
+            .CollectAsync(1, cancellationToken).ConfigureAwait(false);
+        liveSnapshot = liveSnapshot with
+        {
+            Target = liveSnapshot.Target with { TargetId = _targetId },
+        };
+        var live = new LiveIncidentResponseV1(
+            liveSnapshot,
+            new LiveCollectorStatusV1(
+                SamplerRunState.Stopped,
+                1,
+                now,
+                now,
+                0,
+                null,
+                "Connector fixture captured one point-in-time sample.",
+                0,
+                0));
+
+        return
+        [
+            new ObservationInput(
+                ObservationSection.Atlas,
+                atlasFreshness,
+                new AtlasObservationV1(atlas, _atlas.GetStatus())),
+            new ObservationInput(
                 ObservationSection.Capabilities,
-                new ObservationFreshnessV1(snapshot.GeneratedAt, now, null),
-                capabilities));
-        }
-
-        if (TryReadFixture("live-cases.json", out var live))
-        {
-            // Live samples are point-in-time and can be missed; freshUntil is the cadence boundary.
-            inputs.Add(new ObservationInput(
+                new ObservationFreshnessV1(capabilities.GeneratedAt, now, null),
+                capabilities),
+            new ObservationInput(
+                ObservationSection.QueryStore,
+                new ObservationFreshnessV1(queryStore.Status.LastPublishedAt, now, null),
+                queryStore),
+            new ObservationInput(
+                ObservationSection.DatabaseCity,
+                new ObservationFreshnessV1(city.Summaries.GeneratedAt, now, null),
+                city),
+            new ObservationInput(
                 ObservationSection.Live,
-                new ObservationFreshnessV1(now, now, now + _liveFreshness),
-                live));
-        }
-
-        return inputs;
+                new ObservationFreshnessV1(liveSnapshot.SourceTimestamp, now, liveSnapshot.FreshUntil),
+                live),
+        ];
     }
 
-    private bool TryReadFixture(string fileName, out JsonElement element)
+    private async Task<CapabilitiesSnapshotV1> BuildCapabilitiesAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
-        element = default;
-        var path = Path.Combine(_fixturesDirectory, fileName);
-        if (!File.Exists(path))
-            return false;
+        var fixtureTarget = FixtureProbeExecutor.GetKnownTargetIds()[0];
+        var profile = await new CapabilityNegotiator(
+                new FixtureProbeExecutor(fixtureTarget),
+                new FixedTimeProvider(now))
+            .NegotiateAsync(
+                new CapabilityNegotiationRequest(fixtureTarget, "db:atlas-sales"),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new CapabilitiesSnapshotV1(
+            "1",
+            now,
+            [profile with { TargetId = _targetId }]);
+    }
 
-        using var document = JsonDocument.Parse(File.ReadAllBytes(path));
-        element = document.RootElement.Clone();
-        return true;
+    private async Task<QueryStoreObservationV1> BuildQueryStoreAsync(CancellationToken cancellationToken)
+    {
+        var page = await _queryStore.GetQueriesAsync(
+            null, "cpu", 200, null, cancellationToken).ConfigureAwait(false);
+        var families = new List<QueryFamilyDetailV1>(page.Items.Count);
+        var plans = new Dictionary<string, NormalizedShowplanV1>(StringComparer.Ordinal);
+        foreach (var summary in page.Items)
+        {
+            if (await _queryStore.GetFamilyAsync(summary.FamilyId, cancellationToken).ConfigureAwait(false) is not { } family)
+                continue;
+            families.Add(family);
+            foreach (var planSummary in family.Plans)
+            {
+                if (await _queryStore.GetPlanAsync(planSummary.PlanId, cancellationToken).ConfigureAwait(false) is { } plan)
+                    plans[plan.PlanId] = plan;
+            }
+        }
+        return new QueryStoreObservationV1(
+            await _queryStore.GetStatusAsync(cancellationToken).ConfigureAwait(false),
+            families,
+            plans.Values.ToArray());
+    }
+
+    private async Task<DatabaseCityObservationV1> BuildDatabaseCityAsync(CancellationToken cancellationToken)
+    {
+        var summaries = await _databaseCity.GetSummariesAsync(cancellationToken).ConfigureAwait(false);
+        var pages = new List<DatabaseCityPageV1>();
+        foreach (var database in summaries.Databases)
+        foreach (var metric in Enum.GetValues<DatabaseCityMetric>())
+        {
+            if (await _databaseCity.GetDatabaseAsync(
+                    database.DatabaseId,
+                    metric,
+                    50,
+                    null,
+                    cancellationToken).ConfigureAwait(false) is { } page)
+            {
+                pages.Add(page);
+            }
+        }
+        return new DatabaseCityObservationV1(summaries, pages);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 }
 
-/// <summary>
-/// Builds one immutable <see cref="ObservationBatchV1"/> per collection cycle from an
-/// <see cref="IObservationProvider"/>, assigning the monotonic per-target sequence and the current
-/// boot epoch. Every section shares the cycle's sequence so the central store can reason about one
-/// generation per cycle.
-/// </summary>
 public sealed class ConnectorObservationCollector(
     ConnectorOptions options,
     IObservationProvider provider,
@@ -92,9 +168,11 @@ public sealed class ConnectorObservationCollector(
 {
     private long _sequence;
 
-    public ObservationBatchV1? CollectBatch(DateTimeOffset now)
+    public async Task<ObservationBatchV1?> CollectBatchAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
-        var inputs = provider.Collect(now);
+        var inputs = await provider.CollectAsync(now, cancellationToken).ConfigureAwait(false);
         if (inputs.Count == 0)
             return null;
 

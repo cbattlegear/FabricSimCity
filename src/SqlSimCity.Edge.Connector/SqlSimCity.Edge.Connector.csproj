@@ -12,6 +12,7 @@
     <ProjectReference Include="..\SqlSimCity.Edge\SqlSimCity.Edge.csproj" />
     <ProjectReference Include="..\SqlSimCity.Domain\SqlSimCity.Domain.csproj" />
     <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Collection\SqlSimCity.Collection.csproj" />
   </ItemGroup>
 
   <ItemGroup>

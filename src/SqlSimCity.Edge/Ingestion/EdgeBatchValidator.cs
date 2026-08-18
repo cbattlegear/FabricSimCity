@@ -57,6 +57,11 @@ public static class EdgeBatchValidator
             result = IngestionResult.Rejected("Batch contains no observation chunks.");
             return false;
         }
+        if (batch.Envelopes.Any(envelope => envelope is null))
+        {
+            result = IngestionResult.Rejected("Batch contains a null observation chunk.");
+            return false;
+        }
 
         if (batch.Envelopes.Count > limits.MaxEnvelopesPerBatch)
         {

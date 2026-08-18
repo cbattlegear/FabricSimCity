@@ -19,7 +19,16 @@ import type { LiveFeedConnectionState, RequestAvailabilityGroups } from './liveI
 import type { LiveIncidentResponse, LiveIncidentSnapshot, LiveRequest } from './liveContracts'
 import './LiveIncidentsPanel.css'
 
-export default function LiveIncidents({ importedArchive = false }: { importedArchive?: boolean }) {
+export default function LiveIncidents({
+  importedArchive = false,
+  edgeSource = false,
+  edgeGeneration = null,
+}: {
+  importedArchive?: boolean
+  edgeSource?: boolean
+  edgeGeneration?: number | null
+}) {
+  const staticSource = importedArchive || edgeSource
   const [response, setResponse] = useState<LiveIncidentResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => new Date().toISOString())
@@ -33,7 +42,7 @@ export default function LiveIncidents({ importedArchive = false }: { importedArc
         if (reason instanceof DOMException && reason.name === 'AbortError') return
         setError(reason instanceof Error ? reason.message : 'The live incident feed could not be loaded')
       })
-    const unsubscribe = importedArchive ? () => {} : subscribeToLiveIncidents(
+    const unsubscribe = staticSource ? () => {} : subscribeToLiveIncidents(
       update => {
         setResponse(update)
         setError(null)
@@ -44,7 +53,7 @@ export default function LiveIncidents({ importedArchive = false }: { importedArc
       controller.abort()
       unsubscribe()
     }
-  }, [importedArchive])
+  }, [staticSource, edgeGeneration])
 
   useEffect(() => {
     // A one-second clock is purely for the staleness label text below; it never drives motion or
@@ -73,8 +82,8 @@ export default function LiveIncidents({ importedArchive = false }: { importedArc
     return (
       <section className="live-incidents loading" aria-live="polite">
         <span className="loading-mark" aria-hidden="true" /> Loading live incident sample…
-        {importedArchive
-          ? <p className="stale-banner" role="status">Imported point-in-time sample. Static, stale, and offline; no SignalR connection or polling is active.</p>
+        {staticSource
+          ? <p className="stale-banner" role="status">{edgeSource ? 'EdgeConnector' : 'Imported'} point-in-time sample. Static; no SignalR connection or central polling is active.</p>
           : <FeedConnectionNotice state={feedState} />}
       </section>
     )
@@ -85,15 +94,15 @@ export default function LiveIncidents({ importedArchive = false }: { importedArc
       <header className="live-header">
         <div>
           <h2 id="live-incidents-title">Live incidents</h2>
-          <p>{importedArchive
-            ? 'ImportedArchive point-in-time evidence. This sample is static, stale, and never refreshed.'
+          <p>{staticSource
+            ? `${edgeSource ? 'EdgeConnector' : 'ImportedArchive'} point-in-time evidence. This sample is static and never implies a continuous trace.`
             : POLLING_DISCLOSURE}</p>
         </div>
         <StatusBadge fresh={fresh} snapshot={snapshot} />
       </header>
 
-      {importedArchive
-        ? <p className="stale-banner" role="status">ImportedArchive · no SignalR connection, REST polling, sampler, or SQL Server connection is active.</p>
+      {staticSource
+        ? <p className="stale-banner" role="status">{edgeSource ? 'EdgeConnector' : 'ImportedArchive'} · no SignalR connection, central sampler, or central SQL Server connection is active.</p>
         : <FeedConnectionNotice state={feedState} />}
 
       <p className="collector-status" aria-live="polite">{collectorStatusLabel(response.collector)}</p>

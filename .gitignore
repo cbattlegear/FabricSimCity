@@ -8,4 +8,5 @@ web/dist/
 *.user
 *.suo
 artifacts/
+secrets/
 *.log

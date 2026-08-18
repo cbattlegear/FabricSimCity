@@ -220,6 +220,7 @@ export interface ArchiveInfo {
     rawShowplanXmlIncluded: boolean
     excludedFields: string[]
   }
+
   features: string[]
   capabilities: string[]
   archiveBytes: number
@@ -229,6 +230,19 @@ export interface ArchiveInfo {
     engineVersion: string
     ruleVersions: Record<string, string>
   } | null
+}
+
+export interface EdgeSourceInfo {
+  source: 'EdgeConnector'
+  targetId: string
+  connectorId: string | null
+  sequence: number | null
+  publicationGeneration: number | null
+  state: 'Available' | 'Stale' | 'Disconnected'
+  capturedAt: string | null
+  freshUntil: string | null
+  sections: string[]
+  qualification: string
 }
 
 export interface QueryStoreCollectorStatus {

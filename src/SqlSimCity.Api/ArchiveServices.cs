@@ -3,16 +3,20 @@ using SqlSimCity.Domain;
 
 namespace SqlSimCity.Api;
 
+internal enum AcquisitionMode { Fixture, Archive, Edge }
+
 internal static class ArchiveServices
 {
-    public static bool IsArchiveMode(IConfiguration configuration)
+    public static AcquisitionMode GetAcquisitionMode(IConfiguration configuration)
     {
         var mode = configuration["Acquisition:Mode"] ?? "Fixture";
         if (string.Equals(mode, "Archive", StringComparison.OrdinalIgnoreCase))
-            return true;
+            return AcquisitionMode.Archive;
         if (string.Equals(mode, "Fixture", StringComparison.OrdinalIgnoreCase))
-            return false;
-        throw new ArchiveValidationException("Acquisition:Mode must be Fixture or Archive.");
+            return AcquisitionMode.Fixture;
+        if (string.Equals(mode, "Edge", StringComparison.OrdinalIgnoreCase))
+            return AcquisitionMode.Edge;
+        throw new ArchiveValidationException("Acquisition:Mode must be Fixture, Archive, or Edge.");
     }
 
     public static ArchiveSource AddArchiveSource(
