@@ -1,6 +1,7 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { fetchAtlas } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
+import { ChunkErrorBoundary } from './ChunkErrorBoundary'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
 
@@ -143,27 +144,27 @@ export default function App() {
       </div>
 
       <div id="panel-findings" role="tabpanel" aria-labelledby="tab-findings" hidden={tab !== 'findings'}>
-        {tab === 'findings' && <Suspense fallback={<PanelFallback label="Loading findings…" />}><FindingsPanel /></Suspense>}
+        {tab === 'findings' && <LazySurface label="Findings" fallback={<PanelFallback label="Loading findings…" />}><FindingsPanel /></LazySurface>}
       </div>
 
       <div id="panel-queries" role="tabpanel" aria-labelledby="tab-queries" hidden={tab !== 'queries'}>
-        {tab === 'queries' && <Suspense fallback={<PanelFallback label="Loading Query Store history…" />}><QueryStoreView initialFamilyId={queryFamilyId} /></Suspense>}
+        {tab === 'queries' && <LazySurface label="Query Store history" fallback={<PanelFallback label="Loading Query Store history…" />}><QueryStoreView initialFamilyId={queryFamilyId} /></LazySurface>}
       </div>
 
       <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>
-        {tab === 'live' && <Suspense fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents /></Suspense>}
+        {tab === 'live' && <LazySurface label="Live incidents" fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents /></LazySurface>}
       </div>
 
       <div id="panel-atlas" role="tabpanel" aria-labelledby="tab-atlas" hidden={tab !== 'atlas'}>
       {cityDatabase ? (
-        <Suspense fallback={<PanelFallback label="Loading database city…" />}>
+        <LazySurface label="Database city" fallback={<PanelFallback label="Loading database city…" />}>
           <DatabaseCityView
             databaseId={cityDatabase.databaseId}
             databaseName={cityDatabase.name}
             onBack={leaveDatabase}
             onOpenQuery={openQuery}
           />
-        </Suspense>
+        </LazySurface>
       ) : error ? (
         <section className="error" role="alert">
           <h2>Atlas unavailable</h2>
@@ -201,14 +202,16 @@ export default function App() {
               </div>
             </div>
             <div className="viewport-wrap">
-              <Suspense fallback={<div className="atlas-viewport"><div className="viewport-fallback" role="status"><strong>Loading 3D atlas…</strong><span>The database evidence table below is available now.</span></div></div>}>
-                <AtlasViewport
-                  snapshot={snapshot}
-                  selectedId={selectedId}
-                  onHover={hoverDatabase}
-                  onSelect={selectDatabase}
-                />
-              </Suspense>
+              <ChunkErrorBoundary label="3D atlas">
+                <Suspense fallback={<div className="atlas-viewport"><div className="viewport-fallback" role="status"><strong>Loading 3D atlas…</strong><span>The database evidence table below is available now.</span></div></div>}>
+                  <AtlasViewport
+                    snapshot={snapshot}
+                    selectedId={selectedId}
+                    onHover={hoverDatabase}
+                    onSelect={selectDatabase}
+                  />
+                </Suspense>
+              </ChunkErrorBoundary>
               <p className="hover-readout" aria-live="polite">
                 {hovered ? `${hovered.name} — select to inspect exact evidence` : 'Move across a block or use the table below'}
               </p>
@@ -344,5 +347,13 @@ function PanelFallback({ label }: { label: string }) {
     <section className="loading" aria-live="polite">
       <span className="loading-mark" aria-hidden="true" /> {label}
     </section>
+  )
+}
+
+function LazySurface({ label, fallback, children }: { label: string; fallback: ReactNode; children: ReactNode }) {
+  return (
+    <ChunkErrorBoundary label={label}>
+      <Suspense fallback={fallback}>{children}</Suspense>
+    </ChunkErrorBoundary>
   )
 }
