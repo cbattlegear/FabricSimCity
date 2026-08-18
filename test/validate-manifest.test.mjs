@@ -767,17 +767,20 @@ describe('regression: server.database_discovery on Azure SQL DB is nuanced, not 
   test('only the documented, platform-limited probes are flagged unsupported on Azure SQL Database', () => {
     // Azure-unsupported is legitimate only for probes that call a DMV/catalog view Microsoft's own
     // documentation does not list as available on Azure SQL Database (sys.master_files,
-    // sys.dm_os_host_info). Every other probe, including ones with narrower visibility or a
-    // different required permission, must remain supported: unsupported is not a catch-all escape
-    // hatch, and this test pins the exact allow-list so a future edit cannot silently widen it.
-    const allowedUnsupported = new Set(['io.file_io_stats', 'server.host_info']);
+    // sys.dm_os_host_info), or that require tempdb as the current database while Azure SQL
+    // Database does not permit a tempdb connection. The session/task allocation DMVs in
+    // tempdb.usage are explicitly documented as applicable only to tempdb, so a user-database
+    // query is not a supported substitute. Unsupported is not a catch-all escape hatch, and this
+    // test pins the exact allow-list so a future edit cannot silently widen it.
+    const allowedUnsupported = new Set(['io.file_io_stats', 'server.host_info', 'tempdb.usage']);
     const stillUnsupported = manifest.probes.filter((p) => p.azureSqlDatabase.unsupported === true);
     for (const probe of stillUnsupported) {
       assert.ok(
         allowedUnsupported.has(probe.id),
         `probe '${probe.id}' is flagged unsupported on Azure SQL Database but is not on the ` +
           'documented allow-list (io.file_io_stats: sys.master_files; server.host_info: ' +
-          'sys.dm_os_host_info) -- verify against Microsoft Learn before adding it there',
+          'sys.dm_os_host_info; tempdb.usage: tempdb-only connection scope) -- verify against ' +
+          'Microsoft Learn before adding it there',
       );
     }
     assert.deepEqual(

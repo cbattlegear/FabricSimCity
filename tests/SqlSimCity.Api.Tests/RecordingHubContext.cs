@@ -10,14 +10,16 @@ namespace SqlSimCity.Api.Tests;
 /// </summary>
 internal sealed class RecordingHubContext : IHubContext<CurrentSnapshotHub>
 {
+    private readonly Func<CancellationToken, Task>? _onSend;
     public List<(string Method, object?[] Args)> Sent { get; } = [];
 
     public IHubClients Clients { get; }
 
     public IGroupManager Groups => throw new NotSupportedException();
 
-    public RecordingHubContext()
+    public RecordingHubContext(Func<CancellationToken, Task>? onSend = null)
     {
+        _onSend = onSend;
         Clients = new RecordingHubClients(this);
     }
 
@@ -53,7 +55,7 @@ internal sealed class RecordingHubContext : IHubContext<CurrentSnapshotHub>
                 owner.Sent.Add((method, args));
             }
 
-            return Task.CompletedTask;
+            return owner._onSend?.Invoke(cancellationToken) ?? Task.CompletedTask;
         }
     }
 }

@@ -176,9 +176,21 @@ public static class LiveIncidentsServiceCollectionExtensions
                 RequireNonBlank(auth.TenantId, authSection, nameof(LiveIncidentsAuthenticationOptions.TenantId)),
                 RequireNonBlank(auth.ClientId, authSection, nameof(LiveIncidentsAuthenticationOptions.ClientId)),
                 auth.FederatedTokenFilePath),
+            "serviceprincipalcertificate" => new ServicePrincipalCertificateAuthenticationStrategy(
+                RequireNonBlank(auth.TenantId, authSection, nameof(LiveIncidentsAuthenticationOptions.TenantId)),
+                RequireNonBlank(auth.ClientId, authSection, nameof(LiveIncidentsAuthenticationOptions.ClientId)),
+                RequireNonBlank(auth.CertificateSecretFile, authSection, nameof(LiveIncidentsAuthenticationOptions.CertificateSecretFile)),
+                string.IsNullOrWhiteSpace(auth.CertificatePasswordSecretFile)
+                    ? (SecretFileReference?)null
+                    : new SecretFileReference(auth.CertificatePasswordSecretFile)),
+            "serviceprincipalsecret" => new ServicePrincipalSecretAuthenticationStrategy(
+                RequireNonBlank(auth.TenantId, authSection, nameof(LiveIncidentsAuthenticationOptions.TenantId)),
+                RequireNonBlank(auth.ClientId, authSection, nameof(LiveIncidentsAuthenticationOptions.ClientId)),
+                RequireNonBlank(auth.ClientSecretFile, authSection, nameof(LiveIncidentsAuthenticationOptions.ClientSecretFile))),
             "kerberos" => new KerberosAuthenticationStrategy(),
             _ => throw new LiveIncidentsConfigurationException(
-                $"{authSection}:{nameof(LiveIncidentsAuthenticationOptions.Mode)} '{auth.Mode}' must be one of: SqlLogin, ManagedIdentity, WorkloadIdentity, Kerberos."),
+                $"{authSection}:{nameof(LiveIncidentsAuthenticationOptions.Mode)} '{auth.Mode}' must be one of: " +
+                "SqlLogin, Kerberos, ManagedIdentity, WorkloadIdentity, ServicePrincipalCertificate, ServicePrincipalSecret."),
         };
     }
 

@@ -89,7 +89,7 @@ public sealed class LiveIncidentsPoolOptions
 /// </summary>
 public sealed class LiveIncidentsAuthenticationOptions
 {
-    /// <summary><c>SqlLogin</c>, <c>ManagedIdentity</c>, <c>WorkloadIdentity</c>, or <c>Kerberos</c>.</summary>
+    /// <summary><c>SqlLogin</c>, <c>Kerberos</c>, or one explicit Microsoft Entra strategy.</summary>
     public string? Mode { get; set; }
 
     /// <summary>SQL login username (<c>SqlLogin</c> mode only).</summary>
@@ -101,14 +101,23 @@ public sealed class LiveIncidentsAuthenticationOptions
     /// <summary>Optional user-assigned managed identity client id (<c>ManagedIdentity</c> mode only; system-assigned when omitted).</summary>
     public string? UserAssignedClientId { get; set; }
 
-    /// <summary>Entra tenant id (<c>WorkloadIdentity</c> mode only).</summary>
+    /// <summary>Entra tenant id (workload identity or service principal modes).</summary>
     public string? TenantId { get; set; }
 
-    /// <summary>Entra application (client) id (<c>WorkloadIdentity</c> mode only).</summary>
+    /// <summary>Entra application (client) id (workload identity or service principal modes).</summary>
     public string? ClientId { get; set; }
 
     /// <summary>Optional override of the projected federated token file path (<c>WorkloadIdentity</c> mode only).</summary>
     public string? FederatedTokenFilePath { get; set; }
+
+    /// <summary>Secret file containing a PKCS#12/PFX client certificate.</summary>
+    public string? CertificateSecretFile { get; set; }
+
+    /// <summary>Optional secret file containing the PFX password.</summary>
+    public string? CertificatePasswordSecretFile { get; set; }
+
+    /// <summary>Secret file containing a service-principal client secret.</summary>
+    public string? ClientSecretFile { get; set; }
 }
 
 public sealed class LiveIncidentsSecretsOptions

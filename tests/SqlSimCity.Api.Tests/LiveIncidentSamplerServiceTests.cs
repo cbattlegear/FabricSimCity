@@ -56,6 +56,38 @@ public sealed class LiveIncidentSamplerServiceTests
     }
 
     [Fact]
+    public async Task CurrentSnapshotDiagnosticsIncludeSamplerSkippedCycles()
+    {
+        var time = new FakeTimeProvider();
+        var collector = new StubLiveIncidentCollector
+        {
+            OnCollect = (sequence, _) => sequence == 1
+                ? Task.FromResult(StubLiveIncidentCollector.MinimalSnapshot(sequence))
+                : throw new InvalidOperationException("boom"),
+        };
+        await using var service = new LiveIncidentSamplerService(
+            collector, new RecordingHubContext(),
+            new LiveIncidentSamplerOptions
+            {
+                Cadence = TimeSpan.FromSeconds(2),
+                InitialBackoff = TimeSpan.FromSeconds(2),
+                JitterFraction = 0,
+            },
+            time);
+
+        await service.StartAsync(CancellationToken.None);
+        await WaitForAsync(() => service.GetCurrentResponse().Snapshot is not null);
+        time.Advance(TimeSpan.FromSeconds(2));
+        await WaitForAsync(() => service.GetCurrentResponse().Collector.State == SamplerRunState.Reconnecting);
+
+        var response = service.GetCurrentResponse();
+        Assert.Equal(response.Collector.SkippedCycles, response.Snapshot!.Diagnostics.SkippedCycles);
+        Assert.True(response.Snapshot.Diagnostics.SkippedCycles > 0);
+
+        await service.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task StopAsyncHonorsAnAlreadyCancelledTokenInsteadOfBlockingOnAStuckCycle()
     {
         var time = new FakeTimeProvider();
@@ -98,6 +130,27 @@ public sealed class LiveIncidentSamplerServiceTests
         await second; // must not throw, double-dispose the sampler, or double-complete the publisher channel
 
         await service.DisposeAsync(); // a third, later call must also be a safe no-op
+    }
+
+    [Fact]
+    public async Task DisposeCancelsAStuckSignalRSend()
+    {
+        var sendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hub = new RecordingHubContext(async cancellationToken =>
+        {
+            sendStarted.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        });
+        var service = new LiveIncidentSamplerService(
+            new StubLiveIncidentCollector(), hub,
+            new LiveIncidentSamplerOptions { Cadence = TimeSpan.FromSeconds(2) },
+            new FakeTimeProvider());
+
+        await service.StartAsync(CancellationToken.None);
+        await sendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var dispose = service.DisposeAsync().AsTask();
+        await dispose.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     private static async Task WaitForAsync(Func<bool> condition)

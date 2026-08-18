@@ -152,9 +152,8 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
             ? (decimal)(now - previousSampleAt).TotalMilliseconds
             : null;
 
-        // isPlatformKnown gates whether the Azure-scoped (database-only) file I/O view is used:
-        // an unknown platform must not risk selecting the instance-wide, Azure-incompatible view.
-        var fileIo = await CollectFileIoAsync(isAzureSqlDatabase || !isPlatformKnown, now, sampleWindowMs, cancellationToken).ConfigureAwait(false);
+        // Unknown/unsupported platforms must not risk the instance-wide, Azure-incompatible view.
+        var fileIo = await CollectFileIoAsync(platform, now, sampleWindowMs, cancellationToken).ConfigureAwait(false);
         anyOperationalSuccess = anyOperationalSuccess || fileIo.Status == DataStatus.Available;
         if (fileIo.Status != DataStatus.Available)
         {
@@ -350,16 +349,24 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
                 "wrong connection profile.");
         }
 
-        if (platform is not (EnginePlatform.SqlServerOnPremises or EnginePlatform.AzureSqlManagedInstance or EnginePlatform.AzureSqlDatabase))
+        if (platform == EnginePlatform.AzureSqlDatabase)
+        {
+            return new TempdbUsageV1([], [], [], DataStatus.Unsupported,
+                "Azure SQL Database does not allow a connection whose current database is tempdb. " +
+                "The documented sys.dm_db_session_space_usage and sys.dm_db_task_space_usage views " +
+                "are applicable only in tempdb, so SQLSimCity does not claim session, task, or file " +
+                "tempdb usage from a regular user-database connection.");
+        }
+
+        if (platform is not (EnginePlatform.SqlServerOnPremises or EnginePlatform.AzureSqlManagedInstance))
         {
             return new TempdbUsageV1([], [], [], DataStatus.Unsupported,
                 $"This build does not model a tempdb access path for engine platform '{platform}'.");
         }
 
-        var azureScoped = platform == EnginePlatform.AzureSqlDatabase;
         try
         {
-            var raw = await _probes.GetTempdbUsageAsync(azureScoped, cancellationToken).ConfigureAwait(false);
+            var raw = await _probes.GetTempdbUsageAsync(azureScoped: false, cancellationToken).ConfigureAwait(false);
             return new TempdbUsageV1(
                 raw.Files.Select(f => new TempdbFileUsageV1(
                     f.FileId, f.TotalMb, f.AllocatedMb, f.FreeMb, f.VersionStoreMb, f.UserObjectsMb, f.InternalObjectsMb, f.MixedExtentMb)).ToList(),
@@ -376,11 +383,7 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
                     t.InternalObjectsAllocPageCount.ToString(CultureInfo.InvariantCulture),
                     t.InternalObjectsDeallocPageCount.ToString(CultureInfo.InvariantCulture))).ToList(),
                 DataStatus.Available,
-                azureScoped
-                    ? "tempdb session/task allocation sampled from the caller's own regular database connection " +
-                      "(Azure SQL Database cannot open a tempdb-scoped connection or a cross-database tempdb " +
-                      "reference); file-level tempdb space usage is unavailable on this platform, not zero."
-                    : "tempdb usage sampled from a connection opened with tempdb as its initial database.");
+                "tempdb usage sampled from a connection opened with tempdb as its initial database.");
         }
         catch (ProbeExecutionException ex)
         {
@@ -390,11 +393,13 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
     }
 
     private async Task<FileIoSampleV1> CollectFileIoAsync(
-        bool isAzureSqlDatabase, DateTimeOffset now, decimal? sampleWindowMs, CancellationToken cancellationToken)
+        EnginePlatform platform, DateTimeOffset now, decimal? sampleWindowMs, CancellationToken cancellationToken)
     {
+        var useDatabaseScopedView = platform is not (
+            EnginePlatform.SqlServerOnPremises or EnginePlatform.AzureSqlManagedInstance);
         try
         {
-            var rows = await _probes.GetFileIoStatsAsync(isAzureSqlDatabase, cancellationToken).ConfigureAwait(false);
+            var rows = await _probes.GetFileIoStatsAsync(useDatabaseScopedView, cancellationToken).ConfigureAwait(false);
             var deltas = rows.Select(row =>
             {
                 // Each counter (reads/bytesRead/stallRead/writes/bytesWritten/stallWrite) is
@@ -436,9 +441,16 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
 
             _fileIoTracker.Prune(rows.SelectMany(r => FileIoMetrics(r.DatabaseId, r.FileId)).ToList());
             return new FileIoSampleV1(deltas, DataStatus.Available,
-                isAzureSqlDatabase
-                    ? "File I/O sampled through the Azure SQL Database-scoped view (io.file_io_stats_current_db)."
-                    : "File I/O sampled through the instance-wide view (io.file_io_stats).");
+                platform switch
+                {
+                    EnginePlatform.AzureSqlDatabase =>
+                        "File I/O sampled through the Azure SQL Database-scoped view (io.file_io_stats_current_db).",
+                    EnginePlatform.Unknown =>
+                        "File I/O sampled through the database-scoped view because the engine platform could not be determined this cycle.",
+                    EnginePlatform.Unsupported =>
+                        "File I/O sampled through the database-scoped view because the engine platform is not supported for instance-wide collection.",
+                    _ => "File I/O sampled through the instance-wide view (io.file_io_stats).",
+                });
         }
         catch (ProbeExecutionException ex)
         {

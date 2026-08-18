@@ -14,6 +14,7 @@ namespace SqlSimCity.Api;
 internal sealed class LatestValuePublisher<T> : IAsyncDisposable
 {
     private readonly Channel<T> _channel;
+    private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _drainTask;
 
     public LatestValuePublisher(Func<T, CancellationToken, Task> publishAsync, ILogger? logger = null)
@@ -33,28 +34,39 @@ internal sealed class LatestValuePublisher<T> : IAsyncDisposable
 
     private async Task DrainAsync(Func<T, CancellationToken, Task> publishAsync, ILogger? logger)
     {
-        await foreach (var value in _channel.Reader.ReadAllAsync().ConfigureAwait(false))
+        try
         {
-            try
+            await foreach (var value in _channel.Reader.ReadAllAsync(_shutdown.Token).ConfigureAwait(false))
             {
-                await publishAsync(value, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                // A delivery failure (e.g. no connected SignalR clients, a transport hiccup) must
-                // never crash the drain loop or escape as an unobserved task exception -- the next
-                // published value simply supersedes this one.
-                if (logger is not null)
+                try
                 {
-                    LatestValuePublisherLog.BroadcastFailed(logger, typeof(T).Name, ex);
+                    await publishAsync(value, _shutdown.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // A delivery failure (e.g. no connected SignalR clients, a transport hiccup)
+                    // must not crash the drain loop; the next value supersedes this one.
+                    if (logger is not null)
+                    {
+                        LatestValuePublisherLog.BroadcastFailed(logger, typeof(T).Name, ex);
+                    }
                 }
             }
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            // Host shutdown cancels an in-flight transport send and abandons pending values.
         }
     }
 
     public async ValueTask DisposeAsync()
     {
         _channel.Writer.TryComplete();
+        await _shutdown.CancelAsync().ConfigureAwait(false);
         try
         {
             await _drainTask.ConfigureAwait(false);
@@ -62,6 +74,10 @@ internal sealed class LatestValuePublisher<T> : IAsyncDisposable
         catch
         {
             // Already logged inside DrainAsync; disposal must not throw for a delivery failure.
+        }
+        finally
+        {
+            _shutdown.Dispose();
         }
     }
 }

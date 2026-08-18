@@ -203,14 +203,15 @@ public class LiveIncidentCollectorTests
         // The identity probe fails outright (as it legitimately can for a contained Azure SQL
         // Database user), but Connected-mode DI wiring supplied the platform from its own
         // connection profile configuration -- the collector must trust that, not fall back to
-        // Unknown, and must select the Azure-safe tempdb/file-I/O probes accordingly.
-        bool? observedTempdbAzureScoped = null;
+        // Unknown, and must select the Azure-safe file-I/O probe. Azure SQL Database does not
+        // expose a supported connection context for the tempdb-only allocation DMVs.
+        var tempdbProbeWasCalled = false;
         var probes = new FakeLiveIncidentProbeExecutor
         {
             ServerIdentity = _ => throw new ProbePermissionDeniedException("no VIEW SERVER STATE", 300, 14),
-            TempdbUsage = (azureScoped, _) =>
+            TempdbUsage = (_, _) =>
             {
-                observedTempdbAzureScoped = azureScoped;
+                tempdbProbeWasCalled = true;
                 return Task.FromResult(new TempdbUsageRaw([], [], []));
             },
         };
@@ -221,22 +222,22 @@ public class LiveIncidentCollectorTests
 
         Assert.Equal(nameof(EnginePlatform.AzureSqlDatabase), snapshot.Target.Platform);
         Assert.Equal("DatabaseScoped", snapshot.Target.VisibilityScope);
-        Assert.True(observedTempdbAzureScoped);
-        Assert.Equal(DataStatus.Available, snapshot.Tempdb.Status);
+        Assert.False(tempdbProbeWasCalled);
+        Assert.Equal(DataStatus.Unsupported, snapshot.Tempdb.Status);
     }
 
-    // --- Requirement 4: Azure SQL Database tempdb access, and platform-unknown skips tempdb entirely. ---
+    // --- Requirement 4: tempdb-only DMVs are unavailable from Azure SQL Database user connections. ---
 
     [Fact]
-    public async Task AzureSqlDatabaseUsesTheAzureScopedTempdbProbeAndReportsAvailable()
+    public async Task AzureSqlDatabaseDoesNotClaimTempdbSessionOrTaskUsage()
     {
-        bool? observedAzureScoped = null;
+        var tempdbProbeWasCalled = false;
         var probes = new FakeLiveIncidentProbeExecutor
         {
             ServerIdentity = _ => Task.FromResult(FakeLiveIncidentProbeExecutor.DefaultIdentity(EngineStart, engineEdition: 5)),
-            TempdbUsage = (azureScoped, _) =>
+            TempdbUsage = (_, _) =>
             {
-                observedAzureScoped = azureScoped;
+                tempdbProbeWasCalled = true;
                 return Task.FromResult(new TempdbUsageRaw(
                     [], [new TempdbSessionRow(51, 10, 2, 0, 0)], []));
             },
@@ -245,11 +246,13 @@ public class LiveIncidentCollectorTests
 
         var snapshot = await collector.CollectAsync(1, CancellationToken.None);
 
-        Assert.True(observedAzureScoped);
-        Assert.Equal(DataStatus.Available, snapshot.Tempdb.Status);
-        Assert.Empty(snapshot.Tempdb.Files); // file-level tempdb usage is never available on Azure SQL Database
-        Assert.Single(snapshot.Tempdb.Sessions);
-        Assert.DoesNotContain(snapshot.Diagnostics.UnavailableFields, f => f.Field == "tempdb");
+        Assert.False(tempdbProbeWasCalled);
+        Assert.Equal(DataStatus.Unsupported, snapshot.Tempdb.Status);
+        Assert.Empty(snapshot.Tempdb.Files);
+        Assert.Empty(snapshot.Tempdb.Sessions);
+        var unavailable = Assert.Single(snapshot.Diagnostics.UnavailableFields, f => f.Field == "tempdb");
+        Assert.Equal(DataStatus.Unsupported, unavailable.Status);
+        Assert.Contains("tempdb", unavailable.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -271,6 +274,8 @@ public class LiveIncidentCollectorTests
 
         Assert.False(tempdbProbeWasCalled);
         Assert.Equal(DataStatus.Unknown, snapshot.Tempdb.Status);
+        Assert.Contains("platform could not be determined", snapshot.FileIo.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Azure SQL Database", snapshot.FileIo.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

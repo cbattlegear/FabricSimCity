@@ -13,13 +13,9 @@
 --   connect to directly on the logical server, unlike SQL Server and SQL Managed Instance, where a
 --   fresh pooled connection can open with tempdb as its current database. Each Azure SQL Database
 --   does have its own private, per-database tempdb, but this probe's tempdb-scoped connection
---   pattern cannot reach it; use tempdb.usage_azure_scoped instead, which reads
---   sys.dm_db_session_space_usage/sys.dm_db_task_space_usage from the caller's own regular
---   database connection (no tempdb connection required) and explicitly has no file-level result
---   set, since that requires either a tempdb connection or a cross-database reference, neither of
---   which single Azure SQL Database supports. LiveIncidentCollector never attempts this probe
---   (tempdb.usage) when the target's platform is Azure SQL Database or could not be confirmed; see
---   sql/README.md.
+--   pattern cannot reach it. The session/task allocation views are also documented as applicable
+--   only to tempdb, so querying them from a regular Azure SQL Database connection is not a valid
+--   substitute. LiveIncidentCollector reports this evidence as Unsupported on Azure SQL Database.
 -- Minimum platform: SQL Server 2016 (13.x) and SQL Managed Instance only.
 -- Permission: sys.dm_db_file_space_usage / sys.dm_db_session_space_usage / sys.dm_db_task_space_usage
 --   on SQL Server/Managed Instance require VIEW SERVER STATE (SQL Server 2016-2019 (13.x-15.x)) or

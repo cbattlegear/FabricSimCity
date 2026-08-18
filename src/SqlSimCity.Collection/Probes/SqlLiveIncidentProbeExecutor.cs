@@ -187,16 +187,12 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
             },
             cancellationToken);
 
-    /// <summary>
-    /// <paramref name="azureScoped"/> selects <c>tempdb.usage_azure_scoped</c> (session/task
-    /// allocation only, run from the caller's own regular database connection -- never tempdb)
-    /// instead of <c>tempdb.usage</c> (the full file/session/task result set, which requires a
-    /// tempdb-scoped connection unavailable on Azure SQL Database). The caller must never request
-    /// <paramref name="azureScoped"/><c>: false</c> for an Azure SQL Database target; see each
-    /// probe's own header and <c>LiveIncidentCollector</c>'s platform-gated selection.
-    /// </summary>
+    /// <summary>Reads tempdb-only allocation DMVs; Azure SQL Database has no supported connection scope for this probe.</summary>
     public Task<TempdbUsageRaw> GetTempdbUsageAsync(bool azureScoped, CancellationToken cancellationToken) =>
-        azureScoped ? GetTempdbUsageAzureScopedAsync(cancellationToken) : GetTempdbUsageFullAsync(cancellationToken);
+        azureScoped
+            ? Task.FromException<TempdbUsageRaw>(new ProbeObjectUnavailableException(
+                "Azure SQL Database does not expose a supported tempdb connection scope for this probe.", null, null))
+            : GetTempdbUsageFullAsync(cancellationToken);
 
     private Task<TempdbUsageRaw> GetTempdbUsageFullAsync(CancellationToken cancellationToken) =>
         ExecuteAsync(
@@ -222,34 +218,6 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                 var sessions = await ReadTempdbSessionsAsync(reader, ct).ConfigureAwait(false);
                 var tasks = await ReadTempdbTasksAsync(reader, ct).ConfigureAwait(false);
                 return new TempdbUsageRaw(files, sessions, tasks);
-            },
-            cancellationToken,
-            new Dictionary<string, object?> { ["@IncludeSystemSessions"] = false });
-
-    private Task<TempdbUsageRaw> GetTempdbUsageAzureScopedAsync(CancellationToken cancellationToken) =>
-        ExecuteAsync(
-            "tempdb.usage_azure_scoped",
-            "database",
-            async (reader, ct) =>
-            {
-                var sessions = new List<TempdbSessionRow>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                {
-                    sessions.Add(ReadTempdbSessionRow(reader));
-                }
-
-                var tasks = new List<TempdbTaskRow>();
-                if (await reader.NextResultAsync(ct).ConfigureAwait(false))
-                {
-                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    {
-                        tasks.Add(ReadTempdbTaskRow(reader));
-                    }
-                }
-
-                // No file-level result set: Azure SQL Database supports neither a tempdb-scoped
-                // connection nor a cross-database reference to read it (see the probe's header).
-                return new TempdbUsageRaw([], sessions, tasks);
             },
             cancellationToken,
             new Dictionary<string, object?> { ["@IncludeSystemSessions"] = false });

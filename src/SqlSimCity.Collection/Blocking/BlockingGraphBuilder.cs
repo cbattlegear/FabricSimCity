@@ -148,7 +148,8 @@ public static class BlockingGraphBuilder
         // "Directly blocked by" counts distinct blocked *sessions* per target, not edges, so a
         // session with several parallel waiting tasks all blocked on the same target cannot
         // inflate the count (requirement 4's "avoid inflated blocked counts").
-        var directlyBlockedCount = edges
+        var incidentEdges = edges.Where(edge => edge.ToNodeId != "sentinel:-5").ToArray();
+        var directlyBlockedCount = incidentEdges
             .GroupBy(e => e.ToNodeId)
             .ToDictionary(g => g.Key, g => g.Select(e => e.FromNodeId).Distinct().Count());
 
@@ -181,7 +182,11 @@ public static class BlockingGraphBuilder
 
         var effectiveRoots = finalNodes.Where(n => n.IsRoot).Select(n => n.NodeId).OrderBy(n => n, StringComparer.Ordinal).ToList();
 
-        var blockedSessionCount = relationshipEdges.Select(e => e.SessionId).Distinct().Count();
+        var blockedSessionCount = relationshipEdges
+            .Where(edge => edge.BlockerRaw != -5)
+            .Select(edge => edge.SessionId)
+            .Distinct()
+            .Count();
         var parallelWaitTaskCount = waitingTasks.Count(t => t.ExecContextId != 0);
         var summary = new BlockingGraphSummaryV1(
             BlockedSessionCount: blockedSessionCount,

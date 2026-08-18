@@ -44,7 +44,24 @@ public sealed class LiveIncidentSamplerService : IHostedService, IAsyncDisposabl
             logger: samplerLogger);
     }
 
-    public LiveIncidentResponseV1 GetCurrentResponse() => new(_sampler.LatestSnapshot, _sampler.GetStatus());
+    public LiveIncidentResponseV1 GetCurrentResponse()
+    {
+        var status = _sampler.GetStatus();
+        var snapshot = _sampler.LatestSnapshot;
+        if (snapshot is not null)
+        {
+            snapshot = snapshot with
+            {
+                Diagnostics = snapshot.Diagnostics with
+                {
+                    MissedCycles = status.MissedCycles,
+                    SkippedCycles = status.SkippedCycles,
+                },
+            };
+        }
+
+        return new(snapshot, status);
+    }
 
     public Task StartAsync(CancellationToken cancellationToken) => _sampler.StartAsync(cancellationToken);
 
@@ -75,4 +92,3 @@ public sealed class LiveIncidentSamplerService : IHostedService, IAsyncDisposabl
     private Task BroadcastAsync(LiveIncidentResponseV1 response, CancellationToken cancellationToken) =>
         _hubContext.Clients.All.SendAsync(LiveIncidentUpdatedMethod, response, cancellationToken);
 }
-

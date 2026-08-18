@@ -81,6 +81,7 @@ public class BlockingGraphBuilderTests
         Assert.DoesNotContain(sentinelNode.NodeId, graph.RootNodeIds);
         Assert.Equal(0, graph.Summary.SentinelRootCount);
         Assert.Equal(0, graph.Summary.RootBlockerCount);
+        Assert.Equal(0, graph.Summary.BlockedSessionCount);
         Assert.Empty(graph.RootNodeIds);
     }
 

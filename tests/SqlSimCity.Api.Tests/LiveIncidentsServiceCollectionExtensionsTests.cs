@@ -169,6 +169,29 @@ public sealed class LiveIncidentsServiceCollectionExtensionsTests
         Assert.IsType<LiveIncidentCollector>(provider.GetRequiredService<ILiveIncidentCollector>());
     }
 
+    [Theory]
+    [InlineData("ServicePrincipalCertificate", "CertificateSecretFile")]
+    [InlineData("ServicePrincipalSecret", "ClientSecretFile")]
+    public void ConnectedModeSupportsExplicitServicePrincipalAuthentication(
+        string mode,
+        string secretKey)
+    {
+        var overrides = ValidConnectedConfiguration();
+        overrides.Remove("LiveIncidents:Connection:Authentication:Username");
+        overrides.Remove("LiveIncidents:Connection:Authentication:PasswordSecretFile");
+        overrides["LiveIncidents:Connection:Authentication:Mode"] = mode;
+        overrides["LiveIncidents:Connection:Authentication:TenantId"] = "6a72031d-4f77-47af-b061-84ad7083bb16";
+        overrides["LiveIncidents:Connection:Authentication:ClientId"] = "da0fa149-46b6-4ff8-82a9-c98788df11b2";
+        overrides[$"LiveIncidents:Connection:Authentication:{secretKey}"] =
+            secretKey == "CertificateSecretFile" ? "client.pfx" : "client-secret";
+        var services = new ServiceCollection();
+
+        services.AddLiveIncidents(BuildConfiguration(overrides), LoadCatalog());
+        using var provider = services.BuildServiceProvider();
+
+        Assert.IsType<LiveIncidentCollector>(provider.GetRequiredService<ILiveIncidentCollector>());
+    }
+
     [Fact]
     public void UnrecognizedModeFailsClosed()
     {
