@@ -103,6 +103,14 @@ if "${repo_root}/tools/backup-data.sh" --quiesced --key-file "${key_file}" \
 fi
 rm "${source_dir}/hard-linked-key"
 
+printf 'unsupported\n' >"${source_dir}/backslash\\name"
+if "${repo_root}/tools/backup-data.sh" --quiesced \
+  "${source_dir}" "${work_dir}/backslash.tar.gz" >/dev/null 2>&1; then
+  echo "backup unexpectedly accepted an unrestorable backslash path" >&2
+  exit 1
+fi
+rm "${source_dir}/backslash\\name"
+
 tamper_dir="${work_dir}/tamper"
 mkdir "${tamper_dir}"
 tar --extract --gzip --file "${work_dir}/backup-one.tar.gz" --directory "${tamper_dir}"

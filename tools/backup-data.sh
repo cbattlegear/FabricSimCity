@@ -64,6 +64,12 @@ if find "${source_dir}" -name $'*\n*' -print -quit | grep --quiet .; then
   echo "data directory contains a newline in a path; backup refused" >&2
   exit 65
 fi
+while IFS= read -r -d '' relative_path; do
+  if [[ "${relative_path}" == *\\* ]]; then
+    echo "data directory contains a backslash in a path; backup refused" >&2
+    exit 65
+  fi
+done < <(find "${source_dir}" -mindepth 1 -printf '%P\0')
 
 output_parent="$(realpath -e -- "$(dirname -- "$2")")"
 output_name="$(basename -- "$2")"

@@ -64,7 +64,8 @@ created the data.
 Confirm `/readyz`, then exercise Query Store status and findings export. The CI
 operations test performs a deterministic backup/restore round trip and negative
 tests for symlinks, traversal, non-empty targets, key placement/hard links, and
-tampering.
+tampering. Paths that the restore format cannot represent safely are rejected
+at backup time.
 
 ## Key rotation
 
