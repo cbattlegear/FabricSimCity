@@ -19,14 +19,21 @@ history all switch off the fixture path with no `Atlas:Mode`, `LiveIncidents:Mod
 
 Query Store history stores query *text*, so it requires encryption at rest and has no plaintext
 fallback. Rather than make you turn that on by hand, a connection string provisions the key for you:
-an AES-256 key ring is generated at a `sqlsimcity-keys` directory beside `ProtectedStorage:DataDirectory`
-and announced at startup with a warning naming the path. **Back that file up and keep it — if it is
-lost or replaced, every stored query history record becomes permanently unrecoverable and the store
-refuses to open.** It is deliberately placed outside the data directory so a data backup cannot carry
-its own decryption key; `tools/backup-data.sh` refuses to run when the two are nested. In a
-container, that path needs a persistent writable volume (see the Compose example below) or the key
-will not survive recreation. If the key cannot be written at all, Query Store history disables itself
-with a warning rather than blocking startup.
+an AES-256 key ring is generated at a `sqlsimcity-keys` directory inside
+`ProtectedStorage:DataDirectory` and announced at startup with a warning naming the path.
+
+It lives inside the data directory on purpose, so that it is exactly as durable as the data it
+protects. In a container anywhere else is either unwritable or ephemeral, and a key that disappears
+while its data survives leaves every stored record permanently unopenable.
+
+**Back the key up yourself — `tools/backup-data.sh` deliberately excludes it, so a backup alone
+cannot restore a protected store.** That exclusion is what keeps a backup from carrying its own
+decryption key; the script verifies the key is absent before writing the archive. Treat the key as a
+production credential: if it is lost or replaced, every stored query history record becomes
+permanently unrecoverable. Note that a raw volume snapshot of the data directory *does* contain both.
+
+If the key cannot be written at all, Query Store history disables itself with a warning rather than
+blocking startup.
 
 To keep key custody entirely in your own hands, set `ProtectedStorage:Enabled=true` and mount your
 own key file at `ProtectedStorage:KeyFilePath`; nothing is then generated, and a missing key fails
@@ -129,8 +136,8 @@ services:
       # Retained Query Store history requires encrypted storage. This is the
       # operator-managed key path: because ProtectedStorage__Enabled is set
       # explicitly, nothing is generated and a missing key file fails closed.
-      # (Drive the connection from a connection string instead and the key is
-      # provisioned for you — give it a persistent volume, as in compose.yaml.)
+      # (Drive the connection from a connection string instead and a key is
+      # generated inside the data directory for you.)
       QueryStoreHistory__Mode: Connected
       ProtectedStorage__Enabled: "true"
       ProtectedStorage__DataDirectory: /data

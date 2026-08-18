@@ -38,11 +38,12 @@ public static class ProtectedStorageAutoProvisioning
         LoggerMessage.Define<string>(
             LogLevel.Warning, new EventId(31, "ProtectedStorageKeyGenerated"),
             "Connected Query Store history was enabled by a connection string, so an AES-256 storage " +
-            "key was generated at '{KeyFilePath}'. Query text is encrypted at rest with it. Back this " +
-            "file up separately from the data directory and treat it as a production credential: if it " +
-            "is lost or replaced, every stored query history record becomes permanently unrecoverable " +
-            "and the store will refuse to open. In a container, keep this path on a persistent volume " +
-            "or the key will not survive being recreated.");
+            "key was generated at '{KeyFilePath}'. Query text is encrypted at rest with it. It is kept " +
+            "inside the data directory so it is exactly as durable as the data it protects, and " +
+            "'tools/backup-data.sh' deliberately excludes it, so YOUR BACKUPS DO NOT CONTAIN THIS KEY: " +
+            "copy it somewhere safe yourself and treat it as a production credential. If it is lost or " +
+            "replaced, every stored query history record becomes permanently unrecoverable and the " +
+            "store will refuse to open.");
 
     private static readonly Action<ILogger, string, Exception?> LogKeyReused =
         LoggerMessage.Define<string>(
@@ -55,9 +56,10 @@ public static class ProtectedStorageAutoProvisioning
             LogLevel.Warning, new EventId(33, "ProtectedStorageKeyUnavailable"),
             "Connected Query Store history was requested by a connection string but no storage key could " +
             "be created at '{KeyFilePath}', so query history collection is disabled and query views will " +
-            "be empty. Query text cannot be persisted without encryption at rest. Give this path a " +
-            "writable persistent volume, or set ProtectedStorage:Enabled=true with your own key file at " +
-            "ProtectedStorage:KeyFilePath. Underlying cause: {Reason}");
+            "be empty. Query text cannot be persisted without encryption at rest. Make " +
+            "ProtectedStorage:DataDirectory writable by the running user, or set " +
+            "ProtectedStorage:Enabled=true with your own key file at ProtectedStorage:KeyFilePath. " +
+            "Underlying cause: {Reason}");
 
     /// <summary>
     /// States at startup that a key now exists and that it is the operator's to
@@ -90,15 +92,21 @@ public static class ProtectedStorageAutoProvisioning
     }
 
     /// <summary>
-    /// Directory name used for a generated key, created as a sibling of the data
-    /// directory rather than inside it.
+    /// Directory name used for a generated key, created inside the data
+    /// directory.
     ///
-    /// The location is not cosmetic. <c>tools/backup-data.sh</c> refuses to take
-    /// a backup at all when the key file resolves inside the data directory,
-    /// because a backup containing its own decryption key protects nobody. A
-    /// generated key must therefore live outside <c>DataDirectory</c> or it
-    /// would silently break backups for exactly the operators who never
-    /// configured any of this.
+    /// Placing it there is a deliberate trade-off. A container's only reliably
+    /// writable, reliably persistent location is the data volume itself: a key
+    /// written anywhere else in a container either fails (read-only root
+    /// filesystem) or lands on the ephemeral container layer, where it is lost
+    /// on recreate while the data survives -- which would leave every protected
+    /// record permanently unopenable. Durability of the key must therefore match
+    /// durability of the data it protects, and inside the data directory is the
+    /// only placement that guarantees it.
+    ///
+    /// The cost is that a raw volume snapshot contains both. What is preserved
+    /// is that no <em>backup</em> contains the key: <c>tools/backup-data.sh</c>
+    /// excludes this directory and verifies it is absent from the archive.
     /// </summary>
     private const string KeyDirectoryName = "sqlsimcity-keys";
 
@@ -173,7 +181,7 @@ public static class ProtectedStorageAutoProvisioning
     /// <summary>
     /// Prefers a key file that is already present at the configured path, so an
     /// operator who mounted one without also setting <c>Enabled</c> keeps it,
-    /// and otherwise picks a persistent path beside the data directory.
+    /// and otherwise generates inside the data directory.
     ///
     /// The shipped default points at <c>/run/secrets</c>, which is tmpfs under
     /// Docker. Generating there would produce a key that disappears on restart
@@ -199,16 +207,7 @@ public static class ProtectedStorageAutoProvisioning
             dataDirectory = "/data";
         }
 
-        var fullDataDirectory = Path.GetFullPath(dataDirectory);
-        var parent = Path.GetDirectoryName(fullDataDirectory);
-
-        // A data directory at a filesystem root has no parent to sit beside; the
-        // root itself is still outside the data directory, which is the property
-        // that matters to the backup tool.
-        var keyDirectory = string.IsNullOrEmpty(parent)
-            ? Path.Combine(fullDataDirectory, "..", KeyDirectoryName)
-            : Path.Combine(parent, KeyDirectoryName);
-
-        return Path.GetFullPath(Path.Combine(keyDirectory, KeyFileName));
+        return Path.GetFullPath(Path.Combine(
+            Path.GetFullPath(dataDirectory), KeyDirectoryName, KeyFileName));
     }
 }

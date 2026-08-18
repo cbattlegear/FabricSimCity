@@ -100,11 +100,14 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
     }
 
     [Fact]
-    public void TheGeneratedKeyNeverLandsInsideTheDataDirectory()
+    public void TheGeneratedKeyIsAsDurableAsTheDataItProtects()
     {
-        // tools/backup-data.sh refuses to take a backup at all when the key file
-        // resolves inside the data directory, so generating one there would
-        // silently break backups for operators who configured none of this.
+        // The key must live inside the data directory. It is the only location in
+        // a container that is both writable and exactly as durable as the data:
+        // anywhere else either fails on a read-only root filesystem or lands on
+        // the ephemeral container layer, where it is lost on recreate while the
+        // data survives, leaving every protected record permanently unopenable.
+        // tools/backup-data.sh excludes it so no backup carries its own key.
         var configuration = Build(("ConnectionStrings:SqlSimCity", ConnectionString));
 
         var provisioning = ProtectedStorageAutoProvisioning.TryProvision(configuration);
@@ -112,9 +115,13 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
         Assert.NotNull(provisioning);
         var data = Path.GetFullPath(DataDirectory);
         var key = Path.GetFullPath(provisioning.KeyFilePath);
-        Assert.False(
-            key.StartsWith(data + Path.DirectorySeparatorChar, StringComparison.Ordinal),
-            $"generated key '{key}' must not live inside the data directory '{data}'");
+        Assert.StartsWith(data + Path.DirectorySeparatorChar, key, StringComparison.Ordinal);
+
+        // Kept in its own subdirectory so the backup tool can exclude it by path
+        // without having to reason about which file in the data directory is a key.
+        Assert.Equal(
+            "sqlsimcity-keys",
+            Path.GetFileName(Path.GetDirectoryName(key)));
     }
 
     [Fact]
@@ -185,11 +192,10 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
     [Fact]
     public void AnUnwritableKeyLocationDisablesQueryStoreInsteadOfFailingStartup()
     {
-        // The shipped container has a read-only root filesystem with only the data
-        // volume writable, so the key directory beside it cannot always be created.
-        // Standing in for that here with a data directory whose parent is a file:
-        // creating any sibling directory is impossible, exactly as on a read-only
-        // mount. Adding a convenience must never stop a deployment that boots today.
+        // The key now lives inside the data directory, so this stands in for a
+        // data directory that cannot be created at all -- an unwritable mount, or
+        // a path whose parent is a file, as here. Adding a convenience must never
+        // stop a deployment that boots today.
         Directory.CreateDirectory(_root);
         var blocker = Path.Combine(_root, "blocked");
         File.WriteAllText(blocker, "not a directory");

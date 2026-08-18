@@ -13,16 +13,6 @@ services:
       - /tmp:rw,noexec,nosuid,size=64m
     volumes:
       - sqlsimcity-data:/data
-      # Supplying only a connection string turns on connected Query Store history,
-      # which persists query text and so requires encryption at rest. The key is
-      # generated automatically, but this container has a read-only root
-      # filesystem, so it needs one writable place to live that is NOT inside the
-      # data directory -- `tools/backup-data.sh` refuses to back up a data
-      # directory that contains its own decryption key. Without this volume the
-      # key cannot be written, and Query Store history turns itself off with a
-      # warning rather than failing to start. This volume must persist: if the key
-      # is lost, every stored query history record is permanently unrecoverable.
-      - sqlsimcity-keys:/sqlsimcity-keys
     cap_drop:
       - ALL
     security_opt:
@@ -107,10 +97,6 @@ services:
 
 volumes:
   sqlsimcity-data:
-  # Holds the auto-generated storage key. Kept separate from sqlsimcity-data so a
-  # data backup never carries the key that decrypts it, and so the key survives
-  # the container being recreated. Back this up independently.
-  sqlsimcity-keys:
 
 # Uncomment to mount a key file as a Docker secret. `file:` must point to a
 # key ring JSON file (see SECURITY.md) that is NOT committed to this repo.

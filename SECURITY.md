@@ -61,7 +61,7 @@ If either is missing when `Enabled` is `true`, the process fails at startup rath
 
 Connected Query Store history persists query *text*, so it requires protected storage and has no plaintext fallback. Requiring operators to have configured a key before that requirement is ever mentioned meant a connection string produced permanently empty query views with no error, so a connection string now provisions the key itself.
 
-This is a deliberate, bounded reduction in key custody, not a reduction in encryption. Encryption at rest is unchanged and still mandatory; what changes is that the process generates the key rather than an operator supplying it out of band. The generated key sits on the host beside the data directory instead of arriving as a mounted secret, so it is protected by filesystem permissions alone — an attacker with host filesystem access has both halves. Deployments that need the stronger separation should keep supplying their own key.
+This is a deliberate, bounded reduction in key custody, not a reduction in encryption. Encryption at rest is unchanged and still mandatory; what changes is that the process generates the key rather than an operator supplying it out of band. Deployments that need stronger separation should keep supplying their own key, which disables all of this.
 
 The narrow trigger keeps the hardened path intact. Auto-provisioning happens **only** when all of the following hold, and is skipped entirely otherwise:
 
@@ -70,13 +70,21 @@ The narrow trigger keeps the hardened path intact. Auto-provisioning happens **o
 - `QueryStoreHistory:Mode` is not `Disabled`;
 - the mode is neither archive nor edge, both of which forbid connected collection outright.
 
-The generated key ring is written to a `sqlsimcity-keys` directory beside `ProtectedStorage:DataDirectory` with mode `0600`, in the same strict format documented below. Placement is load-bearing in two ways. It is never written *inside* the data directory, because a backup that contains its own decryption key protects nobody — `tools/backup-data.sh` refuses to run in that arrangement. It is also never generated at the shipped `/run/secrets/...` default, which is tmpfs under Docker and would yield a key that vanishes on restart, leaving a store that fails its canary check and can never be opened again; that path is honoured only when a file genuinely exists there, so a mounted key always wins.
+#### Where the generated key lives, and why
 
-An existing key file is never inspected, rewritten, or replaced, and losing a race to a concurrent creator is treated as finding the file already present. Overwriting a key whose data still exists would permanently orphan every record it protected.
+The key ring is written to a `sqlsimcity-keys` directory **inside** `ProtectedStorage:DataDirectory`, with mode `0600`, in the same strict format documented below.
 
-Key generation is announced at startup with a warning naming the path (`ProtectedStorageKeyGenerated`). **A generated key is still a production credential and still your responsibility to back up** — the recovery consequences below apply to it in full. In a container it needs a persistent writable volume, or it will not survive recreation.
+Placing it there is a deliberate trade-off, and the reasoning matters because the obvious alternative is actively dangerous. **The key must be at least as durable as the data it protects.** In a container the data directory is the only location that is reliably writable *and* reliably persistent: a key written anywhere else either cannot be created at all (the shipped image runs as a non-root user on a read-only root filesystem) or lands on the ephemeral container layer, where it is destroyed when the container is recreated while the mounted data volume survives. That combination is unrecoverable — the store fails its canary check and every protected record is permanently unopenable. A key that silently arranges for that outcome is far worse than a feature that is switched off.
 
-Where the key cannot be written at all — notably the shipped container's read-only root filesystem — connected Query Store history disables itself with a warning explaining the cause and the fix (`ProtectedStorageKeyUnavailable`), preserving previous startup behavior. Convenience is never allowed to turn into an outage, and never into plaintext.
+The cost is that a raw volume snapshot, or anything else that copies the data directory wholesale, contains both the ciphertext and its key. **What is preserved is that no backup produced by `tools/backup-data.sh` contains the key**: the script excludes the key from the archive and then verifies it is genuinely absent before writing the backup, failing closed if it is not. It still refuses outright when the data directory contains a *hard link* to the key, which cannot be excluded by path.
+
+Two placements are still never used for a generated key. It is never written at the shipped `/run/secrets/...` default, which is tmpfs under Docker and would produce exactly the vanishing-key failure described above; that path is honoured only when a file genuinely exists there, so a mounted key always wins. And an existing key file is never inspected, rewritten, or replaced — including when a concurrent creator wins the race — because overwriting a key whose data still exists would permanently orphan every record it protected.
+
+#### Operational consequences
+
+Key generation is announced at startup with a warning naming the path (`ProtectedStorageKeyGenerated`). **Because backups deliberately exclude the key, a backup alone is not sufficient to recover a protected store — you must copy the key somewhere safe yourself** and treat it as a production credential. This is the same responsibility that applies to an operator-supplied key; only its origin has changed.
+
+Where the key cannot be written at all, connected Query Store history disables itself with a warning explaining the cause and the fix (`ProtectedStorageKeyUnavailable`), preserving previous startup behavior. Convenience is never allowed to turn into an outage, and never into plaintext.
 
 ### Key file format
 
