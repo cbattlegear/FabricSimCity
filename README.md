@@ -367,6 +367,22 @@ docker build -t sqlsimcity:foundation .
 See [CHANGELOG.md](CHANGELOG.md) for the notable changes in this unreleased MVP
 release candidate, including the explicit no-live-target validation gap.
 
+## Edge connector (outward-only remote monitoring)
+
+For SQL Servers the central container cannot reach, the optional **edge connector**
+(`src/SqlSimCity.Edge`, `src/SqlSimCity.Edge.Connector`) runs near SQL Server and connects **outward**
+to a configured central ingestion endpoint over HTTPS. It forwards the same source-neutral
+observations in a versioned envelope, signs every request with HMAC-SHA-256, and buffers a bounded,
+AES-256-GCM-encrypted spool when the central server is unavailable. It never accepts inbound control,
+never centralizes SQL credentials, and never mutates SQL Server.
+
+Central ingestion is **opt-in and disabled by default** (`EdgeIngestion:Enabled`); when off, the app
+stays strictly GET-only. When on, it adds one bounded `POST /api/v1/edge/ingest` plus read-only
+`GET /api/v1/edge/status` endpoints, and reconstructs delivered evidence into immutable generations.
+See [`docs/edge-connector.md`](docs/edge-connector.md) and [`compose.edge.yaml`](compose.edge.yaml).
+As elsewhere, no live SQL target was validated: the connector is exercised end to end against fixtures
+and a fake collector only.
+
 ## License
 
 Copyright 2026 SQLSimCity contributors. Licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).

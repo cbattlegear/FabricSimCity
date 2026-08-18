@@ -6,6 +6,7 @@
     <ProjectReference Include="..\SqlSimCity.Storage\SqlSimCity.Storage.csproj" />
     <ProjectReference Include="..\SqlSimCity.Collection\SqlSimCity.Collection.csproj" />
     <ProjectReference Include="..\SqlSimCity.Findings\SqlSimCity.Findings.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Edge\SqlSimCity.Edge.csproj" />
     <InternalsVisibleTo Include="SqlSimCity.Api.Tests" />
   </ItemGroup>
   <ItemGroup Condition="Exists('..\..\web\dist')">

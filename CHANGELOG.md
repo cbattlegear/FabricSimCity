@@ -15,6 +15,18 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- Outward-only **edge connector** for monitoring SQL Servers the central container cannot reach
+  (`src/SqlSimCity.Edge`, `src/SqlSimCity.Edge.Connector`, `Dockerfile.connector`,
+  `compose.edge.yaml`, `docs/edge-connector.md`). A connector near SQL Server connects outward over
+  HTTPS, forwards the same source-neutral observations in a versioned envelope
+  (`ObservationEnvelopeV1`), signs each request with HMAC-SHA-256 (constant-time verification, bounded
+  clock skew, connector allowlist, key rotation, and durable replay-nonce protection), and buffers a
+  bounded AES-256-GCM-encrypted spool when the central server is unavailable. Central ingestion is
+  opt-in and disabled by default (`EdgeIngestion:Enabled`); when enabled it adds one bounded
+  `POST /api/v1/edge/ingest` plus read-only `GET /api/v1/edge/status`/`/targets` endpoints, validates
+  schema/digest/signature/sequence/epoch with atomic idempotent persistence and compression-bomb
+  guards, and reassembles delivered chunks into immutable observation generations. No live SQL target
+  was validated; the path is exercised against fixtures and a fake collector only.
 - Fixture-mode and opt-in read-only connected server **atlas** (`/api/v1/atlas`,
   `/api/v1/atlas/status`) with a three.js scene backed by a keyboard- and
   screen-reader-accessible database evidence table.

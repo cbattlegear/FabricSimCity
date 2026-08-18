@@ -1,0 +1,112 @@
+# SQLSimCity edge connector example deployment.
+#
+# This is a SEPARATE example compose file (use `docker compose -f compose.edge.yaml ...`).
+# It shows the central server with opt-in edge ingestion enabled, plus one outward-only edge
+# connector that runs near a SQL Server the central container cannot reach. The connector connects
+# OUTWARD to the central ingestion endpoint over HTTPS/HMAC and never accepts inbound control.
+#
+# Never commit real secrets. The files referenced under `secrets:` must be provided out of band and
+# excluded from version control. See docs/edge-connector.md for key generation, rotation, TLS,
+# reverse-proxy/AllowedHosts, the connector allowlist, and the spool-backup non-guarantee.
+
+services:
+  # --- Central SQLSimCity with edge ingestion turned on (disabled by default otherwise). ---
+  sqlsimcity-central:
+    image: sqlsimcity:local
+    build:
+      context: .
+      args:
+        VERSION: 0.0.0-local
+        REVISION: local
+    # In a real deployment, terminate TLS at a reverse proxy in front of this and set AllowedHosts.
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    volumes:
+      - sqlsimcity-central-data:/data
+      # Durable replay-nonce journal must survive restarts so the replay window never reopens.
+      - sqlsimcity-central-nonces:/nonces
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Atlas__Mode: Fixture
+      # Opt-in edge ingestion. When disabled (default) the app is strictly GET-only.
+      EdgeIngestion__Enabled: "true"
+      EdgeIngestion__SecretCatalogFile: /run/secrets/edge-connector-catalog
+      EdgeIngestion__SecretsDirectory: /run/secrets
+      EdgeIngestion__NonceJournalPath: /nonces/edge-nonces.log
+      EdgeIngestion__ClockSkewSeconds: "300"
+      EdgeIngestion__MaxBatchBytes: "4194304"
+    secrets:
+      - edge-connector-catalog
+      - edge-a-hmac
+    restart: unless-stopped
+
+  # --- Outward-only edge connector. Runs nonroot, read-only root, all caps dropped, no Docker socket. ---
+  sqlsimcity-edge-connector:
+    image: sqlsimcity-edge:local
+    build:
+      context: .
+      dockerfile: Dockerfile.connector
+      args:
+        VERSION: 0.0.0-local
+        REVISION: local
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    volumes:
+      # Bounded encrypted spool. Its contents are AES-256-GCM sealed; the key lives in a separate
+      # mounted secret. Backing up the spool is not a delivery guarantee (see docs).
+      - sqlsimcity-edge-spool:/spool
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SQLSIMCITY_EDGE_CONNECTOR_ID: edge-a
+      SQLSIMCITY_EDGE_TARGET_ID: sql-prod-east
+      SQLSIMCITY_EDGE_KEY_ID: "2026-08"
+      # HTTPS is required in production. This example targets the central service in-network; replace
+      # with the https:// reverse-proxy URL and remove ALLOW_LOOPBACK_HTTP outside local development.
+      SQLSIMCITY_EDGE_INGEST_ENDPOINT: http://sqlsimcity-central:8080/api/v1/edge/ingest
+      SQLSIMCITY_EDGE_ALLOW_LOOPBACK_HTTP: "false"
+      SQLSIMCITY_EDGE_SIGNING_SECRET_FILE: /run/secrets/edge-a-hmac
+      SQLSIMCITY_EDGE_SPOOL_KEY_FILE: /run/secrets/edge-spool-key
+      SQLSIMCITY_EDGE_SPOOL_DIR: /spool
+      SQLSIMCITY_EDGE_FIXTURES_DIR: /app/fixtures/v1
+      SQLSIMCITY_EDGE_COLLECT_INTERVAL_SECONDS: "15"
+      SQLSIMCITY_EDGE_DELIVER_INTERVAL_SECONDS: "5"
+      SQLSIMCITY_EDGE_SPOOL_MAX_BYTES: "67108864"
+      SQLSIMCITY_EDGE_SPOOL_MAX_ITEMS: "4096"
+      SQLSIMCITY_EDGE_SPOOL_MAX_AGE_SECONDS: "86400"
+      # Optional loopback-only generic health port; 0 disables it. There is no inbound control API.
+      SQLSIMCITY_EDGE_LOOPBACK_HEALTH_PORT: "0"
+    secrets:
+      - edge-a-hmac
+      - edge-spool-key
+    depends_on:
+      - sqlsimcity-central
+    restart: unless-stopped
+
+volumes:
+  sqlsimcity-central-data:
+  sqlsimcity-central-nonces:
+  sqlsimcity-edge-spool:
+
+# Provide these files out of band; do NOT commit them.
+#   edge-connector-catalog: JSON allowlist mapping connector ids -> key ids -> secret file names
+#                           (see docs/edge-connector.md). References edge-a-hmac by file name.
+#   edge-a-hmac:            base64 of >= 32 random bytes; the shared HMAC secret for connector edge-a.
+#   edge-spool-key:         JSON spool key file { "formatVersion":1, "keyVersion":1, "key":"<base64 32 bytes>" }.
+secrets:
+  edge-connector-catalog:
+    file: ./secrets/edge-connector-catalog.json
+  edge-a-hmac:
+    file: ./secrets/edge-a-hmac.b64
+  edge-spool-key:
+    file: ./secrets/edge-spool-key.json

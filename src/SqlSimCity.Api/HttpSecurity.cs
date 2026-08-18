@@ -85,7 +85,11 @@ public static class HttpSecurityExtensions
         var options = app.Services.GetRequiredService<HttpSecurityOptions>();
         app.Use(async (context, next) =>
         {
-            if (context.Request.ContentLength is { } contentLength &&
+            // The edge ingestion endpoint accepts larger signed batches and enforces its own bound
+            // (and a per-request max body size) rather than the small global API limit.
+            var isEdgeIngest = context.Request.Path.StartsWithSegments("/api/v1/edge/ingest");
+            if (!isEdgeIngest &&
+                context.Request.ContentLength is { } contentLength &&
                 contentLength > options.MaxRequestBodyBytes)
             {
                 context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;

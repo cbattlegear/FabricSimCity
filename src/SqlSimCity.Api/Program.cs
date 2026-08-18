@@ -30,15 +30,17 @@ if (archiveMode && (
         queryStoreConnected ||
         AtlasConfiguration.IsConnected(builder.Configuration) ||
         string.Equals(builder.Configuration["LiveIncidents:Mode"], "Connected", StringComparison.OrdinalIgnoreCase) ||
+        builder.Configuration.GetValue<bool>("EdgeIngestion:Enabled") ||
         builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled")))
     throw new InvalidOperationException(
-        "Acquisition:Mode=Archive cannot be combined with connected Atlas, Query Store, live incidents, or protected storage.");
+        "Acquisition:Mode=Archive cannot be combined with connected Atlas, Query Store, live incidents, edge ingestion, or protected storage.");
 if (queryStoreConnected && !AtlasConfiguration.IsConnected(builder.Configuration))
     throw new InvalidOperationException("Connected Query Store history requires Atlas:Mode=Connected so both share one validated profile and authentication strategy.");
 if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled"))
     throw new InvalidOperationException("Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden.");
 
 builder.Services.AddSqlSimCityHttpSecurity(builder.Configuration);
+builder.Services.AddEdgeIngestion(builder.Configuration);
 
 if (archiveMode)
 {
@@ -280,6 +282,7 @@ else
     app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 }
 app.MapFindings();
+app.MapEdgeIngestion();
 app.MapFallbackToFile("index.html");
 
 app.Run();

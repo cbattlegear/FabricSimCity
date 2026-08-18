@@ -202,6 +202,12 @@
           "SqlSimCity.Contracts": "[1.0.0, )"
         }
       },
+      "sqlsimcity.edge": {
+        "type": "Project",
+        "dependencies": {
+          "SqlSimCity.Contracts": "[1.0.0, )"
+        }
+      },
       "sqlsimcity.findings": {
         "type": "Project",
         "dependencies": {

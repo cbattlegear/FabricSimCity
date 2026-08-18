@@ -635,6 +635,7 @@
           "SqlSimCity.Collection": "[1.0.0, )",
           "SqlSimCity.Contracts": "[1.0.0, )",
           "SqlSimCity.Domain": "[1.0.0, )",
+          "SqlSimCity.Edge": "[1.0.0, )",
           "SqlSimCity.Findings": "[1.0.0, )",
           "SqlSimCity.Storage": "[1.0.0, )"
         }
@@ -664,6 +665,12 @@
         "type": "Project"
       },
       "sqlsimcity.domain": {
+        "type": "Project",
+        "dependencies": {
+          "SqlSimCity.Contracts": "[1.0.0, )"
+        }
+      },
+      "sqlsimcity.edge": {
         "type": "Project",
         "dependencies": {
           "SqlSimCity.Contracts": "[1.0.0, )"
