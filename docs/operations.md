@@ -6,8 +6,9 @@ gzip, and findutils. Run the service on loopback or behind an authenticating
 reverse proxy on a trusted network; the application has no authentication and
 must not be exposed directly to the internet.
 
-The default `AllowedHosts` value is `*`; it is not an exposure control. Loopback
-binding is the default network boundary. When using a reverse proxy, terminate
+The shipped `appsettings.json` pins `AllowedHosts` to `localhost;127.0.0.1;[::1]`;
+this is a `Host` header check, not an exposure control, and loopback binding
+remains the actual network boundary. When using a reverse proxy, terminate
 TLS and enforce authentication there, restrict the backend network path, and set
 `AllowedHosts` to the externally accepted host names (semicolon-separated in
 ASP.NET Core configuration). SQLSimCity does not enable forwarded-header
