@@ -7,9 +7,8 @@ namespace SqlSimCity.Storage.Sqlite;
 
 /// <summary>
 /// SQLite-backed <see cref="IProtectedRecordStore"/>. SQLite holds the opaque id,
-/// record kind, captured timestamp, resolution, and the record envelope. New
-/// envelopes carry the payload in the clear; envelopes written by earlier versions
-/// stay AES-256-GCM sealed and are still opened with the key ring. A new connection is
+/// record kind, captured timestamp, resolution, and the record envelope, whose
+/// payload is stored in the clear. A new connection is
 /// opened per operation (each with its own busy timeout), relying on WAL for
 /// reader/writer concurrency rather than in-process locking.
 /// <see cref="EnsureReadyAsync"/> must succeed before any other member is
@@ -20,7 +19,6 @@ namespace SqlSimCity.Storage.Sqlite;
 public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtectedStorageInitializer, IDisposable
 {
     private readonly string _connectionString;
-    private readonly KeyRing _keyRing;
     private readonly RetentionOptions _retention;
     private readonly TimeProvider _timeProvider;
     private readonly int _maxRecordKindLength;
@@ -33,7 +31,6 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
     public SqliteProtectedRecordStore(
         string dataDirectory,
         string databaseFileName,
-        KeyRing keyRing,
         RetentionOptions retention,
         TimeProvider timeProvider,
         int maxRecordKindLength = ProtectedStorageOptions.DefaultMaxRecordKindLength,
@@ -41,7 +38,6 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseFileName);
-        ArgumentNullException.ThrowIfNull(keyRing);
         ArgumentNullException.ThrowIfNull(retention);
         ArgumentNullException.ThrowIfNull(timeProvider);
         if (maxRecordKindLength is < 1 or > ProtectedStorageOptions.MaximumRecordKindLength)
@@ -69,7 +65,6 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
             // expect the file to be free. This store isn't a request hot path.
             Pooling = false,
         }.ToString();
-        _keyRing = keyRing;
         _retention = retention;
         _timeProvider = timeProvider;
         _maxRecordKindLength = maxRecordKindLength;
@@ -80,7 +75,7 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await using var connection = await OpenConnectionAsync(cancellationToken);
-        await SqliteSchema.EnsureReadyAsync(connection, _keyRing, _timeProvider, cancellationToken);
+        await SqliteSchema.EnsureReadyAsync(connection, _timeProvider, cancellationToken);
         Volatile.Write(ref _ready, 1);
     }
 
@@ -106,7 +101,7 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
                 $"Payload must be {_maxPayloadBytes} bytes or fewer.", nameof(payload));
         }
 
-        var envelope = EnvelopeCodec.Seal(_keyRing, recordKind, id.Value, payload.Span);
+        var envelope = EnvelopeCodec.Wrap(recordKind, id.Value, payload.Span);
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
@@ -156,7 +151,7 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
             envelope = (byte[])reader["envelope"];
         }
 
-        var plaintext = EnvelopeCodec.Open(_keyRing, recordKind, id.Value, envelope);
+        var plaintext = EnvelopeCodec.Unwrap(recordKind, id.Value, envelope);
         try
         {
             return new ProtectedRecord(
@@ -223,8 +218,8 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
                 if (!record.Id.Value.StartsWith(idPrefix, StringComparison.Ordinal))
                     throw new ArgumentException("Every replacement record id must start with the set prefix.", nameof(records));
 
-                var envelope = EnvelopeCodec.Seal(
-                    _keyRing, record.RecordKind, record.Id.Value, record.Payload.Span);
+                var envelope = EnvelopeCodec.Wrap(
+                    record.RecordKind, record.Id.Value, record.Payload.Span);
                 try
                 {
                     idParameter.Value = record.Id.Value;
@@ -300,12 +295,6 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
 
     public void Dispose()
     {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _keyRing.Dispose();
         _disposed = true;
     }
 

@@ -31,7 +31,7 @@ The `/data` mount hosts an optional protected storage layer. It is **disabled by
 
 **Protected storage records are written in the clear.** This tool exists to show captured query plans, query text, and workload evidence; encrypting that evidence at rest defeated its own purpose, made the store opaque to the operator who collected it, and protected nothing that filesystem permissions did not already have to protect. Anyone who can read the `/data` volume can read every retained plan and every retained query text — including any literal parameter values a showplan happens to carry. Treat the volume itself as the trust boundary: mount it with restrictive permissions, keep it off shared hosts, and back it up and access-control it like any other data at rest.
 
-Stores created by an earlier version contain AES-256-GCM envelopes. Those are still read with the configured key ring, so upgrading needs no migration and no data is lost; new writes are plaintext.
+Stores created by a version that encrypted payloads cannot be opened by this version. There is no key, so there is nothing to decrypt them with. Such a store fails its canary check at startup with a message naming the fix: stop the app and delete the store directory. Query Store history is a cache that the collector rebuilds from SQL Server, not a system of record, so the cost of starting over is one collection interval.
 
 ### Offline archive trust boundary
 
@@ -54,87 +54,40 @@ contains.
 
 ### Enabling protected storage
 
-Set `ProtectedStorage:Enabled` to `true` and provide two mandatory settings:
+Set `ProtectedStorage:Enabled` to `true` and provide one mandatory setting:
 
 - `ProtectedStorage:DataDirectory` — a writable directory for the SQLite database file (the container image sets this to `/data`).
-- `ProtectedStorage:KeyFilePath` — the path to a key ring file, normally a Docker/Compose secret mounted at `/run/secrets/sqlsimcity-storage-key`.
 
-If either is missing when `Enabled` is `true`, the process fails at startup rather than starting with a partially configured store. If the key file is missing, unreadable, malformed, or declares an invalid key, resolving the storage service fails with `SqlSimCity.Storage.KeyRingConfigurationException` and the process does not become ready.
+If it is missing when `Enabled` is `true`, the process fails at startup with `SqlSimCity.Storage.ProtectedStorageConfigurationException` rather than starting with a partially configured store. There is no key to configure, mount, rotate, or lose.
 
-The key ring is still required because it is what opens records written before payloads moved to plaintext, and because a store created by an earlier version authenticates it on open. **New records are not sealed with it.** If you are standing up a fresh store, the key is a formality that a connection-string deployment provisions for you (below); if you are upgrading, it is the only thing that can read your existing rows, so do not discard it.
+### Automatic enablement (connection-string deployments)
 
-### Auto-provisioned keys (connection-string deployments)
+Connected Query Store history persists query text and plan XML, so it requires protected storage. Leaving that requirement unmet meant a connection string produced permanently empty query views with no error, so a connection string turns protected storage on itself.
 
-Connected Query Store history persists query text and plan XML, so it requires protected storage. Requiring operators to have configured a key before that requirement is ever mentioned meant a connection string produced permanently empty query views with no error, so a connection string provisions the key itself.
-
-The narrow trigger keeps the hardened path intact. Auto-provisioning happens **only** when all of the following hold, and is skipped entirely otherwise:
+The narrow trigger keeps the explicit path intact. Automatic enablement happens **only** when all of the following hold, and is skipped entirely otherwise:
 
 - a connection string (`ConnectionStrings:SqlSimCity` or `SQLSIMCITY_CONNECTION_STRING`) is what drives the connection;
-- `ProtectedStorage:Enabled` is not already `true` — an operator who set it has made deliberate custody choices and no key is ever generated over the top of them;
+- `ProtectedStorage:Enabled` is not already `true` — an operator who set it has already made the decision;
 - `QueryStoreHistory:Mode` is not `Disabled`;
 - the mode is neither archive nor edge, both of which forbid connected collection outright.
 
-#### Where the generated key lives, and why
-
-The key ring is written to a `sqlsimcity-keys` directory **inside** `ProtectedStorage:DataDirectory`, with mode `0600`, in the same strict format documented below.
-
-Placing it there was a deliberate trade-off when payloads were sealed, because **a key had to be at least as durable as the data it protected**. In a container the data directory is the only location that is reliably writable *and* reliably persistent: a key written anywhere else either cannot be created at all (the shipped image runs as a non-root user on a read-only root filesystem) or lands on the ephemeral container layer, where it is destroyed when the container is recreated while the mounted data volume survives. For a store that still holds sealed rows, that combination is still unrecoverable, so the placement has not changed.
-
-Two placements are still never used for a generated key. It is never written at the shipped `/run/secrets/...` default, which is tmpfs under Docker and would produce exactly the vanishing-key failure described above; that path is honoured only when a file genuinely exists there, so a mounted key always wins. And an existing key file is never inspected, rewritten, or replaced — including when a concurrent creator wins the race — because overwriting a key that older records still depend on would permanently orphan them.
+Before committing to the directory, startup creates it and writes and deletes a probe file. This is the whole of what is provisioned; no credential is created, and nothing is left behind.
 
 #### Operational consequences
 
-Key generation is announced at startup with a warning naming the path (`ProtectedStorageKeyGenerated`). `tools/backup-data.sh` excludes the key from the archive and verifies it is genuinely absent before writing the backup, failing closed if it is not; it refuses outright when the data directory contains a *hard link* to the key, which cannot be excluded by path. That exclusion is now about key hygiene rather than about the recoverability of new records: a backup of a store written by this version is fully readable without the key.
-
-Where the key cannot be written at all, connected Query Store history disables itself with a warning explaining the cause and the fix (`ProtectedStorageKeyUnavailable`), preserving previous startup behavior.
-
-### Key file format
-
-The key file is strict JSON:
-
-```json
-{
-  "formatVersion": 1,
-  "activeKeyVersion": 2,
-  "keys": [
-    { "version": 1, "key": "<base64, must decode to exactly 32 bytes>" },
-    { "version": 2, "key": "<base64, must decode to exactly 32 bytes>" }
-  ]
-}
-```
-
-- `formatVersion` must be `1`.
-- `activeKeyVersion` must appear in `keys`. It no longer selects a key for new writes, because new writes are not sealed.
-- Every entry in `keys` must have a unique, positive `version` and a `key` that base64-decodes to exactly 32 bytes (AES-256). Duplicate versions, missing versions, non-base64 values, and wrong-length keys are all rejected.
-- Every version that any surviving legacy record was sealed with must remain in `keys`, or those records become unreadable.
-
-Generate a key with, for example:
-
-```bash
-openssl rand -base64 32
-```
-
-Never commit a real key file to source control. This repository does not ship one.
-
-### Key rotation
-
-Rotation no longer affects new data, because new data is not sealed. It remains meaningful only for a store that still holds legacy sealed records:
-
-1. Add a new key version to the file (new random 32 bytes, a new version number) alongside the existing ones.
-2. Keep every version that a still-live legacy record depends on. Removing one makes that record permanently unreadable — there is no recovery path other than restoring from backup.
-3. Once retention (below) has aged out every legacy record, the older versions can be dropped.
+Enablement is announced at startup with a warning naming the directory and stating plainly that query text and plan XML are retained there in the clear (`ProtectedStorageEnabled`). Where the directory cannot be created or written at all, connected Query Store history disables itself with a warning explaining the cause and the fix (`ProtectedStorageUnavailable`) rather than taking down a deployment that boots today.
 
 ### Backup and recovery
 
-A backup of `/data` taken from a store written by this version is self-sufficient: the records in it are plaintext and need no key. **A store that still holds records written by an earlier version is not**, and for those the data volume and the key file must both survive — losing the key file makes every record it sealed permanently unrecoverable, including from a database backup. Store the key file with the same care as a production credential.
+A backup of `/data` is self-sufficient: the records in it are plaintext and need nothing else to read. `tools/backup-data.sh` takes it; there is no key to exclude and no `--key-file` argument.
 
-Because backups are readable without a key, protect the backup itself: it contains captured query text and plan XML.
+Because backups are readable by anyone who holds them, protect the backup itself: it contains captured query text and plan XML.
 
 ### Fail-closed behavior
 
-Protected storage still refuses to become usable, rather than logging and continuing, on any of the following: a missing or unreadable key file; a key file that fails strict format validation; a corrupted or tampered *legacy sealed* envelope; a canary that holds the wrong value; or a SQLite schema migration failure. A fresh (empty) store creates its own canary on first use; an existing store must open and verify that canary before any other record is read or written. For a store created before this change the canary is still sealed, so it continues to prove that the configured key matches the store; for a store created by this version it is a plaintext format marker and proves only that the store is a SQL SimCity store.
+Protected storage still refuses to become usable, rather than logging and continuing, on any of the following: a data directory that cannot be created or opened; a record envelope in a format this version cannot read, including one written by a version that encrypted payloads; a canary that holds the wrong value; or a SQLite schema migration failure. A fresh (empty) store creates its own canary on first use; an existing store must open and verify that canary before any other record is read or written. The canary is a plaintext format marker: it proves the store is a SQL SimCity store of a format this build understands, and nothing more.
 
-Note what this no longer claims: a plaintext record has no authentication tag, so tampering with a new record's bytes in the database file is not detected. The integrity boundary is the volume's access control.
+Note what this no longer claims: a plaintext record has no authentication tag, so tampering with a record's bytes in the database file is not detected. The integrity boundary is the volume's access control.
 
 ### Retention
 

@@ -209,7 +209,7 @@ into a continuous trace.
 ## Scale and lifecycle
 
 - Atlas summaries load before database-city or query detail.
-- Query Store uses keyset pagination, encrypted index pages, individually addressable/chunked detail,
+- Query Store uses keyset pagination, chunked index pages, individually addressable/chunked detail,
   a final publication pointer, and 7-day detail plus 90-day hourly retention.
 - Database-city layout is deterministic and independent of source row order.
 - Live samplers, channels, publishers, edge spools, idempotency maps, and replay journals are bounded.

@@ -57,43 +57,31 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["ProtectedStorage:Enabled"] = "true",
-            ["ProtectedStorage:KeyFilePath"] = Path.Combine(_directory, "key.json"),
         });
         var services = new ServiceCollection();
 
-        Assert.Throws<KeyRingConfigurationException>(() => services.AddProtectedStorage(configuration));
+        Assert.Throws<ProtectedStorageConfigurationException>(() => services.AddProtectedStorage(configuration));
     }
 
     [Fact]
-    public void EnabledWithoutKeyFilePathThrows()
+    public async Task EnabledWithAnUnusableDataDirectoryFailsAtInitialization()
     {
+        Directory.CreateDirectory(_directory);
+        var blockingFile = Path.Combine(_directory, "not-a-directory");
+        await File.WriteAllTextAsync(blockingFile, "fixture");
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["ProtectedStorage:Enabled"] = "true",
-            ["ProtectedStorage:DataDirectory"] = Path.Combine(_directory, "data"),
-        });
-        var services = new ServiceCollection();
-
-        Assert.Throws<KeyRingConfigurationException>(() => services.AddProtectedStorage(configuration));
-    }
-
-    [Fact]
-    public async Task EnabledWithMissingKeyFileFailsAtInitialization()
-    {
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
-        {
-            ["ProtectedStorage:Enabled"] = "true",
-            ["ProtectedStorage:DataDirectory"] = Path.Combine(_directory, "data"),
-            ["ProtectedStorage:KeyFilePath"] = Path.Combine(_directory, "does-not-exist.json"),
+            ["ProtectedStorage:DataDirectory"] = Path.Combine(blockingFile, "data"),
         });
         var services = new ServiceCollection();
         services.AddProtectedStorage(configuration);
         using var provider = services.BuildServiceProvider();
 
-        // The key file isn't touched until the store is actually resolved, so
+        // The directory isn't touched until the store is actually resolved, so
         // misconfiguration is visible as soon as a host resolves it (e.g. at
-        // startup, before EnsureReadyAsync).
-        await Assert.ThrowsAsync<KeyRingConfigurationException>(async () =>
+        // startup, before EnsureReadyAsync) rather than as silent data loss later.
+        await Assert.ThrowsAnyAsync<IOException>(async () =>
         {
             var initializer = provider.GetRequiredService<IProtectedStorageInitializer>();
             await initializer.EnsureReadyAsync();
@@ -103,14 +91,11 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
     [Fact]
     public async Task EnabledWithValidConfigurationRegistersAWorkingStore()
     {
-        var key = KeyRingTestHelpers.NewKeyBytes();
-        var keyFilePath = KeyRingTestHelpers.WriteKeyFile(_directory, activeKeyVersion: 1, (1, key));
         var dataDirectory = Path.Combine(_directory, "data");
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["ProtectedStorage:Enabled"] = "true",
             ["ProtectedStorage:DataDirectory"] = dataDirectory,
-            ["ProtectedStorage:KeyFilePath"] = keyFilePath,
         });
         var services = new ServiceCollection();
         services.AddProtectedStorage(configuration);
@@ -138,11 +123,10 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
         {
             ["ProtectedStorage:Enabled"] = "true",
             ["ProtectedStorage:DataDirectory"] = Path.Combine(_directory, "data"),
-            ["ProtectedStorage:KeyFilePath"] = Path.Combine(_directory, "key.json"),
             ["ProtectedStorage:DatabaseFileName"] = databaseFileName,
         });
 
-        var ex = Assert.Throws<KeyRingConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
+        var ex = Assert.Throws<ProtectedStorageConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
 
         Assert.DoesNotContain(_directory, ex.Message, StringComparison.Ordinal);
     }
@@ -158,13 +142,12 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
         {
             ["ProtectedStorage:Enabled"] = "true",
             ["ProtectedStorage:DataDirectory"] = Path.Combine(_directory, "data"),
-            ["ProtectedStorage:KeyFilePath"] = Path.Combine(_directory, "key.json"),
             ["ProtectedStorage:Retention:DetailRetention"] = detail,
             ["ProtectedStorage:Retention:HourlyRollupRetention"] = hourly,
             ["ProtectedStorage:Retention:PruneBatchSize"] = batchSize,
         });
 
-        Assert.Throws<KeyRingConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
+        Assert.Throws<ProtectedStorageConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
     }
 
     [Fact]
@@ -174,7 +157,6 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
         {
             ["ProtectedStorage:Enabled"] = "true",
             ["ProtectedStorage:DataDirectory"] = Path.Combine(_directory, "data"),
-            ["ProtectedStorage:KeyFilePath"] = Path.Combine(_directory, "key.json"),
             ["ProtectedStorage:MaxRecordKindLength"] = "1",
             ["ProtectedStorage:MaxPayloadBytes"] = "1",
             ["ProtectedStorage:Retention:PruneBatchSize"] = "500",
@@ -194,16 +176,15 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
         {
             ["ProtectedStorage:Enabled"] = "true",
             ["ProtectedStorage:DataDirectory"] = Path.Combine(_directory, "data"),
-            ["ProtectedStorage:KeyFilePath"] = Path.Combine(_directory, "key.json"),
             ["ProtectedStorage:MaxRecordKindLength"] = recordKindLimit,
             ["ProtectedStorage:MaxPayloadBytes"] = payloadLimit,
         });
 
-        Assert.Throws<KeyRingConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
+        Assert.Throws<ProtectedStorageConfigurationException>(() => new ServiceCollection().AddProtectedStorage(configuration));
     }
 
     [Fact]
-    public void FailedStoreConstructionDisposesLoadedKeyRing()
+    public void StoreConstructionSurfacesAnUnusableDataDirectory()
     {
         Directory.CreateDirectory(_directory);
         var blockingFile = Path.Combine(_directory, "not-a-directory");
@@ -213,12 +194,9 @@ public sealed class ProtectedStorageServiceCollectionExtensionsTests : IDisposab
             Enabled = true,
             DataDirectory = Path.Combine(blockingFile, "data"),
         };
-        var sourceKey = KeyRingTestHelpers.NewKeyBytes();
-        using var keyRing = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = sourceKey });
 
         Assert.ThrowsAny<IOException>(() =>
             ProtectedStorageServiceCollectionExtensions.CreateStore(
-                options, keyRing, options.Retention, TimeProvider.System));
-        Assert.Throws<ObjectDisposedException>(() => keyRing.GetKey(1));
+                options, options.Retention, TimeProvider.System));
     }
 }

@@ -37,13 +37,12 @@ internal static class SqliteSchema
         """;
 
     /// <summary>
-    /// Creates a fresh v1 store, then verifies its canary. Existing stores
-    /// authenticate before <see cref="ApplyAuthenticatedMigrationsAsync"/> can
+    /// Creates a fresh v1 store, then verifies its canary. Existing stores are
+    /// checked before <see cref="ApplyAuthenticatedMigrationsAsync"/> can
     /// make a future schema change.
     /// </summary>
     public static async Task EnsureReadyAsync(
         SqliteConnection connection,
-        KeyRing keyRing,
         TimeProvider timeProvider,
         CancellationToken cancellationToken,
         Func<SqliteConnection, int, CancellationToken, Task>? migrationAfterCanary = null)
@@ -67,7 +66,7 @@ internal static class SqliteSchema
             {
                 await ExecuteAsync(connection, CreateV1Schema, cancellationToken, transaction);
                 await CanaryVerifier.EnsureCanaryAsync(
-                    connection, keyRing, timeProvider, cancellationToken, transaction, createIfMissing: true);
+                    connection, timeProvider, cancellationToken, transaction, createIfMissing: true);
                 await SetUserVersionAsync(connection, 1, transaction, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 currentVersion = 1;
@@ -79,7 +78,7 @@ internal static class SqliteSchema
         }
         else
         {
-            await CanaryVerifier.EnsureCanaryAsync(connection, keyRing, timeProvider, cancellationToken);
+            await CanaryVerifier.EnsureCanaryAsync(connection, timeProvider, cancellationToken);
         }
 
         await ApplyAuthenticatedMigrationsAsync(connection, currentVersion, cancellationToken);

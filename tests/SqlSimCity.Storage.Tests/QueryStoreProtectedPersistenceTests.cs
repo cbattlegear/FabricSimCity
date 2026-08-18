@@ -1,10 +1,8 @@
-using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Storage;
-using SqlSimCity.Storage.Crypto;
 using SqlSimCity.Storage.Sqlite;
 
 namespace SqlSimCity.Storage.Tests;
@@ -15,11 +13,9 @@ public sealed class QueryStoreProtectedPersistenceTests
     public async Task HundredThousandFamilyGenerationIsReplacedWithinTwoSqliteSlots()
     {
         var directory = NewDirectory("query-store-bounded-generations");
-        var key = RandomNumberGenerator.GetBytes(32);
         try
         {
-            using var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key });
-            using var store = NewStore(directory, ring);
+            using var store = NewStore(directory);
             await store.EnsureReadyAsync();
             var repository = new ProtectedQueryStoreRepository(store);
             var captured = DateTimeOffset.UtcNow;
@@ -51,18 +47,16 @@ public sealed class QueryStoreProtectedPersistenceTests
             var restored = await repository.ReadPublishedSnapshotHeaderAsync();
             Assert.Equal("generation-3", restored?.SnapshotId);
         }
-        finally { Cleanup(directory, key); }
+        finally { Cleanup(directory); }
     }
 
     [Fact]
     public async Task QueryTextPlanAndSnapshotsArePersistedInTheClear()
     {
         var directory = NewDirectory("query-store-persistence");
-        var key = RandomNumberGenerator.GetBytes(32);
         try
         {
-            using var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key });
-            using (var store = NewStore(directory, ring))
+            using (var store = NewStore(directory))
             {
                 await store.EnsureReadyAsync();
                 var repository = new ProtectedQueryStoreRepository(store);
@@ -86,20 +80,18 @@ public sealed class QueryStoreProtectedPersistenceTests
             Assert.Contains("SNAPSHOT_MARKER", persisted, StringComparison.Ordinal);
             Assert.Contains("STATUS_MARKER", persisted, StringComparison.Ordinal);
         }
-        finally { Cleanup(directory, key); }
+        finally { Cleanup(directory); }
     }
 
     [Fact]
     public async Task PublishedSnapshotSurvivesDetailPruneAndExpiresAfterNinetyDays()
     {
         var directory = NewDirectory("query-store-retention");
-        var key = RandomNumberGenerator.GetBytes(32);
         var captured = new DateTimeOffset(2026, 8, 17, 18, 0, 0, TimeSpan.Zero);
         var clock = new TestTimeProvider(captured);
         try
         {
-            using (var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key }))
-            using (var store = NewStore(directory, ring, clock))
+            using (var store = NewStore(directory, clock))
             {
                 await store.EnsureReadyAsync();
                 var repository = new ProtectedQueryStoreRepository(store);
@@ -113,8 +105,7 @@ public sealed class QueryStoreProtectedPersistenceTests
                 Assert.Equal("retained", (await repository.ReadPublishedSnapshotAsync())?.SnapshotId);
             }
 
-            using (var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key }))
-            using (var store = NewStore(directory, ring, clock))
+            using (var store = NewStore(directory, clock))
             {
                 await store.EnsureReadyAsync();
                 var repository = new ProtectedQueryStoreRepository(store);
@@ -129,14 +120,13 @@ public sealed class QueryStoreProtectedPersistenceTests
                 Assert.Null(await repository.ReadPublishedSnapshotAsync());
             }
         }
-        finally { Cleanup(directory, key); }
+        finally { Cleanup(directory); }
     }
 
     [Fact]
     public async Task PublishedEpochAndIndexesSurviveRealSqliteRestart()
     {
         var directory = NewDirectory("query-store-restart");
-        var key = RandomNumberGenerator.GetBytes(32);
         try
         {
             var captured = DateTimeOffset.UtcNow;
@@ -156,8 +146,7 @@ public sealed class QueryStoreProtectedPersistenceTests
                 new QueryStoreCollectorStatusV1(
                     "1.0", QueryStoreCollectorState.Ready, 1, captured, captured, null, [], "ready"));
 
-            using (var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key }))
-            using (var store = NewStore(directory, ring))
+            using (var store = NewStore(directory))
             {
                 await store.EnsureReadyAsync();
                 var repository = new ProtectedQueryStoreRepository(store);
@@ -167,8 +156,7 @@ public sealed class QueryStoreProtectedPersistenceTests
                     new ProtectedQueryStoreRepository(new FailPointerStore(store))
                         .PublishSnapshotAsync(failed));
             }
-            using (var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key }))
-            using (var store = NewStore(directory, ring))
+            using (var store = NewStore(directory))
             {
                 await store.EnsureReadyAsync();
                 var restored = await new ProtectedQueryStoreRepository(store).ReadPublishedSnapshotAsync();
@@ -178,7 +166,7 @@ public sealed class QueryStoreProtectedPersistenceTests
                 Assert.Equal("interval:with:colon", restoredRuntime.IntervalId);
             }
         }
-        finally { Cleanup(directory, key); }
+        finally { Cleanup(directory); }
     }
 
     private static string NewDirectory(string name)
@@ -189,9 +177,8 @@ public sealed class QueryStoreProtectedPersistenceTests
     }
     private static SqliteProtectedRecordStore NewStore(
         string directory,
-        KeyRing ring,
         TimeProvider? timeProvider = null) =>
-        new(directory, "history.db", ring, new RetentionOptions(), timeProvider ?? TimeProvider.System);
+        new(directory, "history.db", new RetentionOptions(), timeProvider ?? TimeProvider.System);
 
     private static async Task DrainPruneAsync(SqliteProtectedRecordStore store)
     {
@@ -227,9 +214,8 @@ public sealed class QueryStoreProtectedPersistenceTests
         }).ToArray();
     }
 
-    private static void Cleanup(string directory, byte[] key)
+    private static void Cleanup(string directory)
     {
-        CryptographicOperations.ZeroMemory(key);
         Directory.Delete(directory, recursive: true);
     }
 

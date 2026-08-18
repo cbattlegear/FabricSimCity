@@ -84,38 +84,6 @@ if "${repo_root}/tools/backup-data.sh" --quiesced \
 fi
 rm "${source_dir}/linked-key"
 
-# An auto-provisioned key lives inside the data directory, because that is the
-# only place in a container that is both writable and exactly as durable as the
-# data it protects. The backup must therefore succeed -- refusing would leave
-# those deployments unable to back up at all -- while still never carrying the
-# key itself.
-mkdir "${source_dir}/sqlsimcity-keys"
-key_file="${source_dir}/sqlsimcity-keys/storage-key.json"
-printf 'not-a-real-key\n' >"${key_file}"
-SOURCE_DATE_EPOCH=1700000000 \
-  "${repo_root}/tools/backup-data.sh" --quiesced --key-file "${key_file}" \
-  "${source_dir}" "${work_dir}/key.tar.gz"
-key_restore_dir="${work_dir}/key-restore"
-mkdir "${key_restore_dir}"
-"${repo_root}/tools/restore-data.sh" --quiesced \
-  "${work_dir}/key.tar.gz" "${key_restore_dir}"
-if [[ -e "${key_restore_dir}/sqlsimcity-keys/storage-key.json" ]]; then
-  echo "backup unexpectedly carried its own decryption key" >&2
-  exit 1
-fi
-cmp "${source_dir}/database.db" "${key_restore_dir}/database.db"
-rm -r "${source_dir}/sqlsimcity-keys"
-
-key_file="${work_dir}/external-storage-key"
-printf 'not-a-real-key\n' >"${key_file}"
-ln "${key_file}" "${source_dir}/hard-linked-key"
-if "${repo_root}/tools/backup-data.sh" --quiesced --key-file "${key_file}" \
-  "${source_dir}" "${work_dir}/hard-link-key.tar.gz" >/dev/null 2>&1; then
-  echo "backup unexpectedly included a hard link to the key file" >&2
-  exit 1
-fi
-rm "${source_dir}/hard-linked-key"
-
 printf 'unsupported\n' >"${source_dir}/backslash\\name"
 if "${repo_root}/tools/backup-data.sh" --quiesced \
   "${source_dir}" "${work_dir}/backslash.tar.gz" >/dev/null 2>&1; then

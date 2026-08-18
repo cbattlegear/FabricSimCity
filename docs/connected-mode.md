@@ -18,25 +18,24 @@ history all switch off the fixture path with no `Atlas:Mode`, `LiveIncidents:Mod
 `QueryStoreHistory:Mode` needed. With no connection string configured, fixtures stay the default.
 
 Query Store history retains query text and plan XML in protected storage, so it requires that store
-to be configured. Rather than make you turn that on by hand, a connection string provisions its key
-ring for you: an AES-256 key ring is generated at a `sqlsimcity-keys` directory inside
-`ProtectedStorage:DataDirectory` and announced at startup with a warning naming the path.
+to be configured. Rather than make you turn that on by hand, a connection string enables it for you:
+the data directory is created, checked for writability, and announced at startup with a warning
+naming it.
 
-**The retained records themselves are written in the clear.** Showing captured plans and query text
-is the entire point of this tool, so the store keeps them readable — an operator can open the SQLite
-file and see exactly what was collected. The key ring exists to open records written by an earlier
-version, which were AES-256-GCM sealed; upgrading needs no migration.
+**The retained records are written in the clear.** Showing captured plans and query text is the
+entire point of this tool, so the store keeps them readable — an operator can open the SQLite file
+and see exactly what was collected. There is no key, no secret to mount, and nothing to rotate.
 
 That also means the data directory is the trust boundary. Anyone who can read it can read every
 retained plan and query text, including any literal parameter values a showplan carries. Mount it
 with restrictive permissions and protect backups of it accordingly.
 
-If the key cannot be written at all, Query Store history disables itself with a warning rather than
-blocking startup.
+If the data directory cannot be created or written at all, Query Store history disables itself with
+a warning rather than blocking startup.
 
-To keep key custody entirely in your own hands, set `ProtectedStorage:Enabled=true` and mount your
-own key file at `ProtectedStorage:KeyFilePath`; nothing is then generated, and a missing key fails
-closed as before. `QueryStoreHistory:Mode=Disabled` opts out of collection completely.
+To decide for yourself where retained evidence lands, set `ProtectedStorage:Enabled=true` and
+`ProtectedStorage:DataDirectory` explicitly; nothing is then enabled on your behalf.
+`QueryStoreHistory:Mode=Disabled` opts out of collection completely.
 
 The connection string is parsed into exactly the same validated `ConnectionProfile` the settings
 below produce, so every downstream guarantee still holds: the password is passed as a
@@ -132,15 +131,13 @@ services:
       Atlas__Connection__Authentication__PasswordSecret: sql-password
       Atlas__SecretsDirectory: /run/secrets
 
-      # Retained Query Store history requires protected storage. This is the
-      # operator-managed key path: because ProtectedStorage__Enabled is set
-      # explicitly, nothing is generated and a missing key file fails closed.
-      # (Drive the connection from a connection string instead and a key is
-      # generated inside the data directory for you.)
+      # Retained Query Store history requires protected storage. Setting
+      # ProtectedStorage__Enabled explicitly keeps the choice of where retained
+      # evidence lands in your hands. (Drive the connection from a connection
+      # string instead and this is turned on for you.)
       QueryStoreHistory__Mode: Connected
       ProtectedStorage__Enabled: "true"
       ProtectedStorage__DataDirectory: /data
-      ProtectedStorage__KeyFilePath: /run/secrets/storage-key
 
       # Live sampling has its own cadence/profile and must name the same target
       # when its counts should appear in the Atlas.
@@ -158,13 +155,10 @@ services:
       LiveIncidents__Connection__Secrets__Directory: /run/secrets
     secrets:
       - sql-password
-      - storage-key
 
 secrets:
   sql-password:
     file: ./secrets/sql-password
-  storage-key:
-    file: ./secrets/storage-key.json
 ```
 
 Run:
@@ -237,11 +231,11 @@ refresh cycles. Database-city object/index pages are queried only when entered.
 
 Connected Query Store history is enabled by a connection string, or explicitly with
 `QueryStoreHistory__Mode=Connected`. Either way it requires Atlas connected mode and protected
-storage, which a connection string provisions automatically (see the quick start above). The
+storage, which a connection string enables automatically (see the quick start above). The
 collector uses keyset pages, overlap watermarks, reset epochs, active-interval replacement, bounded
-encrypted generations, and a final publication pointer.
+generations, and a final publication pointer.
 
-Raw SQL and Showplan XML are fetched only on demand and stored as 7-day encrypted detail. Normalized
+Raw SQL and Showplan XML are fetched only on demand and stored as 7-day detail. Normalized
 facts and hourly history are retained for 90 days by default.
 
 Collection needs Query Store to be enabled on the databases themselves (`ALTER DATABASE ... SET
