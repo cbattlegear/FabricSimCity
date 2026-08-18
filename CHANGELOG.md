@@ -115,6 +115,23 @@ First MVP release candidate. There is no tagged release yet.
   rule, and UI all expect. This was invisible to the unit tests, which substitute a fake probe
   executor for the real `SqlDataReader` path, so a corpus-wide guard now asserts that every column
   the Atlas and live-incident executors read by name is actually emitted somewhere in the probe SQL.
+- Connected live-incident sampling no longer fails on every cycle **against Azure SQL Database**.
+  `SERVERPROPERTY('IsHadrEnabled')` is documented "Applies to: SQL Server", and SERVERPROPERTY
+  returns NULL for any property unsupported on the connected engine, so the server-identity probe
+  returned NULL there and the unguarded `Convert.ToInt32` threw
+  `InvalidCastException: Object cannot be cast from DBNull to other types` on every sample. Azure
+  SQL Database and Managed Instance now read as "not enabled", which is what the value means on a
+  platform whose high availability is built in rather than configured as an availability group.
+  The same unguarded read was present in the edge connector's probe executor and is fixed with the
+  shared helper.
+- A single unreadable column no longer costs an entire live-incident cycle. `LiveIncidentCollector`
+  is designed to degrade — it records an `UnavailableFieldV1` and publishes the rest of the
+  snapshot — but only recognized `ProbeExecutionException`s, so a row-projection failure escaped to
+  the sampler and destroyed every other subsystem's evidence for that cycle. Row-shape failures are
+  now classified as the already-defined `ProbeDataFormatException`, so an unexpected NULL or missing
+  column on any engine edition degrades exactly one field, names itself in
+  `diagnostics.unavailableFields`, and leaves the rest of the snapshot intact. Genuine programming
+  faults are deliberately still allowed to propagate.
 
 ### Security
 
@@ -126,9 +143,12 @@ First MVP release candidate. There is no tagged release yet.
 
 - **Live SQL Server validation is partial.** Connected Atlas collection and live-incident sampling
   have now been exercised end to end against a real local SQL Server (Kerberos/integrated auth),
-  which is what surfaced the transaction-log column defect above. No Azure SQL Database or Managed
-  Instance target was available, so platform-specific behavior on those, and every Entra
-  authentication strategy, remains exercised only against fakes and deterministic fixtures.
+  which is what surfaced the transaction-log column defect above. The Azure SQL Database
+  `IsHadrEnabled` defect above was reported from a real Azure SQL Database and was reproduced and
+  verified locally by making the identity probe emit NULL for that column, but no Azure SQL Database
+  or Managed Instance target was available for direct end-to-end confirmation, so platform-specific
+  behavior on those, and every Entra authentication strategy, remains otherwise exercised only
+  against fakes and deterministic fixtures.
 - GHCR image publication, SBOM, and provenance attestation are defined in the
   release workflow but are not executed as part of this candidate; their outputs
   are unverified until a tagged release runs.

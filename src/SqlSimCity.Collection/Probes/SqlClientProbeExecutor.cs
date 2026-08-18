@@ -58,7 +58,7 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
                     reader["product_level"] as string,
                     reader["edition"] as string,
                     Convert.ToInt32(reader["engine_edition"], CultureInfo.InvariantCulture),
-                    Convert.ToInt32(reader["is_hadr_enabled"], CultureInfo.InvariantCulture) != 0,
+                    IsHadrEnabled(reader["is_hadr_enabled"]),
                     Convert.ToInt32(reader["cpu_count"], CultureInfo.InvariantCulture),
                     Convert.ToInt32(reader["scheduler_count"], CultureInfo.InvariantCulture),
                     reader["physical_memory_mb"] is DBNull ? null : Convert.ToInt64(reader["physical_memory_mb"], CultureInfo.InvariantCulture),
@@ -196,8 +196,22 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
     }
 
     /// <summary>
-    /// Opens one connection, runs one catalog probe, hands the live reader to
-    /// <paramref name="project"/>, and guarantees the connection (and any credential lease it
+    /// Reads <c>is_hadr_enabled</c>, treating NULL as "not enabled".
+    ///
+    /// <c>SERVERPROPERTY('IsHadrEnabled')</c> is documented "Applies to: SQL Server", and the
+    /// function returns NULL for any property not supported on the connected engine, so this is
+    /// NULL on both Azure SQL Database and Azure SQL Managed Instance. Azure provides its own
+    /// built-in high availability rather than exposing the Always On availability-groups feature
+    /// this property reports on, so "not applicable" and "not enabled" mean the same thing to
+    /// every consumer of <see cref="ServerIdentityResult.IsHadrEnabled"/>.
+    ///
+    /// Converting it unguarded threw <see cref="InvalidCastException"/> against a live Azure SQL
+    /// Database, which aborted the entire identity probe and, with it, every sampling cycle.
+    /// </summary>
+    internal static bool IsHadrEnabled(object value) =>
+        value is not DBNull && Convert.ToInt32(value, CultureInfo.InvariantCulture) != 0;
+
+    /// <summary>
     /// holds) is disposed before returning -- regardless of whether <paramref name="project"/>
     /// completes, throws, or the token is cancelled.
     /// </summary>
@@ -258,8 +272,27 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
             {
                 throw SqlExceptionClassifier.Classify(ex, probeId);
             }
+            catch (Exception ex) when (IsRowShapeFailure(ex))
+            {
+                throw ClassifyRowShapeFailure(ex, probeId);
+            }
         }
     }
+
+    /// <summary>
+    /// True for the exceptions a row projection raises when the engine's actual result shape
+    /// disagrees with what the projection expects: a column that is NULL on this platform but not
+    /// another (<see cref="InvalidCastException"/> from <c>Convert</c>), a column the probe does not
+    /// emit (<see cref="IndexOutOfRangeException"/>), or a value outside the target type
+    /// (<see cref="FormatException"/>, <see cref="OverflowException"/>). Classifying them lets the
+    /// negotiation layer above record a probe as unavailable instead of failing the whole run.
+    /// </summary>
+    private static bool IsRowShapeFailure(Exception ex) =>
+        ex is InvalidCastException or IndexOutOfRangeException or FormatException or OverflowException;
+
+    private static ProbeDataFormatException ClassifyRowShapeFailure(Exception ex, string probeId) =>
+        new($"Probe '{probeId}' returned a row shape its result contract cannot represent, which " +
+            "usually means a column is NULL or absent on this engine edition.", ex);
 
     internal static SqlParameter[] BuildParameters(
         Catalog.ProbeDefinition probe,
