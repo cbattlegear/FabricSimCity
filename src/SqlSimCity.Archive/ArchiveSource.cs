@@ -684,16 +684,23 @@ public sealed class ArchiveSource :
         if (series.Entries.Count != expectedEntries)
             throw new ArchiveValidationException("Archive page series entry count is inconsistent.");
         long records = 0;
-        foreach (var name in series.Entries)
+        for (var index = 0; index < series.Entries.Count; index++)
         {
+            var name = series.Entries[index];
             var entry = RequireSection(name, section);
             var chunk = ReadRequired<IReadOnlyList<T>>(name);
             foreach (var item in chunk)
                 validateItem?.Invoke(item);
             var chunkRecords = chunk.Sum(entryRecordCount);
+            var expectedChunkRecords = series.TotalCount == 0
+                ? 0
+                : Math.Min(
+                    series.ChunkSize,
+                    series.TotalCount - (long)index * series.ChunkSize);
             if (chunk.Count < 1 ||
                 (!pageWrappers && chunk.Count > series.ChunkSize) ||
                 (pageWrappers && (chunk.Count != 1 || chunkRecords > series.ChunkSize)) ||
+                chunkRecords != expectedChunkRecords ||
                 entry.RecordCount != chunkRecords)
                 throw new ArchiveValidationException($"Archive page chunk '{name}' has an inconsistent count.");
             records = checked(records + chunkRecords);

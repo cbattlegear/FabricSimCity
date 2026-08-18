@@ -444,6 +444,48 @@ public sealed class ArchivePackageTests : IDisposable
         Assert.NotEqual(first.Objects[0].ObjectId, second.Objects[0].ObjectId);
     }
 
+    [Fact]
+    public void Archive_source_rejects_undersized_nonfinal_page_chunks()
+    {
+        var firstName = "query-store/pages/page-00000.json";
+        var secondName = "query-store/pages/page-00001.json";
+        var index = new QueryStoreArchiveIndex(
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            new Dictionary<string, ArchivePageSeries>(StringComparer.Ordinal)
+            {
+                ["cpu|*"] = new(2, 3, [firstName, secondName]),
+            });
+        var payloads = new[]
+        {
+            AtlasPayload(),
+            new ArchivePayload(
+                firstName, "query-store", ArchiveJson.SerializeCanonical(new[] { Family("one") }), 1,
+                new ArchiveSourceStamp(At, At, null, "PointInTime")),
+            new ArchivePayload(
+                secondName, "query-store",
+                ArchiveJson.SerializeCanonical(new[] { Family("two"), Family("three") }), 2,
+                new ArchiveSourceStamp(At, At, null, "PointInTime")),
+            new ArchivePayload(
+                ArchiveSource.QueryStoreIndexEntry, "query-store",
+                ArchiveJson.SerializeCanonical(index), 3,
+                new ArchiveSourceStamp(At, At, null, "PointInTime")),
+        };
+        var manifest = ArchivePackageWriter.Preview(
+            "1.0.0", At, new ArchiveTarget("opaque", "alias"),
+            new ArchiveRedactionPolicy("default", false, false, false, []),
+            ["atlas-v1", "canonical-json-v1", "query-store-v1", "uncompressed-container-v1"],
+            [], new ArchiveLimits(1024 * 1024, 10, 100, 128, 10_000), payloads);
+        var path = Path.Combine(_directory, "undersized-chunk.ssca");
+        ArchivePackageWriter.Write(
+            path, manifest,
+            payloads.ToDictionary(value => value.Name, value => value.Bytes, StringComparer.Ordinal),
+            overwrite: false);
+
+        Assert.Throws<ArchiveValidationException>(() =>
+            ArchiveSource.Open(new ArchiveSourceOptions(_directory, Path.GetFileName(path))));
+    }
+
     private string WriteSimple(string name = "simple.ssca")
     {
         var built = Build([Payload()]);
@@ -464,6 +506,18 @@ public sealed class ArchivePackageTests : IDisposable
             ArchiveSource.AtlasSnapshotEntry, "atlas", ArchiveJson.SerializeCanonical(snapshot), 0,
             new ArchiveSourceStamp(At, At, null, "PointInTime"));
     }
+
+    private static QueryFamilySummaryV1 Family(string id) => new(
+        id,
+        "database",
+        $"hash-{id}",
+        null,
+        new QueryTextDescriptorV1(QueryTextAvailability.Restricted, null, null, "omitted"),
+        [],
+        "1", "1", "1", "1", "1",
+        At, At,
+        new QueryStoreEvidenceV1(
+            QueryStoreSource.Fixture, DataStatus.Available, At, At, "fixture", "aggregate"));
 
     private static (ArchiveManifest Manifest, IReadOnlyDictionary<string, byte[]> Payloads) Build(
         IReadOnlyList<ArchivePayload> payloads)
