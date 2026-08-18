@@ -17,7 +17,16 @@ public sealed record ConnectedSourceOptions(
     IReadOnlyList<string> KnownDatabases,
     SecretFileProviderOptions SecretFiles,
     AtlasCollectionOptions Atlas,
-    QueryStoreCollectionOptions QueryStore);
+    QueryStoreCollectionOptions QueryStore)
+{
+    /// <summary>
+    /// Set only when the profile came from <c>SQLSIMCITY_EDGE_SQL_CONNECTION_STRING</c>
+    /// and that connection string carried a password. It resolves that one secret
+    /// from memory instead of <see cref="SecretFiles"/>; see
+    /// <see cref="ConnectionStringProfile"/> for what an inline password gives up.
+    /// </summary>
+    public ISecretFileProvider? InlineSecrets { get; init; }
+}
 
 /// <summary>
 /// Immutable, validated connector configuration. Values come from prefixed environment variables;
@@ -130,6 +139,27 @@ public sealed record ConnectorOptions
         return options;
     }
 
+    /// <summary>
+    /// Profile fields a connection string already carries. Setting one alongside
+    /// <c>SQLSIMCITY_EDGE_SQL_CONNECTION_STRING</c> is rejected rather than
+    /// silently ignored, so an operator can never edit a value that has no effect.
+    /// </summary>
+    private static readonly string[] ConnectionStringProfileKeys =
+    [
+        "HOST", "INSTANCE", "PORT", "INITIAL_DATABASE", "AUTH_MODE", "USERNAME",
+        "PASSWORD_SECRET_FILE", "ENCRYPTION", "TRUST_SERVER_CERTIFICATE",
+        "HOST_NAME_IN_CERTIFICATE", "CONNECT_TIMEOUT_SECONDS", "COMMAND_TIMEOUT_SECONDS",
+        "MIN_POOL_SIZE", "MAX_POOL_SIZE",
+        // Authentication identity fields. USER_ASSIGNED_CLIENT_ID especially: a
+        // connection string expresses it as the managed-identity `User Id`, so
+        // leaving it out here would let an operator set it, see no error, and
+        // silently authenticate as the system-assigned identity instead. The
+        // rest are inert once AUTH_MODE is rejected, but are listed so the
+        // "never edit a value that has no effect" rule holds uniformly.
+        "USER_ASSIGNED_CLIENT_ID", "TENANT_ID", "CLIENT_ID", "FEDERATED_TOKEN_FILE",
+        "CLIENT_SECRET_FILE", "CERTIFICATE_SECRET_FILE", "CERTIFICATE_PASSWORD_SECRET_FILE",
+    ];
+
     private static ConnectedSourceOptions BuildConnected(
         IReadOnlyDictionary<string, string?> env,
         string targetId)
@@ -155,38 +185,37 @@ public sealed record ConnectorOptions
             SecretsDirectory = secretsDirectory,
             MaxSecretSizeBytes = maxSecretSize,
         };
-        var platform = ParseRequiredEnum<EnginePlatform>(Get("PLATFORM"), "SQL_PLATFORM");
+
+        var parsedConnectionString = ParseConnectionString(Get, targetId);
+
+        // A connection string cannot state the platform, so an Azure SQL endpoint
+        // is assumed to be Azure SQL Database. Managed Instance shares that host
+        // suffix and must always be stated explicitly.
+        var rawPlatform = Get("PLATFORM");
+        var platform = rawPlatform is null && parsedConnectionString is { } inferred
+            ? (inferred.IsAzureSqlHost ? EnginePlatform.AzureSqlDatabase : EnginePlatform.SqlServerOnPremises)
+            : ParseRequiredEnum<EnginePlatform>(rawPlatform, "SQL_PLATFORM");
         if (platform is EnginePlatform.Unknown or EnginePlatform.Unsupported)
             throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_PLATFORM must identify a supported configured platform.");
+
         var knownDatabases = ParseList(Get("KNOWN_DATABASES"));
+        if (knownDatabases.Length == 0 && platform == EnginePlatform.AzureSqlDatabase && parsedConnectionString is { } azure)
+        {
+            // Azure SQL Database enumerates only the connected database, so fall
+            // back to the single database the connection string already names.
+            knownDatabases = [azure.InitialDatabase];
+        }
+
         if (platform == EnginePlatform.AzureSqlDatabase && knownDatabases.Length == 0)
             throw new ConnectorConfigurationException("Azure SQL Database requires at least one configured known database.");
         if (knownDatabases.Length > AtlasCollectionOptions.MaximumDatabases)
             throw new ConnectorConfigurationException("Known database count exceeds the bounded maximum of 100.");
 
-        var initialDatabase = Get("INITIAL_DATABASE") ??
-            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_INITIAL_DATABASE is required.");
-        var authentication = BuildAuthentication(Get, secretsDirectory);
-        var profile = new ConnectionProfile(
-            new ConnectionProfileId($"edge:{targetId}"),
-            new ServerAddress(
-                Get("HOST") ?? throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_HOST is required."),
-                Get("INSTANCE"),
-                ParseNullableInt(Get("PORT"), "SQL_PORT")),
-            initialDatabase,
-            new ConnectionTimeouts(
-                ParseIntStrict(Get("CONNECT_TIMEOUT_SECONDS"), 15, "SQL_CONNECT_TIMEOUT_SECONDS"),
-                ParseIntStrict(Get("COMMAND_TIMEOUT_SECONDS"), 30, "SQL_COMMAND_TIMEOUT_SECONDS")),
-            new PoolBounds(
-                ParseIntStrict(Get("MIN_POOL_SIZE"), 0, "SQL_MIN_POOL_SIZE"),
-                ParseIntStrict(Get("MAX_POOL_SIZE"), 20, "SQL_MAX_POOL_SIZE")),
-            ParseRequiredEnum<EncryptionPolicy>(Get("ENCRYPTION") ?? "Mandatory", "SQL_ENCRYPTION"),
-            authentication,
-            Get("HOST_NAME_IN_CERTIFICATE"),
-            ParseBoolStrict(Get("TRUST_SERVER_CERTIFICATE"), false, "SQL_TRUST_SERVER_CERTIFICATE"));
+        var profile = parsedConnectionString?.Profile ?? BuildFieldConfiguredProfile(Get, targetId, secretsDirectory);
 
-        var displayName = Get("TARGET_DISPLAY_NAME") ??
-            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_TARGET_DISPLAY_NAME is required.");
+        var displayName = Get("TARGET_DISPLAY_NAME") ?? (parsedConnectionString is null
+            ? throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_TARGET_DISPLAY_NAME is required.")
+            : targetId);
         var atlas = new AtlasCollectionOptions
         {
             TargetId = targetId,
@@ -207,7 +236,75 @@ public sealed record ConnectorOptions
                 Get("QUERY_STORE_OVERLAP_MINUTES"), 65, "SQL_QUERY_STORE_OVERLAP_MINUTES")));
         queryStore.Validate();
         return new ConnectedSourceOptions(
-            profile, platform, displayName, knownDatabases, secretOptions, atlas, queryStore);
+            profile, platform, displayName, knownDatabases, secretOptions, atlas, queryStore)
+        {
+            InlineSecrets = parsedConnectionString?.InlineSecrets,
+        };
+    }
+
+    /// <summary>
+    /// Parses <c>SQLSIMCITY_EDGE_SQL_CONNECTION_STRING</c> when it is set. This is
+    /// the one deliberate exception to the connector's "no secret ever comes from
+    /// an environment variable" rule: it exists so a basic connection needs one
+    /// variable instead of a dozen plus a mounted file. The password still never
+    /// reaches a connection string, a log, or a diagnostic -- see
+    /// <see cref="ConnectionStringProfile"/> -- but it is readable by anything
+    /// that can read this process's environment and cannot be rotated without a
+    /// restart, so mounted secret files remain the deployment default.
+    /// </summary>
+    private static ConnectionStringProfile? ParseConnectionString(Func<string, string?> get, string targetId)
+    {
+        var connectionString = get("CONNECTION_STRING");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return null;
+
+        foreach (var key in ConnectionStringProfileKeys)
+        {
+            if (!string.IsNullOrEmpty(get(key)))
+                throw new ConnectorConfigurationException(
+                    $"SQLSIMCITY_EDGE_SQL_{key} cannot be combined with SQLSIMCITY_EDGE_SQL_CONNECTION_STRING; " +
+                    "configure the connection string alone, or remove it and configure every field explicitly.");
+        }
+
+        try
+        {
+            return ConnectionStringProfile.Parse(
+                connectionString.Trim(), new ConnectionProfileId($"edge:{targetId}"));
+        }
+        catch (ConnectionProfileValidationException ex)
+        {
+            // These messages name keywords and rules only, never a configured
+            // value, so relaying one cannot disclose the password.
+            throw new ConnectorConfigurationException(
+                $"SQLSIMCITY_EDGE_SQL_CONNECTION_STRING is invalid: {ex.Message}");
+        }
+    }
+
+    private static ConnectionProfile BuildFieldConfiguredProfile(
+        Func<string, string?> get,
+        string targetId,
+        string secretsDirectory)
+    {
+        var initialDatabase = get("INITIAL_DATABASE") ??
+            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_INITIAL_DATABASE is required.");
+        var authentication = BuildAuthentication(get, secretsDirectory);
+        return new ConnectionProfile(
+            new ConnectionProfileId($"edge:{targetId}"),
+            new ServerAddress(
+                get("HOST") ?? throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_HOST is required."),
+                get("INSTANCE"),
+                ParseNullableInt(get("PORT"), "SQL_PORT")),
+            initialDatabase,
+            new ConnectionTimeouts(
+                ParseIntStrict(get("CONNECT_TIMEOUT_SECONDS"), 15, "SQL_CONNECT_TIMEOUT_SECONDS"),
+                ParseIntStrict(get("COMMAND_TIMEOUT_SECONDS"), 30, "SQL_COMMAND_TIMEOUT_SECONDS")),
+            new PoolBounds(
+                ParseIntStrict(get("MIN_POOL_SIZE"), 0, "SQL_MIN_POOL_SIZE"),
+                ParseIntStrict(get("MAX_POOL_SIZE"), 20, "SQL_MAX_POOL_SIZE")),
+            ParseRequiredEnum<EncryptionPolicy>(get("ENCRYPTION") ?? "Mandatory", "SQL_ENCRYPTION"),
+            authentication,
+            get("HOST_NAME_IN_CERTIFICATE"),
+            ParseBoolStrict(get("TRUST_SERVER_CERTIFICATE"), false, "SQL_TRUST_SERVER_CERTIFICATE"));
     }
 
     private static AuthenticationStrategy BuildAuthentication(

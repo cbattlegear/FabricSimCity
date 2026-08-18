@@ -15,6 +15,33 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **Single connection string configuration** for every connected surface. One ordinary ADO.NET
+  connection string can now stand in for the ~15 individual connection settings plus a mounted
+  password file: `ConnectionStrings:SqlSimCity` (settable as `ConnectionStrings__SqlSimCity`),
+  `SQLSIMCITY_CONNECTION_STRING`, or a section-scoped `Atlas:ConnectionString` /
+  `LiveIncidents:Connection:ConnectionString`, plus `SQLSIMCITY_EDGE_SQL_CONNECTION_STRING` for the
+  edge connector. Supplying one turns connected Atlas and live incidents on by itself, so no mode
+  setting is also required; with none configured, fixtures remain the default. The string is parsed
+  into exactly the same immutable, fully validated `ConnectionProfile` the field-by-field path
+  produces and is then discarded, so every existing guarantee holds — the password is delivered as a
+  `SqlCredential` and never concatenated into a connection string, log, or exception;
+  `ApplicationIntent=ReadOnly` and the `SQLSimCity` application name are still forced; `Encrypt=false`
+  and infinite timeouts are still rejected; and only SQL login, Kerberos, and managed identity are
+  accepted (workload identity and service principal need a tenant id a connection string cannot
+  carry, and `Active Directory Default` remains banned). The engine platform is inferred from the host
+  name (`*.database.windows.net` means Azure SQL Database), Azure SQL `KnownDatabases` defaults to the
+  connection string's own database, and explicit configuration always wins over both. This is a
+  documented convenience, not the hardened path: an inline password is readable from the process
+  environment and cannot be rotated without a restart, so both the API and the connector log a
+  warning at startup when one is in use, and mounted secret files remain the production default.
+  Neither surface will combine a connection string with any field it already covers, rather than
+  letting one silently win — a real safeguard, since `ConnectionStrings__SqlSimCity` is a name some
+  hosting platforms inject automatically and would otherwise silently downgrade a hardened profile's
+  authentication, TLS trust, and mounted password file. `Max Pool Size` defaults to 20 (the field
+  path's ceiling) rather than SqlClient's 100, and `admin:`, `np:`, and `lpc:` data-source prefixes
+  are rejected rather than stripped, since the profile is always rebuilt as TCP. The connector's
+  prohibition on plaintext secret environment variables is unchanged.
+  See `SECURITY.md`, `docs/connected-mode.md`, and `docs/edge-connector.md`.
 - Outward-only **edge connector** for monitoring SQL Servers the central container cannot reach
   (`src/SqlSimCity.Edge`, `src/SqlSimCity.Edge.Connector`, `Dockerfile.connector`,
   `compose.edge.yaml`, `docs/edge-connector.md`). A connector near SQL Server connects outward over
@@ -81,6 +108,13 @@ First MVP release candidate. There is no tagged release yet.
 - A rejected lazy-chunk import no longer unmounts the application: every lazy
   surface is wrapped in an error boundary that renders a focused, announced
   alert with a reload action.
+- Connected live-incident sampling no longer fails on every cycle. The transaction-log probe
+  emits exact `total_log_size_bytes`/`used_log_space_bytes`, but the live-incident executor read
+  `total_log_size_mb`/`used_log_space_mb`, so every sample threw `IndexOutOfRangeException` against
+  a real server. It now reads the byte columns and converts to the megabytes the contract, findings
+  rule, and UI all expect. This was invisible to the unit tests, which substitute a fake probe
+  executor for the real `SqlDataReader` path, so a corpus-wide guard now asserts that every column
+  the Atlas and live-incident executors read by name is actually emitted somewhere in the probe SQL.
 
 ### Security
 
@@ -90,10 +124,11 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Known limitations
 
-- **No live SQL Server execution has been validated.** Connected-mode collection
-  is exercised only against fakes and deterministic fixtures; no real SQL Server,
-  Azure SQL Database, or Managed Instance target was available for end-to-end
-  validation.
+- **Live SQL Server validation is partial.** Connected Atlas collection and live-incident sampling
+  have now been exercised end to end against a real local SQL Server (Kerberos/integrated auth),
+  which is what surfaced the transaction-log column defect above. No Azure SQL Database or Managed
+  Instance target was available, so platform-specific behavior on those, and every Entra
+  authentication strategy, remains exercised only against fakes and deterministic fixtures.
 - GHCR image publication, SBOM, and provenance attestation are defined in the
   release workflow but are not executed as part of this candidate; their outputs
   are unverified until a tagged release runs.

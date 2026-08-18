@@ -7,17 +7,75 @@ namespace SqlSimCity.Api;
 
 public static class AtlasConfiguration
 {
-    public static bool IsConnected(IConfiguration configuration) =>
-        configuration.GetValue<string>("Atlas:Mode")?.Equals("Connected", StringComparison.OrdinalIgnoreCase) == true;
+    /// <summary>The section-scoped connection string key, which wins over the shared ones.</summary>
+    public const string ConnectionStringKey = "Atlas:ConnectionString";
 
-    public static AtlasCollectionOptions BuildCollectionOptions(IConfiguration configuration)
+    /// <summary>
+    /// Connected when <c>Atlas:Mode</c> says so, or when a connection string is
+    /// configured -- supplying one is itself an explicit statement that a real
+    /// target exists, so it does not also have to be paired with a mode.
+    /// </summary>
+    public static bool IsConnected(IConfiguration configuration) =>
+        configuration.GetValue<string>("Atlas:Mode")?.Equals("Connected", StringComparison.OrdinalIgnoreCase) == true
+        || ResolveConnectionString(configuration) is not null;
+
+    public static string? ResolveConnectionString(IConfiguration configuration) =>
+        SqlSimCityConnectionString.Resolve(configuration, ConnectionStringKey);
+
+    /// <summary>
+    /// The <c>Atlas:Connection</c> keys a connection string already supplies.
+    /// Configuring both is rejected rather than silently resolved. <c>ProfileId</c>
+    /// is absent on purpose: it is only a label, so it stays usable alongside one.
+    /// </summary>
+    private static readonly string[] ConnectionStringProfileKeys =
+    [
+        "Host", "Instance", "Port", "InitialDatabase",
+        "ConnectTimeoutSeconds", "CommandTimeoutSeconds", "MaxPoolSize",
+        "Encryption", "HostNameInCertificate", "TrustServerCertificate",
+        "Authentication",
+    ];
+
+    /// <summary>
+    /// Parses the configured connection string once, or returns <c>null</c> when
+    /// the field-by-field <c>Atlas:Connection</c> path is in use. Callers that
+    /// need it more than once pass the result back in rather than reparsing, so
+    /// an inline password is materialized as few times as possible.
+    /// </summary>
+    public static ConnectionStringProfile? TryParseConnectionString(IConfiguration configuration)
+    {
+        if (ResolveConnectionString(configuration) is not { } connectionString)
+        {
+            return null;
+        }
+
+        SqlSimCityConnectionString.EnsureNoFieldConflict(
+            configuration, "Atlas:Connection", ConnectionStringProfileKeys,
+            message => new InvalidOperationException(message));
+
+        return ConnectionStringProfile.Parse(connectionString, BuildProfileId(configuration));
+    }
+
+    public static AtlasCollectionOptions BuildCollectionOptions(
+        IConfiguration configuration,
+        ConnectionStringProfile? parsedConnectionString = null)
     {
         var section = configuration.GetSection("Atlas");
+        var configuredDatabases = section.GetSection("KnownDatabases").Get<string[]>() ?? [];
+        var parsed = parsedConnectionString ?? TryParseConnectionString(configuration);
+
+        // Azure SQL Database enumerates only the connected database, so a
+        // connection-string-only setup that named none falls back to the single
+        // database the connection string already identifies. On-premises and
+        // Managed Instance targets enumerate for themselves and need no default.
+        var knownDatabases = configuredDatabases.Length == 0 && parsed is { IsAzureSqlHost: true }
+            ? new[] { parsed.InitialDatabase }
+            : configuredDatabases;
+
         var options = new AtlasCollectionOptions
         {
             TargetId = section.GetValue<string>("TargetId") ?? "primary",
             DisplayName = section.GetValue<string>("DisplayName") ?? "SQL Server",
-            KnownDatabases = section.GetSection("KnownDatabases").Get<string[]>() ?? [],
+            KnownDatabases = knownDatabases,
             DatabaseConcurrency = section.GetValue<int?>("DatabaseConcurrency") ?? 4,
             QueryStoreWindow = TimeSpan.FromMinutes(section.GetValue<int?>("QueryStoreWindowMinutes") ?? 1_440),
             RefreshInterval = TimeSpan.FromSeconds(section.GetValue<int?>("RefreshIntervalSeconds") ?? 60),
@@ -27,8 +85,15 @@ public static class AtlasConfiguration
         return options;
     }
 
-    public static ConnectionProfile BuildProfile(IConfiguration configuration)
+    public static ConnectionProfile BuildProfile(
+        IConfiguration configuration,
+        ConnectionStringProfile? parsedConnectionString = null)
     {
+        if ((parsedConnectionString ?? TryParseConnectionString(configuration)) is { } parsed)
+        {
+            return parsed.Profile;
+        }
+
         var section = configuration.GetRequiredSection("Atlas:Connection");
         var authentication = BuildAuthentication(section.GetRequiredSection("Authentication"));
         return new ConnectionProfile(
@@ -48,11 +113,25 @@ public static class AtlasConfiguration
             section.GetValue<bool?>("TrustServerCertificate") ?? false);
     }
 
+    /// <summary>
+    /// The secret provider the Atlas connection factory uses: an in-memory one
+    /// carrying the connection string's own password when there is one, and the
+    /// mounted secrets directory otherwise.
+    /// </summary>
+    public static ISecretFileProvider BuildSecretProvider(
+        IConfiguration configuration,
+        ConnectionStringProfile? parsedConnectionString = null) =>
+        (parsedConnectionString ?? TryParseConnectionString(configuration))?.InlineSecrets
+        ?? new FileSecretFileProvider(BuildSecretOptions(configuration));
+
     public static SecretFileProviderOptions BuildSecretOptions(IConfiguration configuration) => new()
     {
         SecretsDirectory = configuration.GetValue<string>("Atlas:SecretsDirectory")
             ?? SecretFileProviderOptions.DefaultSecretsDirectory,
     };
+
+    private static ConnectionProfileId BuildProfileId(IConfiguration configuration) =>
+        new(configuration.GetValue<string>("Atlas:Connection:ProfileId") ?? "atlas-primary");
 
     private static AuthenticationStrategy BuildAuthentication(IConfiguration section)
     {

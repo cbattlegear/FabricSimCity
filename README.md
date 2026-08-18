@@ -46,9 +46,23 @@ docker compose up --build
 
 ### Connect to SQL Server
 
-SQLSimCity intentionally does **not** accept a raw semicolon-delimited connection string because
-those strings commonly expose passwords. Set the connection fields as environment variables and
-mount the password as a read-only file secret.
+The fastest way to point SQLSimCity at a real server is one connection string:
+
+```powershell
+docker run --rm --name sqlsimcity `
+  --publish 127.0.0.1:8080:8080 `
+  --env ConnectionStrings__SqlSimCity="Server=sql01.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=$password;TrustServerCertificate=true" `
+  sqlsimcity:local
+```
+
+Setting it turns connected mode on by itself. It is parsed into the same validated connection
+profile the settings below produce, so the password is still passed as a `SqlCredential` and never
+lands in a connection string, log, or diagnostic, and the session is still read-only.
+
+It is a convenience, not the hardened path: a password in an environment variable is readable by
+anything that can read the process environment and cannot be rotated without a restart. SQLSimCity
+logs a warning at startup when one is configured. For production, set the connection fields
+individually and mount the password as a read-only file secret.
 
 A conventional connection string such as:
 
