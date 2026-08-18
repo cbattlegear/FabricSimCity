@@ -29,7 +29,7 @@ public sealed class IncrementalQueryStoreCollectorTests
     public async Task PageFailureAbortsWithoutAdvancingWatermark()
     {
         var source = new FakeSource { FailKind = QueryStoreFactKind.Runtime };
-        var prior = new QueryStoreWatermark("db", "epoch", Through.AddHours(-2),
+        var prior = new QueryStoreWatermark("db", "signature", "epoch", Through.AddHours(-2),
             new Dictionary<QueryStoreFactKind, string?>());
         var sink = new FakeSink { Watermark = prior };
         using var collector = new IncrementalQueryStoreCollector(
@@ -51,7 +51,7 @@ public sealed class IncrementalQueryStoreCollectorTests
         var sink = new FakeSink
         {
             Watermark = new QueryStoreWatermark(
-                "db", "epoch", Through.AddHours(-2), new Dictionary<QueryStoreFactKind, string?>()),
+                "db", "signature", "epoch", Through.AddHours(-2), new Dictionary<QueryStoreFactKind, string?>()),
         };
         using var collector = new IncrementalQueryStoreCollector(
             source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
@@ -73,7 +73,7 @@ public sealed class IncrementalQueryStoreCollectorTests
         var sink = new FakeSink
         {
             Watermark = new QueryStoreWatermark(
-                "db", "epoch", Through.AddMinutes(-1),
+                "db", "signature", "epoch", Through.AddMinutes(-1),
                 new Dictionary<QueryStoreFactKind, string?>(), LatestIntervalId: 500),
         };
         using var collector = new IncrementalQueryStoreCollector(
@@ -83,6 +83,27 @@ public sealed class IncrementalQueryStoreCollectorTests
 
         Assert.True(result.Databases[0].ResetDetected);
         Assert.Equal(2, sink.Watermark?.LatestIntervalId);
+    }
+
+    [Fact]
+    public async Task RepeatedResetsCreateDistinctPersistedEpochs()
+    {
+        var source = new FakeSource { State = State() with { LatestIntervalId = 2 } };
+        var sink = new FakeSink
+        {
+            Watermark = new QueryStoreWatermark(
+                "db", "epoch", "prior", Through.AddMinutes(-1),
+                new Dictionary<QueryStoreFactKind, string?>(), 500),
+        };
+        using var collector = new IncrementalQueryStoreCollector(
+            source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+
+        await collector.CollectAsync(["db"], Through);
+        source.State = State() with { LatestIntervalId = 1 };
+        await collector.CollectAsync(["db"], Through.AddMinutes(1));
+
+        Assert.Equal(2, sink.StorageEpochs.Count);
+        Assert.NotEqual(sink.StorageEpochs[0], sink.StorageEpochs[1]);
     }
 
     [Fact]
@@ -122,6 +143,32 @@ public sealed class IncrementalQueryStoreCollectorTests
         Assert.Equal(["active"], sink.ActiveBuckets.Select(bucket => bucket.Key.IntervalId));
     }
 
+    [Fact]
+    public async Task ReadCaptureSecondaryIsCollectedWhileUnknownIsNotZero()
+    {
+        var readable = new FakeSource
+        {
+            State = State() with { State = QueryStoreCollectionState.ReadCaptureSecondary },
+        };
+        var readableSink = new FakeSink();
+        using var readableCollector = new IncrementalQueryStoreCollector(
+            readable, readableSink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+        var readableResult = await readableCollector.CollectAsync(["db"], Through);
+
+        var unknown = new FakeSource
+        {
+            State = State() with { State = QueryStoreCollectionState.Unknown },
+        };
+        var unknownSink = new FakeSink();
+        using var unknownCollector = new IncrementalQueryStoreCollector(
+            unknown, unknownSink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+        var unknownResult = await unknownCollector.CollectAsync(["db"], Through);
+
+        Assert.True(readableResult.Databases[0].PageCount > 0);
+        Assert.Equal(QueryStoreCollectionState.Unknown, unknownResult.Databases[0].State);
+        Assert.Equal(0, unknownResult.Databases[0].PageCount);
+    }
+
     private static QueryStoreFactPage Page(QueryStoreFactKind kind, string? next) =>
         new(kind, [], next, false);
 
@@ -139,7 +186,7 @@ public sealed class IncrementalQueryStoreCollectorTests
         public Dictionary<(QueryStoreFactKind, string?), QueryStoreFactPage> Pages { get; } = [];
         public List<DateTimeOffset> Starts { get; } = [];
         public QueryStoreFactKind? FailKind { get; init; }
-        public QueryStoreDatabaseState State { get; init; } = IncrementalQueryStoreCollectorTests.State();
+        public QueryStoreDatabaseState State { get; set; } = IncrementalQueryStoreCollectorTests.State();
         public bool BlockState { get; init; }
         public TaskCompletionSource StateEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -183,15 +230,18 @@ public sealed class IncrementalQueryStoreCollectorTests
         public bool Committed { get; private set; }
         public bool Aborted { get; private set; }
         public bool Published { get; private set; }
+        public List<string> StorageEpochs { get; } = [];
         public List<AggregatedRuntimeBucket> ActiveBuckets { get; } = [];
         public List<AggregatedRuntimeBucket> ClosedBuckets { get; } = [];
 
         public Task<QueryStoreWatermark?> GetWatermarkAsync(string databaseId, CancellationToken cancellationToken) =>
             Task.FromResult(Watermark);
         public Task BeginDatabaseCycleAsync(
-            QueryStoreDatabaseState state, bool resetDetected, CancellationToken cancellationToken)
+            QueryStoreDatabaseState state, string storageEpoch, bool resetDetected,
+            CancellationToken cancellationToken)
         {
             ResetDetected = resetDetected;
+            StorageEpochs.Add(storageEpoch);
             return Task.CompletedTask;
         }
         public Task StageFactsAsync(

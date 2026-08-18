@@ -4,11 +4,14 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
+using Azure.Identity;
 using Microsoft.Data.SqlClient;
 using SqlSimCity.Collection.Catalog;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.SqlServer;
+using SqlSimCity.SqlServer.Auth;
+using SqlSimCity.SqlServer.Secrets;
 
 namespace SqlSimCity.Collection.QueryStore;
 
@@ -25,16 +28,36 @@ public sealed class SqlQueryStoreIncrementalSource(
 
     public async Task<IReadOnlyList<string>> DiscoverDatabasesAsync(CancellationToken cancellationToken)
     {
-        return await ExecuteAsync(
-            "server.database_discovery", "master", null, null,
-            async (reader, token) =>
-            {
-                var names = new List<string>();
-                while (await reader.ReadAsync(token).ConfigureAwait(false))
-                    if (Convert.ToBoolean(reader["is_query_store_on"], CultureInfo.InvariantCulture))
-                        names.Add((string)reader["database_name"]);
-                return (IReadOnlyList<string>)names;
-            }, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await ExecuteAsync(
+                "server.database_discovery", "master", null, null,
+                async (reader, token) =>
+                {
+                    var names = new List<string>();
+                    while (await reader.ReadAsync(token).ConfigureAwait(false))
+                        if (Convert.ToBoolean(reader["is_query_store_on"], CultureInfo.InvariantCulture))
+                            names.Add((string)reader["database_name"]);
+                    return (IReadOnlyList<string>)names;
+                }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProbeExecutionException ex) when (
+            IsExpectedMasterFallback(ex) &&
+            !string.Equals(profile.InitialDatabase, "master", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ExecuteAsync(
+                "server.database_identity_current", "database", profile.InitialDatabase, null,
+                async (reader, token) =>
+                {
+                    if (!await reader.ReadAsync(token).ConfigureAwait(false))
+                        throw new ProbeNotProbedException(
+                            "The configured database could not be identified.");
+                    if (!Convert.ToBoolean(reader["is_query_store_on"], CultureInfo.InvariantCulture))
+                        throw new ProbeNotProbedException(
+                            "Query Store is not enabled in the configured contained database.");
+                    return (IReadOnlyList<string>)[(string)reader["database_name"]];
+                }, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async Task<QueryStoreDatabaseState> GetStateAsync(
@@ -51,9 +74,9 @@ public sealed class SqlQueryStoreIncrementalSource(
                 async (reader, token) =>
                 {
                     if (!await reader.ReadAsync(token).ConfigureAwait(false))
-                        return (Actual: "OFF", Reason: "Query Store options returned no row.");
+                        return (Actual: (string?)null, Reason: "Query Store options returned no row; state is unknown.");
                     return (
-                        Actual: Convert.ToString(reader["actual_state_desc"], CultureInfo.InvariantCulture) ?? "UNKNOWN",
+                        Actual: Convert.ToString(reader["actual_state_desc"], CultureInfo.InvariantCulture),
                         Reason: "Query Store operational state was read from sys.database_query_store_options.");
                 }, cancellationToken).ConfigureAwait(false);
             var intervalRange = await ExecuteAsync(
@@ -68,13 +91,14 @@ public sealed class SqlQueryStoreIncrementalSource(
                         LatestId: reader["latest_interval_id"] is DBNull
                             ? null : Convert.ToInt64(reader["latest_interval_id"], CultureInfo.InvariantCulture));
                 }, cancellationToken).ConfigureAwait(false);
-            var state = options.Actual.ToUpperInvariant() switch
+            var state = options.Actual?.ToUpperInvariant() switch
             {
                 "READ_WRITE" => QueryStoreCollectionState.ReadWrite,
                 "READ_ONLY" => QueryStoreCollectionState.ReadOnly,
+                "READ_CAPTURE_SECONDARY" => QueryStoreCollectionState.ReadCaptureSecondary,
                 "OFF" => QueryStoreCollectionState.Off,
                 "ERROR" => QueryStoreCollectionState.Error,
-                _ => QueryStoreCollectionState.Error,
+                _ => QueryStoreCollectionState.Unknown,
             };
             return new QueryStoreDatabaseState(
                 databaseId, state, $"query-store:{databaseId}", intervalRange.Oldest, timeProvider.GetUtcNow(),
@@ -140,6 +164,7 @@ public sealed class SqlQueryStoreIncrementalSource(
                 return new QueryTextPayload(
                     reader["query_sql_text"] is DBNull ? null : (string)reader["query_sql_text"],
                     Convert.ToBoolean(reader["is_part_of_encrypted_module"], CultureInfo.InvariantCulture),
+                    capabilities.HasRestrictedText &&
                     Convert.ToBoolean(reader["has_restricted_text"], CultureInfo.InvariantCulture));
             }, cancellationToken).ConfigureAwait(false);
     }
@@ -176,7 +201,8 @@ public sealed class SqlQueryStoreIncrementalSource(
             reader => new QueryIdentityFact(
                 Id(reader["query_id"]), Id(reader["query_text_id"]), Id(reader["context_settings_id"]),
                 Hash(reader["query_hash"]), ReadDateTimeOffset(reader["last_execution_time"]),
-                Bool(reader["is_part_of_encrypted_module"]), Bool(reader["has_restricted_text"]),
+                Bool(reader["is_part_of_encrypted_module"]),
+                capabilities.HasRestrictedText && Bool(reader["has_restricted_text"]),
                 NullableHex(reader["set_options"]), NullableString(reader["language_id"]),
                 NullableString(reader["date_format"]), NullableString(reader["date_first"])),
             cancellationToken).ConfigureAwait(false);
@@ -326,18 +352,49 @@ public sealed class SqlQueryStoreIncrementalSource(
             if (_capabilities is { } lockedCached &&
                 lockedCached.CompatibilityByDatabase.TryGetValue(databaseId, out compatibility))
                 return lockedCached with { CompatibilityLevel = compatibility };
-            var identity = await ExecuteAsync(
-                "server.identity", "master", null, null,
+            if (_capabilities is { } partialCache)
+            {
+                var currentCompatibility = await ReadCurrentCompatibilityAsync(
+                    databaseId, cancellationToken).ConfigureAwait(false);
+                var expanded = new Dictionary<string, int>(
+                    partialCache.CompatibilityByDatabase, StringComparer.Ordinal)
+                {
+                    [databaseId] = currentCompatibility,
+                };
+                _capabilities = partialCache with
+                {
+                    CompatibilityLevel = currentCompatibility,
+                    CompatibilityByDatabase = expanded,
+                };
+                return _capabilities;
+            }
+
+            async Task<(int Major, int Edition, int Compatibility)> ReadIdentityAsync(
+                string database)
+                => await ExecuteAsync(
+                "server.identity_current", "database", database, null,
                 async (reader, token) =>
                 {
                     if (!await reader.ReadAsync(token).ConfigureAwait(false))
                         throw new ProbeObjectUnavailableException("Server identity returned no row.", null, null);
-                    var version = (Convert.ToString(reader["product_version"], CultureInfo.InvariantCulture) ?? "0").Split('.')[0];
+                    var version = Convert.ToString(
+                        reader["product_major_version"], CultureInfo.InvariantCulture);
+                    if (string.IsNullOrWhiteSpace(version))
+                        version = (Convert.ToString(
+                            reader["product_version"], CultureInfo.InvariantCulture) ?? "0").Split('.')[0];
                     return (Major: int.Parse(version, CultureInfo.InvariantCulture),
-                        Edition: Convert.ToInt32(reader["engine_edition"], CultureInfo.InvariantCulture));
+                        Edition: Convert.ToInt32(reader["engine_edition"], CultureInfo.InvariantCulture),
+                        Compatibility: Convert.ToInt32(
+                            reader["compatibility_level"], CultureInfo.InvariantCulture));
                 }, cancellationToken).ConfigureAwait(false);
-            var databases = await ExecuteAsync(
-                "server.database_discovery", "master", null, null,
+
+            var identity = await ReadIdentityAsync(databaseId).ConfigureAwait(false);
+
+            Dictionary<string, int> databases;
+            try
+            {
+                databases = await ExecuteAsync(
+                    "server.database_discovery", "master", null, null,
                 async (reader, token) =>
                 {
                     var result = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -346,6 +403,13 @@ public sealed class SqlQueryStoreIncrementalSource(
                             Convert.ToInt32(reader["compatibility_level"], CultureInfo.InvariantCulture);
                     return result;
                 }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ProbeExecutionException ex) when (IsExpectedMasterFallback(ex))
+            {
+                databases = new Dictionary<string, int>(StringComparer.Ordinal);
+            }
+            if (!databases.ContainsKey(databaseId))
+                databases[databaseId] = identity.Compatibility;
             var metadata = await ExecuteAsync(
                 "capability.query_store_plan_metadata", "database", databaseId, null,
                 async (reader, token) =>
@@ -372,6 +436,18 @@ public sealed class SqlQueryStoreIncrementalSource(
             _capabilityGate.Release();
         }
     }
+
+    private Task<int> ReadCurrentCompatibilityAsync(
+        string databaseId, CancellationToken cancellationToken) =>
+        ExecuteAsync(
+            "server.identity_current", "database", databaseId, null,
+            async (reader, token) =>
+            {
+                if (!await reader.ReadAsync(token).ConfigureAwait(false))
+                    throw new ProbeObjectUnavailableException(
+                        "Current database identity returned no row.", null, null);
+                return Convert.ToInt32(reader["compatibility_level"], CultureInfo.InvariantCulture);
+            }, cancellationToken);
 
     private async Task<List<T>> ReadManyAsync<T>(
         string probeId,
@@ -424,7 +500,31 @@ public sealed class SqlQueryStoreIncrementalSource(
         {
             throw;
         }
+        catch (SecretResolutionException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "A required authentication secret is unavailable.", null, null, ex);
+        }
+        catch (AuthenticationConfigurationException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "The configured authentication strategy could not be initialized.", null, null, ex);
+        }
+        catch (CredentialUnavailableException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "The configured Microsoft Entra credential was unavailable.", null, null, ex);
+        }
+        catch (AuthenticationFailedException ex)
+        {
+            throw new ProbeAuthenticationException(
+                "The configured Microsoft Entra authentication failed.", null, null, ex);
+        }
     }
+
+    private static bool IsExpectedMasterFallback(ProbeExecutionException exception) =>
+        exception is ProbePermissionDeniedException or ProbeObjectUnavailableException or
+            ProbeDatabaseUnavailableException;
 
     private static void BindParameters(
         SqlCommand command,
@@ -510,7 +610,7 @@ public sealed class SqlQueryStoreIncrementalSource(
         int MajorVersion,
         int EngineEdition,
         int CompatibilityLevel,
-        IReadOnlyDictionary<string, int> CompatibilityByDatabase,
+        Dictionary<string, int> CompatibilityByDatabase,
         bool HasReplicaRuntimeColumn,
         bool HasVariantView,
         bool HasReplicaView,

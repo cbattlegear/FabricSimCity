@@ -129,6 +129,36 @@ public sealed class ShowplanParserTests
         Assert.Contains(comparison.Changes, change => change.Path == "root/warnings");
     }
 
+    [Fact]
+    public async Task SiblingNodeIdsDoNotMatterButParsedChildOrderDoes()
+    {
+        const string first = """
+            <ShowPlanXML><RelOp NodeId="0" LogicalOp="Join" PhysicalOp="Nested Loops">
+              <RelOp NodeId="1" LogicalOp="Scan A" PhysicalOp="Index Scan" />
+              <RelOp NodeId="2" LogicalOp="Scan B" PhysicalOp="Table Scan" />
+            </RelOp></ShowPlanXML>
+            """;
+        const string renumbered = """
+            <ShowPlanXML><RelOp NodeId="90" LogicalOp="Join" PhysicalOp="Nested Loops">
+              <RelOp NodeId="44" LogicalOp="Scan A" PhysicalOp="Index Scan" />
+              <RelOp NodeId="7" LogicalOp="Scan B" PhysicalOp="Table Scan" />
+            </RelOp></ShowPlanXML>
+            """;
+        const string reversed = """
+            <ShowPlanXML><RelOp NodeId="90" LogicalOp="Join" PhysicalOp="Nested Loops">
+              <RelOp NodeId="7" LogicalOp="Scan B" PhysicalOp="Table Scan" />
+              <RelOp NodeId="44" LogicalOp="Scan A" PhysicalOp="Index Scan" />
+            </RelOp></ShowPlanXML>
+            """;
+        var parser = new SecureShowplanParser();
+        var a = await parser.ParseAsync("a", first);
+        var b = await parser.ParseAsync("b", renumbered);
+        var c = await parser.ParseAsync("c", reversed);
+
+        Assert.Equal(a.StructuralFingerprint, b.StructuralFingerprint);
+        Assert.NotEqual(a.StructuralFingerprint, c.StructuralFingerprint);
+    }
+
     private static string Plan(string rootId, string childId, string physical) => $"""
         <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
           <BatchSequence><Batch><Statements><StmtSimple CardinalityEstimationModelVersion="160"><QueryPlan>

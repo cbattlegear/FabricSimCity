@@ -15,6 +15,7 @@ public sealed class ProtectedQueryStoreHistorySink(
     private readonly ConcurrentDictionary<string, DatabaseFacts> _staged = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, QueryStoreWatermark> _pendingWatermarks = new(StringComparer.Ordinal);
     private long _sequence;
+    public QueryStoreBuildInspection LastBuildInspection { get; private set; } = new(0, 0, 0, 0, 0, 0);
 
     public Task<QueryStoreWatermark?> GetWatermarkAsync(
         string databaseId,
@@ -23,6 +24,7 @@ public sealed class ProtectedQueryStoreHistorySink(
 
     public async Task BeginDatabaseCycleAsync(
         QueryStoreDatabaseState state,
+        string storageEpoch,
         bool resetDetected,
         CancellationToken cancellationToken)
     {
@@ -32,9 +34,12 @@ public sealed class ProtectedQueryStoreHistorySink(
             ? existing.Clone() : new DatabaseFacts(state.DatabaseId);
         if (resetDetected)
         {
-            current.ArchivedFamilies.AddRange(
-                BuildCurrentFamilies(current, state.ObservedAt)
-                    .Select(detail => Archive(detail, current.CurrentEpoch)));
+            var archivedIds = current.ArchivedFamilies.Select(detail => detail.Family.FamilyId)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (var archived in BuildCurrentFamilies(current, state.ObservedAt, out _)
+                         .Select(detail => Archive(detail, current.CurrentEpoch)))
+                if (archivedIds.Add(archived.Family.FamilyId))
+                    current.ArchivedFamilies.Add(archived);
             current.Identities.Clear();
             current.Plans.Clear();
             current.Runtime.Clear();
@@ -43,6 +48,8 @@ public sealed class ProtectedQueryStoreHistorySink(
             current.Replicas.Clear();
             current.Text.Clear();
         }
+
+        PruneCommitted(current, state.ObservedAt);
         var activeBuckets = current.Runtime.Where(pair => pair.Value.ActiveInterval).ToArray();
         var activeWaitKeys = activeBuckets.Select(pair => WaitBucketKey(pair.Value)).ToHashSet();
         foreach (var key in activeBuckets.Select(pair => pair.Key))
@@ -51,8 +58,7 @@ public sealed class ProtectedQueryStoreHistorySink(
                      activeWaitKeys.Contains(WaitBucketKey(pair.Value))).Select(pair => pair.Key).ToArray())
             current.Waits.Remove(wait);
         current.State = state;
-        current.CurrentEpoch = state.ResetEpoch;
-        if (resetDetected) current.ResetEpochs.Add(state.ResetEpoch);
+        current.CurrentEpoch = storageEpoch;
         _staged[state.DatabaseId] = current;
     }
 
@@ -132,10 +138,14 @@ public sealed class ProtectedQueryStoreHistorySink(
         await EnsureLoadedAsync(cancellationToken).ConfigureAwait(false);
         var publishedAt = result.CompletedAt;
         var sequence = Interlocked.Increment(ref _sequence);
+        var inspections = new List<QueryStoreBuildInspection>();
         var details = _committed.Values
-            .SelectMany(state => BuildFamilies(state, publishedAt))
+            .SelectMany(state => BuildFamilies(state, publishedAt, inspections))
             .OrderBy(detail => detail.Family.FamilyId, StringComparer.Ordinal)
             .ToArray();
+        LastBuildInspection = inspections.Aggregate(
+            new QueryStoreBuildInspection(0, 0, 0, 0, 0, 0),
+            (sum, value) => sum + value);
         var statuses = result.Databases.Select(item =>
         {
             var state = _committed.TryGetValue(item.DatabaseId, out var facts) ? facts.State : null;
@@ -183,19 +193,157 @@ public sealed class ProtectedQueryStoreHistorySink(
         _staged.TryGetValue(databaseId, out var state)
             ? state : throw new InvalidOperationException("BeginDatabaseCycleAsync must precede staging.");
 
-    private static IEnumerable<QueryFamilyDetailV1> BuildFamilies(DatabaseFacts state, DateTimeOffset observedAt)
+    private static QueryFamilyDetailV1[] BuildFamilies(
+        DatabaseFacts state,
+        DateTimeOffset observedAt,
+        List<QueryStoreBuildInspection> inspections)
     {
-        foreach (var archived in state.ArchivedFamilies) yield return archived;
-        foreach (var current in BuildCurrentFamilies(state, observedAt)) yield return current;
+        var current = BuildCurrentFamilies(state, observedAt, out var inspection);
+        inspections.Add(inspection);
+        return state.ArchivedFamilies.Concat(current).ToArray();
     }
 
-    private static IEnumerable<QueryFamilyDetailV1> BuildCurrentFamilies(
-        DatabaseFacts state,
+    private static void PruneCommitted(DatabaseFacts state, DateTimeOffset observedAt)
+    {
+        var cutoff = observedAt.AddDays(-90);
+        for (var index = state.ArchivedFamilies.Count - 1; index >= 0; index--)
+        {
+            var archived = state.ArchivedFamilies[index];
+            if (archived.Family.LastObservedAt < cutoff)
+            {
+                state.ArchivedFamilies.RemoveAt(index);
+                continue;
+            }
+            state.ArchivedFamilies[index] = WithRuntimeSummary(
+                archived, RetainArchivedRuntime(archived.Runtime, observedAt), cutoff);
+        }
+        foreach (var key in state.Runtime.Where(pair => pair.Value.Bucket.Key.IntervalEnd < cutoff)
+                     .Select(pair => pair.Key).ToArray())
+            state.Runtime.Remove(key);
+        var runtimeKeys = state.Runtime.Values.Select(WaitBucketKey).ToHashSet();
+        foreach (var key in state.Waits.Where(pair => !runtimeKeys.Contains(WaitBucketKey(pair.Value)))
+                     .Select(pair => pair.Key).ToArray())
+            state.Waits.Remove(key);
+        var retainedPlans = state.Runtime.Values.Select(value => value.Bucket.Key.PlanId)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var key in state.Plans.Where(pair =>
+                     pair.Value.LastExecutionAt < cutoff && !retainedPlans.Contains(pair.Key))
+                     .Select(pair => pair.Key).ToArray())
+            state.Plans.Remove(key);
+        var retainedQueries = state.Plans.Values.Select(plan => plan.QueryId).ToHashSet(StringComparer.Ordinal);
+        foreach (var key in state.Identities.Where(pair =>
+                     pair.Value.LastExecutionAt < cutoff && !retainedQueries.Contains(pair.Key))
+                     .Select(pair => pair.Key).ToArray())
+            state.Identities.Remove(key);
+        foreach (var key in state.Variants.Where(pair =>
+                     !state.Identities.ContainsKey(pair.Value.VariantQueryId) ||
+                     !state.Identities.ContainsKey(pair.Value.ParentQueryId))
+                     .Select(pair => pair.Key).ToArray())
+            state.Variants.Remove(key);
+        var textIds = state.Identities.Values.Select(identity => identity.QueryTextId)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var key in state.Text.Keys.Where(key => !textIds.Contains(key)).ToArray())
+            state.Text.Remove(key);
+    }
+
+    private static RuntimeBucketV1[] RetainArchivedRuntime(
+        IReadOnlyList<RuntimeBucketV1> runtime,
         DateTimeOffset observedAt)
+    {
+        var detailCutoff = observedAt.AddDays(-7);
+        var retentionCutoff = observedAt.AddDays(-90);
+        var retained = runtime.Where(bucket => bucket.IntervalEnd >= detailCutoff).ToList();
+        foreach (var group in runtime.Where(bucket =>
+                     bucket.IntervalEnd >= retentionCutoff && bucket.IntervalEnd < detailCutoff)
+                 .GroupBy(bucket => new
+                 {
+                     bucket.EpochId,
+                     bucket.PlanId,
+                     Hour = Hour(bucket.IntervalStart),
+                     bucket.ExecutionType,
+                     bucket.ReplicaGroupId,
+                 }))
+        {
+            var aggregate = QueryStoreRuntimeAggregator.Aggregate(group.Select(bucket =>
+                new RuntimeStatInput(
+                    bucket.PlanId, bucket.IntervalId, bucket.IntervalStart, bucket.IntervalEnd,
+                    bucket.ExecutionType, bucket.ReplicaGroupId,
+                    BigInteger.Parse(bucket.ExecutionCount, CultureInfo.InvariantCulture),
+                    bucket.AverageDurationMicroseconds, bucket.AverageCpuMicroseconds,
+                    bucket.AverageLogicalReads8KiBPages))).Single();
+            var waits = group.SelectMany(bucket => bucket.WaitMilliseconds)
+                .GroupBy(pair => pair.Key, StringComparer.Ordinal)
+                .ToDictionary(
+                    pairs => pairs.Key,
+                    pairs => pairs.Aggregate(BigInteger.Zero,
+                            (sum, pair) => sum + BigInteger.Parse(pair.Value, CultureInfo.InvariantCulture))
+                        .ToString(CultureInfo.InvariantCulture),
+                    StringComparer.Ordinal);
+            retained.Add(new RuntimeBucketV1(
+                aggregate.Key.PlanId, $"hour:{group.Key.Hour.UtcTicks}", group.Key.EpochId,
+                group.Key.Hour, group.Key.Hour.AddHours(1), group.Key.ExecutionType,
+                group.Key.ReplicaGroupId, aggregate.ExecutionCount.ToString(CultureInfo.InvariantCulture),
+                aggregate.AverageDurationMicroseconds, aggregate.AverageCpuMicroseconds,
+                aggregate.AverageLogicalReads8KiBPages, aggregate.TotalDurationMicroseconds,
+                aggregate.TotalCpuMicroseconds, aggregate.TotalLogicalReads8KiBPages, waits,
+                group.OrderByDescending(bucket => bucket.IntervalEnd).First().Evidence));
+        }
+        return retained.OrderBy(bucket => bucket.IntervalStart)
+            .ThenBy(bucket => bucket.PlanId, StringComparer.Ordinal).ToArray();
+    }
+
+    private static QueryFamilyDetailV1 WithRuntimeSummary(
+        QueryFamilyDetailV1 detail,
+        RuntimeBucketV1[] runtime,
+        DateTimeOffset cutoff)
+    {
+        var count = runtime.Aggregate(
+            BigInteger.Zero,
+            (sum, bucket) => sum + BigInteger.Parse(bucket.ExecutionCount, CultureInfo.InvariantCulture));
+        var plansWithRuntime = runtime.Select(bucket => bucket.PlanId).ToHashSet(StringComparer.Ordinal);
+        return detail with
+        {
+            Family = detail.Family with
+            {
+                ExecutionCount = count.ToString(CultureInfo.InvariantCulture),
+                TotalCpuMicroseconds = SumExact(runtime.Select(bucket => bucket.TotalCpuMicroseconds)),
+                TotalDurationMicroseconds = SumExact(runtime.Select(bucket => bucket.TotalDurationMicroseconds)),
+                TotalLogicalReads8KiBPages = SumExact(
+                    runtime.Select(bucket => bucket.TotalLogicalReads8KiBPages)),
+                TotalWaitMilliseconds = SumExact(
+                    runtime.SelectMany(bucket => bucket.WaitMilliseconds.Values)),
+                FirstObservedAt = runtime.Length > 0
+                    ? runtime[0].IntervalStart : detail.Family.FirstObservedAt,
+                LastObservedAt = runtime.Length > 0
+                    ? runtime[^1].IntervalEnd : detail.Family.LastObservedAt,
+            },
+            Plans = detail.Plans.Where(plan =>
+                plan.LastExecutionAt >= cutoff ||
+                plansWithRuntime.Contains(plan.PlanId)).ToArray(),
+            Runtime = runtime,
+        };
+    }
+
+    private static List<QueryFamilyDetailV1> BuildCurrentFamilies(
+        DatabaseFacts state,
+        DateTimeOffset observedAt,
+        out QueryStoreBuildInspection inspection)
     {
         var queryToParent = state.Variants.Values.ToDictionary(
             variant => variant.VariantQueryId, variant => variant.ParentQueryId, StringComparer.Ordinal);
         var identitiesById = state.Identities;
+        var variantsByParent = state.Variants.Values.ToLookup(
+            variant => variant.ParentQueryId, StringComparer.Ordinal);
+        var plansByQuery = state.Plans.Values.ToLookup(plan => plan.QueryId, StringComparer.Ordinal);
+        var retainedRuntime = RetainedRuntime(state, observedAt)
+            .Where(bucket => bucket.Epoch == state.CurrentEpoch).ToArray();
+        var runtimeByPlan = retainedRuntime.ToLookup(
+            bucket => bucket.Bucket.Key.PlanId, StringComparer.Ordinal);
+        var waitsByBucket = BuildWaitIndex(state.Waits.Values);
+        var planLookups = 0;
+        var runtimeLookups = 0;
+        var waitLookups = 0;
+        var results = new List<QueryFamilyDetailV1>();
         var groups = identitiesById.Values.GroupBy(identity =>
         {
             var effective = queryToParent.TryGetValue(identity.QueryId, out var parent) &&
@@ -211,24 +359,35 @@ public sealed class ProtectedQueryStoreHistorySink(
         {
             var identities = group.ToArray();
             var queryIds = identities.Select(item => item.QueryId).ToHashSet(StringComparer.Ordinal);
-            foreach (var variant in state.Variants.Values.Where(v => queryIds.Contains(v.ParentQueryId)))
-                queryIds.Add(variant.VariantQueryId);
+            foreach (var parentId in queryIds.ToArray())
+                foreach (var variant in variantsByParent[parentId])
+                    queryIds.Add(variant.VariantQueryId);
             var physicalIdentities = queryIds
                 .Select(queryId => identitiesById.GetValueOrDefault(queryId))
                 .Where(identity => identity is not null)
                 .Cast<QueryIdentityFact>()
                 .DistinctBy(identity => identity.QueryId)
                 .ToArray();
-            var rawPlans = state.Plans.Values.Where(plan => queryIds.Contains(plan.QueryId))
+            var rawPlans = queryIds.SelectMany(queryId =>
+                {
+                    planLookups++;
+                    return plansByQuery[queryId];
+                })
                 .OrderByDescending(plan => plan.LastExecutionAt)
                 .ToArray();
             var planIds = rawPlans.Where(plan => plan.PlanType is not QueryPlanType.Dispatcher)
                 .Select(plan => plan.PlanId).ToHashSet(StringComparer.Ordinal);
             var plans = rawPlans.Select(plan => PlanSummary(state.DatabaseId, plan, state.Variants)).ToArray();
-            var runtime = RetainedRuntime(state, observedAt)
-                .Where(bucket => bucket.Epoch == state.CurrentEpoch)
-                .Where(bucket => planIds.Contains(bucket.Bucket.Key.PlanId))
-                .Select(bucket => RuntimeContract(state, bucket, observedAt))
+            var runtime = planIds.SelectMany(planId =>
+                {
+                    runtimeLookups++;
+                    return runtimeByPlan[planId];
+                })
+                .Select(bucket =>
+                {
+                    waitLookups += bucket.SourceIntervalIds?.Count ?? 1;
+                    return RuntimeContract(state, bucket, observedAt, waitsByBucket);
+                })
                 .OrderBy(bucket => bucket.IntervalStart)
                 .ThenBy(bucket => bucket.PlanId, StringComparer.Ordinal)
                 .ToArray();
@@ -257,8 +416,12 @@ public sealed class ProtectedQueryStoreHistorySink(
                 count.ToString(CultureInfo.InvariantCulture), cpu, duration, reads, waits,
                 runtime.FirstOrDefault()?.IntervalStart ?? observedAt,
                 runtime.LastOrDefault()?.IntervalEnd ?? observedAt, evidence);
-            yield return new QueryFamilyDetailV1("1.0", summary, plans, runtime);
+            results.Add(new QueryFamilyDetailV1("1.0", summary, plans, runtime));
         }
+        inspection = new QueryStoreBuildInspection(
+            retainedRuntime.Length, state.Plans.Count, state.Waits.Count,
+            runtimeLookups, planLookups, waitLookups);
+        return results;
     }
 
     private static QueryFamilyDetailV1 Archive(QueryFamilyDetailV1 detail, string epoch)
@@ -318,29 +481,53 @@ public sealed class ProtectedQueryStoreHistorySink(
     private static RuntimeBucketV1 RuntimeContract(
         DatabaseFacts state,
         EpochRuntimeBucket value,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        IReadOnlyDictionary<WaitBucketIdentity, Dictionary<string, BigInteger>> waitsByBucket)
     {
         var bucket = value.Bucket;
-        var waits = state.Waits.Values.Where(wait =>
-            wait.Epoch == value.Epoch &&
-            wait.Value.PlanId == bucket.Key.PlanId &&
-            (value.SourceIntervalIds?.Contains(wait.Value.IntervalId) ??
-             wait.Value.IntervalId == bucket.Key.IntervalId) &&
-            wait.Value.ExecutionType == bucket.Key.ExecutionType &&
-            wait.Value.ReplicaGroupId == bucket.Key.ReplicaGroupId)
-            .GroupBy(wait => wait.Value.WaitCategory)
-            .ToDictionary(group => group.Key,
-                group => group.Aggregate(BigInteger.Zero, (sum, wait) => sum + wait.Value.TotalWaitMilliseconds)
-                    .ToString(CultureInfo.InvariantCulture),
-                StringComparer.Ordinal);
+        IEnumerable<string> intervalIds = value.SourceIntervalIds is null
+            ? [bucket.Key.IntervalId]
+            : value.SourceIntervalIds;
+        var waitTotals = new Dictionary<string, BigInteger>(StringComparer.Ordinal);
+        foreach (var intervalId in intervalIds)
+        {
+            var key = new WaitBucketIdentity(
+                value.Epoch, bucket.Key.PlanId, intervalId,
+                bucket.Key.ExecutionType, bucket.Key.ReplicaGroupId);
+            if (!waitsByBucket.TryGetValue(key, out var categories)) continue;
+            foreach (var pair in categories)
+                waitTotals[pair.Key] = waitTotals.GetValueOrDefault(pair.Key) + pair.Value;
+        }
+        var waits = waitTotals.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.ToString(CultureInfo.InvariantCulture),
+            StringComparer.Ordinal);
         return new RuntimeBucketV1(
-            $"{state.DatabaseId}:{bucket.Key.PlanId}", $"{value.Epoch}:{bucket.Key.IntervalId}",
+            $"{state.DatabaseId}:{bucket.Key.PlanId}", bucket.Key.IntervalId, value.Epoch,
             bucket.Key.IntervalStart, bucket.Key.IntervalEnd, bucket.Key.ExecutionType,
             bucket.Key.ReplicaGroupId, bucket.ExecutionCount.ToString(CultureInfo.InvariantCulture),
             bucket.AverageDurationMicroseconds, bucket.AverageCpuMicroseconds,
             bucket.AverageLogicalReads8KiBPages, bucket.TotalDurationMicroseconds,
             bucket.TotalCpuMicroseconds, bucket.TotalLogicalReads8KiBPages, waits,
             Evidence(state, observedAt));
+    }
+
+    private static Dictionary<WaitBucketIdentity, Dictionary<string, BigInteger>> BuildWaitIndex(
+        IEnumerable<EpochWaitFact> waits)
+    {
+        var result = new Dictionary<WaitBucketIdentity, Dictionary<string, BigInteger>>();
+        foreach (var wait in waits)
+        {
+            var key = WaitBucketKey(wait);
+            if (!result.TryGetValue(key, out var categories))
+            {
+                categories = new Dictionary<string, BigInteger>(StringComparer.Ordinal);
+                result.Add(key, categories);
+            }
+            categories[wait.Value.WaitCategory] =
+                categories.GetValueOrDefault(wait.Value.WaitCategory) + wait.Value.TotalWaitMilliseconds;
+        }
+        return result;
     }
 
     private static IEnumerable<EpochRuntimeBucket> RetainedRuntime(
@@ -419,6 +606,7 @@ public sealed class ProtectedQueryStoreHistorySink(
     {
         QueryStoreCollectionState.ReadWrite => QueryStoreCollectionStateV1.ReadWrite,
         QueryStoreCollectionState.ReadOnly => QueryStoreCollectionStateV1.ReadOnly,
+        QueryStoreCollectionState.ReadCaptureSecondary => QueryStoreCollectionStateV1.ReadCaptureSecondary,
         QueryStoreCollectionState.Off => QueryStoreCollectionStateV1.Off,
         QueryStoreCollectionState.Error => QueryStoreCollectionStateV1.Error,
         QueryStoreCollectionState.PermissionDenied => QueryStoreCollectionStateV1.PermissionDenied,
@@ -431,7 +619,6 @@ public sealed class ProtectedQueryStoreHistorySink(
         public string DatabaseId { get; } = databaseId;
         public QueryStoreDatabaseState? State { get; set; }
         public string CurrentEpoch { get; set; } = "";
-        public HashSet<string> ResetEpochs { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, QueryIdentityFact> Identities { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, QueryPlanFact> Plans { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, EpochRuntimeBucket> Runtime { get; } = new(StringComparer.Ordinal);
@@ -444,7 +631,6 @@ public sealed class ProtectedQueryStoreHistorySink(
         public DatabaseFacts Clone()
         {
             var clone = new DatabaseFacts(DatabaseId) { State = State, CurrentEpoch = CurrentEpoch };
-            clone.ResetEpochs.UnionWith(ResetEpochs);
             Copy(Identities, clone.Identities); Copy(Plans, clone.Plans); Copy(Runtime, clone.Runtime);
             Copy(Waits, clone.Waits); Copy(Variants, clone.Variants); Copy(Replicas, clone.Replicas);
             Copy(Text, clone.Text);
@@ -485,9 +671,12 @@ public sealed class ProtectedQueryStoreHistorySink(
                         plan.LastExecutionAt);
                 foreach (var runtime in detail.Runtime)
                 {
-                    var separator = runtime.IntervalId.IndexOf(':', StringComparison.Ordinal);
-                    var epoch = separator < 0 ? "restored" : runtime.IntervalId[..separator];
-                    var intervalId = separator < 0 ? runtime.IntervalId : runtime.IntervalId[(separator + 1)..];
+                    // Pre-v1.0 snapshots combined epoch and interval into one opaque field.
+                    // Keep that field intact: colon delimiters are ambiguous for real epoch IDs.
+                    var epoch = string.IsNullOrWhiteSpace(runtime.EpochId)
+                        ? LegacyEpoch(databaseId)
+                        : runtime.EpochId;
+                    var intervalId = runtime.IntervalId;
                     state.CurrentEpoch = epoch;
                     var key = new RuntimeBucketKey(
                         RawId(databaseId, runtime.PlanId), intervalId, runtime.IntervalStart, runtime.IntervalEnd,
@@ -522,6 +711,12 @@ public sealed class ProtectedQueryStoreHistorySink(
             var prefix = databaseId + ":";
             return id.StartsWith(prefix, StringComparison.Ordinal) ? id[prefix.Length..] : id;
         }
+
+        private static string LegacyEpoch(string databaseId)
+        {
+            var digest = SHA256.HashData(Encoding.UTF8.GetBytes(databaseId));
+            return $"legacy-restored:{Convert.ToHexString(digest).ToLowerInvariant()[..16]}";
+        }
     }
 
     private sealed record EpochRuntimeBucket(
@@ -545,4 +740,24 @@ public sealed class ProtectedQueryStoreHistorySink(
         DateTimeOffset HourStart,
         QueryStoreExecutionType ExecutionType,
         string ReplicaGroupId);
+}
+
+public readonly record struct QueryStoreBuildInspection(
+    int RuntimeRowsIndexed,
+    int PlanRowsIndexed,
+    int WaitRowsIndexed,
+    int RuntimeIndexLookups,
+    int PlanIndexLookups,
+    int WaitIndexLookups)
+{
+    public static QueryStoreBuildInspection operator +(
+        QueryStoreBuildInspection left,
+        QueryStoreBuildInspection right) =>
+        new(
+            left.RuntimeRowsIndexed + right.RuntimeRowsIndexed,
+            left.PlanRowsIndexed + right.PlanRowsIndexed,
+            left.WaitRowsIndexed + right.WaitRowsIndexed,
+            left.RuntimeIndexLookups + right.RuntimeIndexLookups,
+            left.PlanIndexLookups + right.PlanIndexLookups,
+            left.WaitIndexLookups + right.WaitIndexLookups);
 }

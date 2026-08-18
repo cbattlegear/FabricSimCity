@@ -1,10 +1,16 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
 using SqlSimCity.Contracts.V1;
 
 namespace SqlSimCity.Collection.QueryStore;
 
-public enum QueryStoreCollectionState { ReadWrite, ReadOnly, Off, Error, PermissionDenied, Unsupported }
+public enum QueryStoreCollectionState
+{
+    ReadWrite, ReadOnly, ReadCaptureSecondary, Off, Error, PermissionDenied, Unsupported, Unknown,
+}
 public enum QueryStoreFactKind { Identity, Plan, Runtime, Wait, Variant, Replica }
 
 public sealed record QueryStoreDatabaseState(
@@ -24,7 +30,8 @@ public sealed record QueryStoreDatabaseState(
 
 public sealed record QueryStoreWatermark(
     string DatabaseId,
-    string ResetEpoch,
+    string SourceSignature,
+    string StorageEpoch,
     DateTimeOffset Through,
     IReadOnlyDictionary<QueryStoreFactKind, string?> PageTokens,
     long? LatestIntervalId = null);
@@ -107,7 +114,8 @@ public interface IQueryStoreHistorySink
 {
     Task<QueryStoreWatermark?> GetWatermarkAsync(string databaseId, CancellationToken cancellationToken);
     Task BeginDatabaseCycleAsync(
-        QueryStoreDatabaseState state, bool resetDetected, CancellationToken cancellationToken);
+        QueryStoreDatabaseState state, string storageEpoch, bool resetDetected,
+        CancellationToken cancellationToken);
     Task StageFactsAsync(
         string databaseId, QueryStoreFactPage page, CancellationToken cancellationToken);
     Task StageRuntimeBucketsAsync(
@@ -247,7 +255,8 @@ public sealed class IncrementalQueryStoreCollector : IDisposable
     {
         var state = await _source.GetStateAsync(databaseId, cancellationToken).ConfigureAwait(false);
         if (state.State is QueryStoreCollectionState.Off or QueryStoreCollectionState.Error or
-            QueryStoreCollectionState.PermissionDenied or QueryStoreCollectionState.Unsupported)
+            QueryStoreCollectionState.PermissionDenied or QueryStoreCollectionState.Unsupported or
+            QueryStoreCollectionState.Unknown)
             return new QueryStoreDatabaseCollectionResult(
                 databaseId, state.State, 0, 0, false, state.Reason, null);
 
@@ -255,12 +264,17 @@ public sealed class IncrementalQueryStoreCollector : IDisposable
         var retentionGap = watermark is not null && state.OldestIntervalStart is not null &&
                            watermark.Through < state.OldestIntervalStart;
         var reset = watermark is not null &&
-                    (!string.Equals(watermark.ResetEpoch, state.ResetEpoch, StringComparison.Ordinal) ||
+                    (!string.Equals(watermark.SourceSignature, state.ResetEpoch, StringComparison.Ordinal) ||
                      retentionGap ||
+                     watermark.LatestIntervalId is not null && state.LatestIntervalId is null ||
                      state.LatestIntervalId is { } latest &&
                      watermark.LatestIntervalId is { } priorLatest &&
                      latest < priorLatest);
-        await _sink.BeginDatabaseCycleAsync(state, reset, cancellationToken).ConfigureAwait(false);
+        var storageEpoch = watermark is null || reset
+            ? CreateStorageEpoch(state, watermark?.StorageEpoch)
+            : watermark.StorageEpoch;
+        await _sink.BeginDatabaseCycleAsync(
+            state, storageEpoch, reset, cancellationToken).ConfigureAwait(false);
         var start = watermark is null || reset
             ? state.OldestIntervalStart ?? throughExclusive - _options.EffectiveOverlap
             : watermark.Through - _options.EffectiveOverlap;
@@ -298,12 +312,20 @@ public sealed class IncrementalQueryStoreCollector : IDisposable
         }
 
         var newWatermark = new QueryStoreWatermark(
-            databaseId, state.ResetEpoch, throughExclusive,
+            databaseId, state.ResetEpoch, storageEpoch, throughExclusive,
             kinds.ToDictionary(kind => kind, _ => (string?)null),
             state.LatestIntervalId ?? watermark?.LatestIntervalId);
         await _sink.CommitDatabaseCycleAsync(state, newWatermark, cancellationToken).ConfigureAwait(false);
         return new QueryStoreDatabaseCollectionResult(
             databaseId, state.State, pageCount, bucketCount, reset, state.Reason, null);
+    }
+
+    private static string CreateStorageEpoch(QueryStoreDatabaseState state, string? priorStorageEpoch)
+    {
+        var source = $"{state.DatabaseId}\n{state.ObservedAt.UtcTicks}\n{state.LatestIntervalId?.ToString(CultureInfo.InvariantCulture) ?? "none"}\n{priorStorageEpoch ?? "initial"}";
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source)))
+            .ToLowerInvariant()[..16];
+        return $"qs-epoch-{state.ObservedAt:yyyyMMddHHmmssfffffff}-{hash}";
     }
 
     private static QueryStoreFactKind[] KindsFor(QueryStoreDatabaseState state)

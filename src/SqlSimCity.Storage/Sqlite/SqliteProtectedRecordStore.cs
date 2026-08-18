@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Security.Cryptography;
 using SqlSimCity.Storage;
 using SqlSimCity.Storage.Crypto;
 
@@ -25,6 +26,8 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
     private readonly int _maxPayloadBytes;
     private int _ready;
     private bool _disposed;
+
+    public int MaxPayloadBytes => _maxPayloadBytes;
 
     public SqliteProtectedRecordStore(
         string dataDirectory,
@@ -153,8 +156,15 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
         }
 
         var plaintext = EnvelopeCodec.Open(_keyRing, recordKind, id.Value, envelope);
-        return new ProtectedRecord(
-            id, recordKind, DateTimeOffset.FromUnixTimeMilliseconds(capturedAtUnixMs), resolution, plaintext);
+        try
+        {
+            return new ProtectedRecord(
+                id, recordKind, DateTimeOffset.FromUnixTimeMilliseconds(capturedAtUnixMs), resolution, plaintext);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
     }
 
     public async Task<bool> DeleteAsync(ProtectedRecordId id, CancellationToken cancellationToken = default)
@@ -167,6 +177,75 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
         command.Parameters.AddWithValue("$id", id.Value);
         var affected = await command.ExecuteNonQueryAsync(cancellationToken);
         return affected > 0;
+    }
+
+    public async Task ReplaceSetAsync(
+        string idPrefix,
+        IEnumerable<ProtectedRecordWrite> records,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(idPrefix);
+        ArgumentNullException.ThrowIfNull(records);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction =
+            (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await using (var delete = connection.CreateCommand())
+            {
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM protected_records WHERE substr(id, 1, $length) = $prefix;";
+                delete.Parameters.AddWithValue("$length", idPrefix.Length);
+                delete.Parameters.AddWithValue("$prefix", idPrefix);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var put = connection.CreateCommand();
+            put.Transaction = transaction;
+            put.CommandText = """
+                INSERT INTO protected_records (id, record_kind, captured_at_unix_ms, resolution, envelope, stored_at_unix_ms)
+                VALUES ($id, $kind, $capturedAt, $resolution, $envelope, $storedAt);
+                """;
+            var idParameter = put.Parameters.Add("$id", SqliteType.Text);
+            var kindParameter = put.Parameters.Add("$kind", SqliteType.Text);
+            var capturedParameter = put.Parameters.Add("$capturedAt", SqliteType.Integer);
+            var resolutionParameter = put.Parameters.Add("$resolution", SqliteType.Text);
+            var envelopeParameter = put.Parameters.Add("$envelope", SqliteType.Blob);
+            var storedParameter = put.Parameters.Add("$storedAt", SqliteType.Integer);
+
+            foreach (var record in records)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ValidateWrite(record.RecordKind, record.Payload);
+                if (!record.Id.Value.StartsWith(idPrefix, StringComparison.Ordinal))
+                    throw new ArgumentException("Every replacement record id must start with the set prefix.", nameof(records));
+
+                var envelope = EnvelopeCodec.Seal(
+                    _keyRing, record.RecordKind, record.Id.Value, record.Payload.Span);
+                try
+                {
+                    idParameter.Value = record.Id.Value;
+                    kindParameter.Value = record.RecordKind;
+                    capturedParameter.Value = record.CapturedAt.ToUnixTimeMilliseconds();
+                    resolutionParameter.Value = record.Resolution.ToString();
+                    envelopeParameter.Value = envelope;
+                    storedParameter.Value = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+                    await put.ExecuteNonQueryAsync(cancellationToken);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(envelope);
+                }
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
     }
 
     public async Task<int> PruneExpiredAsync(CancellationToken cancellationToken = default)
@@ -237,6 +316,17 @@ public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtect
             throw new InvalidOperationException(
                 "Protected storage has not completed EnsureReadyAsync. Call it during startup before use.");
         }
+    }
+
+    private void ValidateWrite(string recordKind, ReadOnlyMemory<byte> payload)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(recordKind);
+        if (recordKind.Length > _maxRecordKindLength)
+            throw new ArgumentException(
+                $"Record kind must be {_maxRecordKindLength} characters or fewer.", nameof(recordKind));
+        if (payload.Length > _maxPayloadBytes)
+            throw new ArgumentException(
+                $"Payload must be {_maxPayloadBytes} bytes or fewer.", nameof(payload));
     }
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)

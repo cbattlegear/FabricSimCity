@@ -701,6 +701,21 @@ describe('regression: query_store_wait_stats_summary replica grouping and divisi
     );
   });
 
+  describe('regression: Query Store runtime weighted averages preserve fractional source values', () => {
+    for (const id of ['querystore.runtime_page_2016', 'querystore.runtime_page_2022']) {
+      test(`${id}: weights in float before the final aggregate`, () => {
+        const source = stripSqlComments(readProbeSource(probeById(id)));
+        assert.match(source, /CONVERT\(\s*float\s*,\s*rs\.avg_duration\s*\)/i);
+        assert.match(source, /CONVERT\(\s*float\s*,\s*rs\.count_executions\s*\)/i);
+        assert.doesNotMatch(
+          source,
+          /CONVERT\(\s*decimal\(38,\s*6\)\s*,\s*rs\.avg_duration\s*\)\s*\*/i,
+          'decimal(38,6) multiplication can overflow before aggregation',
+        );
+      });
+    }
+  });
+
   for (const id of ['querystore.wait_stats_summary_2017', 'querystore.wait_stats_summary_2022']) {
     test(`${id}: weighted-average-per-execution expression casts to decimal/float before dividing`, () => {
       const probe = probeById(id);
@@ -754,6 +769,20 @@ describe('regression: server.identity does not overclaim Azure SQL DB capacity f
     );
     assert.match(readmeText, /dm_user_db_resource_governance/i);
     assert.match(readmeText, /dm_os_job_object/i);
+  });
+});
+
+describe('server.identity_current remains a low-privilege database probe', () => {
+  test('uses only SERVERPROPERTY and the current sys.databases row', () => {
+    const probe = probeById('server.identity_current');
+    const source = stripSqlComments(readProbeSource(probe));
+    assert.equal(probe.connectionScope, 'database');
+    assert.match(probe.requiredPermission, /ordinary access/i);
+    assert.match(source, /SERVERPROPERTY\(\s*'ProductMajorVersion'\s*\)/i);
+    assert.match(source, /SERVERPROPERTY\(\s*'EngineEdition'\s*\)/i);
+    assert.match(source, /compatibility_level/i);
+    assert.match(source, /database_id\s*=\s*DB_ID\(\)/i);
+    assert.doesNotMatch(source, /dm_os_|dm_server_/i);
   });
 });
 

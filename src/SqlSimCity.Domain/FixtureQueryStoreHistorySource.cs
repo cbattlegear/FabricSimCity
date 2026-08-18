@@ -222,7 +222,8 @@ public sealed class FixtureQueryStoreHistorySource : IQueryStoreHistorySource
         string planId, string interval, QueryStoreExecutionType executionType, string replica, long count,
         decimal averageDuration, decimal averageCpu, decimal averageReads,
         decimal totalDuration, decimal totalCpu, decimal totalReads) =>
-        new(planId, interval, CapturedAt.AddHours(-1), CapturedAt.AddMinutes(57), executionType, replica,
+        new(planId, interval, "fixture-epoch-1",
+            CapturedAt.AddHours(-1), CapturedAt.AddMinutes(57), executionType, replica,
             count.ToString(CultureInfo.InvariantCulture), averageDuration, averageCpu, averageReads,
             totalDuration.ToString(CultureInfo.InvariantCulture), totalCpu.ToString(CultureInfo.InvariantCulture),
             totalReads.ToString(CultureInfo.InvariantCulture),

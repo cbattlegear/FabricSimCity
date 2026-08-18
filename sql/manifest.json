@@ -40,6 +40,23 @@
       "relativeCost": "trivial"
     },
     {
+      "id": "server.identity_current",
+      "title": "Server/platform identity from current database",
+      "file": "probes/server/server_identity_current.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported (EngineEdition = 5) and intentionally limited to SERVERPROPERTY plus the current sys.databases row."
+      },
+      "requiredPermission": "Ordinary access to the current database; SERVERPROPERTY() requires no special permission.",
+      "cadenceClass": "low_frequency",
+      "parameters": [],
+      "resultSets": 1,
+      "resultContract": "Exactly one row: product version, product major version, engine edition, and current database compatibility level.",
+      "relativeCost": "trivial"
+    },
+    {
       "id": "server.host_info",
       "title": "Host operating system platform detail",
       "file": "probes/server/server_host_info.sql",

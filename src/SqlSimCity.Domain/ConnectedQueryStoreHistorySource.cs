@@ -3,7 +3,9 @@ using System.Numerics;
 using System.Text;
 using System.Text.Json;
 using SqlSimCity.Collection.QueryStore;
+using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Storage;
 
 namespace SqlSimCity.Domain;
 
@@ -21,7 +23,7 @@ public sealed class ConnectedQueryStoreHistorySource(
         string? pageToken,
         CancellationToken cancellationToken)
     {
-        var snapshot = await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var snapshot = await repository.ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
         if (snapshot is null)
             return Empty(pageSize, "No complete connected Query Store snapshot has been published yet.");
 
@@ -32,32 +34,44 @@ public sealed class ConnectedQueryStoreHistorySource(
              !string.Equals(cursor.DatabaseId, databaseId, StringComparison.Ordinal)))
             throw new QueryStorePageTokenException("The Query Store page token is stale or belongs to another filter.");
 
-        var summaries = snapshot.Families.Select(detail => detail.Family)
-            .Where(family => databaseId is null ||
-                             string.Equals(family.DatabaseId, databaseId, StringComparison.Ordinal))
-            .Select(family => new RankedFamily(family, MetricValue(family, metric)))
-            .Where(item => cursor is null ||
-                item.Value.CompareTo(ExactNumber.Parse(cursor.LastValue)) < 0 ||
-                item.Value.CompareTo(ExactNumber.Parse(cursor.LastValue)) == 0 &&
-                string.CompareOrdinal(item.Family.FamilyId, cursor.LastFamilyId) > 0)
-            .OrderByDescending(item => item.Value)
-            .ThenBy(item => item.Family.FamilyId, StringComparer.Ordinal)
-            .Take(pageSize + 1)
-            .ToArray();
-        var hasMore = summaries.Length > pageSize;
-        var page = summaries.Take(pageSize).ToArray();
-        var last = page.LastOrDefault();
-        var next = hasMore && last is not null
-            ? EncodeToken(new QueryPageCursor(
-                snapshot.SnapshotId, metric, databaseId, last.Value.ToString(), last.Family.FamilyId))
-            : null;
-        var total = snapshot.Families.Count(detail => databaseId is null ||
-            string.Equals(detail.Family.DatabaseId, databaseId, StringComparison.Ordinal));
-        return new PageV1<QueryFamilySummaryV1>(
-            "1.0", page.Select(item => item.Family).ToArray(), next, pageSize,
-            total.ToString(CultureInfo.InvariantCulture))
+        if (snapshot.IndexSets is null)
+            return await GetLegacyQueriesAsync(
+                snapshot, databaseId, metric, pageSize, cursor, cancellationToken).ConfigureAwait(false);
+
+        var index = snapshot.IndexSets?.SingleOrDefault(item =>
+            item.Metric == NormalizeMetric(metric) && item.DatabaseId == databaseId);
+        if (index is null) return Empty(pageSize, "No Query Store families match this database filter.");
+        var pageIndex = cursor?.PageIndex ?? 0;
+        var offset = cursor?.Offset ?? 0;
+        if (offset is < 0 or >= 200 ||
+            cursor is not null && pageIndex >= index.PageCount)
+            throw new QueryStorePageTokenException("The Query Store page token is outside the published index.");
+        var families = new List<QueryFamilySummaryV1>(pageSize);
+        while (families.Count < pageSize && pageIndex < index.PageCount)
         {
-            Evidence = (snapshot.Families.Count > 0 ? snapshot.Families[0].Family.Evidence : null) ??
+            var indexPage = await repository.ReadIndexPageAsync(
+                snapshot, index.Metric, databaseId, pageIndex, cancellationToken)
+                .ConfigureAwait(false) ?? throw new InvalidDataException("A protected Query Store index page is missing.");
+            if (cursor is not null && families.Count == 0 && offset >= indexPage.FamilyIds.Count)
+                throw new QueryStorePageTokenException("The Query Store page token is outside the published index.");
+            while (families.Count < pageSize && offset < indexPage.FamilyIds.Count)
+            {
+                var summary = await repository.ReadFamilySummaryAsync(
+                    snapshot, indexPage.FamilyIds[offset++], cancellationToken)
+                    .ConfigureAwait(false) ?? throw new InvalidDataException("A protected Query Store family is missing.");
+                families.Add(summary);
+            }
+            if (offset >= indexPage.FamilyIds.Count) { pageIndex++; offset = 0; }
+        }
+        var hasMore = pageIndex < index.PageCount;
+        var next = hasMore
+            ? EncodeToken(new QueryPageCursor(snapshot.SnapshotId, metric, databaseId, pageIndex, offset))
+            : null;
+        return new PageV1<QueryFamilySummaryV1>(
+            "1.0", families, next, pageSize,
+            index.TotalCount.ToString(CultureInfo.InvariantCulture))
+        {
+            Evidence = (families.Count > 0 ? families[0].Evidence : null) ??
                 ConnectedEvidence(snapshot.PublishedAt, snapshot.Status.State),
         };
     }
@@ -66,9 +80,16 @@ public sealed class ConnectedQueryStoreHistorySource(
         string familyId,
         CancellationToken cancellationToken)
     {
-        var snapshot = await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        var detail = snapshot?.Families.SingleOrDefault(
-            detail => string.Equals(detail.Family.FamilyId, familyId, StringComparison.Ordinal));
+        var snapshot = await repository.ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
+        QueryFamilyDetailV1? detail = null;
+        if (snapshot is not null)
+        {
+            detail = snapshot.IndexSets is null
+                ? (await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false))
+                    ?.Families.SingleOrDefault(item => item.Family.FamilyId == familyId)
+                : await repository.ReadFamilyAsync(
+                    snapshot, familyId, cancellationToken).ConfigureAwait(false);
+        }
         if (detail is null) return null;
         var physical = new List<PhysicalQueryIdentityV1>(detail.Family.PhysicalQueries.Count);
         foreach (var identity in detail.Family.PhysicalQueries)
@@ -76,18 +97,38 @@ public sealed class ConnectedQueryStoreHistorySource(
             var descriptor = identity.Text;
             if (descriptor.Availability == QueryTextAvailability.Missing)
             {
-                var payload = await incrementalSource.ReadQueryTextAsync(
+                descriptor = await repository.ReadTextDescriptorAsync(
                     identity.DatabaseId, identity.QueryTextId, cancellationToken).ConfigureAwait(false);
-                if (payload.Text is not null && !payload.IsEncrypted && !payload.IsRestricted)
-                    await repository.StoreQueryTextAsync(
-                        identity.DatabaseId, identity.QueryTextId, timeProvider.GetUtcNow(),
-                        payload.Text, cancellationToken).ConfigureAwait(false);
-                descriptor = SqlTextNormalizer.Normalize(
-                    payload.Text, payload.IsEncrypted, payload.IsRestricted,
-                    QuotedIdentifiers(identity.Context.SetOptions));
-                await repository.StoreTextDescriptorAsync(
-                    identity.DatabaseId, identity.QueryTextId, descriptor,
-                    timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                if (descriptor is null)
+                {
+                    try
+                    {
+                        var payload = await incrementalSource.ReadQueryTextAsync(
+                            identity.DatabaseId, identity.QueryTextId, cancellationToken).ConfigureAwait(false);
+                        descriptor = SqlTextNormalizer.Normalize(
+                            payload.Text, payload.IsEncrypted, payload.IsRestricted,
+                            QuotedIdentifiers(identity.Context.SetOptions));
+                        if (descriptor.Availability == QueryTextAvailability.Available && payload.Text is not null)
+                            await repository.StoreQueryTextAsync(
+                                identity.DatabaseId, identity.QueryTextId, timeProvider.GetUtcNow(),
+                                payload.Text, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (ProbePermissionDeniedException)
+                    {
+                        descriptor = new QueryTextDescriptorV1(
+                            QueryTextAvailability.Restricted, null, null,
+                            "The configured principal cannot fetch this Query Store text.");
+                    }
+                    catch (ProbeExecutionException)
+                    {
+                        descriptor = new QueryTextDescriptorV1(
+                            QueryTextAvailability.Missing, null, null,
+                            "Query Store text is unavailable from the connected source.");
+                    }
+                    await repository.StoreTextDescriptorAsync(
+                        identity.DatabaseId, identity.QueryTextId, descriptor,
+                        timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                }
             }
             physical.Add(identity with { Text = descriptor });
         }
@@ -124,12 +165,27 @@ public sealed class ConnectedQueryStoreHistorySource(
         if (separator <= 0 || separator == planId.Length - 1) return null;
         var databaseId = planId[..separator];
         var rawPlanId = planId[(separator + 1)..];
-        var xml = await incrementalSource.ReadPlanXmlAsync(
-            databaseId, rawPlanId, cancellationToken).ConfigureAwait(false);
+        string? xml;
+        try
+        {
+            xml = await incrementalSource.ReadPlanXmlAsync(
+                databaseId, rawPlanId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProbeExecutionException)
+        {
+            return null;
+        }
         if (xml is null) return null;
-        await repository.StorePlanXmlAsync(
-            databaseId, rawPlanId, timeProvider.GetUtcNow(), xml, cancellationToken).ConfigureAwait(false);
         var normalized = await showplanParser.ParseAsync(planId, xml, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await repository.StorePlanXmlAsync(
+                databaseId, rawPlanId, timeProvider.GetUtcNow(), xml, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ArgumentException ex) when (ex.ParamName == "payload")
+        {
+            // Normalized structure remains useful when a valid plan exceeds the encrypted raw-record limit.
+        }
         await repository.StoreNormalizedPlanAsync(
             normalized, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
         return normalized;
@@ -147,7 +203,7 @@ public sealed class ConnectedQueryStoreHistorySource(
 
     public async Task<QueryStoreCollectorStatusV1> GetStatusAsync(CancellationToken cancellationToken)
     {
-        var snapshot = await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var snapshot = await repository.ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
         return statusTracker.Current ?? snapshot?.Status ?? new QueryStoreCollectorStatusV1(
             "1.0", QueryStoreCollectorState.Starting, 0, null, null, null, [],
             "Protected storage is ready; the first connected Query Store cycle has not published.");
@@ -163,10 +219,56 @@ public sealed class ConnectedQueryStoreHistorySource(
             : null;
     }
 
-    private static ExactNumber MetricValue(QueryFamilySummaryV1 family, string metric) =>
-        ExactNumber.Parse(metric switch
+    private static string NormalizeMetric(string metric) =>
+        metric is "execution" or "executions" ? "execution" : metric;
+
+    private async Task<PageV1<QueryFamilySummaryV1>> GetLegacyQueriesAsync(
+        QueryStorePublishedSnapshot header,
+        string? databaseId,
+        string metric,
+        int pageSize,
+        QueryPageCursor? cursor,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+            return Empty(pageSize, "No complete connected Query Store snapshot has been published yet.");
+        var normalizedMetric = NormalizeMetric(metric);
+        var ordered = snapshot.Families
+            .Select(item => item.Family)
+            .Where(item => databaseId is null || item.DatabaseId == databaseId)
+            .OrderByDescending(item => LegacyMetric(item, normalizedMetric))
+            .ThenBy(item => item.FamilyId, StringComparer.Ordinal)
+            .ToArray();
+        int start;
+        try
         {
-            "execution" or "executions" => family.ExecutionCount,
+            start = checked((cursor?.PageIndex ?? 0) * 200 + (cursor?.Offset ?? 0));
+        }
+        catch (OverflowException)
+        {
+            throw new QueryStorePageTokenException("The Query Store page token is outside the published index.");
+        }
+        if (start > ordered.Length)
+            throw new QueryStorePageTokenException("The Query Store page token is outside the published index.");
+        var families = ordered.Skip(start).Take(pageSize).ToArray();
+        var nextOffset = start + families.Length;
+        var next = nextOffset < ordered.Length
+            ? EncodeToken(new QueryPageCursor(
+                header.SnapshotId, metric, databaseId, nextOffset / 200, nextOffset % 200))
+            : null;
+        return new PageV1<QueryFamilySummaryV1>(
+            "1.0", families, next, pageSize, ordered.Length.ToString(CultureInfo.InvariantCulture))
+        {
+            Evidence = (families.FirstOrDefault()?.Evidence) ??
+                ConnectedEvidence(header.PublishedAt, header.Status.State),
+        };
+    }
+
+    private static LegacyExactNumber LegacyMetric(QueryFamilySummaryV1 family, string metric) =>
+        LegacyExactNumber.Parse(metric switch
+        {
+            "execution" => family.ExecutionCount,
             "duration" => family.TotalDurationMicroseconds,
             "reads" => family.TotalLogicalReads8KiBPages,
             "waits" => family.TotalWaitMilliseconds,
@@ -197,55 +299,52 @@ public sealed class ConnectedQueryStoreHistorySource(
     private static QueryPageCursor? DecodeToken(string? token)
     {
         if (token is null) return null;
+        if (token.Length > 2_048)
+            throw new QueryStorePageTokenException("The Query Store page token is too long.");
         try
         {
-            return JsonSerializer.Deserialize<QueryPageCursor>(
+            var cursor = JsonSerializer.Deserialize<QueryPageCursor>(
                 Convert.FromBase64String(token)) ??
                 throw new QueryStorePageTokenException("The Query Store page token is malformed.");
+            if (cursor.SnapshotId is null || cursor.SnapshotId.Length is < 1 or > 128 ||
+                cursor.Metric is not ("cpu" or "execution" or "executions" or "duration" or "reads" or "waits") ||
+                cursor.DatabaseId?.Length > 256 || cursor.PageIndex < 0 || cursor.Offset is < 0 or >= 200)
+                throw new QueryStorePageTokenException("The Query Store page token contains invalid values.");
+            return cursor;
         }
-        catch (Exception ex) when (ex is FormatException or JsonException)
+        catch (Exception ex) when (ex is FormatException or JsonException or OverflowException or ArgumentException)
         {
             throw new QueryStorePageTokenException("The Query Store page token is malformed.");
         }
     }
 
-    private sealed record RankedFamily(QueryFamilySummaryV1 Family, ExactNumber Value);
     private sealed record QueryPageCursor(
         string SnapshotId,
         string Metric,
         string? DatabaseId,
-        string LastValue,
-        string LastFamilyId);
+        int PageIndex,
+        int Offset);
 
-    private readonly record struct ExactNumber(BigInteger Unscaled, int Scale) : IComparable<ExactNumber>
+    private readonly record struct LegacyExactNumber(BigInteger Unscaled, int Scale)
+        : IComparable<LegacyExactNumber>
     {
-        public static ExactNumber Parse(string value)
+        public static LegacyExactNumber Parse(string value)
         {
-            ArgumentException.ThrowIfNullOrWhiteSpace(value);
             var span = value.AsSpan();
-            var negative = span[0] == '-';
+            var negative = span.Length > 0 && span[0] == '-';
             if (negative) span = span[1..];
             var point = span.IndexOf('.');
             var scale = point < 0 ? 0 : span.Length - point - 1;
             var digits = point < 0 ? span.ToString() : string.Concat(span[..point], span[(point + 1)..]);
             var unscaled = BigInteger.Parse(digits, CultureInfo.InvariantCulture);
-            return new ExactNumber(negative ? -unscaled : unscaled, scale);
+            return new(negative ? -unscaled : unscaled, scale);
         }
 
-        public int CompareTo(ExactNumber other)
+        public int CompareTo(LegacyExactNumber other)
         {
             var scale = Math.Max(Scale, other.Scale);
             return (Unscaled * BigInteger.Pow(10, scale - Scale))
                 .CompareTo(other.Unscaled * BigInteger.Pow(10, scale - other.Scale));
-        }
-
-        public override string ToString()
-        {
-            var sign = Unscaled.Sign < 0 ? "-" : "";
-            var digits = BigInteger.Abs(Unscaled).ToString(CultureInfo.InvariantCulture);
-            if (Scale == 0) return sign + digits;
-            digits = digits.PadLeft(Scale + 1, '0');
-            return $"{sign}{digits[..^Scale]}.{digits[^Scale..]}";
         }
     }
 }

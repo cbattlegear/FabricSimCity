@@ -8,12 +8,12 @@ WITH buckets AS (
         rs.runtime_stats_interval_id, rs.plan_id, rs.execution_type, rs.replica_group_id,
         rsi.start_time, rsi.end_time,
         SUM(CONVERT(decimal(38,0), rs.count_executions)) AS execution_count,
-        SUM(CONVERT(decimal(38,6), rs.avg_duration) * CONVERT(decimal(38,0), rs.count_executions))
-          / NULLIF(SUM(CONVERT(decimal(38,0), rs.count_executions)), 0) AS average_duration_us,
-        SUM(CONVERT(decimal(38,6), rs.avg_cpu_time) * CONVERT(decimal(38,0), rs.count_executions))
-          / NULLIF(SUM(CONVERT(decimal(38,0), rs.count_executions)), 0) AS average_cpu_us,
-        SUM(CONVERT(decimal(38,6), rs.avg_logical_io_reads) * CONVERT(decimal(38,0), rs.count_executions))
-          / NULLIF(SUM(CONVERT(decimal(38,0), rs.count_executions)), 0) AS average_logical_reads_pages
+        SUM(CONVERT(float, rs.avg_duration) * CONVERT(float, rs.count_executions))
+          / NULLIF(SUM(CONVERT(float, rs.count_executions)), 0.0) AS average_duration_us,
+        SUM(CONVERT(float, rs.avg_cpu_time) * CONVERT(float, rs.count_executions))
+          / NULLIF(SUM(CONVERT(float, rs.count_executions)), 0.0) AS average_cpu_us,
+        SUM(CONVERT(float, rs.avg_logical_io_reads) * CONVERT(float, rs.count_executions))
+          / NULLIF(SUM(CONVERT(float, rs.count_executions)), 0.0) AS average_logical_reads_pages
     FROM sys.query_store_runtime_stats AS rs
     JOIN sys.query_store_runtime_stats_interval AS rsi
       ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id

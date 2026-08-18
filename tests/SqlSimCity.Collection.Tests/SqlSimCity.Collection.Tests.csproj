@@ -14,5 +14,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\SqlSimCity.Collection\SqlSimCity.Collection.csproj" />
+    <ProjectReference Include="..\..\src\SqlSimCity.Domain\SqlSimCity.Domain.csproj" />
   </ItemGroup>
 </Project>

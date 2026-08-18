@@ -108,6 +108,7 @@ The image targets Linux containers on x86-64 and ARM64 where the selected offici
 - exposes only opaque record IDs, record kind, captured timestamp, and resolution (`Detail`/`HourlyRollup`) as plaintext metadata — payload bytes are always encrypted;
 - prunes at most `ProtectedStorage:Retention:PruneBatchSize` expired records per invocation (call again to drain more), under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`; the batch size is bounded from 1 through 500.
 - restricts the database filename to a simple filename, record-kind metadata to 128 characters (maximum 1,024), and plaintext payloads to 1 MiB (maximum 16 MiB); `MaxRecordKindLength` and `MaxPayloadBytes` are explicit protected-storage configuration limits.
+- chunks oversized normalized Query Store family and plan records below `MaxPayloadBytes`. Raw Showplan XML above that limit is deliberately not cached; its sanitized normalized plan remains available from bounded encrypted chunks.
 
 Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). Connected Query Store history refuses to start without it. Raw SQL and Showplan XML enter only protected detail records; normalized facts, watermarks, reset epochs, and atomically published indexes are protected as well. The background collector invokes bounded retention pruning after successful publication.
 

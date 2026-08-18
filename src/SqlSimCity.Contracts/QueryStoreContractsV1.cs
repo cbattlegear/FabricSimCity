@@ -39,6 +39,7 @@ public sealed record PhysicalQueryIdentityV1(
 public sealed record RuntimeBucketV1(
     string PlanId,
     string IntervalId,
+    string EpochId,
     DateTimeOffset IntervalStart,
     DateTimeOffset IntervalEnd,
     QueryStoreExecutionType ExecutionType,
@@ -153,7 +154,10 @@ public sealed record QueryStoreDatabaseStatusV1(
     DateTimeOffset? OldestAvailableAt,
     string Reason);
 
-public enum QueryStoreCollectionStateV1 { ReadWrite, ReadOnly, Off, Error, PermissionDenied, Unsupported, Unknown }
+public enum QueryStoreCollectionStateV1
+{
+    ReadWrite, ReadOnly, ReadCaptureSecondary, Off, Error, PermissionDenied, Unsupported, Unknown,
+}
 
 public sealed record QueryStoreCollectorStatusV1(
     string SchemaVersion,

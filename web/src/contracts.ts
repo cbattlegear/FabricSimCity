@@ -141,6 +141,7 @@ export interface QueryFamilySummary {
 export interface RuntimeBucket {
   planId: string
   intervalId: string
+  epochId: string
   intervalStart: string
   intervalEnd: string
   executionType: QueryStoreExecutionType
@@ -214,7 +215,7 @@ export interface QueryStoreCollectorStatus {
   nextAttemptAt: string | null
   databases: Array<{
     databaseId: string
-    state: 'ReadWrite' | 'ReadOnly' | 'Off' | 'Error' | 'PermissionDenied' | 'Unsupported' | 'Unknown'
+    state: 'ReadWrite' | 'ReadOnly' | 'ReadCaptureSecondary' | 'Off' | 'Error' | 'PermissionDenied' | 'Unsupported' | 'Unknown'
     reason: string
   }>
   reason: string

@@ -24,19 +24,30 @@ public static class QueryStoreHistoryConfiguration
     public static QueryStoreCollectionOptions BuildCollectionOptions(IConfiguration configuration)
     {
         var section = configuration.GetSection("QueryStoreHistory");
-        return new QueryStoreCollectionOptions(
+        var options = new QueryStoreCollectionOptions(
             section.GetValue<int?>("PageSize") ?? 1_000,
             section.GetValue<int?>("DatabaseConcurrency") ?? 4,
             TimeSpan.FromMinutes(section.GetValue<int?>("OverlapMinutes") ?? 65));
+        options.Validate();
+        return options;
     }
 
     public static QueryStoreHistoryHostOptions BuildHostOptions(IConfiguration configuration)
     {
         var section = configuration.GetSection("QueryStoreHistory");
-        return new QueryStoreHistoryHostOptions(
+        var options = new QueryStoreHistoryHostOptions(
             configuration.GetSection("Atlas:KnownDatabases").Get<string[]>() ?? [],
             TimeSpan.FromSeconds(section.GetValue<int?>("RefreshIntervalSeconds") ?? 120),
             TimeSpan.FromMinutes(section.GetValue<int?>("MaximumBackoffMinutes") ?? 15));
+        if (options.KnownDatabases.Any(string.IsNullOrWhiteSpace) ||
+            options.KnownDatabases.Distinct(StringComparer.Ordinal).Count() != options.KnownDatabases.Count)
+            throw new InvalidOperationException("Atlas:KnownDatabases must contain unique, non-empty names.");
+        if (options.RefreshInterval < TimeSpan.FromSeconds(5) ||
+            options.RefreshInterval > TimeSpan.FromHours(1))
+            throw new InvalidOperationException("Query Store refresh interval must be between 5 seconds and 1 hour.");
+        if (options.MaximumBackoff < options.RefreshInterval || options.MaximumBackoff > TimeSpan.FromHours(24))
+            throw new InvalidOperationException("Query Store maximum backoff must be at least the refresh interval and at most 24 hours.");
+        return options;
     }
 }
 
@@ -54,11 +65,15 @@ public sealed class QueryStoreHistoryBackgroundService(
         LoggerMessage.Define<string>(
             LogLevel.Error, new EventId(20, "QueryStoreHistoryCycleFailure"),
             "Query Store history cycle failed ({ExceptionType}); prior published history remains current.");
+    private static readonly Action<ILogger, Exception?> LogNotificationFailure =
+        LoggerMessage.Define(
+            LogLevel.Warning, new EventId(21, "QueryStoreHistoryNotificationFailure"),
+            "Query Store history published, but the bounded client notification failed.");
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (statusTracker.Current is null &&
-            await repository.ReadPublishedSnapshotAsync(stoppingToken).ConfigureAwait(false) is { } persisted)
+            await repository.ReadPublishedSnapshotHeaderAsync(stoppingToken).ConfigureAwait(false) is { } persisted)
             statusTracker.Set(persisted.Status);
         var failures = 0;
         while (!stoppingToken.IsCancellationRequested)
@@ -76,10 +91,19 @@ public sealed class QueryStoreHistoryBackgroundService(
                     ? Math.Min(failures + 1, 10) : 0;
                 if (!result.SkippedBecauseCycleActive)
                 {
-                    await hub.Clients.All.SendAsync(
-                        "queryStoreSnapshotAvailable",
-                        new { result.CompletedAt, DatabaseCount = result.Databases.Count },
-                        stoppingToken).ConfigureAwait(false);
+                    try
+                    {
+                        await NotifyAsync(
+                            hub,
+                            "queryStoreSnapshotAvailable",
+                            new { result.CompletedAt, DatabaseCount = result.Databases.Count },
+                            TimeSpan.FromSeconds(5),
+                            stoppingToken).ConfigureAwait(false);
+                    }
+                    catch (Exception) when (!stoppingToken.IsCancellationRequested)
+                    {
+                        LogNotificationFailure(logger, null);
+                    }
                     await protectedStore.PruneExpiredAsync(stoppingToken).ConfigureAwait(false);
                 }
             }
@@ -115,5 +139,19 @@ public sealed class QueryStoreHistoryBackgroundService(
                 break;
             }
         }
+    }
+
+    internal static async Task NotifyAsync(
+        IHubContext<CurrentSnapshotHub> hubContext,
+        string method,
+        object payload,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var notificationCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        notificationCancellation.CancelAfter(timeout);
+        await hubContext.Clients.All.SendAsync(
+            method, payload, notificationCancellation.Token).ConfigureAwait(false);
     }
 }
