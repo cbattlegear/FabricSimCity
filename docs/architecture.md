@@ -74,6 +74,9 @@ object's stable id and carries no data claim; the in-app legend states this spli
 | Road width | executions of query families naming both endpoints |
 | Road colour | captured wait share, graded low/medium/high, upgraded only by a resolved live lock |
 | Route line pattern | co-reference confidence (confirmed / probable / unknown) |
+| Wait-lane width | captured Query Store wait milliseconds from one building to one facility |
+| Wait-lane colour | which facility the lane ends at |
+| Wait-lane pattern | attribution confidence of the contributing query families |
 
 Building *archetype* (house, rowhouse, midrise, tower, skyscraper, civic hall, vacant parcel) is
 chosen from exact reserved-page thresholds compared as `BigInt`, because page counts are lossless
@@ -88,6 +91,34 @@ facilities in the civic district (`web/src/cityInfrastructure.ts`). Each facilit
 fixed decoration so its location stays learnable with no evidence at all; only the *height* of the
 measured units inside it varies, interpolated between a documented floor and ceiling. A subsystem
 that could not be sampled renders as a wireframe with its reason and claims nothing.
+
+#### Waits as traffic to infrastructure
+
+Roads answer "which objects are named together". **Wait lanes** answer a different question — "where
+did the time go" — so they are a separate layer (`web/src/cityFacilityTraffic.ts`), toggled
+separately. Query Store `wait_category_desc` totals, already collected by the Query Store probes,
+are carried on `DatabaseCityQueryFamilyV1.WaitMillisecondsByCategory` and routed to the facility
+that owns the resource: CPU and Worker Thread to the Scheduler Yard, Memory to the Memory Grant
+Office, Buffer IO and Other Disk IO to the Storage Depot, Tran Log IO and Log Rate Governor to the
+Log Yard, Lock to the Lock Authority.
+
+Three refusals keep the layer honest, and each is enforced by a test:
+
+1. A family naming more than one object is **never divided** between them. Query Store reports one
+   wait total per query, not per object, so splitting it would fabricate a per-building number. Those
+   milliseconds are reported whole in a separate list.
+2. A category with no counterpart in this city — Parallelism, Network IO, Compilation, Idle,
+   Preemptive — is **never folded into the CPU yard**. It is listed with the reason it has no
+   destination.
+3. `Buffer Latch` is **not** routed to tempdb Works, even though tempdb allocation contention is its
+   most famous cause, because the category does not name a database. tempdb therefore has no Query
+   Store lane at all.
+
+A building with no lane is not idle. `sys.query_store_wait_stats` does not exist before SQL Server
+2017 (14.x), so an absent breakdown is stated in prose rather than drawn as a zero-width lane, and
+an unrecognised category is reported verbatim rather than routed to a guessed facility. Lane width
+saturates at a documented ceiling; past it the lane says its width is a floor and defers to the
+exact figure in the evidence table.
 
 The backend returns bounded object pages, a fixed top-query-family set, and an exact `other workload`
 aggregate. The browser never receives all 100,000 query families.

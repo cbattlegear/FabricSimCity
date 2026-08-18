@@ -11,7 +11,8 @@ import {
   type DatabaseCitySceneController,
 } from './DatabaseCityScene'
 import { CONGESTION_COLORS, CONGESTION_LABELS, type LiveBlockingEdge } from './cityTraffic'
-import type { Facility } from './cityInfrastructure'
+import { LANE_COLORS, type FacilityTraffic } from './cityFacilityTraffic'
+import { FACILITY_LABELS, type Facility, type FacilityKind } from './cityInfrastructure'
 import type { CityRoute } from './cityRoute'
 
 type Props = {
@@ -19,6 +20,7 @@ type Props = {
   routes: readonly DatabaseCityRoute[]
   families: readonly DatabaseCityQueryFamily[]
   facilities: readonly Facility[]
+  facilityTraffic: FacilityTraffic
   liveBlocking: readonly LiveBlockingEdge[]
   route: CityRoute | null
   selectedId: string | null
@@ -46,6 +48,7 @@ const KEY_ACTIONS: Record<string, CameraNudge> = {
 const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
 const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string]> = [
   ['traffic', 'Traffic'],
+  ['waitLanes', 'Wait lanes'],
   ['infrastructure', 'Infrastructure'],
   ['route', 'Query route'],
   ['districts', 'Districts'],
@@ -60,6 +63,7 @@ export function DatabaseCityViewport({
   routes,
   families,
   facilities,
+  facilityTraffic,
   liveBlocking,
   route,
   selectedId,
@@ -74,6 +78,7 @@ export function DatabaseCityViewport({
   const [heading, setHeading] = useState(0)
   const [layers, setLayers] = useState<CityLayerToggles>({
     traffic: true,
+    waitLanes: true,
     infrastructure: true,
     route: true,
     districts: true,
@@ -102,6 +107,9 @@ export function DatabaseCityViewport({
     sceneRef.current?.setData(objects, routes, families, liveBlocking)
   }, [objects, routes, families, liveBlocking])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
+  useEffect(
+    () => sceneRef.current?.setFacilityLanes(facilityTraffic.lanes),
+    [facilityTraffic])
   useEffect(() => sceneRef.current?.setRoute(route), [route])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
   useEffect(() => sceneRef.current?.setLayers(layers), [layers])
@@ -129,6 +137,12 @@ export function DatabaseCityViewport({
 
   const toggle = (key: keyof CityLayerToggles) =>
     setLayers(current => ({ ...current, [key]: !current[key] }))
+
+  // Only facilities that actually received a lane are given a legend swatch, so the legend never
+  // advertises a colour for traffic that was not measured.
+  const laneFacilities: FacilityKind[] = [
+    ...new Set(facilityTraffic.lanes.map(lane => lane.facility)),
+  ].sort()
 
   if (unavailable) {
     return (
@@ -202,9 +216,26 @@ export function DatabaseCityViewport({
               </li>
             ))}
             <li>
+              <i className="legend-swatch legend-lane" /> Wait lane width — captured Query Store wait
+              milliseconds from that building to that facility
+            </li>
+            {laneFacilities.map(kind => (
+              <li key={kind}>
+                <i className="legend-swatch" style={{ background: swatch(LANE_COLORS[kind]) }} />
+                Wait lane colour — queued at the {FACILITY_LABELS[kind]}
+              </li>
+            ))}
+            <li>
               <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
             </li>
           </ul>
+          <p className="legend-caveat">
+            A building with no wait lane is not idle: it means no ranked query family carried Query
+            Store wait-category evidence naming only that object. {facilityTraffic.note}
+            {facilityTraffic.unmapped.length > 0 &&
+              ` ${facilityTraffic.unmapped.length} captured wait category/categories have no facility` +
+              ' on this map and are listed in the evidence tables rather than folded into one.'}
+          </p>
           <p className="legend-decoration">
             Roofs, windows, doors, chimneys, setbacks, crowns, sidewalks, and district tints are
             decoration. They are seeded from each object&apos;s stable id and encode nothing.

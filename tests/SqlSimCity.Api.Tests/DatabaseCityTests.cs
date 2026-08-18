@@ -199,6 +199,32 @@ public sealed class DatabaseCityTests : IClassFixture<WebApplicationFactory<ApiA
     }
 
     [Fact]
+    public async Task FixtureSourceExposesWaitCategoriesThatReconcileWithTotalWait()
+    {
+        var source = new FixtureDatabaseCitySource();
+        var page = await source.GetDatabaseAsync(
+            "fixture-target-primary/database/sales", DatabaseCityMetric.Cpu, 20, null, CancellationToken.None);
+
+        var measured = page!.TopQueryFamilies
+            .Where(family => family.WaitMillisecondsByCategory.Count > 0)
+            .ToList();
+
+        Assert.NotEmpty(measured);
+        foreach (var family in measured)
+        {
+            // A breakdown that does not reconcile with the total would claim waits the engine never
+            // reported, so the fixture must never ship one.
+            var breakdown = family.WaitMillisecondsByCategory.Values.Aggregate(
+                BigInteger.Zero, (sum, value) => sum + BigInteger.Parse(value, CultureInfo.InvariantCulture));
+            Assert.Equal(family.TotalWaitMilliseconds, breakdown.ToString(CultureInfo.InvariantCulture));
+        }
+
+        // Families without the breakdown are kept, not dropped: absent categories are not zero waits.
+        Assert.Contains(page.TopQueryFamilies, family =>
+            family.WaitMillisecondsByCategory.Count == 0 && family.TotalWaitMilliseconds != "0");
+    }
+
+    [Fact]
     public async Task FixtureSourceRejectsTokensAcrossMetrics()
     {
         var source = new FixtureDatabaseCitySource();

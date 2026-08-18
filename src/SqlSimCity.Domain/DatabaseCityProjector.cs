@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Numerics;
 using SqlSimCity.Contracts.V1;
@@ -32,7 +33,15 @@ public sealed record DatabaseCityQueryEvidence(
     string TotalWaitMilliseconds,
     IReadOnlyList<string> ObjectIds,
     QueryAttributionConfidence Confidence,
-    string Rationale);
+    string Rationale)
+{
+    /// <summary>
+    /// Captured wait milliseconds keyed by verbatim Query Store <c>wait_category_desc</c>. Empty
+    /// means the category breakdown was not captured, never that the family waited for nothing.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> WaitMillisecondsByCategory { get; init; } =
+        ReadOnlyDictionary<string, string>.Empty;
+}
 
 public sealed record DatabaseCityWorkloadProjection(
     IReadOnlyList<DatabaseCityQueryEvidence> Top,

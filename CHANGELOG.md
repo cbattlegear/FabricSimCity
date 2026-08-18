@@ -51,6 +51,25 @@ First MVP release candidate. There is no tagged release yet.
     legend, compass and camera controls, live-feed pill, and a slide-over for the selected building or
     route. The existing evidence tables are preserved verbatim in a collapsible section below the map as
     the text-first, non-WebGL equivalent.
+- **Waits as traffic to infrastructure.** Query Store wait categories, which were already collected
+  but discarded before reaching the city, now flow through `DatabaseCityQueryFamilyV1.WaitMillisecondsByCategory`
+  and render as **wait lanes** from a building to the facility whose resource its workload queued for
+  (`web/src/cityFacilityTraffic.ts`). Roads answer "which objects are named together"; a lane answers
+  "where did the time go", so it is a separate, separately toggleable layer. Lane width maps captured
+  wait milliseconds on a documented log₂ scale, lane colour names the destination facility, and lane
+  pattern reuses the same attribution-confidence channel roads use. Three refusals are enforced by
+  tests rather than left to judgement:
+  - A family naming more than one object is **never divided** between them. Query Store reports one
+    wait total per query, not per object, so those milliseconds are reported whole in a separate
+    "shared" list instead of being split into per-building numbers nobody measured.
+  - A category with no counterpart in this city — Parallelism, Network IO, Compilation, Idle — is
+    **never folded into the CPU yard**. It is listed with the reason it has no destination.
+  - `Buffer Latch` is **not** routed to tempdb Works despite tempdb allocation contention being its
+    most famous cause, because the category does not name a database. tempdb therefore has no Query
+    Store lane at all.
+  A building with no lane is not idle: `sys.query_store_wait_stats` does not exist before SQL Server
+  2017 (14.x), so an absent breakdown is stated in prose rather than drawn as a zero-width lane, and
+  a lane too wide to draw says so and defers to its exact figure in the evidence table.
 - **Lock resource resolution.** `LockResourceParser` parses the engine's verbatim `wait_resource` /
   `resource_description` text into a new optional `LockResourceV1` on `LiveRequestV1` and
   `WaitingTaskV1`. `OBJECT:`/`TAB:` resolve with no lookup; `KEY:`/`HOBT:`/`ALLOCUNIT:` carry only a

@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Numerics;
 using System.Text;
@@ -195,18 +196,27 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 7 => new[] { "object:dbo:110", "fixture-target-primary/database/warehouse" },
                 _ => Array.Empty<string>(),
             };
-            var confidence = objectIds.Length switch
-            {
-                1 => QueryAttributionConfidence.Confirmed,
-                > 1 => QueryAttributionConfidence.Probable,
-                _ => QueryAttributionConfidence.Unknown,
-            };
-            var rationale = objectIds.Length switch
-            {
-                1 => "A normalized compiled plan names exactly one local object.",
-                > 1 => "A normalized plan names multiple objects; totals remain query-level and are not copied onto each object.",
-                _ => "No normalized object reference was available; workload remains unattributed.",
-            };
+            // Family 3 names exactly one object, but it is an indexed view whose optimizer expansion
+            // is a caveat, so a single-object reference is not automatically Confirmed. This matches
+            // reporting.SalesRollup's own Probable exposure, and the city draws its lanes dashed for
+            // that reason.
+            var confidence = index == 3
+                ? QueryAttributionConfidence.Probable
+                : objectIds.Length switch
+                {
+                    1 => QueryAttributionConfidence.Confirmed,
+                    > 1 => QueryAttributionConfidence.Probable,
+                    _ => QueryAttributionConfidence.Unknown,
+                };
+            var rationale = index == 3
+                ? "A normalized plan names the indexed view reporting.SalesRollup; optimizer expansion remains a caveat, so the single object reference is probable rather than confirmed."
+                : objectIds.Length switch
+                {
+                    1 => "A normalized compiled plan names exactly one local object.",
+                    > 1 => "A normalized plan names multiple objects; totals remain query-level and are not copied onto each object.",
+                    _ => "No normalized object reference was available; workload remains unattributed.",
+                };
+            var waitCategories = WaitCategories(index);
             var weight = 16 - index;
             if (index == 1)
             {
@@ -220,7 +230,10 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                     "287",
                     objectIds,
                     confidence,
-                    rationale));
+                    rationale)
+                {
+                    WaitMillisecondsByCategory = waitCategories,
+                });
                 continue;
             }
             if (index >= 13)
@@ -235,7 +248,10 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                     (16 - index).ToString(CultureInfo.InvariantCulture),
                     objectIds,
                     confidence,
-                    rationale));
+                    rationale)
+                {
+                    WaitMillisecondsByCategory = waitCategories,
+                });
                 continue;
             }
             rows.Add(new DatabaseCityQueryEvidence(
@@ -248,10 +264,42 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 (weight * 1_009L).ToString(CultureInfo.InvariantCulture),
                 objectIds,
                 confidence,
-                rationale));
+                rationale)
+            {
+                WaitMillisecondsByCategory = waitCategories,
+            });
         }
         return rows;
     }
+
+    /// <summary>
+    /// Captured Query Store wait categories per fixture family, using verbatim
+    /// <c>wait_category_desc</c> text. Each family's category totals sum exactly to its
+    /// <c>TotalWaitMilliseconds</c>. Families 9 and above deliberately carry none, so the "no
+    /// captured wait-category evidence" path -- the one a SQL Server 2016 (13.x) target always takes,
+    /// because <c>sys.query_store_wait_stats</c> does not exist there -- stays demonstrable offline.
+    /// The set spans categories that map to a facility (Buffer IO, Tran Log IO, Memory, Lock, CPU,
+    /// Worker Thread, Log Rate Governor) and categories that deliberately do not (Network IO,
+    /// Parallelism, Buffer Latch), so the unmapped-waits disclosure is exercised too. Families 6 and
+    /// 7 name several objects and family 8 names none, so the city's refusal to divide query-level
+    /// wait time between objects -- or to hand it all to whichever object is loaded -- is visible
+    /// offline rather than only asserted in a test.
+    /// </summary>
+    private static ReadOnlyDictionary<string, string> WaitCategories(int index) => index switch
+    {
+        1 => Waits(("Buffer IO", "180"), ("Lock", "62"), ("Network IO", "45")),
+        2 => Waits(("Tran Log IO", "9000"), ("Memory", "3000"), ("Buffer Latch", "1500"), ("Parallelism", "626")),
+        3 => Waits(("CPU", "7000"), ("Buffer IO", "4000"), ("Log Rate Governor", "2117")),
+        4 => Waits(("Memory", "8108"), ("Worker Thread", "4000")),
+        5 => Waits(("Lock", "11099")),
+        6 => Waits(("Buffer IO", "10090")),
+        7 => Waits(("Lock", "9081")),
+        8 => Waits(("Memory", "8072")),
+        _ => ReadOnlyDictionary<string, string>.Empty,
+    };
+
+    private static ReadOnlyDictionary<string, string> Waits(params (string Category, string Milliseconds)[] entries) =>
+        new(entries.ToDictionary(entry => entry.Category, entry => entry.Milliseconds, StringComparer.Ordinal));
 
     private static DatabaseCityQueryFamilyV1 ToContract(DatabaseCityQueryEvidence family) => new(
         family.FamilyId,
@@ -261,6 +309,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
         family.TotalDurationMicroseconds,
         family.TotalLogicalReads8KiBPages,
         family.TotalWaitMilliseconds,
+        family.WaitMillisecondsByCategory,
         family.ObjectIds,
         family.Confidence,
         family.Rationale,

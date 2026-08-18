@@ -16,6 +16,7 @@ import { liveBlockingEdges } from './cityBlocking'
 import { planCity } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
 import { FACILITY_LABELS, layoutFacilities, projectFacilities } from './cityInfrastructure'
+import { projectFacilityTraffic, type FacilityTraffic } from './cityFacilityTraffic'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
 type Metric = (typeof metrics)[number]
@@ -135,6 +136,9 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
     () => liveBlockingEdges(snapshot?.snapshot ?? null, visibleObjects),
     [snapshot, visibleObjects])
   const families = page?.topQueryFamilies ?? []
+  const facilityTraffic = useMemo(
+    () => projectFacilityTraffic(families, visibleObjects),
+    [families, visibleObjects])
 
   const route: CityRoute | null = useMemo(() => {
     if (!activePlan) return null
@@ -340,6 +344,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           routes={page.routes}
           families={families}
           facilities={facilities}
+          facilityTraffic={facilityTraffic}
           liveBlocking={blocking.edges}
           route={route}
           selectedId={selectedId}
@@ -357,6 +362,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           attached to their parent. Road width maps the executions of query families naming both
           endpoints; road colour maps captured wait share, upgraded to red only where a resolved live
           lock names that object; route line pattern maps co-reference confidence, never row flow.
+          Wait-lane width maps the captured Query Store wait milliseconds a building&apos;s workload
+          spent queued at one infrastructure facility, and lane colour names that destination; a
+          category with no facility here is listed, never folded into one, and a family naming more
+          than one object is reported whole rather than divided.
           Unknown size or unavailable activity uses fixed wireframe geometry and makes no quantity
           claim. Everything else — roof shapes, windows, doors, setbacks, crowns, sidewalks, district
           tints — is decoration seeded from each object&apos;s stable id and encodes nothing.
@@ -433,6 +442,8 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
             </p>}
           </section>
 
+          <FacilityTrafficTable traffic={facilityTraffic} objects={visibleObjects} />
+
           <section className="city-workload" aria-labelledby="city-workload-title">
             <div className="section-heading">
               <div><h2 id="city-workload-title">Top query-family exposure</h2>
@@ -476,6 +487,77 @@ function familyMatches(family: QueryFamilySummary, term: string): boolean {
     family.familyId.toLocaleLowerCase().includes(term) ||
     family.queryHash.toLocaleLowerCase().includes(term) ||
     (family.text.normalizedText ?? '').toLocaleLowerCase().includes(term)
+  )
+}
+
+/**
+ * Text-first equivalent of the wait-lane layer. Everything the map draws is listed here, plus the
+ * three things the map deliberately cannot draw: categories with no facility, wait time shared by
+ * families naming several objects, and wait time from families naming no loaded object.
+ */
+function FacilityTrafficTable({
+  traffic,
+  objects,
+}: {
+  traffic: FacilityTraffic
+  objects: readonly DatabaseCityObject[]
+}) {
+  const nameOf = (objectId: string) => {
+    const object = objects.find(item => item.objectId === objectId)
+    return object ? `${object.schemaName}.${object.name}` : objectId
+  }
+  // Captured milliseconds are lossless base-10 strings, so they are grouped as BigInt: rendering an
+  // exact counter through a double would round it, and the saturation note promises exactness.
+  const exact = (milliseconds: string) => BigInt(milliseconds).toLocaleString()
+  return (
+    <section className="city-wait-lanes" aria-labelledby="city-wait-lanes-title">
+      <div className="section-heading">
+        <div>
+          <h2 id="city-wait-lanes-title">Waits as traffic to infrastructure</h2>
+          <p>Captured Query Store wait categories routed to the facility that owns the resource</p>
+        </div>
+      </div>
+      <p className="hud-note">{traffic.note}</p>
+      {traffic.lanes.length > 0 && <div className="table-scroll"><table>
+        <thead><tr>
+          <th>Building</th><th>Facility</th><th>Captured wait (ms)</th>
+          <th>Categories</th><th>Attribution</th>
+        </tr></thead>
+        <tbody>{traffic.lanes.map(lane => <tr key={lane.laneId}>
+          <th scope="row">{nameOf(lane.objectId)}<small>{lane.familyIds.join(' · ')}</small></th>
+          <td>{lane.facilityLabel}</td>
+          <td>{exact(lane.waitMilliseconds)}
+            {lane.saturated && <small>Wider than the map can draw; this figure is exact, the lane
+              width is a floor.</small>}</td>
+          <td>{lane.categories
+            .map(total => `${total.category} ${exact(total.waitMilliseconds)}`)
+            .join(' · ')}</td>
+          <td>{lane.confidence}<small>{lane.rationale}</small></td>
+        </tr>)}</tbody>
+      </table></div>}
+      {traffic.unmapped.length > 0 && <div className="source-note">
+        <strong>Captured waits with no facility on this map</strong>
+        <ul>{traffic.unmapped.map(entry => <li key={entry.category}>
+          {entry.category}: {exact(entry.waitMilliseconds)} ms — {entry.reason}
+        </li>)}</ul>
+      </div>}
+      {traffic.shared.length > 0 && <div className="source-note">
+        <strong>Wait time from families naming more than one object</strong>
+        <p>
+          Query Store reports one wait total per query, not per object, so this time is reported
+          whole rather than divided between the buildings the family names.
+        </p>
+        <ul>{traffic.shared.map(entry => <li key={entry.category}>
+          {entry.category}: {exact(entry.waitMilliseconds)} ms
+        </li>)}</ul>
+      </div>}
+      {traffic.unattributed.length > 0 && <div className="source-note">
+        <strong>Wait time from families naming no object on this page</strong>
+        <ul>{traffic.unattributed.map(entry => <li key={entry.category}>
+          {entry.category}: {exact(entry.waitMilliseconds)} ms
+        </li>)}</ul>
+      </div>}
+    </section>
   )
 }
 

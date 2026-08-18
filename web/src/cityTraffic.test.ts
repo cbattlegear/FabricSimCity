@@ -31,6 +31,7 @@ function family(overrides: Partial<DatabaseCityQueryFamily> & { familyId: string
     totalDurationMicroseconds: '0',
     totalLogicalReads8KiBPages: '0',
     totalWaitMilliseconds: '0',
+    waitMillisecondsByCategory: {},
     objectIds: [],
     confidence: 'Confirmed',
     rationale: 'test',
