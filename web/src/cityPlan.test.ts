@@ -199,13 +199,32 @@ describe('planCity', () => {
     expect(planCity(sampleCity()).civic).toEqual(plan.civic)
   })
 
-  it('packs a full block before starting the next one', () => {
-    const objects = Array.from({ length: CELLS_PER_BLOCK + 1 }, (_unused, index) =>
+  it('gives every building its own block, ringed by street', () => {
+    const objects = Array.from({ length: 9 }, (_unused, index) =>
       object(`object:dbo:${index}`, 'schema:dbo', 0, index))
     const plan = planCity(objects)
     const blocks = new Set([...plan.lots.values()].map(lot => lot.blockId))
-    expect(blocks.size).toBe(2)
+
+    // The separation that schema tints used to provide now lives in the street lattice, so no two
+    // buildings may share a block no matter how many objects the district holds.
+    expect(blocks.size).toBe(objects.length)
+    expect(CELLS_PER_BLOCK).toBe(1)
     expect(BLOCK_COLS * BLOCK_ROWS).toBe(CELLS_PER_BLOCK)
+  })
+
+  it('separates every pair of buildings by at least a street width', () => {
+    const plan = planCity(sampleCity())
+    const lots = [...plan.lots.values()]
+    for (const left of lots) {
+      for (const right of lots) {
+        if (left.objectId === right.objectId) continue
+        // Lots sit one per block, so any two buildings differ by a full block pitch on at least one
+        // axis. Their footprints are bounded by the cell, leaving the street clear between them.
+        const gapX = Math.abs(left.x - right.x)
+        const gapZ = Math.abs(left.z - right.z)
+        expect(Math.max(gapX, gapZ)).toBeGreaterThanOrEqual(plan.cell)
+      }
+    }
   })
 
   it('plans a usable city from a single object', () => {

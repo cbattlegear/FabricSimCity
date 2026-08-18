@@ -28,6 +28,11 @@ type Props = {
   /** Rendered into the right HUD slot: object detail or turn-by-turn directions. */
   panel?: ReactNode
   liveStatus?: ReactNode
+  /**
+   * Called with the live layer state on mount and on every toggle, so surrounding chrome can stay
+   * consistent with what the map is actually drawing.
+   */
+  onLayersChange?: (layers: CityLayerToggles) => void
 }
 
 const KEY_ACTIONS: Record<string, CameraNudge> = {
@@ -71,6 +76,7 @@ export function DatabaseCityViewport({
   finder,
   panel,
   liveStatus,
+  onLayersChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<DatabaseCitySceneController | null>(null)
@@ -119,6 +125,7 @@ export function DatabaseCityViewport({
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
   useEffect(() => sceneRef.current?.setSelectedRoad(selectedRoadId), [selectedRoadId])
   useEffect(() => sceneRef.current?.setLayers(layers), [layers])
+  useEffect(() => onLayersChange?.(layers), [layers, onLayersChange])
 
   const nudge = useCallback((action: CameraNudge) => {
     sceneRef.current?.nudge(action)

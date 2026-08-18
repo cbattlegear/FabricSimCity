@@ -12,6 +12,7 @@ import type { LiveIncidentResponse } from './liveContracts'
 import type { LiveFeedConnectionState } from './liveIncidents'
 import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
 import { DatabaseCityViewport } from './DatabaseCityViewport'
+import type { CityLayerToggles } from './DatabaseCityScene'
 import { liveBlockingEdges } from './cityBlocking'
 import { planCity } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
@@ -45,6 +46,9 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get('object'))
   const [selectedRoadId, setSelectedRoadId] = useState<string | null>(null)
+  // Mirrors the viewport's Schema neighborhoods layer. The count line and the schema strip both
+  // describe that layer, so they follow it rather than announcing a grouping the map is not drawing.
+  const [showNeighborhoods, setShowNeighborhoods] = useState(false)
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -110,6 +114,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
     const url = new URL(window.location.href)
     url.searchParams.set('object', objectId)
     window.history.replaceState(null, '', url)
+  }, [])
+
+  const onLayersChange = useCallback((layers: CityLayerToggles) => {
+    setShowNeighborhoods(layers.districts)
   }, [])
 
   const selectRoad = useCallback((routeId: string | null) => {
@@ -453,7 +461,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
         <div>
           <p className="eyebrow">Database city · factual projection</p>
           <h2 id="database-city-title" ref={headingRef} tabIndex={-1}>{databaseName}</h2>
-          <p>{page?.totalObjects ?? '—'} objects · {displayedSchemas.length || '—'} schema neighborhoods loaded</p>
+          <p>
+            {page?.totalObjects ?? '—'} objects
+            {showNeighborhoods && <> · {displayedSchemas.length || '—'} schema neighborhoods loaded</>}
+          </p>
         </div>
         <div className="city-controls">
           <label>Rank workload
@@ -485,6 +496,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           finder={finder}
           panel={panel}
           liveStatus={liveStatus}
+          onLayersChange={onLayersChange}
         />
 
         <p className="mapping-note">
@@ -501,11 +513,14 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           than one object is reported whole rather than divided.
           Unknown size or unavailable activity uses fixed wireframe geometry and makes no quantity
           claim. Ground labels name each building and facility and carry identity only — a label
-          never restates or qualifies a measurement. Everything else — roof shapes, windows, doors,
-          setbacks, crowns, sidewalks, schema neighborhood tints — is decoration seeded from each
-          object&apos;s stable id and encodes nothing. Schema neighborhood tints are off by default,
-          because the schema name a tint grouped by is now written on every building label; turn
-          them back on from the Layers control.
+          never restates or qualifies a measurement. Every building stands alone on its own block,
+          which separates one table from the next without depending on a layer being switched on;
+          a building&apos;s block position comes from its stable layout ordinals and encodes nothing,
+          so neighbouring buildings are not related by being neighbours. Everything else — roof
+          shapes, windows, doors, setbacks, crowns, sidewalks, schema neighborhood tints — is
+          decoration seeded from each object&apos;s stable id and encodes nothing. Schema
+          neighborhood tints are off by default, because the schema name a tint grouped by is now
+          written on every building label; turn them back on from the Layers control.
         </p>
 
         <details className="evidence-tables" open>
@@ -517,12 +532,12 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
             <span><i className="legend-unknown">×</i> unknown, nonquantitative size</span>
             <span><i className="legend-route" /> confidence-graded co-reference, never row flow</span>
           </div>
-          <div className="city-schema-strip" aria-label="Schema neighborhoods">
+          {showNeighborhoods && <div className="city-schema-strip" aria-label="Schema neighborhoods">
             {displayedSchemas.map(schema => <div key={schema.schemaId}>
               <strong>{schema.name}</strong>
               <span>{schema.objectCount} objects · neighborhood {schema.neighborhoodOrdinal + 1}</span>
             </div>)}
-          </div>
+          </div>}
 
           <div className="analysis-grid city-analysis">
             <section className="table-region" aria-labelledby="city-object-table">

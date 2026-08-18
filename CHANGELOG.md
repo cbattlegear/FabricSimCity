@@ -163,6 +163,26 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Every building stands alone on its own block.** A block used to hold eight buildings in two
+  back-to-back rows, and the schema neighborhood tint was what visually separated one cluster from
+  the next. Once that tint went off by default the packed blocks read as an undifferentiated mass of
+  geometry, so the separation moved into the street lattice itself: `BLOCK_COLS`/`BLOCK_ROWS` in
+  `web/src/cityPlan.ts` are now `1`, giving each object a lot ringed by street on every side. Block
+  position is still derived purely from the backend's stable layout ordinals and encodes nothing —
+  neighbouring buildings are not related by being neighbours, and the map's own prose now says so.
+  The change costs roughly 1.7x the ground area per building, paid deliberately for separation that
+  does not depend on a layer being switched on. Because the reserved civic rectangle is measured in
+  blocks, it was resized from 3x2 to 5x3 so the six infrastructure facilities keep the footprint they
+  had before rather than shrinking to the size of the tables they serve. Routing cost was measured
+  rather than assumed: 30 street paths across a 500-object city (672 intersections) take ~8.5 ms.
+
+- **The schema-neighborhood count and strip follow the layer that draws them.** The city heading
+  advertised "N schema neighborhoods loaded" and the legend showed a per-neighborhood strip even
+  when the neighborhoods layer was switched off, describing a grouping the map was not drawing. Both
+  now track the toggle, so with the layer off the heading reads plainly as "N objects". No evidence
+  is lost when they are hidden: every object stays listed, schema-qualified, in the objects table
+  that is the text-first equivalent of the map.
+
 - **Schema neighborhoods are off by default and the layer that draws them is now named for what it
   draws.** The toggle was called "Districts" and started switched on, tinting a translucent plate
   under every schema so the map met you pre-coloured by a grouping that encodes nothing measured.
