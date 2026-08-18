@@ -171,29 +171,54 @@ queryStore.MapGet("/queries", async (
     {
         return Results.BadRequest(new { error = "pageToken is malformed or no longer valid." });
     }
+    catch (QueryStoreSnapshotChangedException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
 });
 queryStore.MapGet("/queries/{familyId}", async (
     IQueryStoreHistorySource source, HttpContext context, string familyId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
-        ? Results.Ok(family) : Results.NotFound();
+    try
+    {
+        return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
+            ? Results.Ok(family) : Results.NotFound();
+    }
+    catch (QueryStoreSnapshotChangedException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
 });
 queryStore.MapGet("/queries/{familyId}/timeline", async (
     IQueryStoreHistorySource source, HttpContext context, string familyId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
-        ? Results.Ok(new { schemaVersion = "1.0", items = family.Runtime })
-        : Results.NotFound();
+    try
+    {
+        return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
+            ? Results.Ok(new { schemaVersion = "1.0", items = family.Runtime })
+            : Results.NotFound();
+    }
+    catch (QueryStoreSnapshotChangedException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
 });
 queryStore.MapGet("/queries/{familyId}/plans", async (
     IQueryStoreHistorySource source, HttpContext context, string familyId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
-        ? Results.Ok(new { schemaVersion = "1.0", items = family.Plans })
-        : Results.NotFound();
+    try
+    {
+        return await source.GetFamilyAsync(familyId, cancellationToken) is { } family
+            ? Results.Ok(new { schemaVersion = "1.0", items = family.Plans })
+            : Results.NotFound();
+    }
+    catch (QueryStoreSnapshotChangedException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
 });
 queryStore.MapGet("/plans/{planId}", async (
     IQueryStoreHistorySource source, HttpContext context, string planId, CancellationToken cancellationToken) =>

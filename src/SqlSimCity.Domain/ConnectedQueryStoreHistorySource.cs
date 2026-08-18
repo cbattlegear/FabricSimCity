@@ -16,14 +16,25 @@ public sealed class ConnectedQueryStoreHistorySource(
     QueryStoreCollectionStatusTracker statusTracker,
     TimeProvider timeProvider) : IQueryStoreHistorySource
 {
-    public async Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(
+    public Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(
+        string? databaseId,
+        string metric,
+        int pageSize,
+        string? pageToken,
+        CancellationToken cancellationToken) =>
+        repository.ReadConsistentPublishedSnapshotAsync(
+            (snapshot, token) => GetQueriesAsync(
+                snapshot, databaseId, metric, pageSize, pageToken, token),
+            cancellationToken);
+
+    private async Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(
+        QueryStorePublishedSnapshot? snapshot,
         string? databaseId,
         string metric,
         int pageSize,
         string? pageToken,
         CancellationToken cancellationToken)
     {
-        var snapshot = await repository.ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
         if (snapshot is null)
             return Empty(pageSize, "No complete connected Query Store snapshot has been published yet.");
 
@@ -76,17 +87,24 @@ public sealed class ConnectedQueryStoreHistorySource(
         };
     }
 
-    public async Task<QueryFamilyDetailV1?> GetFamilyAsync(
+    public Task<QueryFamilyDetailV1?> GetFamilyAsync(
+        string familyId,
+        CancellationToken cancellationToken) =>
+        repository.ReadConsistentPublishedSnapshotAsync(
+            (snapshot, token) => GetFamilyAsync(snapshot, familyId, token),
+            cancellationToken);
+
+    private async Task<QueryFamilyDetailV1?> GetFamilyAsync(
+        QueryStorePublishedSnapshot? snapshot,
         string familyId,
         CancellationToken cancellationToken)
     {
-        var snapshot = await repository.ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
         QueryFamilyDetailV1? detail = null;
         if (snapshot is not null)
         {
             detail = snapshot.IndexSets is null
-                ? (await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false))
-                    ?.Families.SingleOrDefault(item => item.Family.FamilyId == familyId)
+                ? (await repository.ReadPublishedSnapshotAsync(snapshot, cancellationToken).ConfigureAwait(false))
+                    .Families.SingleOrDefault(item => item.Family.FamilyId == familyId)
                 : await repository.ReadFamilyAsync(
                     snapshot, familyId, cancellationToken).ConfigureAwait(false);
         }
@@ -230,9 +248,8 @@ public sealed class ConnectedQueryStoreHistorySource(
         QueryPageCursor? cursor,
         CancellationToken cancellationToken)
     {
-        var snapshot = await repository.ReadPublishedSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        if (snapshot is null)
-            return Empty(pageSize, "No complete connected Query Store snapshot has been published yet.");
+        var snapshot = await repository.ReadPublishedSnapshotAsync(header, cancellationToken)
+            .ConfigureAwait(false);
         var normalizedMetric = NormalizeMetric(metric);
         var ordered = snapshot.Families
             .Select(item => item.Family)

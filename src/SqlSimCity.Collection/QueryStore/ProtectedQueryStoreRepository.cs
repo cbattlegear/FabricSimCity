@@ -92,7 +92,7 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
             BuildSlotRecords(snapshot, slot, snapshotRecordId, indexSets),
             cancellationToken).ConfigureAwait(false);
         await PutJsonAsync(CurrentPointerId, "query-store-snapshot-pointer", snapshot.PublishedAt,
-            StorageResolution.Detail,
+            StorageResolution.HourlyRollup,
             new QueryStoreSnapshotPointer(snapshotRecordId.Value, slot),
             cancellationToken)
             .ConfigureAwait(false);
@@ -106,7 +106,15 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
         if (pointer is null) return null;
         var snapshot = await ReadJsonAsync<QueryStorePublishedSnapshot>(
             new ProtectedRecordId(pointer.SnapshotRecordId), cancellationToken).ConfigureAwait(false);
-        if (snapshot is null) return null;
+        return snapshot is null
+            ? null
+            : await ReadPublishedSnapshotAsync(snapshot, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<QueryStorePublishedSnapshot> ReadPublishedSnapshotAsync(
+        QueryStorePublishedSnapshot snapshot,
+        CancellationToken cancellationToken = default)
+    {
         if (snapshot.IndexSets is not null)
         {
             var index = snapshot.IndexSets.Single(item => item.Metric == "execution" && item.DatabaseId is null);
@@ -142,6 +150,37 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
             CurrentPointerId, cancellationToken).ConfigureAwait(false);
         return pointer is null ? null : await ReadJsonAsync<QueryStorePublishedSnapshot>(
             new ProtectedRecordId(pointer.SnapshotRecordId), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<T> ReadConsistentPublishedSnapshotAsync<T>(
+        Func<QueryStorePublishedSnapshot?, CancellationToken, Task<T>> reader,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var before = await ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
+            T result;
+            try
+            {
+                result = await reader(before, cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidDataException)
+            {
+                var afterFailure = await ReadPublishedSnapshotHeaderAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (SameSnapshot(before, afterFailure)) throw;
+                if (attempt == 0) continue;
+                throw new QueryStoreSnapshotChangedException();
+            }
+
+            // Legacy snapshots use immutable GUID-derived records rather than reusable slots.
+            if (before is { StorageSlot: null }) return result;
+            var after = await ReadPublishedSnapshotHeaderAsync(cancellationToken).ConfigureAwait(false);
+            if (SameSnapshot(before, after)) return result;
+            if (attempt == 1) throw new QueryStoreSnapshotChangedException();
+        }
+        throw new QueryStoreSnapshotChangedException();
     }
 
     public Task<QueryFamilyDetailV1?> ReadFamilyAsync(
@@ -226,6 +265,11 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
         CancellationToken cancellationToken = default) =>
         ReadJsonAsync<QueryStoreWatermark>(Id("watermark", databaseId, "current"), cancellationToken);
 
+    public Task<bool> DeleteWatermarkAsync(
+        string databaseId,
+        CancellationToken cancellationToken = default) =>
+        store.DeleteAsync(Id("watermark", databaseId, "current"), cancellationToken);
+
     public async Task<string?> ReadSensitiveTextAsync(
         string kind, string databaseId, string sourceId,
         CancellationToken cancellationToken = default)
@@ -306,7 +350,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
                              SlotIndexId(slot, metric, databaseId, page),
                              "query-store-family-index-page",
                              snapshot.PublishedAt,
-                             value))
+                             value,
+                             StorageResolution.HourlyRollup))
                     yield return record;
             }
             indexSets.Add(new QueryStoreIndexSet(metric, databaseId, ordered.Length, pageCount));
@@ -320,7 +365,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
             StorageSlot = slot,
         };
         foreach (var record in JsonWrites(
-                     snapshotRecordId, "query-store-published-snapshot", snapshot.PublishedAt, header))
+                     snapshotRecordId, "query-store-published-snapshot", snapshot.PublishedAt, header,
+                     StorageResolution.HourlyRollup))
             yield return record;
     }
 
@@ -383,7 +429,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
             {
                 yield return BytesWrite(
                     SlotFamilyId(slot, family.Family.FamilyId),
-                    "query-store-family-detail", capturedAt, inlineBytes);
+                    "query-store-family-detail", capturedAt, inlineBytes,
+                    StorageResolution.HourlyRollup);
             }
             finally
             {
@@ -412,7 +459,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
                 throw new InvalidDataException("The protected Query Store family manifest exceeds the record limit.");
             yield return BytesWrite(
                 SlotFamilyId(slot, family.Family.FamilyId),
-                "query-store-family-detail", capturedAt, manifestBytes);
+                "query-store-family-detail", capturedAt, manifestBytes,
+                StorageResolution.HourlyRollup);
             if (summaryChunks > 0)
                 foreach (var record in ChunkWrites(
                              slot, family.Family.FamilyId, "summary", summaryBytes, capturedAt))
@@ -444,7 +492,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
             {
                 yield return BytesWrite(
                     SlotChunkId(slot, familyId, component, offset / store.MaxPayloadBytes),
-                    $"query-store-family-{component}-chunk", capturedAt, chunk);
+                    $"query-store-family-{component}-chunk", capturedAt, chunk,
+                    StorageResolution.HourlyRollup);
             }
             finally
             {
@@ -511,12 +560,13 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
         ProtectedRecordId id,
         string recordKind,
         DateTimeOffset capturedAt,
-        T value)
+        T value,
+        StorageResolution resolution = StorageResolution.Detail)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
         try
         {
-            yield return BytesWrite(id, recordKind, capturedAt, bytes);
+            yield return BytesWrite(id, recordKind, capturedAt, bytes, resolution);
         }
         finally
         {
@@ -528,8 +578,18 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
         ProtectedRecordId id,
         string recordKind,
         DateTimeOffset capturedAt,
-        byte[] bytes) =>
-        new(id, recordKind, capturedAt, StorageResolution.Detail, bytes);
+        byte[] bytes,
+        StorageResolution resolution = StorageResolution.Detail) =>
+        new(id, recordKind, capturedAt, resolution, bytes);
+
+    private static bool SameSnapshot(
+        QueryStorePublishedSnapshot? left,
+        QueryStorePublishedSnapshot? right) =>
+        left is null && right is null ||
+        left is not null && right is not null &&
+        left.Sequence == right.Sequence &&
+        string.Equals(left.SnapshotId, right.SnapshotId, StringComparison.Ordinal) &&
+        string.Equals(left.StorageSlot, right.StorageSlot, StringComparison.Ordinal);
 
     private static ProtectedRecordId Id(string kind, string databaseId, string sourceId)
     {
@@ -621,3 +681,6 @@ public sealed record QueryStoreChunkManifest(int ChunkCount);
 public sealed record QueryStoreIndexSet(
     string Metric, string? DatabaseId, int TotalCount, int PageCount);
 public sealed record QueryStoreIndexPage(IReadOnlyList<string> FamilyIds);
+
+public sealed class QueryStoreSnapshotChangedException()
+    : Exception("The published Query Store snapshot changed repeatedly during the read.");

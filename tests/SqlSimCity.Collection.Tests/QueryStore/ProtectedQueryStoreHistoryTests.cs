@@ -153,6 +153,46 @@ public sealed class ProtectedQueryStoreHistoryTests
     }
 
     [Fact]
+    public async Task AuthoritativeDatabaseSetRemovesOnlyAbsentDatabasesAcrossRestart()
+    {
+        var repository = new ProtectedQueryStoreRepository(new MemoryProtectedStore());
+        var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker());
+        await PublishCycleAsync(sink, 4, "epoch-a", databaseId: "db-a");
+        await PublishCycleAsync(sink, 8, "epoch-b", databaseId: "db-b");
+
+        await sink.PublishAsync(new QueryStoreCollectionResult(
+            false, Now.AddMinutes(-1), Now,
+            [
+                DatabaseResult("db-a"),
+                DatabaseResult("db-b", "synthetic failure"),
+            ],
+            ["db-a", "db-b"]), default);
+
+        var failedCycle = await repository.ReadPublishedSnapshotAsync();
+        Assert.Equal(["db-a", "db-b"], failedCycle!.Families
+            .Select(family => family.Family.DatabaseId).Order(StringComparer.Ordinal));
+
+        await sink.PublishAsync(new QueryStoreCollectionResult(
+            false, Now, Now.AddMinutes(1),
+            [DatabaseResult("db-a")],
+            ["db-a"]), default);
+
+        var removed = await repository.ReadPublishedSnapshotAsync();
+        Assert.All(removed!.Families, family => Assert.Equal("db-a", family.Family.DatabaseId));
+        Assert.Null(await repository.ReadWatermarkAsync("db-b"));
+
+        var restarted = new ProtectedQueryStoreHistorySink(
+            repository, new QueryStoreCollectionStatusTracker());
+        await restarted.PublishAsync(new QueryStoreCollectionResult(
+            false, Now.AddMinutes(1), Now.AddMinutes(2),
+            [DatabaseResult("db-a")],
+            ["db-a"]), default);
+
+        var afterRestart = await repository.ReadPublishedSnapshotAsync();
+        Assert.All(afterRestart!.Families, family => Assert.Equal("db-a", family.Family.DatabaseId));
+    }
+
+    [Fact]
     public async Task OversizedFamilyDetailIsChunkedAndRoundTrips()
     {
         var store = new MemoryProtectedStore { MaxPayloadBytes = 32 * 1024 };
@@ -202,6 +242,10 @@ public sealed class ProtectedQueryStoreHistoryTests
         Assert.NotNull(plan);
         Assert.NotNull(await repository.ReadNormalizedPlanAsync("db:42"));
         Assert.Null(await repository.ReadSensitiveTextAsync("showplan", "db", "42"));
+        Assert.DoesNotContain(
+            "RAW_PRIVATE_MARKER",
+            System.Text.Json.JsonSerializer.Serialize(plan),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -285,44 +329,57 @@ public sealed class ProtectedQueryStoreHistoryTests
         long count,
         string epoch = "epoch",
         bool reset = false,
-        DateTimeOffset? observedAt = null)
+        DateTimeOffset? observedAt = null,
+        string databaseId = "db")
     {
         var observed = observedAt ?? Now;
         var state = new QueryStoreDatabaseState(
-            "db", QueryStoreCollectionState.ReadWrite, epoch, observed.AddDays(-1), observed,
+            databaseId, QueryStoreCollectionState.ReadWrite, epoch, observed.AddDays(-1), observed,
             "available", 16, 160, true, true, false, false);
         await sink.BeginDatabaseCycleAsync(state, epoch, reset, default);
-        await sink.StageFactsAsync("db", new QueryStoreFactPage(QueryStoreFactKind.Identity,
+        await sink.StageFactsAsync(databaseId, new QueryStoreFactPage(QueryStoreFactKind.Identity,
         [
             new QueryIdentityFact("parent", "parent-text", "context-a", "hash-a", observed, false, true, null, null, null, null),
             new QueryIdentityFact("variant", "variant-text", "context-b", "hash-b", observed, false, true, null, null, null, null),
         ], null, false), default);
-        await sink.StageFactsAsync("db", new QueryStoreFactPage(QueryStoreFactKind.Plan,
+        await sink.StageFactsAsync(databaseId, new QueryStoreFactPage(QueryStoreFactKind.Plan,
         [
             new QueryPlanFact("dispatcher", "parent", "dispatcher-hash", QueryPlanType.Dispatcher, null,
                 false, null, BigInteger.Zero, null, "16", "160", observed),
             new QueryPlanFact("variant-plan", "variant", "variant-hash", QueryPlanType.Variant, "dispatcher",
                 false, null, BigInteger.One, "NO_INDEX", "16", "160", observed),
         ], null, false), default);
-        await sink.StageFactsAsync("db", new QueryStoreFactPage(QueryStoreFactKind.Variant,
+        await sink.StageFactsAsync(databaseId, new QueryStoreFactPage(QueryStoreFactKind.Variant,
         [
             new QueryVariantFact("variant", "parent", "dispatcher", QueryOptimizationKind.ParameterSensitivePlan),
         ], null, false), default);
-        await sink.StageRuntimeBucketsAsync("db",
+        await sink.StageRuntimeBucketsAsync(databaseId,
         [
             Bucket("dispatcher", 999, observed),
             Bucket("variant-plan", count, observed),
         ], true, default);
         await sink.CommitDatabaseCycleAsync(state,
             new QueryStoreWatermark(
-                "db", state.ResetEpoch, epoch, observed,
+                databaseId, state.ResetEpoch, epoch, observed,
                 new Dictionary<QueryStoreFactKind, string?>()), default);
         await sink.PublishAsync(new QueryStoreCollectionResult(false, observed.AddSeconds(-1), observed,
         [
             new QueryStoreDatabaseCollectionResult(
-                "db", QueryStoreCollectionState.ReadWrite, 4, 2, false, "available", null),
+                databaseId, QueryStoreCollectionState.ReadWrite, 4, 2, false, "available", null),
         ]), default);
     }
+
+    private static QueryStoreDatabaseCollectionResult DatabaseResult(
+        string databaseId,
+        string? failure = null) =>
+        new(
+            databaseId,
+            failure is null ? QueryStoreCollectionState.ReadWrite : QueryStoreCollectionState.Error,
+            failure is null ? 3 : 0,
+            failure is null ? 1 : 0,
+            false,
+            failure ?? "available",
+            failure is null ? null : nameof(IOException));
 
     private static AggregatedRuntimeBucket Bucket(
         string planId, long count, DateTimeOffset? observedAt = null)
@@ -411,7 +468,7 @@ public sealed class ProtectedQueryStoreHistoryTests
         public Task<string?> ReadPlanXmlAsync(
             string databaseId, string planId, CancellationToken cancellationToken) =>
             Task.FromResult<string?>(
-                $"<ShowPlanXML><RelOp NodeId=\"0\" LogicalOp=\"Scan\" PhysicalOp=\"Index Scan\" />" +
-                $"{new string(' ', 40_000)}</ShowPlanXML>");
+                $"<ShowPlanXML><!--RAW_PRIVATE_MARKER{new string('x', 40_000)}-->" +
+                "<RelOp NodeId=\"0\" LogicalOp=\"Scan\" PhysicalOp=\"Index Scan\" /></ShowPlanXML>");
     }
 }

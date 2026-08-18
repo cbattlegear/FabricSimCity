@@ -121,6 +121,27 @@ public sealed class ConnectedQueryStoreScaleTests
         Assert.Equal("family-1", restored?.Family.FamilyId);
     }
 
+    [Fact]
+    public async Task ListReadRetriesWhenTwoPublicationsReuseItsSlot()
+    {
+        var store = new CountingStore();
+        var repository = new ProtectedQueryStoreRepository(store);
+        await repository.PublishSnapshotAsync(SnapshotWithFamily("snapshot-a", 1, "family-a"));
+        store.OnFirstIndexRead = async () =>
+        {
+            await repository.PublishSnapshotAsync(SnapshotWithFamily("snapshot-b", 2, "family-b"));
+            await repository.PublishSnapshotAsync(SnapshotWithFamily("snapshot-c", 3, "family-c"));
+        };
+        var source = new ConnectedQueryStoreHistorySource(
+            repository, new NoDetailSource(), new SecureShowplanParser(),
+            new QueryStoreCollectionStatusTracker(), TimeProvider.System);
+
+        var page = await source.GetQueriesAsync(null, "cpu", 100, null, default);
+
+        Assert.Equal("family-c", Assert.Single(page.Items).FamilyId);
+        Assert.Equal(1, store.IndexReadRaceCount);
+    }
+
     private static async Task PutJsonAsync<T>(CountingStore store, string id, T value)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
@@ -133,11 +154,33 @@ public sealed class ConnectedQueryStoreScaleTests
         return $"qs:{Convert.ToHexString(opaque).ToLowerInvariant()}";
     }
 
+    private static QueryStorePublishedSnapshot SnapshotWithFamily(
+        string snapshotId,
+        long sequence,
+        string familyId)
+    {
+        var captured = DateTimeOffset.UtcNow;
+        var evidence = new QueryStoreEvidenceV1(
+            QueryStoreSource.QueryStore, DataStatus.Available, captured, null, "race", "aggregate");
+        var summary = new QueryFamilySummaryV1(
+            familyId, "db", familyId, null,
+            new QueryTextDescriptorV1(QueryTextAvailability.Missing, null, null, "missing"),
+            [], "1", "1", "1", "1", "0", captured, captured, evidence);
+        return new QueryStorePublishedSnapshot(
+            "1.0", snapshotId, sequence, captured,
+            [new QueryFamilyDetailV1("1.0", summary, [], [])],
+            new QueryStoreCollectorStatusV1(
+                "1.0", QueryStoreCollectorState.Ready, sequence,
+                captured, captured, null, [], "ready"));
+    }
+
     private sealed class CountingStore : IProtectedRecordStore
     {
         private readonly Dictionary<string, ProtectedRecord> _records = new(StringComparer.Ordinal);
         public int GetCount { get; set; }
         public int MaxPayloadBytes => 1_048_576;
+        public Func<Task>? OnFirstIndexRead { get; set; }
+        public int IndexReadRaceCount { get; private set; }
         public Task PutAsync(
             ProtectedRecordId id, string recordKind, DateTimeOffset capturedAt,
             StorageResolution resolution, ReadOnlyMemory<byte> payload,
@@ -146,13 +189,19 @@ public sealed class ConnectedQueryStoreScaleTests
             _records[id.Value] = new(id, recordKind, capturedAt, resolution, payload.ToArray());
             return Task.CompletedTask;
         }
-        public Task<ProtectedRecord?> GetAsync(
+        public async Task<ProtectedRecord?> GetAsync(
             ProtectedRecordId id, CancellationToken cancellationToken = default)
         {
             GetCount++;
             var value = _records.GetValueOrDefault(id.Value);
-            return Task.FromResult(value is null ? null : new ProtectedRecord(
-                value.Id, value.RecordKind, value.CapturedAt, value.Resolution, value.Payload));
+            if (value?.RecordKind == "query-store-family-index-page" &&
+                OnFirstIndexRead is { } race && IndexReadRaceCount == 0)
+            {
+                IndexReadRaceCount = 1;
+                await race();
+            }
+            return value is null ? null : new ProtectedRecord(
+                value.Id, value.RecordKind, value.CapturedAt, value.Resolution, value.Payload);
         }
         public Task<bool> DeleteAsync(
             ProtectedRecordId id, CancellationToken cancellationToken = default) =>

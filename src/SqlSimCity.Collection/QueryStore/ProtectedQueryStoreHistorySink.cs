@@ -138,8 +138,20 @@ public sealed class ProtectedQueryStoreHistorySink(
         await EnsureLoadedAsync(cancellationToken).ConfigureAwait(false);
         var publishedAt = result.CompletedAt;
         var sequence = Interlocked.Increment(ref _sequence);
+        HashSet<string>? requested = null;
+        string[] removedDatabases = [];
+        if (result.RequestedDatabaseIds is not null)
+        {
+            requested = result.RequestedDatabaseIds.ToHashSet(StringComparer.Ordinal);
+            if (requested.Count != result.RequestedDatabaseIds.Count ||
+                !requested.SetEquals(result.Databases.Select(database => database.DatabaseId)))
+                throw new InvalidOperationException(
+                    "The authoritative Query Store database set must exactly match the cycle results.");
+            removedDatabases = _committed.Keys.Where(databaseId => !requested.Contains(databaseId)).ToArray();
+        }
         var inspections = new List<QueryStoreBuildInspection>();
         var details = _committed.Values
+            .Where(state => requested is null || requested.Contains(state.DatabaseId))
             .SelectMany(state => BuildFamilies(state, publishedAt, inspections))
             .OrderBy(detail => detail.Family.FamilyId, StringComparer.Ordinal)
             .ToArray();
@@ -165,6 +177,13 @@ public sealed class ProtectedQueryStoreHistorySink(
             "1.0", Guid.NewGuid().ToString("N"), sequence, publishedAt, details, status);
 
         await repository.PublishSnapshotAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        foreach (var databaseId in removedDatabases)
+        {
+            await repository.DeleteWatermarkAsync(databaseId, cancellationToken).ConfigureAwait(false);
+            _committed.TryRemove(databaseId, out _);
+            _staged.TryRemove(databaseId, out _);
+            _pendingWatermarks.TryRemove(databaseId, out _);
+        }
         statusTracker.Set(status);
         // The snapshot pointer above is the current-state commit. Watermarks follow it; a crash
         // between these writes only causes safe overlap replay, never skipped or partial history.

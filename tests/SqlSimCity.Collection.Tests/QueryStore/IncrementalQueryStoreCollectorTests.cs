@@ -23,6 +23,7 @@ public sealed class IncrementalQueryStoreCollectorTests
         Assert.Equal(Through, sink.Watermark?.Through);
         Assert.True(sink.Published);
         Assert.False(sink.Aborted);
+        Assert.Equal(["db"], result.RequestedDatabaseIds);
     }
 
     [Fact]

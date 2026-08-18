@@ -160,7 +160,8 @@ public sealed record QueryStoreCollectionResult(
     bool SkippedBecauseCycleActive,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
-    IReadOnlyList<QueryStoreDatabaseCollectionResult> Databases);
+    IReadOnlyList<QueryStoreDatabaseCollectionResult> Databases,
+    IReadOnlyList<string>? RequestedDatabaseIds = null);
 
 public sealed class IncrementalQueryStoreCollector : IDisposable
 {
@@ -214,7 +215,8 @@ public sealed class IncrementalQueryStoreCollector : IDisposable
                 }).ConfigureAwait(false);
             var result = new QueryStoreCollectionResult(
                 false, startedAt, _timeProvider.GetUtcNow(),
-                results.OrderBy(item => item.DatabaseId, StringComparer.Ordinal).ToArray());
+                results.OrderBy(item => item.DatabaseId, StringComparer.Ordinal).ToArray(),
+                databases);
             await _sink.PublishAsync(result, cancellationToken).ConfigureAwait(false);
             return result;
         }

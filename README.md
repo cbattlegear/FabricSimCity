@@ -107,6 +107,7 @@ The image targets Linux containers on x86-64 and ARM64 where the selected offici
 - fails closed: a missing/wrong key, corrupt or tampered envelope, failed canary check, or migration error prevents the application from becoming ready rather than silently degrading to an unencrypted or partially working store;
 - exposes only opaque record IDs, record kind, captured timestamp, and resolution (`Detail`/`HourlyRollup`) as plaintext metadata — payload bytes are always encrypted;
 - prunes at most `ProtectedStorage:Retention:PruneBatchSize` expired records per invocation (call again to drain more), under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`; the batch size is bounded from 1 through 500.
+- retains published Query Store snapshot pointers, indexes, families, and chunks as `HourlyRollup` records so the readable 90-day history survives a collector outage; raw SQL and raw Showplan XML remain 7-day `Detail` records.
 - restricts the database filename to a simple filename, record-kind metadata to 128 characters (maximum 1,024), and plaintext payloads to 1 MiB (maximum 16 MiB); `MaxRecordKindLength` and `MaxPayloadBytes` are explicit protected-storage configuration limits.
 - chunks oversized normalized Query Store family and plan records below `MaxPayloadBytes`. Raw Showplan XML above that limit is deliberately not cached; its sanitized normalized plan remains available from bounded encrypted chunks.
 

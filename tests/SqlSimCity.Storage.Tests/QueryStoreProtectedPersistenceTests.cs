@@ -88,6 +88,49 @@ public sealed class QueryStoreProtectedPersistenceTests
     }
 
     [Fact]
+    public async Task PublishedSnapshotSurvivesDetailPruneAndExpiresAfterNinetyDays()
+    {
+        var directory = NewDirectory("query-store-retention");
+        var key = RandomNumberGenerator.GetBytes(32);
+        var captured = new DateTimeOffset(2026, 8, 17, 18, 0, 0, TimeSpan.Zero);
+        var clock = new TestTimeProvider(captured);
+        try
+        {
+            using (var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key }))
+            using (var store = NewStore(directory, ring, clock))
+            {
+                await store.EnsureReadyAsync();
+                var repository = new ProtectedQueryStoreRepository(store);
+                await repository.StoreQueryTextAsync("db", "raw", captured, "short-lived raw SQL");
+                await repository.PublishSnapshotAsync(Snapshot(
+                    "retained", 1, captured, Families(1, "retained", captured)));
+
+                clock.Advance(TimeSpan.FromDays(8));
+                await DrainPruneAsync(store);
+                Assert.Null(await repository.ReadSensitiveTextAsync("query-text", "db", "raw"));
+                Assert.Equal("retained", (await repository.ReadPublishedSnapshotAsync())?.SnapshotId);
+            }
+
+            using (var ring = new KeyRing(1, new Dictionary<uint, byte[]> { [1] = key }))
+            using (var store = NewStore(directory, ring, clock))
+            {
+                await store.EnsureReadyAsync();
+                var repository = new ProtectedQueryStoreRepository(store);
+                Assert.Equal("retained", (await repository.ReadPublishedSnapshotAsync())?.SnapshotId);
+
+                clock.SetUtcNow(captured.AddDays(90));
+                await DrainPruneAsync(store);
+                Assert.Equal("retained", (await repository.ReadPublishedSnapshotAsync())?.SnapshotId);
+
+                clock.Advance(TimeSpan.FromMilliseconds(1));
+                await DrainPruneAsync(store);
+                Assert.Null(await repository.ReadPublishedSnapshotAsync());
+            }
+        }
+        finally { Cleanup(directory, key); }
+    }
+
+    [Fact]
     public async Task PublishedEpochAndIndexesSurviveRealSqliteRestart()
     {
         var directory = NewDirectory("query-store-restart");
@@ -142,8 +185,16 @@ public sealed class QueryStoreProtectedPersistenceTests
         Directory.CreateDirectory(directory);
         return directory;
     }
-    private static SqliteProtectedRecordStore NewStore(string directory, KeyRing ring) =>
-        new(directory, "history.db", ring, new RetentionOptions(), TimeProvider.System);
+    private static SqliteProtectedRecordStore NewStore(
+        string directory,
+        KeyRing ring,
+        TimeProvider? timeProvider = null) =>
+        new(directory, "history.db", ring, new RetentionOptions(), timeProvider ?? TimeProvider.System);
+
+    private static async Task DrainPruneAsync(SqliteProtectedRecordStore store)
+    {
+        while (await store.PruneExpiredAsync() > 0) { }
+    }
 
     private static QueryStorePublishedSnapshot Snapshot(
         string id,
