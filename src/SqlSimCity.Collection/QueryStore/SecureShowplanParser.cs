@@ -7,11 +7,34 @@ using SqlSimCity.Contracts.V1;
 
 namespace SqlSimCity.Collection.QueryStore;
 
+/// <param name="MaximumNodes">
+/// Cap on <c>RelOp</c> operators, which are the only elements retained as plan nodes. A real
+/// Showplan carries thousands of non-operator elements (<c>ColumnReference</c>,
+/// <c>ScalarOperator</c>, <c>DefinedValue</c>) for every operator, so counting all elements
+/// against this cap rejected ordinary plans.
+/// </param>
+/// <param name="MaximumElements">
+/// Cap on total XML elements streamed. This is the pathological-expansion guard for work that is
+/// not retained; everything this parser keeps is bounded by <paramref name="MaximumNodes"/>,
+/// <paramref name="MaximumNodeExpressions"/>, and <paramref name="MaximumNodeWarnings"/>.
+/// </param>
+/// <param name="MaximumNodeExpressions">
+/// Cap on expressions retained for a single operator. Expressions are the one unbounded list an
+/// operator accumulates, and <c>Build</c> sorts and joins all of them, so they need a stated bound
+/// rather than one inherited from the element counter.
+/// </param>
+/// <param name="MaximumNodeWarnings">
+/// Cap on warnings retained for a single operator. Every element under <c>Warnings</c> allocates a
+/// warning and canonicalizes its attributes, so this bounds allocation and regex work alike.
+/// </param>
 public sealed record ShowplanParserLimits(
     int MaximumXmlCharacters = 8 * 1024 * 1024,
     int MaximumDepth = 128,
     int MaximumNodes = 20_000,
-    int MaximumTextCharacters = 1_000_000);
+    int MaximumTextCharacters = 4 * 1024 * 1024,
+    int MaximumElements = 400_000,
+    int MaximumNodeExpressions = 4_000,
+    int MaximumNodeWarnings = 1_000);
 
 public sealed class SecureShowplanParser
 {
@@ -50,7 +73,8 @@ public sealed class SecureShowplanParser
         var builders = new List<NodeBuilder>();
         var nodeStack = new Stack<NodeBuilder>();
         var elementStack = new Stack<string>();
-        var text = new StringBuilder();
+        var textCharacters = 0;
+        var warningsDepth = 0;
         string version = "unknown";
         string? ceVersion = null;
         decimal? desiredMemory = null;
@@ -58,6 +82,7 @@ public sealed class SecureShowplanParser
         var optimization = QueryOptimizationKind.None;
         string? dispatcherExpression = null;
         var elementCount = 0;
+        var operatorCount = 0;
 
         while (await reader.ReadAsync())
         {
@@ -69,13 +94,14 @@ public sealed class SecureShowplanParser
 
             if (reader.NodeType == XmlNodeType.Element)
             {
-                if (++elementCount > _limits.MaximumNodes)
+                if (++elementCount > _limits.MaximumElements)
                 {
-                    throw new XmlException($"Showplan exceeds the {_limits.MaximumNodes}-node limit.");
+                    throw new XmlException($"Showplan exceeds the {_limits.MaximumElements}-element limit.");
                 }
 
                 var local = reader.LocalName;
                 elementStack.Push(local);
+                if (local == "Warnings" && !reader.IsEmptyElement) warningsDepth++;
                 if (local == "ShowPlanXML")
                 {
                     version = Attribute(reader, "Version") ?? version;
@@ -91,6 +117,11 @@ public sealed class SecureShowplanParser
                 }
                 else if (local == "RelOp")
                 {
+                    if (++operatorCount > _limits.MaximumNodes)
+                    {
+                        throw new XmlException($"Showplan exceeds the {_limits.MaximumNodes}-operator limit.");
+                    }
+
                     var builder = new NodeBuilder(
                         IntAttribute(reader, "NodeId") ?? throw new XmlException("RelOp is missing NodeId."),
                         nodeStack.TryPeek(out var parent) ? parent.NodeId : null,
@@ -115,18 +146,18 @@ public sealed class SecureShowplanParser
                 else if (local == "ScalarOperator" && nodeStack.TryPeek(out var scalarNode) &&
                          Attribute(reader, "ScalarString") is { } scalar)
                 {
-                    scalarNode.AddExpression(SanitizeExpression(scalar));
+                    AddExpression(scalarNode, SanitizeExpression(scalar));
                 }
                 else if (local != "Warnings" &&
                           local.Contains("Warning", StringComparison.OrdinalIgnoreCase) &&
                          nodeStack.TryPeek(out var warningNode))
                 {
-                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalWarningAttributes(reader)));
+                    AddWarning(warningNode, local);
                 }
-                else if (elementStack.Contains("Warnings") && local != "Warnings" &&
+                else if (warningsDepth > 0 && local != "Warnings" &&
                          nodeStack.TryPeek(out warningNode))
                 {
-                    warningNode.Warnings.Add(new ShowplanWarningV1(local, CanonicalWarningAttributes(reader)));
+                    AddWarning(warningNode, local);
                 }
                 else if (local is "ParameterSensitivePredicate" or "DispatcherExpression")
                 {
@@ -146,14 +177,16 @@ public sealed class SecureShowplanParser
             }
             else if (reader.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
             {
-                if (text.Length + reader.Value.Length > _limits.MaximumTextCharacters)
+                // Only the running total is needed: no caller ever reads the concatenated text, so
+                // accumulating it would be several megabytes of pure dead retention per parse.
+                if (textCharacters + reader.Value.Length > _limits.MaximumTextCharacters)
                 {
                     throw new XmlException($"Showplan text exceeds the {_limits.MaximumTextCharacters}-character limit.");
                 }
-                text.Append(reader.Value);
+                textCharacters += reader.Value.Length;
                 if (elementStack.TryPeek(out var current) && current is "ScalarString" or "Predicate")
                 {
-                    if (nodeStack.TryPeek(out var predicateNode)) predicateNode.AddExpression(SanitizeExpression(reader.Value));
+                    if (nodeStack.TryPeek(out var predicateNode)) AddExpression(predicateNode, SanitizeExpression(reader.Value));
                 }
                 if (elementStack.TryPeek(out current) && current is "DispatcherExpression")
                 {
@@ -163,6 +196,7 @@ public sealed class SecureShowplanParser
             else if (reader.NodeType == XmlNodeType.EndElement)
             {
                 if (reader.LocalName == "RelOp" && nodeStack.Count > 0) nodeStack.Pop();
+                if (reader.LocalName == "Warnings" && warningsDepth > 0) warningsDepth--;
                 if (elementStack.Count > 0) elementStack.Pop();
             }
         }
@@ -176,6 +210,30 @@ public sealed class SecureShowplanParser
             optimization, dispatcherExpression, fingerprint, Caveat,
             new QueryStoreEvidenceV1(QueryStoreSource.QueryStore, DataStatus.Available, null, null,
                 "Normalized from a single on-demand Query Store Showplan document.", Caveat));
+
+        // Both lists are retained for the lifetime of the parse and neither is bounded by the
+        // element counter, so each states its own limit rather than inheriting one by side effect.
+        void AddExpression(NodeBuilder node, string expression)
+        {
+            if (node.ExpressionCount >= _limits.MaximumNodeExpressions)
+            {
+                throw new XmlException(
+                    $"A Showplan operator exceeds the {_limits.MaximumNodeExpressions}-expression limit.");
+            }
+
+            node.AddExpression(expression);
+        }
+
+        void AddWarning(NodeBuilder node, string name)
+        {
+            if (node.Warnings.Count >= _limits.MaximumNodeWarnings)
+            {
+                throw new XmlException(
+                    $"A Showplan operator exceeds the {_limits.MaximumNodeWarnings}-warning limit.");
+            }
+
+            node.Warnings.Add(new ShowplanWarningV1(name, CanonicalWarningAttributes(reader)));
+        }
     }
 
     private static string? Attribute(XmlReader reader, string name) => reader.GetAttribute(name);
@@ -264,6 +322,8 @@ public sealed class SecureShowplanParser
         public ShowplanObjectV1? ObjectReference { get; set; }
         private List<string> Expressions { get; } = [];
         public List<ShowplanWarningV1> Warnings { get; } = [];
+
+        public int ExpressionCount => Expressions.Count;
 
         public void AddExpression(string expression) => Expressions.Add(expression);
 

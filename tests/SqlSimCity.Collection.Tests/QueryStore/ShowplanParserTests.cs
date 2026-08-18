@@ -159,6 +159,66 @@ public sealed class ShowplanParserTests
         Assert.NotEqual(a.StructuralFingerprint, c.StructuralFingerprint);
     }
 
+    [Fact]
+    public async Task AcceptsAVerbosePlanButStillCapsOperatorsAndElements()
+    {
+        // A real Showplan carries thousands of non-operator elements per operator (column references,
+        // scalar operators, defined values). Counting those against the operator cap is what rejected
+        // ordinary plans with "Showplan exceeds the 20000-node limit".
+        var columns = string.Concat(Enumerable.Repeat(
+            """<ColumnReference Database="[db]" Schema="[dbo]" Table="[T]" Column="c" />""", 25_000));
+        var verbose = $"""
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+              <RelOp NodeId="0" LogicalOp="Scan" PhysicalOp="Index Scan">
+                <OutputList>{columns}</OutputList>
+              </RelOp>
+            </ShowPlanXML>
+            """;
+
+        var parsed = await new SecureShowplanParser().ParseAsync("verbose", verbose);
+
+        Assert.Single(parsed.Nodes);
+        await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser(new ShowplanParserLimits(MaximumElements: 100))
+                .ParseAsync("elements", verbose));
+        await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser(new ShowplanParserLimits(MaximumNodes: 1))
+                .ParseAsync("operators", Plan("0", "1", "Scan")));
+    }
+
+    [Fact]
+    public async Task BoundsWhatOneOperatorCanRetainRatherThanInheritingTheElementCap()
+    {
+        // Expressions and warnings are the two lists an operator accumulates without a cap of their
+        // own. Raising the element cap must not silently raise how much a single crafted operator
+        // can make the parser retain, sort, and join.
+        var expressions = string.Concat(Enumerable.Repeat(
+            """<ScalarOperator ScalarString="[db].[dbo].[T].[c]=(1)" />""", 40));
+        var warnings = string.Concat(Enumerable.Repeat(
+            """<SpillToTempDb SpillLevel="1" SpilledThreadCount="4" />""", 40));
+        var crafted = $"""
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+              <RelOp NodeId="0" LogicalOp="Scan" PhysicalOp="Index Scan">
+                <Warnings>{warnings}</Warnings>
+                {expressions}
+              </RelOp>
+            </ShowPlanXML>
+            """;
+
+        var parsed = await new SecureShowplanParser().ParseAsync("crafted", crafted);
+        Assert.Equal(40, Assert.Single(parsed.Nodes).Warnings.Count);
+
+        var expressionCap = await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser(new ShowplanParserLimits(MaximumNodeExpressions: 5))
+                .ParseAsync("expressions", crafted));
+        Assert.Contains("5-expression limit", expressionCap.Message);
+
+        var warningCap = await Assert.ThrowsAsync<XmlException>(() =>
+            new SecureShowplanParser(new ShowplanParserLimits(MaximumNodeWarnings: 5))
+                .ParseAsync("warnings", crafted));
+        Assert.Contains("5-warning limit", warningCap.Message);
+    }
+
     private static string Plan(string rootId, string childId, string physical) => $"""
         <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
           <BatchSequence><Batch><Statements><StmtSimple CardinalityEstimationModelVersion="160"><QueryPlan>

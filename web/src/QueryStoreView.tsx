@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchPlan, fetchPlanComparison, fetchQueryFamilies, fetchQueryFamily, fetchQueryStoreStatus } from './api'
 import type { NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilySummary, QueryStoreCollectorStatus } from './contracts'
 import { takeInitialFamilyId } from './queryStoreSelection'
@@ -18,6 +18,7 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const requests = useRef(new Set<AbortController>())
+  const detailRequest = useRef<AbortController | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const pendingInitialFamilyId = useRef(initialFamilyId)
 
@@ -30,6 +31,7 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
         if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason))
       })
       .finally(() => requests.current.delete(controller))
+    return controller
   }
 
   useEffect(() => () => {
@@ -40,6 +42,7 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
   useEffect(() => {
     for (const request of requests.current) request.abort()
     requests.current.clear()
+    detailRequest.current = null
     const controller = new AbortController()
     setLoading(true)
     setError(null)
@@ -79,8 +82,32 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
   }, [detail])
 
   const selectFamily = (familyId: string) => {
-    tracked(signal => fetchQueryFamily(familyId, signal), setDetail)
+    // A detail fetch still in flight would call setDetail when it lands, re-opening a panel the
+    // reader had already closed and overwriting a newer selection. Only the latest one may win.
+    detailRequest.current?.abort()
+    detailRequest.current = tracked(signal => fetchQueryFamily(familyId, signal), setDetail)
   }
+  const closeDetail = useCallback(() => {
+    detailRequest.current?.abort()
+    detailRequest.current = null
+    setDetail(null)
+    setPlan(null)
+    setComparison(null)
+    setComparePlanId('')
+    // Focus must not be stranded on a button that just left the document.
+    headingRef.current?.focus()
+  }, [])
+
+  // Escape closes the detail from anywhere on the page, not only from inside it, because the click
+  // that opened it leaves focus on the family button in the table.
+  useEffect(() => {
+    if (!detail) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDetail()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [detail, closeDetail])
   const loadMore = () => {
     if (!nextPageToken) return
     tracked(signal => fetchQueryFamilies(metric, nextPageToken, signal), page => {
@@ -116,8 +143,12 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
         <div className="table-scroll">
           <table aria-label="Top query families">
             <thead><tr><th>Query family</th><th>Executions</th><th>CPU µs</th><th>Duration µs</th><th>Reads (8-KiB pages)</th><th>Wait ms</th></tr></thead>
-            <tbody>{families.map(family => <tr key={family.familyId}>
-              <th scope="row"><button type="button" onClick={() => selectFamily(family.familyId)}>
+            <tbody>{families.map(family => <tr key={family.familyId} className={detail?.family.familyId === family.familyId ? 'is-selected' : undefined}>
+              <th scope="row"><button
+                type="button"
+                aria-pressed={detail?.family.familyId === family.familyId}
+                onClick={() => selectFamily(family.familyId)}
+              >
                 {family.text.normalizedText ?? `${family.text.availability} text · physical ${family.physicalQueries[0]?.queryId}`}
               </button><small>{family.databaseId} · hash {family.queryHash}</small></th>
               <td>{family.executionCount}</td><td>{family.totalCpuMicroseconds}</td>
@@ -127,7 +158,16 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
           </table>
           {nextPageToken && <button className="load-more" type="button" onClick={loadMore}>Load next 100 query families</button>}
         </div>
-        {detail && <article className="query-detail">
+        {detail && <article className="query-detail" aria-labelledby="query-detail-title">
+          <div className="detail-title">
+            <div>
+              <h3 id="query-detail-title">{detail.family.text.normalizedText ?? detail.family.familyId}</h3>
+              <small>{detail.family.familyId} · hash {detail.family.queryHash}</small>
+            </div>
+            <button type="button" className="detail-close" onClick={closeDetail}>
+              Close detail
+            </button>
+          </div>
           <h3>Physical identities and context</h3>
           <ul>{detail.family.physicalQueries.map(query => <li key={`${query.queryId}:${query.context.contextSettingsId}`}>
             query_id {query.queryId} · context {query.context.contextSettingsId} · {query.context.setOptions ?? 'SET options unavailable'}

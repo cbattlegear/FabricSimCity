@@ -205,6 +205,59 @@ First MVP release candidate. There is no tagged release yet.
   the query views to nothing at all — with no error and no log line. A connection string now enables
   connected Query Store history and provisions the required AES-256 key, so the encryption
   requirement is met rather than relaxed.
+- The Findings page no longer returns 500 for an ordinary large execution plan.
+  `SecureShowplanParser` counted *every* XML element against `MaximumNodes`, a limit meant to bound
+  the operator tree it retains, and threw `Showplan exceeds the 20000-node limit`. Only `RelOp`
+  elements are ever retained, but a real plan carries thousands of `ColumnReference`,
+  `ScalarOperator`, and `DefinedValue` elements per operator, so a normal plan tripped a DoS guard
+  at roughly a hundred operators. The operator cap now counts operators, a separate, far larger
+  `MaximumElements` cap bounds total streamed elements, and — because raising that cap would
+  otherwise have raised what a single crafted operator can make the parser retain twentyfold — the
+  two per-operator lists that grow without a bound of their own, expressions and warnings, now state
+  their own caps instead of inheriting one as a side effect of the element counter. The accumulated
+  text buffer, which nothing ever read, was replaced by a running character count, and
+  `MaximumTextCharacters` was raised to 4 MiB because it is only a size check against text a plan of
+  the permitted size can legitimately exceed.
+- One unparseable plan no longer destroys the entire findings evaluation. `SourceBackedFindingsEvidenceProvider`
+  let an `XmlException` from any single plan escape `LoadPlansAsync`, so `/api/v1/findings` and
+  `/api/v1/findings/status` both returned an unhandled 500 and the page showed nothing at all rather
+  than the findings it could still prove. Plans that cannot be normalized are now skipped and named
+  in the bundle reason, so Showplan-backed rules evaluate on what parsed and the exclusion is
+  disclosed instead of hidden. `/api/v1/queries/plans/{planId}` and `/plans/compare` likewise return
+  422 with the reason instead of an unhandled 500.
+- Roads are no longer drawn severed. The dashed and sparse confidence patterns were rendered by
+  trimming each *whole polyline leg* to a fraction of its length and centring the remainder, but a
+  street-grid road has only two to four long legs, so instead of dashes every non-confirmed road
+  showed one enormous gap per leg and read as broken. Patterns are now real repeating dashes of a
+  fixed world length whose phase carries across corners, so a road reads as one route and the
+  pattern means the same thing on a long road as on a short one.
+- Roads that share a street no longer hide each other. Every road was drawn on the street centre
+  line at the same height, so overlapping roads z-fought and only the last one drawn was visible.
+  Roads now claim the lowest lane free on every leg they use — widest first, so the heaviest traffic
+  keeps the centre line — and are stacked a hair apart, making a busy corridor read as the several
+  distinct references it is.
+- A road can now be identified. Roads were not pickable and were never labelled, so the one thing
+  the map claims about a road — which two objects it connects — could not be read off it. Roads are
+  now hoverable and clickable, naming both endpoints in a readout and in a road panel that gives the
+  reference kind, confidence, executions, wait share, congestion grade, and the rationale behind
+  each, with links to either endpoint building and a Frame road control. The "Evidence-labeled
+  routes" table now prints schema-qualified object names instead of raw stable ids, selects the road
+  on the map, and says so when a route is not drawn because an endpoint is outside the loaded page.
+- The Query Store query detail panel can now be closed. Opening a query family replaced the panel
+  but nothing ever cleared it, so the only way out was a page reload. It now has a Close control,
+  responds to Escape from anywhere on the page, returns focus to the page heading rather than
+  stranding it on a removed button, and the family row that produced it is marked selected.
+- A right-drag on the database city map no longer permanently disables map hover. The pointer-down
+  gesture was only cleared on a primary-button pointer-up, so panning with the right button left it
+  latched open.
+- A closed Query Store detail panel no longer re-opens itself. The family fetch was tracked only for
+  unmount and metric changes, so closing the panel — or clicking a second family — left the first
+  request in flight, and its `setDetail` reinstated the panel when it landed. The detail request is
+  now aborted by both a close and a newer selection, so only the latest one can win.
+- Closing the database city road panel no longer strands keyboard focus. Its Close and endpoint
+  buttons unmount the panel they live in, which dropped focus to `document.body` and restarted the
+  next Tab at the top of the page. Focus now returns to whatever opened the panel, falling back to
+  the city heading, and Escape closes the panel the way it closes the Query Store detail.
 
 ### Security
 
