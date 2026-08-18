@@ -319,7 +319,7 @@ severity/confidence encoding, impact formatting, and local presentation-state be
 
 ## Security and privacy
 
-SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. Fixture mode has no application network dependency after loading; connected mode contacts only its configured SQL target and explicit identity endpoints required by the selected authentication strategy.
+SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. A persistent, color-independent trusted-network / no-built-in-login notice is shown on every analysis view (including on mobile) so this constraint is never off-screen; see [`docs/operations.md`](docs/operations.md) for how to set `AllowedHosts` behind a reverse proxy. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. Fixture mode has no application network dependency after loading; connected mode contacts only its configured SQL target and explicit identity endpoints required by the selected authentication strategy.
 
 Atlas and live-incident collection are strictly read-only and fail closed: no probe or endpoint mutates the target, and unavailable secrets or identity providers never fall back to plaintext, anonymous access, or another authentication strategy. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
 
@@ -336,6 +336,11 @@ Set-Location ..
 dotnet publish src\SqlSimCity.Api -c Release -o artifacts\publish
 docker build -t sqlsimcity:foundation .
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the notable changes in this unreleased MVP
+release candidate, including the explicit no-live-target validation gap.
 
 ## License
 
