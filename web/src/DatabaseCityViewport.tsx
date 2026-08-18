@@ -1,28 +1,26 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import type {
-  DatabaseCityObject,
-  DatabaseCityQueryFamily,
-  DatabaseCityRoute,
-} from './databaseCityContracts'
+import type { DatabaseCityObject } from './databaseCityContracts'
 import {
   createDatabaseCityScene,
   type CameraNudge,
   type CityLayerToggles,
   type DatabaseCitySceneController,
 } from './DatabaseCityScene'
-import { CONGESTION_COLORS, CONGESTION_LABELS, type LiveBlockingEdge } from './cityTraffic'
+import { CONGESTION_COLORS, CONGESTION_LABELS, type RoadTraffic } from './cityTraffic'
 import type { Facility } from './cityInfrastructure'
 import type { CityRoute } from './cityRoute'
 
 type Props = {
   objects: readonly DatabaseCityObject[]
-  routes: readonly DatabaseCityRoute[]
-  families: readonly DatabaseCityQueryFamily[]
+  roads: readonly RoadTraffic[]
   facilities: readonly Facility[]
-  liveBlocking: readonly LiveBlockingEdge[]
   route: CityRoute | null
   selectedId: string | null
+  selectedRoadId: string | null
   onSelect: (objectId: string) => void
+  onSelectRoad: (routeId: string | null) => void
+  /** One-line description per road id, shown when a road is hovered. */
+  roadLabels: ReadonlyMap<string, string>
   /** Rendered into the top-left HUD slot: the object and plan finder. */
   finder?: ReactNode
   /** Rendered into the right HUD slot: object detail or turn-by-turn directions. */
@@ -57,13 +55,14 @@ function swatch(color: number): string {
 
 export function DatabaseCityViewport({
   objects,
-  routes,
-  families,
+  roads,
   facilities,
-  liveBlocking,
   route,
   selectedId,
+  selectedRoadId,
   onSelect,
+  onSelectRoad,
+  roadLabels,
   finder,
   panel,
   liveStatus,
@@ -72,6 +71,7 @@ export function DatabaseCityViewport({
   const sceneRef = useRef<DatabaseCitySceneController | null>(null)
   const [unavailable, setUnavailable] = useState(false)
   const [heading, setHeading] = useState(0)
+  const [hoveredRoadId, setHoveredRoadId] = useState<string | null>(null)
   const [layers, setLayers] = useState<CityLayerToggles>({
     traffic: true,
     infrastructure: true,
@@ -85,6 +85,8 @@ export function DatabaseCityViewport({
     try {
       controller = createDatabaseCityScene(canvasRef.current, {
         onSelect,
+        onSelectRoad,
+        onHoverRoad: setHoveredRoadId,
         onCameraChange: () => setHeading(sceneRef.current?.heading() ?? 0),
       })
     } catch {
@@ -96,14 +98,14 @@ export function DatabaseCityViewport({
       controller.dispose()
       sceneRef.current = null
     }
-  }, [onSelect])
+  }, [onSelect, onSelectRoad])
 
-  useEffect(() => {
-    sceneRef.current?.setData(objects, routes, families, liveBlocking)
-  }, [objects, routes, families, liveBlocking])
+  useEffect(() => sceneRef.current?.setObjects(objects), [objects])
+  useEffect(() => sceneRef.current?.setRoads(roads), [roads])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
   useEffect(() => sceneRef.current?.setRoute(route), [route])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
+  useEffect(() => sceneRef.current?.setSelectedRoad(selectedRoadId), [selectedRoadId])
   useEffect(() => sceneRef.current?.setLayers(layers), [layers])
 
   const nudge = useCallback((action: CameraNudge) => {
@@ -129,6 +131,8 @@ export function DatabaseCityViewport({
 
   const toggle = (key: keyof CityLayerToggles) =>
     setLayers(current => ({ ...current, [key]: !current[key] }))
+
+  const hoverLabel = hoveredRoadId === null ? null : roadLabels.get(hoveredRoadId) ?? null
 
   if (unavailable) {
     return (
@@ -202,6 +206,15 @@ export function DatabaseCityViewport({
               </li>
             ))}
             <li>
+              <i className="legend-swatch legend-solid" /> Unbroken road — confirmed reference
+            </li>
+            <li>
+              <i className="legend-swatch legend-dashed" /> Long dashes — probable reference
+            </li>
+            <li>
+              <i className="legend-swatch legend-sparse" /> Short dashes — inferred reference
+            </li>
+            <li>
               <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
             </li>
           </ul>
@@ -228,8 +241,21 @@ export function DatabaseCityViewport({
           <button type="button" onClick={() => nudge('rotateRight')} aria-label="Rotate right">⟳</button>
           <button type="button" onClick={() => sceneRef.current?.resetView()}>Reset view</button>
           {route && <button type="button" onClick={() => sceneRef.current?.frameRoute()}>Frame route</button>}
+          {selectedRoadId && (
+            <button type="button" onClick={() => sceneRef.current?.frameRoad(selectedRoadId)}>Frame road</button>
+          )}
         </div>
       </div>
+
+      {hoverLabel && (
+        <div className="hud hud-road-readout" aria-hidden="true">
+          <strong>Road</strong>
+          <span>{hoverLabel}</span>
+        </div>
+      )}
+      <p className="visually-hidden" role="status">
+        {hoverLabel ? `Road under pointer: ${hoverLabel}` : ''}
+      </p>
 
       {panel && <div className="hud hud-panel">{panel}</div>}
     </div>

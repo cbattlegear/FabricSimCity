@@ -1,10 +1,19 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { directActivityWidth, shouldRenderRoute } from './databaseCity'
-import type { DatabaseCityObject, DatabaseCityQueryFamily, DatabaseCityRoute } from './databaseCityContracts'
+import { directActivityWidth } from './databaseCity'
+import type { DatabaseCityObject } from './databaseCityContracts'
 import { ARTERIAL_WIDTH, planCity, streetPolyline, type CityLot, type CityPlan } from './cityPlan'
 import { ARCHETYPE_COLORS, buildBuildingGeometry } from './cityBuildings'
-import { gradeRoads, type LiveBlockingEdge, type RoadTraffic } from './cityTraffic'
+import { type RoadTraffic } from './cityTraffic'
+import {
+  claimLane,
+  corridorKeys,
+  dashSpans,
+  DASH_PATTERNS,
+  laneOffset,
+  offsetPolyline,
+  type DashPattern,
+} from './cityRoads'
 import { layoutFacilities, type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
 import type { CityRoute } from './cityRoute'
@@ -27,33 +36,36 @@ export type CameraNudge =
   | 'rotateRight'
 
 export type DatabaseCitySceneController = {
-  setData(
-    objects: readonly DatabaseCityObject[],
-    routes: readonly DatabaseCityRoute[],
-    families: readonly DatabaseCityQueryFamily[],
-    liveBlocking?: readonly LiveBlockingEdge[],
-  ): void
+  setObjects(objects: readonly DatabaseCityObject[]): void
+  /** Roads are graded outside the scene so the map and the HUD read the same numbers. */
+  setRoads(roads: readonly RoadTraffic[]): void
   setFacilities(facilities: readonly Facility[]): void
   setRoute(route: CityRoute | null): void
   setSelected(objectId: string | null): void
+  /** Highlights one road and pins both of its endpoints. */
+  setSelectedRoad(routeId: string | null): void
   setLayers(layers: Partial<CityLayerToggles>): void
   /** Frames the whole city. Only ever called on first load or from an explicit user action. */
   resetView(): void
   /** Frames the currently drawn GPS route. No-op when there is none. */
   frameRoute(): void
+  /** Frames one road and both of the buildings it connects. */
+  frameRoad(routeId: string): void
   /** Centres the camera on one building without changing zoom. */
   focusObject(objectId: string): void
   nudge(action: CameraNudge): void
   /** Compass heading in degrees; 0 means the camera looks north. */
   heading(): number
   getPlan(): CityPlan | null
-  getRoadTraffic(): readonly RoadTraffic[]
   dispose(): void
 }
 
 type SceneOptions = {
   onSelect: (objectId: string) => void
   onCameraChange?: () => void
+  /** Fired with a road's id when one is clicked, and with null when the click missed everything. */
+  onSelectRoad?: (routeId: string | null) => void
+  onHoverRoad?: (routeId: string | null) => void
 }
 
 export function createDatabaseCityScene(
@@ -116,6 +128,9 @@ export function createDatabaseCityScene(
     facilityAlert: new THREE.MeshStandardMaterial({ color: 0xe4483c, emissive: 0x4a0f0a, roughness: 0.4 }),
     route: new THREE.MeshBasicMaterial({ color: 0x2fe0ff, transparent: true, opacity: 0.92 }),
     routePin: new THREE.MeshStandardMaterial({ color: 0x2fe0ff, emissive: 0x0d5f70, roughness: 0.3 }),
+    roadHighlight: new THREE.MeshBasicMaterial({ color: 0xf4f9ff, transparent: true, opacity: 0.5 }),
+    roadPin: new THREE.MeshStandardMaterial({ color: 0xf4f9ff, emissive: 0x5d7183, roughness: 0.3 }),
+    roadPinOffMap: new THREE.MeshStandardMaterial({ color: 0xb0bcc7, emissive: 0x39434d, roughness: 0.45 }),
     selection: new THREE.MeshBasicMaterial({ color: 0xffd479, transparent: true, opacity: 0.26 }),
     selectionPin: new THREE.MeshStandardMaterial({ color: 0xffd479, emissive: 0x6b4a06, roughness: 0.35 }),
   }
@@ -144,22 +159,36 @@ export function createDatabaseCityScene(
   const districtGroup = new THREE.Group()
   const buildingGroup = new THREE.Group()
   const roadGroup = new THREE.Group()
+  const roadHighlightGroup = new THREE.Group()
   const infrastructureGroup = new THREE.Group()
   const routeGroup = new THREE.Group()
   const selectionGroup = new THREE.Group()
-  scene.add(groundGroup, districtGroup, roadGroup, buildingGroup, infrastructureGroup, routeGroup, selectionGroup)
+  scene.add(
+    groundGroup,
+    districtGroup,
+    roadGroup,
+    roadHighlightGroup,
+    buildingGroup,
+    infrastructureGroup,
+    routeGroup,
+    selectionGroup,
+  )
 
   const pickable: THREE.Object3D[] = []
+  const roadPickable: THREE.Object3D[] = []
+  const roadPaths = new Map<string, { road: RoadTraffic; polyline: Array<{ x: number; z: number }>; endsOffMap: boolean }>()
   const disposables = new Set<THREE.BufferGeometry>()
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
 
   let plan: CityPlan | null = null
   let facilitySites = new Map<FacilityKind, FacilitySite>()
-  let roadTraffic: RoadTraffic[] = []
+  let currentRoads: readonly RoadTraffic[] = []
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
   let selectedId: string | null = null
+  let selectedRoadId: string | null = null
+  let hoveredRoadId: string | null = null
   let framedOnce = false
   let disposed = false
   let animationHandle = 0
@@ -357,40 +386,82 @@ export function createDatabaseCityScene(
     }
   }
 
-  function buildRoads(
-    routes: readonly DatabaseCityRoute[],
-    families: readonly DatabaseCityQueryFamily[],
-    cityPlan: CityPlan,
-    liveBlocking: readonly LiveBlockingEdge[],
-  ) {
+  /**
+   * Draws every graded road. Roads that share a street leg are pushed into their own lane so a
+   * busy corridor reads as several distinct routes instead of one stack of overlapping ribbons.
+   */
+  function buildRoads(roads: readonly RoadTraffic[], cityPlan: CityPlan) {
     clearGroup(roadGroup)
-    const visible = new Set(cityPlan.lots.keys())
-    roadTraffic = gradeRoads(
-      routes.filter(route => shouldRenderRoute(route, visible)),
-      families,
-      liveBlocking,
-    )
+    roadPickable.length = 0
+    roadPaths.clear()
 
-    for (const road of roadTraffic) {
+    // Widest first, so the heaviest traffic keeps the centre line and the light roads move aside.
+    const ordered = [...roads].sort((left, right) => right.width - left.width || left.routeId.localeCompare(right.routeId))
+    const corridorLanes = new Map<string, Set<number>>()
+
+    for (const road of ordered) {
       const from = cityPlan.lots.get(road.fromObjectId)
       if (!from) continue
       const to = cityPlan.lots.get(road.toId)
       // A cross-database reference leaves the city on a ramp through the nearest boundary.
       const target = to ? { x: to.accessX, z: to.accessZ } : rampPoint(cityPlan, from)
       const points = streetPolyline(cityPlan, { x: from.accessX, z: from.accessZ }, target)
-      const ribbon = ribbonGeometry(points, road.width, road.pattern === 'solid' ? 1 : road.pattern === 'dashed' ? 0.72 : 0.42)
+      const corridors = corridorKeys(points)
+      const lane = claimLane(corridorLanes, corridors)
+      const offset = laneOffset(lane)
+      const centreline = offsetPolyline(points, offset)
+      const ribbon = ribbonGeometry(points, road.width, DASH_PATTERNS[road.pattern], offset)
       if (!ribbon) continue
       const mesh = new THREE.Mesh(track(ribbon), roadMaterial(road.color, road.pattern !== 'solid'))
-      mesh.position.y = 0.06
+      // Lane order also stacks the ribbons a hair apart so coplanar roads never z-fight.
+      mesh.position.y = 0.06 + lane * 0.014
       mesh.userData.routeId = road.routeId
+      mesh.renderOrder = 1
       roadGroup.add(mesh)
+      roadPickable.push(mesh)
+      roadPaths.set(road.routeId, { road, polyline: centreline, endsOffMap: !to })
 
       if (!to) {
         const marker = new THREE.Mesh(track(new THREE.ConeGeometry(3.4, 9, 4)), roadMaterial(road.color, false))
-        marker.position.set(target.x, 4.5, target.z)
+        const exit = centreline[centreline.length - 1]
+        marker.position.set(exit.x, 4.5, exit.z)
+        marker.userData.routeId = road.routeId
         roadGroup.add(marker)
+        roadPickable.push(marker)
       }
     }
+    applyRoadHighlight()
+  }
+
+  /**
+   * Traces the selected road in white and drops a pin on each endpoint, so a road that is named in
+   * the HUD can be found on the map and its two endpoints identified without guessing.
+   */
+  function applyRoadHighlight() {
+    clearGroup(roadHighlightGroup)
+    if (!plan) return
+    const entry = selectedRoadId === null ? undefined : roadPaths.get(selectedRoadId)
+    if (!entry) return
+
+    const trace = ribbonGeometry(entry.polyline, entry.road.width + 3.4, null)
+    if (trace) {
+      const halo = new THREE.Mesh(track(trace), materials.roadHighlight)
+      halo.position.y = 0.05
+      halo.renderOrder = 2
+      roadHighlightGroup.add(halo)
+    }
+
+    const ends = [entry.polyline[0], entry.polyline[entry.polyline.length - 1]]
+    ends.forEach((end, index) => {
+      const offMap = entry.endsOffMap && index === 1
+      const pin = new THREE.Mesh(
+        track(new THREE.ConeGeometry(3.1, 11, 4)),
+        offMap ? materials.roadPinOffMap : materials.roadPin,
+      )
+      pin.position.set(end.x, 12.5, end.z)
+      pin.rotation.x = Math.PI
+      roadHighlightGroup.add(pin)
+    })
   }
 
   function buildInfrastructure(facilities: readonly Facility[]) {
@@ -453,7 +524,7 @@ export function createDatabaseCityScene(
   function buildRoute(route: CityRoute | null) {
     clearGroup(routeGroup)
     if (!route || route.polyline.length < 2) return
-    const ribbon = ribbonGeometry(route.polyline, 4.6, 1)
+    const ribbon = ribbonGeometry(route.polyline, 4.6, null)
     if (ribbon) {
       const mesh = new THREE.Mesh(track(ribbon), materials.route)
       mesh.position.y = 1.5
@@ -525,16 +596,34 @@ export function createDatabaseCityScene(
     )
   }
 
-  const select = (event: PointerEvent) => {
+  const setPointer = (event: PointerEvent) => {
     const bounds = canvas.getBoundingClientRect()
     pointer.set(
       ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
       -((event.clientY - bounds.top) / bounds.height) * 2 + 1,
     )
     raycaster.setFromCamera(pointer, camera)
+  }
+
+  const pickRoadAt = (event: PointerEvent): string | null => {
+    if (!layers.traffic || roadPickable.length === 0) return null
+    setPointer(event)
+    const hit = raycaster.intersectObjects(roadPickable, false)[0]
+    const routeId = hit?.object.userData.routeId
+    return typeof routeId === 'string' ? routeId : null
+  }
+
+  const select = (event: PointerEvent) => {
+    setPointer(event)
     const hit = raycaster.intersectObjects(pickable, false)[0]
     const objectId = hit?.object.userData.objectId
-    if (typeof objectId === 'string') options.onSelect(objectId)
+    if (typeof objectId === 'string') {
+      options.onSelect(objectId)
+      return
+    }
+    // Only a click that missed every building can be a road click, so a road drawn under an
+    // overhanging building never steals the building's selection.
+    options.onSelectRoad?.(pickRoadAt(event))
   }
 
   // A pointer-up that follows an orbit drag must not also select a building.
@@ -543,26 +632,60 @@ export function createDatabaseCityScene(
     pointerDownAt = { x: event.clientX, y: event.clientY, button: event.button }
   }
   const maybeSelect = (event: PointerEvent) => {
-    if (pointerDownAt === null || pointerDownAt.button !== 0 || event.button !== 0) return
-    const moved = Math.hypot(event.clientX - pointerDownAt.x, event.clientY - pointerDownAt.y)
+    // Cleared for every button, so a right-drag to pan cannot leave the gesture latched open.
+    const down = pointerDownAt
     pointerDownAt = null
+    if (down === null || down.button !== 0 || event.button !== 0) return
+    const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y)
     if (moved < 5) select(event)
+  }
+  const cancelPointer = () => {
+    pointerDownAt = null
+  }
+
+  // Hover is sampled at most once per frame; raycasting on every pointermove is wasteful.
+  let hoverEvent: PointerEvent | null = null
+  let hoverHandle = 0
+  const sampleHover = () => {
+    hoverHandle = 0
+    if (disposed || hoverEvent === null) return
+    const routeId = pickRoadAt(hoverEvent)
+    hoverEvent = null
+    if (routeId === hoveredRoadId) return
+    hoveredRoadId = routeId
+    canvas.style.cursor = routeId === null ? '' : 'pointer'
+    options.onHoverRoad?.(routeId)
+  }
+  const trackHover = (event: PointerEvent) => {
+    if (!options.onHoverRoad || pointerDownAt !== null) return
+    hoverEvent = event
+    if (hoverHandle === 0) hoverHandle = requestAnimationFrame(sampleHover)
+  }
+  const clearHover = () => {
+    hoverEvent = null
+    if (hoveredRoadId === null) return
+    hoveredRoadId = null
+    canvas.style.cursor = ''
+    options.onHoverRoad?.(null)
   }
 
   canvas.addEventListener('pointerdown', rememberPointer)
   canvas.addEventListener('pointerup', maybeSelect)
+  canvas.addEventListener('pointercancel', cancelPointer)
+  canvas.addEventListener('pointermove', trackHover)
+  canvas.addEventListener('pointerleave', clearHover)
   const resize = new ResizeObserver(() => requestRender())
   resize.observe(canvas)
   draw()
 
   return {
-    setData(objects, routes, families, liveBlocking = []) {
+    setObjects(objects) {
       plan = planCity(objects)
       facilitySites = layoutFacilities(plan.civic)
       buildGround(plan)
       buildDistricts(plan)
       buildBuildings(objects, plan)
-      buildRoads(routes, families, plan, liveBlocking)
+      buildRoads(currentRoads, plan)
       buildInfrastructure(currentFacilities)
       buildRoute(currentRoute)
       applySelection()
@@ -573,6 +696,11 @@ export function createDatabaseCityScene(
         framedOnce = true
         frame(cityBox())
       }
+      requestRender()
+    },
+    setRoads(roads) {
+      currentRoads = roads
+      if (plan) buildRoads(roads, plan)
       requestRender()
     },
     setFacilities(facilities) {
@@ -590,12 +718,19 @@ export function createDatabaseCityScene(
       applySelection()
       requestRender()
     },
+    setSelectedRoad(routeId) {
+      selectedRoadId = routeId
+      applyRoadHighlight()
+      requestRender()
+    },
     setLayers(next) {
       Object.assign(layers, next)
       roadGroup.visible = layers.traffic
+      roadHighlightGroup.visible = layers.traffic
       infrastructureGroup.visible = layers.infrastructure
       routeGroup.visible = layers.route
       districtGroup.visible = layers.districts
+      if (!layers.traffic) clearHover()
       requestRender()
     },
     resetView() {
@@ -607,6 +742,16 @@ export function createDatabaseCityScene(
       for (const point of currentRoute.polyline) {
         box.expandByPoint(new THREE.Vector3(point.x - 24, 0, point.z - 24))
         box.expandByPoint(new THREE.Vector3(point.x + 24, 55, point.z + 24))
+      }
+      frame(box)
+    },
+    frameRoad(routeId) {
+      const entry = roadPaths.get(routeId)
+      if (!entry || entry.polyline.length === 0) return
+      const box = new THREE.Box3()
+      for (const point of entry.polyline) {
+        box.expandByPoint(new THREE.Vector3(point.x - 26, 0, point.z - 26))
+        box.expandByPoint(new THREE.Vector3(point.x + 26, 55, point.z + 26))
       }
       frame(box)
     },
@@ -674,13 +819,16 @@ export function createDatabaseCityScene(
       return (THREE.MathUtils.radToDeg(Math.atan2(forward.x, -forward.z)) + 360) % 360
     },
     getPlan: () => plan,
-    getRoadTraffic: () => roadTraffic,
     dispose() {
       disposed = true
       if (animationHandle !== 0) cancelAnimationFrame(animationHandle)
+      if (hoverHandle !== 0) cancelAnimationFrame(hoverHandle)
       resize.disconnect()
       canvas.removeEventListener('pointerdown', rememberPointer)
       canvas.removeEventListener('pointerup', maybeSelect)
+      canvas.removeEventListener('pointercancel', cancelPointer)
+      canvas.removeEventListener('pointermove', trackHover)
+      canvas.removeEventListener('pointerleave', clearHover)
       controls.dispose()
       for (const geometry of disposables) geometry.dispose()
       disposables.clear()
@@ -694,15 +842,17 @@ export function createDatabaseCityScene(
 
 /**
  * Extrudes a polyline into a flat ribbon, so roads read as surfaces rather than hairlines.
- * `fill` shortens each segment to leave gaps, which is how the dashed confidence pattern is expressed
- * without needing a line material.
+ * `dash` repeats a fixed-length on/off pattern along the whole polyline, which is how the reduced
+ * confidence patterns are expressed without needing a line material.
  */
 function ribbonGeometry(
   points: ReadonlyArray<{ x: number; z: number }>,
   width: number,
-  fill: number,
+  dash: DashPattern | null,
+  offset = 0,
 ): THREE.BufferGeometry | null {
-  if (points.length < 2) return null
+  const line = offsetPolyline(points, offset)
+  if (line.length < 2) return null
   const positions: number[] = []
   const half = width / 2
   const push = (
@@ -723,22 +873,22 @@ function ribbonGeometry(
     )
   }
 
-  for (let i = 1; i < points.length; i += 1) {
-    const a = points[i - 1]
-    const b = points[i]
-    const dx = b.x - a.x
-    const dz = b.z - a.z
-    const length = Math.hypot(dx, dz)
+  for (const span of dashSpans(line, dash)) {
+    const length = Math.hypot(span.bx - span.ax, span.bz - span.az)
     if (length < 1e-6) continue
-    const ux = dx / length
-    const uz = dz / length
-    const trim = (length * (1 - fill)) / 2
-    push(a.x + ux * trim, a.z + uz * trim, b.x - ux * trim, b.z - uz * trim, -uz * half, ux * half)
-    // Square off the corner so consecutive perpendicular segments join without a notch.
-    if (i < points.length - 1) {
-      push(b.x - half, b.z, b.x + half, b.z, 0, half)
+    const ux = (span.bx - span.ax) / length
+    const uz = (span.bz - span.az) / length
+    push(span.ax, span.az, span.bx, span.bz, -uz * half, ux * half)
+  }
+
+  // Square off the corners of an unbroken road so perpendicular legs join without a notch. A dashed
+  // road needs no corner patch: its dashes already carry around the turn.
+  if (dash === null) {
+    for (let i = 1; i < line.length - 1; i += 1) {
+      push(line[i].x - half, line[i].z, line[i].x + half, line[i].z, 0, half)
     }
   }
+
   if (positions.length === 0) return null
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
