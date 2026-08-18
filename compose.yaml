@@ -28,8 +28,19 @@ services:
       # Acquisition__Archive__FileName: sqlsimcity.ssca
       # volumes:
       #   - ./artifacts/sqlsimcity.ssca:/archives/sqlsimcity.ssca:ro
-      # Connected mode is opt-in. Supply only non-secret profile values here;
-      # mount passwords/certificates/client secrets under /run/secrets.
+      # Connected mode is opt-in.
+      #
+      # Quickest path (development/evaluation): one connection string. Setting it
+      # turns connected mode on by itself -- no Atlas__Mode change needed. It is
+      # parsed into the same validated profile as the fields below, so the
+      # password is still passed as a SqlCredential and never lands in a
+      # connection string or log. But it *is* readable from this container's
+      # environment and cannot be rotated without a restart, so prefer the
+      # field-by-field configuration below in production. See SECURITY.md.
+      # ConnectionStrings__SqlSimCity: "Server=sql.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=CHANGE-ME;TrustServerCertificate=true"
+      #
+      # Hardened path: supply only non-secret profile values here and mount
+      # passwords/certificates/client secrets under /run/secrets.
       # Replace Atlas__Mode above with Connected, then configure:
       # Atlas__TargetId: production-east
       # Atlas__DisplayName: Production East

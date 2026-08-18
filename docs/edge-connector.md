@@ -119,14 +119,16 @@ store is capped at 4,096 records, 1 MiB per record, and 64 MiB total; it never w
 disk and clears rejected/replaced/disposed buffers. Restarting the
 connector starts a new transport epoch and intentionally resets that in-process history.
 
-The complete profile is required before the process starts:
+The complete profile is required before the process starts. Either set
+`SQLSIMCITY_EDGE_SQL_CONNECTION_STRING` (see [the shortcut below](#development-shortcut-sqlsimcity_edge_sql_connection_string))
+or configure these fields:
 
 | Variable | Meaning |
 | --- | --- |
 | `SQLSIMCITY_EDGE_SQL_HOST` | SQL Server DNS name or IPv4 address. |
 | `SQLSIMCITY_EDGE_SQL_PORT` / `_INSTANCE` | Optional port or named instance; configure at most one. |
 | `SQLSIMCITY_EDGE_SQL_INITIAL_DATABASE` | Initial/contained database. |
-| `SQLSIMCITY_EDGE_SQL_PLATFORM` | `SqlServerOnPremises`, `AzureSqlDatabase`, or `AzureSqlManagedInstance`; never inferred. |
+| `SQLSIMCITY_EDGE_SQL_PLATFORM` | `SqlServerOnPremises`, `AzureSqlDatabase`, or `AzureSqlManagedInstance`; inferred only from a connection string host. |
 | `SQLSIMCITY_EDGE_SQL_TARGET_DISPLAY_NAME` | Non-secret display label. |
 | `SQLSIMCITY_EDGE_SQL_KNOWN_DATABASES` | Comma-separated, unique names (maximum 100). Required for Azure SQL Database. |
 | `SQLSIMCITY_EDGE_SQL_CONNECT_TIMEOUT_SECONDS` / `_COMMAND_TIMEOUT_SECONDS` | Bounded connection/command timeouts (defaults 15/30). |
@@ -156,6 +158,54 @@ Select exactly one `SQLSIMCITY_EDGE_SQL_AUTH_MODE`:
 Every name above is appended to the `SQLSIMCITY_EDGE_` prefix. Secret values in environment
 variables are rejected; configured authentication files are preflighted before collection starts.
 There is no `DefaultAzureCredential`, interactive login, credential chain, or auth fallback.
+
+#### Development shortcut: `SQLSIMCITY_EDGE_SQL_CONNECTION_STRING`
+
+`SQLSIMCITY_EDGE_SQL_CONNECTION_STRING` accepts one ordinary ADO.NET connection string in place of
+the connection fields above:
+
+```text
+SQLSIMCITY_EDGE_SOURCE_MODE=Connected
+SQLSIMCITY_EDGE_SQL_CONNECTION_STRING=Server=sql01.example.internal,1433;Database=appdb;User Id=collector;Password=...;TrustServerCertificate=true
+```
+
+It is parsed into exactly the same validated `ConnectionProfile` the fields produce, so the password
+still never reaches a connection string, log, or diagnostic — it is passed as a `SqlCredential` —
+and `ApplicationIntent=ReadOnly` is still forced.
+
+**It is the one deliberate exception to the rule that no secret comes from an environment
+variable.** A password here is readable by anything that can read the connector's environment and
+cannot be rotated without a restart. The connector logs a `warn` event at startup when one is in
+use. Mounted secret files remain the deployment default.
+
+Rules:
+
+- It cannot be combined with any field it already covers — `SQL_HOST`, `_INSTANCE`, `_PORT`,
+  `_INITIAL_DATABASE`, `_AUTH_MODE`, `_USERNAME`, `_PASSWORD_SECRET_FILE`, `_ENCRYPTION`,
+  `_TRUST_SERVER_CERTIFICATE`, `_HOST_NAME_IN_CERTIFICATE`, `_CONNECT_TIMEOUT_SECONDS`,
+  `_COMMAND_TIMEOUT_SECONDS`, `_MIN_POOL_SIZE`, `_MAX_POOL_SIZE`, `_USER_ASSIGNED_CLIENT_ID`,
+  `_TENANT_ID`, `_CLIENT_ID`, `_FEDERATED_TOKEN_FILE`, `_CLIENT_SECRET_FILE`,
+  `_CERTIFICATE_SECRET_FILE`, `_CERTIFICATE_PASSWORD_SECRET_FILE`. Setting both is rejected rather
+  than one silently winning — most importantly for `_USER_ASSIGNED_CLIENT_ID`, where the connection
+  string's own `User Id` would otherwise take effect and authenticate as the system-assigned
+  identity with no error.
+- Fields it cannot express still apply: `SQL_TARGET_DISPLAY_NAME` (defaults to
+  `SQLSIMCITY_EDGE_TARGET_ID`), `SQL_KNOWN_DATABASES`, and the collection tuning variables.
+- `SQL_PLATFORM` becomes optional and is inferred from the host name — `*.database.windows.net` is
+  taken as Azure SQL Database, everything else as SQL Server on-premises. Managed Instance shares
+  that suffix, so it must still be stated explicitly. For Azure SQL Database, `SQL_KNOWN_DATABASES`
+  defaults to the connection string's own `Database`.
+- Only SQL login, `Integrated Security=true` (Kerberos), and
+  `Authentication=Active Directory Managed Identity` are supported. Workload identity and service
+  principal need a tenant id a connection string cannot carry, and `Active Directory Default` stays
+  banned; use the fields above for those.
+- `Encrypt=false` and infinite (`0`) timeouts are rejected, as they are on the field path.
+- `Max Pool Size` defaults to 20, matching the field path, not SqlClient's own default of 100.
+- `Server=admin:host` (dedicated administrator connection), `np:`, and `lpc:` are rejected. The
+  connector rebuilds the connection as TCP, so it cannot honor them; connecting to an ordinary
+  endpoint instead, silently, would be worse. `tcp:` is accepted.
+- The prohibition on plaintext secret variables (`SQL_PASSWORD`, `SQL_CLIENT_SECRET`,
+  `SQL_CERTIFICATE_PASSWORD`, `SQL_FEDERATED_TOKEN`) is unchanged and still enforced.
 
 The connector fetches Query Store normalized facts only. It never calls the raw query-text or
 Showplan XML lookup methods. Its live probes set `@IncludeSqlText=0`, which prevents

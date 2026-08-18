@@ -356,12 +356,28 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                     return (LogSpaceRow?)null;
                 }
 
+                // The probe returns exact bytes (total_log_size_bytes / used_log_space_bytes);
+                // every consumer of LogSpaceRow -- the V1 contract, the findings rule, and the
+                // UI -- is in MB, so the conversion happens here. Reading "*_mb" columns that
+                // the probe never emits threw IndexOutOfRangeException on every sampling cycle.
                 return new LogSpaceRow(
-                    Convert.ToDecimal(reader["total_log_size_mb"], CultureInfo.InvariantCulture),
-                    Convert.ToDecimal(reader["used_log_space_mb"], CultureInfo.InvariantCulture),
+                    BytesToMegabytes(reader["total_log_size_bytes"]),
+                    BytesToMegabytes(reader["used_log_space_bytes"]),
                     Convert.ToDecimal(reader["used_log_space_in_percent"], CultureInfo.InvariantCulture));
             },
             cancellationToken);
+
+    private const decimal BytesPerMegabyte = 1_024m * 1_024m;
+
+    /// <summary>
+    /// Converts an exact byte count to megabytes, rounded to two decimals to match
+    /// the precision the live-incident contract and its fixtures already use.
+    /// </summary>
+    private static decimal BytesToMegabytes(object value) =>
+        Math.Round(
+            Convert.ToDecimal(value, CultureInfo.InvariantCulture) / BytesPerMegabyte,
+            2,
+            MidpointRounding.AwayFromZero);
 
     private static string? AsString(SqlDataReader reader, string column) => reader[column] is DBNull ? null : (string)reader[column];
 

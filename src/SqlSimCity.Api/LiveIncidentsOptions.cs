@@ -25,6 +25,14 @@ public sealed class LiveIncidentsOptions
 /// </summary>
 public sealed class LiveIncidentsConnectionOptions
 {
+    /// <summary>
+    /// An optional ordinary ADO.NET connection string that replaces every field
+    /// below except <see cref="TargetId"/>, <see cref="DisplayName"/>, and
+    /// <see cref="Platform"/> (which all fall back to defaults). See
+    /// <c>SqlSimCityConnectionString</c> for the shared keys it also honors.
+    /// </summary>
+    public string? ConnectionString { get; set; }
+
     /// <summary>A short, stable label for this target, used as the sampler's target id.</summary>
     public string? TargetId { get; set; }
 

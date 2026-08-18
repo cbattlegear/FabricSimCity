@@ -29,8 +29,7 @@ builder.Services.AddSingleton(probeCatalog);
 builder.Services.AddProtectedStorage(builder.Configuration);
 var queryStoreConnected = QueryStoreHistoryConfiguration.IsConnected(builder.Configuration);
 var atlasConnected = AtlasConfiguration.IsConnected(builder.Configuration);
-var liveConnected = string.Equals(
-    builder.Configuration["LiveIncidents:Mode"], "Connected", StringComparison.OrdinalIgnoreCase);
+var liveConnected = LiveIncidentsServiceCollectionExtensions.IsConnected(builder.Configuration);
 var edgeIngestionEnabled = builder.Configuration.GetValue<bool>("EdgeIngestion:Enabled");
 var protectedStorageEnabled = builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled");
 if (archiveMode && (
@@ -79,14 +78,16 @@ builder.Services.AddFindings();
 
 if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
 {
-    var atlasOptions = AtlasConfiguration.BuildCollectionOptions(builder.Configuration);
-    var connectionProfile = AtlasConfiguration.BuildProfile(builder.Configuration);
+    var atlasConnectionString = AtlasConfiguration.TryParseConnectionString(builder.Configuration);
+    var atlasOptions = AtlasConfiguration.BuildCollectionOptions(builder.Configuration, atlasConnectionString);
+    var connectionProfile = AtlasConfiguration.BuildProfile(builder.Configuration, atlasConnectionString);
     builder.Services.AddSingleton(atlasOptions);
     builder.Services.AddSingleton(connectionProfile);
     builder.Services.AddSingleton(TimeProvider.System);
-    builder.Services.AddSingleton(new FileSecretFileProvider(AtlasConfiguration.BuildSecretOptions(builder.Configuration)));
+    builder.Services.AddSingleton(
+        AtlasConfiguration.BuildSecretProvider(builder.Configuration, atlasConnectionString));
     builder.Services.AddSingleton<ISqlConnectionFactory>(services =>
-        new SqlConnectionFactory(services.GetRequiredService<FileSecretFileProvider>()));
+        new SqlConnectionFactory(services.GetRequiredService<ISecretFileProvider>()));
     builder.Services.AddSingleton<IAtlasProbeExecutor, SqlClientAtlasProbeExecutor>();
     builder.Services.AddSingleton<ILiveAtlasActivitySource>(services =>
         new LiveIncidentAtlasActivitySource(
@@ -137,6 +138,12 @@ else if (acquisitionMode == AcquisitionMode.Fixture)
 }
 
 var app = builder.Build();
+
+// A connection string password lives in this process's environment and cannot be
+// rotated without a restart, unlike the mounted secret files every other path uses.
+// Say so once at startup rather than letting the trade-off pass silently.
+SqlSimCityConnectionString.WarnIfConfigured(
+    builder.Configuration, app.Services.GetRequiredService<ILoggerFactory>());
 
 // Protected storage is opt-in and fails closed: when enabled, a missing/invalid
 // key, corrupt canary, or migration error must stop the process before it

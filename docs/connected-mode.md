@@ -3,11 +3,69 @@
 Connected mode runs only the embedded, startup-validated, static read-only SQL probe catalog. It
 never executes grants or tuning changes.
 
+## Quick start: a single connection string
+
+The fastest way to point SQLSimCity at a real server is one ordinary ADO.NET connection string:
+
+```text
+ConnectionStrings__SqlSimCity=Server=sql01.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=...;TrustServerCertificate=true
+```
+
+`SQLSIMCITY_CONNECTION_STRING` works identically, for parity with the edge connector's naming.
+
+Setting either one turns connected mode on by itself — Atlas and live incidents switch off the
+fixture path with no `Atlas:Mode` or `LiveIncidents:Mode` needed. With no connection string
+configured, fixtures stay the default. (Connected Query Store history is the one exception: it also
+needs `QueryStoreHistory:Mode=Connected` and `ProtectedStorage:Enabled=true`, because it writes
+collected plans to disk.)
+
+The connection string is parsed into exactly the same validated `ConnectionProfile` the settings
+below produce, so every downstream guarantee still holds: the password is passed as a
+`SqlCredential` and never appears in a connection string, log, or diagnostic; `ApplicationIntent`
+is forced to `ReadOnly`; and the application name is forced to `SQLSimCity`.
+
+**This is a convenience, not the hardened path.** A password in a connection string is readable by
+anything that can read the process environment and cannot be rotated without a restart, unlike the
+mounted secret files the settings path uses. The API logs a warning at startup when one is
+configured. Use it for local development and evaluation; prefer the settings below in production.
+See [SECURITY.md](../SECURITY.md).
+
+What a connection string cannot express, and what SQLSimCity does about it:
+
+| Concern | Behavior |
+| --- | --- |
+| Engine platform | Inferred from the host name: `*.database.windows.net` is taken as Azure SQL Database, everything else as SQL Server on-premises. Managed Instance shares that suffix, so it must be stated explicitly. |
+| `Atlas:KnownDatabases` | Defaults to the connection string's own `Database` when the host is Azure SQL. Explicit configuration always wins. |
+| `Encrypt=false` | Rejected. SQLSimCity supports only `Mandatory` (the SqlClient default) and `Strict`. |
+| Workload identity, service principal, `Active Directory Default` | Rejected. These need a tenant id a connection string cannot carry, or are banned outright; use the settings below. |
+| `Connect Timeout=0` / `Command Timeout=0` | Rejected. Timeouts are bounded, never infinite. |
+| `Max Pool Size` | Defaults to 20, matching the settings below, not SqlClient's own default of 100. An explicit value always wins. |
+| `Server=admin:host`, `np:`, `lpc:` | Rejected. SQLSimCity rebuilds the connection string as TCP, so honoring a different protocol or endpoint is not possible; silently connecting elsewhere would be worse. `tcp:` is accepted. |
+
+Supported authentication in a connection string: SQL login (`User Id` + `Password`), Kerberos
+(`Integrated Security=true`), and managed identity
+(`Authentication=Active Directory Managed Identity`, with `User Id` as the user-assigned client id).
+
+A connection string **cannot be combined with any `Atlas:Connection` or `LiveIncidents:Connection`
+field it already covers** — host, port, instance, database, timeouts, pool bounds, encryption,
+certificate trust, or authentication. Configuring both is rejected at startup rather than silently
+resolved in the connection string's favor, because `ConnectionStrings__SqlSimCity` is a conventional
+name that some hosting platforms inject automatically: without this check, one appearing in the
+environment would quietly replace a hardened profile's authentication strategy, TLS trust setting,
+and mounted password file. Labels a connection string cannot express stay configurable alongside
+one: `Atlas:Connection:ProfileId`, and `LiveIncidents:Connection`'s `TargetId`, `DisplayName`,
+`Platform`, and `Secrets`.
+
+A section-scoped key overrides the shared one for a single subsystem — `Atlas:ConnectionString` and
+`LiveIncidents:Connection:ConnectionString`. Resolution order is section key, then
+`ConnectionStrings:SqlSimCity`, then `SQLSIMCITY_CONNECTION_STRING`.
+
 ## Connection settings instead of a raw connection string
 
-SQLSimCity uses a typed `ConnectionProfile` rather than accepting a raw connection string. This
-prevents passwords or access tokens from being placed in environment variables, logs, or process
-arguments.
+For production, SQLSimCity prefers a typed `ConnectionProfile` over a raw connection string. This
+keeps passwords and access tokens out of environment variables, logs, and process arguments
+entirely: only a *reference* to a mounted secret file is configured, and the bytes are read from
+that file at use time.
 
 The Atlas profile is configured under `Atlas:Connection`:
 
@@ -40,6 +98,9 @@ Keep the default [`compose.yaml`](../compose.yaml) and add a local
 services:
   sqlsimcity:
     environment:
+      # Development shortcut -- one variable, no mounted secret file. The password
+      # is readable from the container environment; see the quick start above.
+      # ConnectionStrings__SqlSimCity: "Server=sql01.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=...;TrustServerCertificate=true"
       Atlas__Mode: Connected
       Atlas__TargetId: production-east
       Atlas__DisplayName: Production East

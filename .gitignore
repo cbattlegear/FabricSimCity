@@ -8,5 +8,9 @@ web/dist/
 *.user
 *.suo
 artifacts/
-secrets/
+# Anchored to the repository root: this is the runtime secret-file mount the
+# README and compose.yaml create (./secrets). Unanchored, it also matched the
+# src/SqlSimCity.SqlServer/Secrets source directory on case-insensitive
+# filesystems and silently excluded new source files from commits.
+/secrets/
 *.log

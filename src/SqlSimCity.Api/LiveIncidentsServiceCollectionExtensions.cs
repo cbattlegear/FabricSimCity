@@ -25,6 +25,50 @@ public static class LiveIncidentsServiceCollectionExtensions
 {
     public const string ConnectionFactoryServiceKey = "LiveIncidents";
 
+    private const string DefaultTargetId = "primary";
+    private const string DefaultDisplayName = "SQL Server";
+
+    /// <summary>
+    /// The <c>LiveIncidents:Connection</c> keys a connection string already
+    /// supplies. Configuring both is rejected rather than silently resolved.
+    /// <c>TargetId</c>, <c>DisplayName</c>, <c>Platform</c>, and <c>Secrets</c>
+    /// are absent on purpose: a connection string cannot express them, so they
+    /// stay usable alongside one.
+    /// </summary>
+    private static readonly string[] ConnectionStringProfileKeys =
+    [
+        nameof(LiveIncidentsConnectionOptions.Server),
+        nameof(LiveIncidentsConnectionOptions.Database),
+        nameof(LiveIncidentsConnectionOptions.Encryption),
+        nameof(LiveIncidentsConnectionOptions.TrustServerCertificate),
+        nameof(LiveIncidentsConnectionOptions.HostNameInCertificate),
+        nameof(LiveIncidentsConnectionOptions.Timeouts),
+        nameof(LiveIncidentsConnectionOptions.Pool),
+        nameof(LiveIncidentsConnectionOptions.Authentication),
+    ];
+
+    /// <summary>
+    /// Connected when <c>LiveIncidents:Mode</c> says so, or when a connection
+    /// string is configured. Program startup uses this to keep its own
+    /// mode-conflict checks in step with what <see cref="AddLiveIncidents"/> registers.
+    /// </summary>
+    public static bool IsConnected(
+        IConfiguration configuration,
+        string sectionName = LiveIncidentsOptions.SectionName)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        return string.Equals(
+                configuration[$"{sectionName}:{nameof(LiveIncidentsOptions.Mode)}"],
+                nameof(LiveIncidentsMode.Connected),
+                StringComparison.OrdinalIgnoreCase)
+            || ResolveConnectionString(configuration, sectionName) is not null;
+    }
+
+    private static string? ResolveConnectionString(IConfiguration configuration, string sectionName) =>
+        SqlSimCityConnectionString.Resolve(
+            configuration,
+            $"{sectionName}:{nameof(LiveIncidentsOptions.Connection)}:{nameof(LiveIncidentsConnectionOptions.ConnectionString)}");
+
     public static IServiceCollection AddLiveIncidents(
         this IServiceCollection services,
         IConfiguration configuration,
@@ -44,6 +88,20 @@ public static class LiveIncidentsServiceCollectionExtensions
                 $"{sectionName}:{nameof(LiveIncidentsOptions.Mode)} '{options.Mode}' must be 'Fixture' or 'Connected'.");
         }
 
+        // A configured connection string is itself an opt-in to a real target, so
+        // it selects Connected without also having to set the mode.
+        var connectionString = ResolveConnectionString(configuration, sectionName);
+        if (connectionString is not null)
+        {
+            SqlSimCityConnectionString.EnsureNoFieldConflict(
+                configuration,
+                $"{sectionName}:{nameof(LiveIncidentsOptions.Connection)}",
+                ConnectionStringProfileKeys,
+                message => new LiveIncidentsConfigurationException(message));
+
+            mode = LiveIncidentsMode.Connected;
+        }
+
         switch (mode)
         {
             case LiveIncidentsMode.Fixture:
@@ -54,7 +112,7 @@ public static class LiveIncidentsServiceCollectionExtensions
                 break;
 
             case LiveIncidentsMode.Connected:
-                RegisterConnected(services, options.Connection, probeCatalog, sectionName);
+                RegisterConnected(services, options.Connection, probeCatalog, sectionName, connectionString);
                 break;
 
             default:
@@ -69,17 +127,30 @@ public static class LiveIncidentsServiceCollectionExtensions
         IServiceCollection services,
         LiveIncidentsConnectionOptions connection,
         ProbeCatalog probeCatalog,
-        string sectionName)
+        string sectionName,
+        string? connectionString)
     {
         var connectionSection = $"{sectionName}:{nameof(LiveIncidentsOptions.Connection)}";
 
         // Building the profile, platform, and secret provider now -- not lazily inside a
         // service factory -- guarantees every validation exception below surfaces the moment
         // this method runs, which callers await before the host can start serving traffic.
-        var platform = ParsePlatform(connection.Platform, connectionSection);
-        var profile = BuildConnectionProfile(connection, connectionSection);
-        var targetId = RequireNonBlank(connection.TargetId, connectionSection, nameof(LiveIncidentsConnectionOptions.TargetId));
-        var displayName = RequireNonBlank(connection.DisplayName, connectionSection, nameof(LiveIncidentsConnectionOptions.DisplayName));
+        var parsed = connectionString is null
+            ? null
+            : ParseConnectionString(connectionString, connection, connectionSection);
+
+        var platform = parsed is null
+            ? ParsePlatform(connection.Platform, connectionSection)
+            : string.IsNullOrWhiteSpace(connection.Platform)
+                ? SqlSimCityConnectionString.DefaultPlatform(parsed)
+                : ParsePlatform(connection.Platform, connectionSection);
+        var profile = parsed?.Profile ?? BuildConnectionProfile(connection, connectionSection);
+        var targetId = parsed is null
+            ? RequireNonBlank(connection.TargetId, connectionSection, nameof(LiveIncidentsConnectionOptions.TargetId))
+            : connection.TargetId is { Length: > 0 } ? connection.TargetId : DefaultTargetId;
+        var displayName = parsed is null
+            ? RequireNonBlank(connection.DisplayName, connectionSection, nameof(LiveIncidentsConnectionOptions.DisplayName))
+            : connection.DisplayName is { Length: > 0 } ? connection.DisplayName : DefaultDisplayName;
 
         var secretOptions = new SecretFileProviderOptions
         {
@@ -89,7 +160,7 @@ public static class LiveIncidentsServiceCollectionExtensions
 
         services.AddKeyedSingleton<ISecretFileProvider>(
             ConnectionFactoryServiceKey,
-            new FileSecretFileProvider(secretOptions));
+            parsed?.InlineSecrets ?? new FileSecretFileProvider(secretOptions));
         services.AddKeyedSingleton<ISqlConnectionFactory>(
             ConnectionFactoryServiceKey,
             (sp, _) => new SqlConnectionFactory(
@@ -106,6 +177,27 @@ public static class LiveIncidentsServiceCollectionExtensions
                 targetId,
                 displayName,
                 configuredPlatform: platform));
+    }
+
+    private static ConnectionStringProfile ParseConnectionString(
+        string connectionString,
+        LiveIncidentsConnectionOptions connection,
+        string connectionSection)
+    {
+        try
+        {
+            return ConnectionStringProfile.Parse(
+                connectionString,
+                new ConnectionProfileId(
+                    connection.TargetId is { Length: > 0 } targetId ? targetId : DefaultTargetId));
+        }
+        catch (ConnectionProfileValidationException ex)
+        {
+            // ConnectionProfileValidationException messages name fields and rules only,
+            // never a configured value, so wrapping cannot disclose the password.
+            throw new LiveIncidentsConfigurationException(
+                $"{connectionSection}:{nameof(LiveIncidentsConnectionOptions.ConnectionString)}: {ex.Message}", ex);
+        }
     }
 
     private static EnginePlatform ParsePlatform(string? rawPlatform, string connectionSection)

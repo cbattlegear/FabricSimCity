@@ -65,10 +65,10 @@ public sealed class ConnectedObservationProvider : IObservationProvider, IAsyncD
         ArgumentNullException.ThrowIfNull(options);
         var timeProvider = TimeProvider.System;
         var catalog = ProbeCatalog.Load();
-        FileSecretFileProvider secrets;
+        ISecretFileProvider secrets;
         try
         {
-            secrets = new FileSecretFileProvider(options.SecretFiles);
+            secrets = options.InlineSecrets ?? new FileSecretFileProvider(options.SecretFiles);
         }
         catch (Exception ex) when (
             ex is ArgumentException or PathTooLongException or NotSupportedException)
@@ -320,7 +320,7 @@ public sealed class ConnectedObservationProvider : IObservationProvider, IAsyncD
 
     private static async Task ValidateAuthenticationFilesAsync(
         AuthenticationStrategy authentication,
-        FileSecretFileProvider provider,
+        ISecretFileProvider provider,
         CancellationToken cancellationToken)
     {
         var references = authentication switch

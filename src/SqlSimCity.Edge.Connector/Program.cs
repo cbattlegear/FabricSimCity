@@ -13,6 +13,18 @@ try
 
     var options = ConnectorOptions.FromEnvironment(env);
 
+    if (options.Connected?.InlineSecrets is not null)
+    {
+        // The connector's normal rule is that no secret ever comes from the
+        // environment. A connection-string password is the one opt-in exception,
+        // so say so once at startup rather than letting it pass silently.
+        log.Warn("connector.inline_connection_string_password", new Dictionary<string, object?>
+        {
+            ["message"] = "SQLSIMCITY_EDGE_SQL_CONNECTION_STRING carries a password in this process's environment. " +
+                "It cannot be rotated without a restart; mount a secret file instead for production.",
+        });
+    }
+
     // Load key material from files (fail-closed). Secrets are never read from environment plaintext.
     var signingSecret = FileSigningSecret.Load(options.SigningSecretFile);
     using var spoolKey = SpoolKeyLoader.Load(options.SpoolKeyFile);

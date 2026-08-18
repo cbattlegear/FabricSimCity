@@ -1171,3 +1171,41 @@ describe('regression: read-only guard rejects SELECT ... INTO across the whole p
     }
   });
 });
+
+// Every column an executor reads by name must actually be emitted by the probe SQL corpus.
+// This is deliberately corpus-wide rather than per-probe: it needs no mapping from a C#
+// call site to a probe id, so it cannot drift, yet it still catches the failure mode that
+// motivated it -- SqlLiveIncidentProbeExecutor read "total_log_size_mb"/"used_log_space_mb"
+// while space/log_space_usage.sql emits "total_log_size_bytes"/"used_log_space_bytes",
+// throwing IndexOutOfRangeException on every connected sampling cycle. The unit tests could
+// not catch it because they all substitute a fake executor for the real SqlDataReader path.
+describe('probe executors only read columns the probe SQL emits', () => {
+  const executorPaths = [
+    'src/SqlSimCity.Collection/Probes/SqlLiveIncidentProbeExecutor.cs',
+    'src/SqlSimCity.Collection/Atlas/SqlClientAtlasProbeExecutor.cs',
+  ];
+
+  const allProbeSql = listSqlFilesRecursive(path.join(sqlDir, 'probes'))
+    .map((f) => readFileSync(f, 'utf8'))
+    .join('\n')
+    .toLowerCase();
+
+  for (const relative of executorPaths) {
+    test(`${relative}: every reader["column"] exists in the probe SQL`, () => {
+      const source = readFileSync(path.join(repoRoot, relative), 'utf8');
+      const columns = new Set();
+      for (const match of source.matchAll(/reader\[\s*"([a-z0-9_]+)"\s*\]/gi)) {
+        columns.add(match[1].toLowerCase());
+      }
+
+      assert.ok(columns.size > 0, 'expected to find at least one reader["column"] access');
+
+      const missing = [...columns].filter((c) => !allProbeSql.includes(c)).sort();
+      assert.deepEqual(
+        missing,
+        [],
+        `these columns are read in C# but appear in no probe SQL file: ${missing.join(', ')}`,
+      );
+    });
+  }
+});
