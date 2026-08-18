@@ -4,10 +4,11 @@ import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evide
 import { AtlasViewport } from './AtlasViewport'
 import LiveIncidents from './LiveIncidentsPanel'
 import { QueryStoreView } from './QueryStoreView'
+import FindingsPanel from './FindingsPanel'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
 
-type Tab = 'atlas' | 'queries' | 'live'
+type Tab = 'atlas' | 'queries' | 'live' | 'findings'
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AtlasSnapshot | null>(null)
@@ -95,6 +96,18 @@ export default function App() {
           aria-controls="panel-live"
           onClick={() => setTab('live')}
         >Live incidents</button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-findings"
+          aria-selected={tab === 'findings'}
+          aria-controls="panel-findings"
+          onClick={() => setTab('findings')}
+        >Findings</button>
+      </div>
+
+      <div id="panel-findings" role="tabpanel" aria-labelledby="tab-findings" hidden={tab !== 'findings'}>
+        {tab === 'findings' && <FindingsPanel />}
       </div>
 
       <div id="panel-queries" role="tabpanel" aria-labelledby="tab-queries" hidden={tab !== 'queries'}>

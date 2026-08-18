@@ -31,6 +31,7 @@ src/SqlSimCity.Domain     fixture source and API source seam
 src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
 src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
 src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, live-incident sampler, and refresh coordination
+src/SqlSimCity.Findings   pure deterministic findings rule engine, rules, and bounded evidence provider
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 sql/                      versioned probe catalog (manifest.json + probes/*.sql)
 fixtures/                 deterministic JSON fixtures for the atlas, capabilities, and live-incident APIs
@@ -258,6 +259,54 @@ timeout handling, and cadence/no-overlap/pause/backoff/shutdown; `SqlSimCity.Api
 the endpoint shape, exact-bigint serialization, GET-only enforcement, and the SignalR push/pull
 round-trip; `web/src/liveIncidents.test.ts` covers the same accessibility and disclosure
 guarantees on the frontend.
+
+## Findings
+
+`SqlSimCity.Findings` turns the atlas, Query Store, and live evidence into deterministic,
+evidence-reproducible performance **findings**. It is not an automated tuning oracle: every finding
+exposes its observed window, exact measured magnitude, confidence, navigable evidence references,
+caveats and alternate explanations, a read-only recommendation, and concrete next checks. Low-confidence
+or stale evidence only ever downgrades a finding; it never becomes a definitive diagnosis, and
+insufficient/stale/unsupported data is never reported as a measured zero.
+
+- **Versioned contracts** (`FindingsContractsV1` in `SqlSimCity.Contracts`) carry the finding, its
+  deterministic scope fingerprint (stable across runs, used as the local acknowledgment/suppression
+  key), status/severity/impact/confidence, evidence references to visible facts, source freshness, the
+  engine status (including explicitly disclosed **unsupported** rules), a paged list, and a literal-safe
+  redacted export shape.
+- **A pure rule engine.** Rules are independently testable, never mutate SQL Server, and return
+  `NotEvaluated`/`InsufficientEvidence` rather than an empty success when prerequisites or evidence are
+  missing. The engine orders findings by severity, then confidence, then measured impact, then id, and
+  guards that every finding id is the deterministic scope fingerprint.
+- **The initial rules.** Query Store health (disabled/read-only/error/nearly-full/permission/stale),
+  same-family plan regression (comparable replica/epoch/execution-type windows, minimum execution
+  evidence, ranked by total measured impact), plan instability, forced-plan failure, PSP/OPPO variant
+  imbalance, high aborted/exception share, dominant Query Store wait category, query CPU dominance over
+  the bounded loaded set, current root blocker (excluding the -5 sentinel), current memory-grant queue,
+  log-space pressure, file-I/O stall pressure, and material Showplan warnings/missing-index suggestions
+  as advisory. tempdb-to-query and per-operator cost attribution are marked **unsupported** and never
+  fabricated, because the current contracts cannot support them.
+- **Bounded evidence.** `SourceBackedFindingsEvidenceProvider` pages a bounded number of top families
+  per ranking metric, deduplicates them, and loads detail and Showplans only for that bounded set, so
+  evaluation stays bounded even against a 100k-family target and never opens its own SQL connection.
+- **Read-only API.** `/api/v1/findings` (paged/sorted/filterable), `/api/v1/findings/{id}`,
+  `/api/v1/findings/rules/{ruleId}`, `/api/v1/findings/status`, and `/api/v1/findings/export` (a
+  redacted JSON export/preview). All are GET-only, `Cache-Control: no-store`, with bounded page tokens,
+  filters, and export size. The export omits or hashes any string that could contain raw SQL, plan XML,
+  credentials, or host/user/client identifiers; raw text is never passed through.
+- **React Findings tab** (`web/src/FindingsPanel.tsx`) is a keyboard- and screen-reader-accessible
+  inbox plus evidence drawer with severity/confidence sorting, filters, caveats, alternate explanations,
+  next checks, and the read-only recommendation. Severity and confidence are communicated with glyphs
+  plus text, never color alone, and the qualifications survive on mobile. Acknowledgment and suppression
+  are local presentation state only (versioned `localStorage` keyed by the finding fingerprint); they
+  never change engine truth. A persistent trusted-network/no-login disclosure is always shown.
+
+`SqlSimCity.Findings.Tests` covers each rule's direction, prerequisites, false-positive controls,
+confidence downgrade, comparable-window enforcement, the -5 sentinel exclusion, total-impact ranking,
+deterministic ordering/fingerprints, redacted export, paging/token DoS bounds, and bounded 100k-family
+evaluation; `SqlSimCity.Api.Tests` covers the endpoint shapes, GET-only enforcement, string-typed
+magnitudes, and export redaction; `web/src/findings.test.ts` covers the color-independent
+severity/confidence encoding, impact formatting, and local presentation-state behavior.
 
 ## Security and privacy
 

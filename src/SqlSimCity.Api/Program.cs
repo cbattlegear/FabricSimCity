@@ -37,6 +37,7 @@ if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStora
 builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
 builder.Services.AddSingleton<LiveIncidentSamplerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
+builder.Services.AddFindings();
 
 if (AtlasConfiguration.IsConnected(builder.Configuration))
 {
@@ -243,6 +244,7 @@ queryStore.MapGet("/status", async (
     return Results.Ok(await source.GetStatusAsync(cancellationToken));
 });
 app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
+app.MapFindings();
 app.MapFallbackToFile("index.html");
 
 app.Run();

@@ -15,6 +15,7 @@ COPY src/SqlSimCity.Contracts/SqlSimCity.Contracts.csproj src/SqlSimCity.Contrac
 COPY src/SqlSimCity.Storage/SqlSimCity.Storage.csproj src/SqlSimCity.Storage/
 COPY src/SqlSimCity.SqlServer/SqlSimCity.SqlServer.csproj src/SqlSimCity.SqlServer/
 COPY src/SqlSimCity.Collection/SqlSimCity.Collection.csproj src/SqlSimCity.Collection/
+COPY src/SqlSimCity.Findings/SqlSimCity.Findings.csproj src/SqlSimCity.Findings/
 RUN dotnet restore src/SqlSimCity.Api/SqlSimCity.Api.csproj
 COPY src/ src/
 COPY sql/ sql/

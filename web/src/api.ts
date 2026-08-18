@@ -3,6 +3,7 @@ import type { AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDeta
 import type { LiveIncidentResponse } from './liveContracts'
 import { assertAtlasSnapshot } from './atlas'
 import { assertLiveIncidentResponse, computeReconnectDelayMs } from './liveIncidents'
+import { assertFindingsPage, assertFindingsEngineStatus } from './findings'
 import type { LiveFeedConnectionState } from './liveIncidents'
 
 export async function fetchAtlas(signal?: AbortSignal): Promise<AtlasSnapshot> {
@@ -214,3 +215,21 @@ export const fetchPlanComparison = (left: string, right: string, signal?: AbortS
 
 export const fetchQueryStoreStatus = (signal?: AbortSignal) =>
   fetchJson<QueryStoreCollectorStatus>('/api/v1/query-store/status', signal)
+
+export const fetchFindings = async (
+  params: { sort?: string; severity?: string[]; confidence?: string[]; ruleId?: string; databaseId?: string; pageToken?: string | null },
+  signal?: AbortSignal,
+) => {
+  const query = new URLSearchParams()
+  query.set('pageSize', '100')
+  if (params.sort) query.set('sort', params.sort)
+  if (params.ruleId) query.set('ruleId', params.ruleId)
+  if (params.databaseId) query.set('databaseId', params.databaseId)
+  if (params.pageToken) query.set('pageToken', params.pageToken)
+  for (const s of params.severity ?? []) query.append('severity', s)
+  for (const c of params.confidence ?? []) query.append('confidence', c)
+  return assertFindingsPage(await fetchJson<unknown>(`/api/v1/findings?${query.toString()}`, signal))
+}
+
+export const fetchFindingsStatus = async (signal?: AbortSignal) =>
+  assertFindingsEngineStatus(await fetchJson<unknown>('/api/v1/findings/status', signal))
