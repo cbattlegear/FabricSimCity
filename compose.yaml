@@ -1,7 +1,11 @@
 services:
   sqlsimcity:
+    image: sqlsimcity:local
     build:
       context: .
+      args:
+        VERSION: 0.0.0-local
+        REVISION: local
     ports:
       - "127.0.0.1:8080:8080"
     read_only: true
