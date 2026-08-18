@@ -183,6 +183,37 @@ test('database city keeps geometry, activity, attribution, and routes factual', 
   }
 });
 
+test('database city wait categories reconcile and never imply an absent breakdown is zero', () => {
+  const withBreakdown = city.queryFamilies.filter(
+    (family) => Object.keys(family.waitMillisecondsByCategory).length > 0,
+  );
+
+  assert.ok(withBreakdown.length > 0, 'fixture must exercise wait lanes');
+  for (const family of withBreakdown) {
+    const total = Object.values(family.waitMillisecondsByCategory)
+      .reduce((sum, value) => sum + BigInt(value), 0n);
+    assert.equal(
+      total.toString(), family.totalWaitMilliseconds,
+      `${family.familyId} breakdown must reconcile with its captured total`,
+    );
+  }
+
+  // A family with waits but no breakdown proves the layer degrades instead of claiming zero: this is
+  // what a pre-2017 instance looks like, where sys.query_store_wait_stats does not exist.
+  assert.ok(city.queryFamilies.some(
+    (family) => Object.keys(family.waitMillisecondsByCategory).length === 0
+      && BigInt(family.totalWaitMilliseconds) > 0n,
+  ));
+
+  // The fixture must exercise every routing outcome: a facility lane, a category with no facility,
+  // a multi-object family that must not be divided, and a family naming no object at all.
+  assert.ok(withBreakdown.some((family) => family.objectIds.length === 1
+    && 'Buffer IO' in family.waitMillisecondsByCategory));
+  assert.ok(withBreakdown.some((family) => 'Parallelism' in family.waitMillisecondsByCategory));
+  assert.ok(withBreakdown.some((family) => family.objectIds.length > 1));
+  assert.ok(withBreakdown.some((family) => family.objectIds.length === 0));
+});
+
 test('fixture content does not resemble production secrets or connection strings', () => {
   const forbidden = [/(?:password|pwd)\s*=/i, /(?:user id|uid)\s*=/i, /server\s*=/i, /data source\s*=/i, /(?:account key|access token|client secret)\s*=/i, /(?:^|[^a-z])(?:jdbc|odbc|sqlserver):/i];
   for (const path of jsonFiles(fixtureDir)) {

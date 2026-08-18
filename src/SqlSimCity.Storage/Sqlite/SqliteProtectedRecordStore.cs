@@ -6,9 +6,10 @@ using SqlSimCity.Storage.Crypto;
 namespace SqlSimCity.Storage.Sqlite;
 
 /// <summary>
-/// SQLite-backed <see cref="IProtectedRecordStore"/>. SQLite holds only
-/// opaque id, record kind, captured timestamp, resolution, and the encrypted
-/// envelope; it never sees plaintext payload bytes. A new connection is
+/// SQLite-backed <see cref="IProtectedRecordStore"/>. SQLite holds the opaque id,
+/// record kind, captured timestamp, resolution, and the record envelope. New
+/// envelopes carry the payload in the clear; envelopes written by earlier versions
+/// stay AES-256-GCM sealed and are still opened with the key ring. A new connection is
 /// opened per operation (each with its own busy timeout), relying on WAL for
 /// reader/writer concurrency rather than in-process locking.
 /// <see cref="EnsureReadyAsync"/> must succeed before any other member is

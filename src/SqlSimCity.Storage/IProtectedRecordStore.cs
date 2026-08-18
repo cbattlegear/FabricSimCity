@@ -1,18 +1,20 @@
 namespace SqlSimCity.Storage;
 
 /// <summary>
-/// Async storage for encrypted operational records. Only <see cref="ProtectedRecordId"/>,
-/// record kind, captured timestamp, and <see cref="StorageResolution"/> are ever
-/// plaintext metadata; <c>payload</c> bytes are always AES-256-GCM encrypted before
-/// they reach SQLite. Implementations must fail closed: they must not silently
-/// fall back to an unencrypted store on key or integrity failure.
+/// Async storage for operational records. <see cref="ProtectedRecordId"/>, record kind,
+/// captured timestamp, and <see cref="StorageResolution"/> are plaintext metadata, and
+/// <c>payload</c> bytes are stored in the clear so captured plans, query text, and workload
+/// evidence stay inspectable -- SQL SimCity exists to visualize this data, not to obscure it.
+/// Records written by earlier versions remain AES-256-GCM sealed and are still readable.
+/// Plan XML can contain literal parameter values from the observed database, so protect the
+/// storage directory with filesystem permissions.
 /// </summary>
 public interface IProtectedRecordStore
 {
-    /// <summary>Maximum plaintext bytes accepted by one protected record.</summary>
+    /// <summary>Maximum payload bytes accepted by one record.</summary>
     int MaxPayloadBytes { get; }
 
-    /// <summary>Encrypts and upserts a record under its opaque id.</summary>
+    /// <summary>Upserts a record under its opaque id.</summary>
     Task PutAsync(
         ProtectedRecordId id,
         string recordKind,
@@ -21,7 +23,7 @@ public interface IProtectedRecordStore
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Reads and decrypts a caller-owned record, or <c>null</c>; dispose it to zero the payload.</summary>
+    /// <summary>Reads a caller-owned record, or <c>null</c>; dispose it to zero the payload.</summary>
     Task<ProtectedRecord?> GetAsync(ProtectedRecordId id, CancellationToken cancellationToken = default);
 
     /// <summary>Deletes a record. Returns <c>false</c> if the id was absent.</summary>

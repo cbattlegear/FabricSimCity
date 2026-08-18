@@ -110,21 +110,21 @@
     { "databaseId": "fixture-target-primary/database/ledger", "availability": "stale" }
   ],
   "queryFamilies": [
-    { "familyId": "qf:sales-orders", "cpu": "2089500", "objectIds": ["object:dbo:100"], "confidence": "confirmed" },
-    { "familyId": "family:sales:002", "cpu": "14000042", "objectIds": ["object:dbo:110"], "confidence": "confirmed" },
-    { "familyId": "family:sales:003", "cpu": "13000039", "objectIds": ["object:reporting:300"], "confidence": "confirmed" },
-    { "familyId": "family:sales:004", "cpu": "12000036", "objectIds": ["object:dbo:100"], "confidence": "confirmed" },
-    { "familyId": "family:sales:005", "cpu": "11000033", "objectIds": ["object:dbo:110"], "confidence": "confirmed" },
-    { "familyId": "family:sales:006", "cpu": "10000030", "objectIds": ["object:dbo:100", "object:dbo:110"], "confidence": "probable" },
-    { "familyId": "family:sales:007", "cpu": "9000027", "objectIds": ["object:dbo:110", "fixture-target-primary/database/warehouse"], "confidence": "probable" },
-    { "familyId": "family:sales:008", "cpu": "8000024", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:009", "cpu": "7000021", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:010", "cpu": "6000018", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:011", "cpu": "5000015", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:012", "cpu": "4000012", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:013", "cpu": "300", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:014", "cpu": "200", "objectIds": [], "confidence": "unknown" },
-    { "familyId": "family:sales:015", "cpu": "100", "objectIds": [], "confidence": "unknown" }
+    { "familyId": "qf:sales-orders", "cpu": "2089500", "objectIds": ["object:dbo:100"], "confidence": "confirmed", "totalWaitMilliseconds": "287", "waitMillisecondsByCategory": { "Buffer IO": "180", "Lock": "62", "Network IO": "45" } },
+    { "familyId": "family:sales:002", "cpu": "14000042", "objectIds": ["object:dbo:110"], "confidence": "confirmed", "totalWaitMilliseconds": "14126", "waitMillisecondsByCategory": { "Tran Log IO": "9000", "Memory": "3000", "Buffer Latch": "1500", "Parallelism": "626" } },
+    { "familyId": "family:sales:003", "cpu": "13000039", "objectIds": ["object:reporting:300"], "confidence": "probable", "totalWaitMilliseconds": "13117", "waitMillisecondsByCategory": { "CPU": "7000", "Buffer IO": "4000", "Log Rate Governor": "2117" } },
+    { "familyId": "family:sales:004", "cpu": "12000036", "objectIds": ["object:dbo:100"], "confidence": "confirmed", "totalWaitMilliseconds": "12108", "waitMillisecondsByCategory": { "Memory": "8108", "Worker Thread": "4000" } },
+    { "familyId": "family:sales:005", "cpu": "11000033", "objectIds": ["object:dbo:110"], "confidence": "confirmed", "totalWaitMilliseconds": "11099", "waitMillisecondsByCategory": { "Lock": "11099" } },
+    { "familyId": "family:sales:006", "cpu": "10000030", "objectIds": ["object:dbo:100", "object:dbo:110"], "confidence": "probable", "totalWaitMilliseconds": "10090", "waitMillisecondsByCategory": { "Buffer IO": "10090" } },
+    { "familyId": "family:sales:007", "cpu": "9000027", "objectIds": ["object:dbo:110", "fixture-target-primary/database/warehouse"], "confidence": "probable", "totalWaitMilliseconds": "9081", "waitMillisecondsByCategory": { "Lock": "9081" } },
+    { "familyId": "family:sales:008", "cpu": "8000024", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "8072", "waitMillisecondsByCategory": { "Memory": "8072" } },
+    { "familyId": "family:sales:009", "cpu": "7000021", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "7063", "waitMillisecondsByCategory": {} },
+    { "familyId": "family:sales:010", "cpu": "6000018", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "6054", "waitMillisecondsByCategory": {} },
+    { "familyId": "family:sales:011", "cpu": "5000015", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "5045", "waitMillisecondsByCategory": {} },
+    { "familyId": "family:sales:012", "cpu": "4000012", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "4036", "waitMillisecondsByCategory": {} },
+    { "familyId": "family:sales:013", "cpu": "300", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "3", "waitMillisecondsByCategory": {} },
+    { "familyId": "family:sales:014", "cpu": "200", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "2", "waitMillisecondsByCategory": {} },
+    { "familyId": "family:sales:015", "cpu": "100", "objectIds": [], "confidence": "unknown", "totalWaitMilliseconds": "1", "waitMillisecondsByCategory": {} }
   ],
   "routes": [
     {

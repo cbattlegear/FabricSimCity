@@ -1,0 +1,114 @@
+using System.Collections.ObjectModel;
+using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
+
+namespace SqlSimCity.Collection.Tests.DatabaseCity;
+
+/// <summary>
+/// An in-memory Query Store that returns exactly the families, plans, and runtime buckets a test
+/// declares, so attribution behaviour is judged against known evidence rather than a live server.
+/// </summary>
+internal sealed class FakeQueryStore : IQueryStoreHistorySource
+{
+    public const string DatabaseId = "target/database/sales";
+
+    /// <summary>Builds a showplan object reference, honouring showplan's optional bracket quoting.</summary>
+    public static ShowplanObjectV1 Reference(
+        string? database = null,
+        string? schema = "dbo",
+        string? table = null,
+        string? index = null) => new(database, schema, table, index);
+
+    /// <summary>Declares one compiled plan and the object references its nodes carry.</summary>
+    public static (string PlanId, ShowplanObjectV1[] References) Plan(
+        string planId,
+        params ShowplanObjectV1[] references) => (planId, references);
+
+    private static readonly DateTimeOffset Observed = new(2026, 8, 17, 17, 0, 0, TimeSpan.Zero);
+
+    private static readonly QueryStoreEvidenceV1 Evidence = new(
+        QueryStoreSource.QueryStore, DataStatus.Available, Observed, null, "Fake Query Store.", "None.");
+
+    private readonly List<QueryFamilySummaryV1> _families = [];
+    private readonly Dictionary<string, QueryFamilyDetailV1> _details = [];
+    private readonly Dictionary<string, NormalizedShowplanV1> _plans = [];
+
+    public string? TotalCount { get; init; }
+    public bool ThrowOnQueries { get; init; }
+    public bool ReturnNullPlans { get; init; }
+    public int PlansRequested { get; private set; }
+
+    public void AddFamily(
+        string familyId,
+        string cpu,
+        string executions,
+        (string PlanId, ShowplanObjectV1[] References)[] plans,
+        string waitMilliseconds = "0",
+        IReadOnlyList<IReadOnlyDictionary<string, string>>? runtimeWaits = null)
+    {
+        var text = new QueryTextDescriptorV1(QueryTextAvailability.Available, "SELECT 1", "fp", "Captured.");
+        var summary = new QueryFamilySummaryV1(
+            familyId, DatabaseId, $"hash-{familyId}", "fp", text, [],
+            executions, cpu, "2000", "300", waitMilliseconds, Observed, Observed, Evidence);
+        _families.Add(summary);
+
+        var planSummaries = plans
+            .Select(plan => new QueryPlanSummaryV1(
+                plan.PlanId, "1", $"planhash-{plan.PlanId}", QueryPlanType.Compiled,
+                QueryOptimizationKind.None, null, true, false, null, "0", null, "16.0", "160",
+                Observed, Evidence))
+            .ToArray();
+
+        var runtime = (runtimeWaits ?? [])
+            .Select((waits, i) => new RuntimeBucketV1(
+                plans[0].PlanId, $"interval-{i}", "epoch:1", Observed, Observed,
+                QueryStoreExecutionType.Regular, "primary", "1", 1m, 1m, 1m, "1", "1", "1",
+                new ReadOnlyDictionary<string, string>(waits.ToDictionary()), Evidence))
+            .ToArray();
+
+        _details[familyId] = new QueryFamilyDetailV1("1.0", summary, planSummaries, runtime);
+
+        foreach (var plan in plans)
+        {
+            var nodes = plan.References
+                .Select((reference, i) => new ShowplanNodeV1(
+                    i + 1, i == 0 ? null : 1, "Scan", "Index Scan",
+                    null, null, null, null, false, reference, null, []))
+                .ToArray();
+            _plans[plan.PlanId] = new NormalizedShowplanV1(
+                "1.0", plan.PlanId, "1.539", null, null, null, nodes,
+                QueryOptimizationKind.None, null, $"fingerprint-{plan.PlanId}", "None.", Evidence);
+        }
+    }
+
+    public Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(
+        string? databaseId, string metric, int pageSize, string? pageToken, CancellationToken cancellationToken)
+    {
+        if (ThrowOnQueries)
+        {
+            throw new InvalidDataException("Query Store index is unreadable.");
+        }
+
+        Assert.Equal(DatabaseId, databaseId);
+        Assert.Equal("cpu", metric);
+        return Task.FromResult(new PageV1<QueryFamilySummaryV1>(
+            "1.0", _families.Take(pageSize).ToArray(), null, pageSize, TotalCount) { Evidence = Evidence });
+    }
+
+    public Task<QueryFamilyDetailV1?> GetFamilyAsync(string familyId, CancellationToken cancellationToken) =>
+        Task.FromResult(_details.GetValueOrDefault(familyId));
+
+    public Task<NormalizedShowplanV1?> GetPlanAsync(string planId, CancellationToken cancellationToken)
+    {
+        PlansRequested++;
+        return Task.FromResult(ReturnNullPlans ? null : _plans.GetValueOrDefault(planId));
+    }
+
+    public Task<PlanComparisonV1?> ComparePlansAsync(
+        string leftPlanId, string rightPlanId, CancellationToken cancellationToken) =>
+        Task.FromResult<PlanComparisonV1?>(null);
+
+    public Task<QueryStoreCollectorStatusV1> GetStatusAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(new QueryStoreCollectorStatusV1(
+            "1.0", QueryStoreCollectorState.Ready, 1, Observed, Observed, null, [], "Ready."));
+}

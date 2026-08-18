@@ -15,11 +15,13 @@ import {
   type DashPattern,
 } from './cityRoads'
 import { layoutFacilities, type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
+import type { FacilityLane } from './cityFacilityTraffic'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
 import type { CityRoute } from './cityRoute'
 
 export type CityLayerToggles = {
   traffic: boolean
+  waitLanes: boolean
   infrastructure: boolean
   route: boolean
   districts: boolean
@@ -40,6 +42,8 @@ export type DatabaseCitySceneController = {
   /** Roads are graded outside the scene so the map and the HUD read the same numbers. */
   setRoads(roads: readonly RoadTraffic[]): void
   setFacilities(facilities: readonly Facility[]): void
+  /** Measured wait lanes from buildings to the facility their workload queued at. */
+  setFacilityLanes(lanes: readonly FacilityLane[]): void
   setRoute(route: CityRoute | null): void
   setSelected(objectId: string | null): void
   /** Highlights one road and pins both of its endpoints. */
@@ -159,6 +163,7 @@ export function createDatabaseCityScene(
   const districtGroup = new THREE.Group()
   const buildingGroup = new THREE.Group()
   const roadGroup = new THREE.Group()
+  const laneGroup = new THREE.Group()
   const roadHighlightGroup = new THREE.Group()
   const infrastructureGroup = new THREE.Group()
   const routeGroup = new THREE.Group()
@@ -168,6 +173,7 @@ export function createDatabaseCityScene(
     districtGroup,
     roadGroup,
     roadHighlightGroup,
+    laneGroup,
     buildingGroup,
     infrastructureGroup,
     routeGroup,
@@ -186,6 +192,7 @@ export function createDatabaseCityScene(
   let currentRoads: readonly RoadTraffic[] = []
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
+  let currentLanes: readonly FacilityLane[] = []
   let selectedId: string | null = null
   let selectedRoadId: string | null = null
   let hoveredRoadId: string | null = null
@@ -193,7 +200,13 @@ export function createDatabaseCityScene(
   let disposed = false
   let animationHandle = 0
   let renderRequested = false
-  const layers: CityLayerToggles = { traffic: true, infrastructure: true, route: true, districts: true }
+  const layers: CityLayerToggles = {
+    traffic: true,
+    waitLanes: true,
+    infrastructure: true,
+    route: true,
+    districts: true,
+  }
 
   const track = <T extends THREE.BufferGeometry>(geometry: T): T => {
     disposables.add(geometry)
@@ -464,6 +477,30 @@ export function createDatabaseCityScene(
     })
   }
 
+  function buildFacilityLanes(lanes: readonly FacilityLane[]) {
+    clearGroup(laneGroup)
+    if (!plan) return
+    for (const lane of lanes) {
+      const from = plan.lots.get(lane.objectId)
+      const site = facilitySites.get(lane.facility)
+      // A lane whose building or facility is not on this map is dropped from the geometry only; it
+      // still appears in the evidence table, so it is never silently lost.
+      if (!from || !site) continue
+      const points = streetPolyline(
+        plan,
+        { x: from.accessX, z: from.accessZ },
+        { x: site.x, z: site.z },
+      )
+      const ribbon = ribbonGeometry(points, lane.width, DASH_PATTERNS[lane.pattern])
+      if (!ribbon) continue
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid'))
+      // Lanes sit above every road lane so a lane and a road sharing a street stay distinguishable.
+      mesh.position.y = 0.2
+      mesh.userData.laneId = lane.laneId
+      laneGroup.add(mesh)
+    }
+  }
+
   function buildInfrastructure(facilities: readonly Facility[]) {
     clearGroup(infrastructureGroup)
     if (!plan) return
@@ -686,6 +723,7 @@ export function createDatabaseCityScene(
       buildDistricts(plan)
       buildBuildings(objects, plan)
       buildRoads(currentRoads, plan)
+      buildFacilityLanes(currentLanes)
       buildInfrastructure(currentFacilities)
       buildRoute(currentRoute)
       applySelection()
@@ -708,6 +746,11 @@ export function createDatabaseCityScene(
       buildInfrastructure(facilities)
       requestRender()
     },
+    setFacilityLanes(lanes) {
+      currentLanes = lanes
+      buildFacilityLanes(lanes)
+      requestRender()
+    },
     setRoute(route) {
       currentRoute = route
       buildRoute(route)
@@ -726,6 +769,7 @@ export function createDatabaseCityScene(
     setLayers(next) {
       Object.assign(layers, next)
       roadGroup.visible = layers.traffic
+      laneGroup.visible = layers.waitLanes
       roadHighlightGroup.visible = layers.traffic
       infrastructureGroup.visible = layers.infrastructure
       routeGroup.visible = layers.route

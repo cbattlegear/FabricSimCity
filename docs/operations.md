@@ -78,11 +78,13 @@ at backup time.
 
 ## Key rotation
 
-Add a new 32-byte key as a new version while retaining all old versions, deploy
-that key ring, then change `activeKeyVersion`. New writes use the new key.
-Retain old keys until no retained record or backup needs them. Test a restore
-with the rotated ring before retiring anything. Removing a still-needed key
-permanently makes its records unreadable.
+New records are written in the clear, so rotation no longer changes how anything
+is written. It still matters for a store that holds records written before that
+change, which are AES-256-GCM sealed. Add a new 32-byte key as a new version
+while retaining all old versions and deploy that key ring. Retain every old key
+until no surviving legacy record or backup needs it. Test a restore with the
+rotated ring before retiring anything. Removing a still-needed key permanently
+makes its records unreadable.
 
 ## Upgrade and rollback
 

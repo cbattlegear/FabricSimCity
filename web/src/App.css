@@ -217,10 +217,16 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .legend-swatch { flex: none; width: 13px; height: 13px; display: grid; place-content: center; border: 1px solid #45596c; font-size: .6rem; }
 .legend-footprint { background: #4a5c70; }
 .legend-height { background: linear-gradient(#8ca6bd, #35485c); }
+.legend-lane { width: 18px; height: 5px; border: 0; border-radius: 3px; background: linear-gradient(90deg, #4ea9f5, #f5a04e); }
 .legend-solid { background: #93a8ba; border-color: #93a8ba; }
 .legend-dashed { background: repeating-linear-gradient(90deg, #93a8ba 0 7px, transparent 7px 11px); border-color: #5d7183; }
 .legend-sparse { background: repeating-linear-gradient(90deg, #93a8ba 0 3px, transparent 3px 9px); border-color: #5d7183; }
 .legend-decoration { margin: 8px 0 0; color: #7f93a5; font-size: .65rem; line-height: 1.45; }
+.legend-caveat { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid #2b3b4b; color: #9bb0c2; font-size: .66rem; line-height: 1.5; }
+.city-wait-lanes { margin-top: 24px; }
+.city-wait-lanes .hud-note { padding: 0 20px; }
+.city-wait-lanes .source-note { margin: 0 20px 14px; }
+.city-wait-lanes .source-note ul { margin: 6px 0 0; padding-left: 18px; color: #a8bac9; font-size: .72rem; line-height: 1.6; }
 
 .hud-compass { display: flex; gap: 7px; align-items: center; padding: 6px 10px; font: .68rem ui-monospace, Consolas, monospace; }
 .compass-needle { display: inline-block; color: #72f4c4; transition: transform 120ms linear; }
@@ -285,6 +291,9 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .city-workload { margin-top: 24px; border-top: 2px solid #e2a957; background: #0d131c; }
 .city-workload tbody button { border: 0; padding: 0; color: #efc16e; background: transparent; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .city-workload tfoot { background: #161b1e; color: #e6c889; }
+.city-workload .map-cell { white-space: nowrap; }
+.city-workload .map-cell small { display: block; margin-top: 4px; white-space: normal; color: #92a7b7; }
+.city-workload tbody button[disabled] { color: #7d8a94; cursor: progress; text-decoration: none; }
 .city-workload tfoot small, .city-workload th small { display: block; margin-top: 4px; color: #92a7b7; font-weight: 400; }
 .city-routes { border-top-color: #8496a5; }
 .city-routes li.is-selected { border-left: 2px solid #72f4c4; padding-left: 9px; }

@@ -30,7 +30,11 @@ production connection strings, credentials, hosts, or customer data.
 - `database-city.json` supplies deterministic schema neighborhoods, tables,
   indexed views, attached indexes, direct cumulative activity, normalized-plan
   attribution, unavailable evidence, confidence-graded routes, and more query
-  families than the API top-N so `other workload` is always exercised.
+  families than the API top-N so `other workload` is always exercised. Query
+  Store wait categories are included and always reconcile with each family's
+  captured total; families that carry waits but no breakdown are kept on
+  purpose, because that is what a pre-2017 instance looks like and an absent
+  breakdown is not a claim that nothing waited.
 
 ## Schemas and units
 

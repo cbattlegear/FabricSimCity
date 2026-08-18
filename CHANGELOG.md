@@ -51,6 +51,25 @@ First MVP release candidate. There is no tagged release yet.
     legend, compass and camera controls, live-feed pill, and a slide-over for the selected building or
     route. The existing evidence tables are preserved verbatim in a collapsible section below the map as
     the text-first, non-WebGL equivalent.
+- **Waits as traffic to infrastructure.** Query Store wait categories, which were already collected
+  but discarded before reaching the city, now flow through `DatabaseCityQueryFamilyV1.WaitMillisecondsByCategory`
+  and render as **wait lanes** from a building to the facility whose resource its workload queued for
+  (`web/src/cityFacilityTraffic.ts`). Roads answer "which objects are named together"; a lane answers
+  "where did the time go", so it is a separate, separately toggleable layer. Lane width maps captured
+  wait milliseconds on a documented log₂ scale, lane colour names the destination facility, and lane
+  pattern reuses the same attribution-confidence channel roads use. Three refusals are enforced by
+  tests rather than left to judgement:
+  - A family naming more than one object is **never divided** between them. Query Store reports one
+    wait total per query, not per object, so those milliseconds are reported whole in a separate
+    "shared" list instead of being split into per-building numbers nobody measured.
+  - A category with no counterpart in this city — Parallelism, Network IO, Compilation, Idle — is
+    **never folded into the CPU yard**. It is listed with the reason it has no destination.
+  - `Buffer Latch` is **not** routed to tempdb Works despite tempdb allocation contention being its
+    most famous cause, because the category does not name a database. tempdb therefore has no Query
+    Store lane at all.
+  A building with no lane is not idle: `sys.query_store_wait_stats` does not exist before SQL Server
+  2017 (14.x), so an absent breakdown is stated in prose rather than drawn as a zero-width lane, and
+  a lane too wide to draw says so and defers to its exact figure in the evidence table.
 - **Lock resource resolution.** `LockResourceParser` parses the engine's verbatim `wait_resource` /
   `resource_description` text into a new optional `LockResourceV1` on `LiveRequestV1` and
   `WaitingTaskV1`. `OBJECT:`/`TAB:` resolve with no lookup; `KEY:`/`HOBT:`/`ALLOCUNIT:` carry only a
@@ -135,6 +154,36 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Query Store is now wired into the connected map.** `ConnectedDatabaseCitySource` used to emit
+  `topQueryFamilies: []` and `routes: []` against a live server, so on a real connection the city had
+  buildings but no workload, no roads, and no wait lanes. A new
+  `SqlSimCity.Collection.DatabaseCity.QueryStoreCityAttribution` reads each ranked family's
+  normalized compiled plans and resolves their showplan object references against the bounded catalog
+  page, producing the families, co-reference routes, per-object attributed exposure, and wait-category
+  totals the fixture city already published. The join never guesses: a plan naming several objects
+  keeps its totals at query level and is never divided; a reference to a real object outside the
+  bounded page is reported by qualified name instead of being dropped; a reference to another database
+  becomes a `CrossDatabaseReference` route only when the atlas can resolve that database, and is
+  otherwise disclosed by name; a single reference to an indexed view stays `Probable` because the
+  optimizer can expand it. An object is credited with a family's totals only when the plans named that
+  object and nothing else at all. Wait categories are published only when they reconcile exactly with
+  the family's total wait milliseconds, otherwise they are withheld as "not captured" rather than
+  shown as a partial account.
+- The top query-family table in the database city gained a **Show on map** action that reads the
+  family's own plan and draws it as a route through the buildings it names, so ranked workload and the
+  3D map are the same evidence rather than two views an operator has to reconnect by hand.
+- **Protected storage records are written in the clear.** Sealing captured plan XML and query text
+  worked against the purpose of a tool whose entire job is to show that evidence: it made the store
+  unreadable to the operator who collected it while protecting nothing that filesystem permissions did
+  not already have to protect. `EnvelopeCodec` writes a new plaintext envelope (format version 2) and
+  still opens the AES-256-GCM envelope (format version 1), so existing stores keep working with no
+  migration and no data loss. The key ring is now read-only legacy support; a store created before
+  this change still authenticates it through its sealed canary. `SECURITY.md`, `docs/connected-mode.md`,
+  and `docs/operations.md` were corrected, including the removal of the at-rest-encryption claim and
+  the addition of an explicit statement that the data volume is the trust boundary.
+  Edge spool encryption (`SqlSimCity.Edge.Spool.EncryptedSpool`, separate key, outward-only transport
+  threat model) and archive redaction are unaffected, as is `SecureShowplanParser`'s XXE and
+  entity-expansion hardening, which is XML safety rather than confidentiality.
 - Frontend build is code-split: the three.js atlas/city viewports and the Query
   Store, Live, and Findings tabs load as lazy chunks, and three.js is isolated
   into its own vendor chunk. The initial-path bundle drops from ~848 KiB to
@@ -230,7 +279,9 @@ First MVP release candidate. There is no tagged release yet.
   street-grid road has only two to four long legs, so instead of dashes every non-confirmed road
   showed one enormous gap per leg and read as broken. Patterns are now real repeating dashes of a
   fixed world length whose phase carries across corners, so a road reads as one route and the
-  pattern means the same thing on a long road as on a short one.
+  pattern means the same thing on a long road as on a short one. Query Store **wait lanes** carried
+  the identical defect, because they encode confidence through the same channel; they now share the
+  same dash geometry and sit above every road lane so a lane and a road on one street stay distinct.
 - Roads that share a street no longer hide each other. Every road was drawn on the street centre
   line at the same height, so overlapping roads z-fought and only the last one drawn was visible.
   Roads now claim the lowest lane free on every leg they use — widest first, so the heaviest traffic
@@ -261,6 +312,11 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Security
 
+- **Superseded within this same unreleased block:** the three protected-storage entries immediately
+  below describe key custody as it was when payloads were sealed. Payloads are now written in the
+  clear (see Changed), so the key ring only opens records written by an earlier version, and a backup
+  of a store written by this version needs no key to restore. The at-rest-encryption claims below no
+  longer hold; the data volume's access control is the trust boundary.
 - A connection string now auto-provisions the protected-storage AES-256 key that connected Query
   Store history requires, in a `sqlsimcity-keys` directory inside the data directory. Encryption at
   rest is unchanged and still mandatory; what changes is that the process generates the key instead

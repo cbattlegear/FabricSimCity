@@ -63,6 +63,12 @@ export interface DatabaseCityQueryFamily {
   totalDurationMicroseconds: string
   totalLogicalReads8KiBPages: string
   totalWaitMilliseconds: string
+  /**
+   * Captured wait milliseconds keyed by verbatim Query Store `wait_category_desc`. An empty object
+   * means the breakdown was not captured — `sys.query_store_wait_stats` does not exist before
+   * SQL Server 2017 (14.x) — and never that the family waited for nothing.
+   */
+  waitMillisecondsByCategory: Record<string, string>
   objectIds: string[]
   confidence: QueryAttributionConfidence
   rationale: string

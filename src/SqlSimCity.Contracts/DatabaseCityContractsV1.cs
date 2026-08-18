@@ -56,6 +56,15 @@ public sealed record DatabaseCityObjectV1(
     DatabaseCityDirectActivityV1 DirectActivity,
     DatabaseCityAttributedExposureV1 AttributedExposure);
 
+/// <summary>
+/// One captured query family. <paramref name="WaitMillisecondsByCategory"/> is keyed by the verbatim
+/// Query Store <c>wait_category_desc</c> and is the evidence behind the city's wait lanes: it says
+/// which physical resource the family queued for, which <paramref name="TotalWaitMilliseconds"/>
+/// alone cannot. An <b>empty</b> dictionary means no wait-category evidence was captured -- most
+/// often because <c>sys.query_store_wait_stats</c> does not exist before SQL Server 2017 (14.x) --
+/// and never that the family waited for nothing. Categories are passed through unmapped and
+/// untranslated so a category this build does not recognise is still reported rather than dropped.
+/// </summary>
 public sealed record DatabaseCityQueryFamilyV1(
     string FamilyId,
     string QueryHash,
@@ -64,6 +73,7 @@ public sealed record DatabaseCityQueryFamilyV1(
     string TotalDurationMicroseconds,
     string TotalLogicalReads8KiBPages,
     string TotalWaitMilliseconds,
+    IReadOnlyDictionary<string, string> WaitMillisecondsByCategory,
     IReadOnlyList<string> ObjectIds,
     QueryAttributionConfidence Confidence,
     string Rationale,

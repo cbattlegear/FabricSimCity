@@ -17,20 +17,19 @@ Setting either one turns connected mode on by itself — Atlas, live incidents, 
 history all switch off the fixture path with no `Atlas:Mode`, `LiveIncidents:Mode`, or
 `QueryStoreHistory:Mode` needed. With no connection string configured, fixtures stay the default.
 
-Query Store history stores query *text*, so it requires encryption at rest and has no plaintext
-fallback. Rather than make you turn that on by hand, a connection string provisions the key for you:
-an AES-256 key ring is generated at a `sqlsimcity-keys` directory inside
+Query Store history retains query text and plan XML in protected storage, so it requires that store
+to be configured. Rather than make you turn that on by hand, a connection string provisions its key
+ring for you: an AES-256 key ring is generated at a `sqlsimcity-keys` directory inside
 `ProtectedStorage:DataDirectory` and announced at startup with a warning naming the path.
 
-It lives inside the data directory on purpose, so that it is exactly as durable as the data it
-protects. In a container anywhere else is either unwritable or ephemeral, and a key that disappears
-while its data survives leaves every stored record permanently unopenable.
+**The retained records themselves are written in the clear.** Showing captured plans and query text
+is the entire point of this tool, so the store keeps them readable — an operator can open the SQLite
+file and see exactly what was collected. The key ring exists to open records written by an earlier
+version, which were AES-256-GCM sealed; upgrading needs no migration.
 
-**Back the key up yourself — `tools/backup-data.sh` deliberately excludes it, so a backup alone
-cannot restore a protected store.** That exclusion is what keeps a backup from carrying its own
-decryption key; the script verifies the key is absent before writing the archive. Treat the key as a
-production credential: if it is lost or replaced, every stored query history record becomes
-permanently unrecoverable. Note that a raw volume snapshot of the data directory *does* contain both.
+That also means the data directory is the trust boundary. Anyone who can read it can read every
+retained plan and query text, including any literal parameter values a showplan carries. Mount it
+with restrictive permissions and protect backups of it accordingly.
 
 If the key cannot be written at all, Query Store history disables itself with a warning rather than
 blocking startup.
@@ -133,7 +132,7 @@ services:
       Atlas__Connection__Authentication__PasswordSecret: sql-password
       Atlas__SecretsDirectory: /run/secrets
 
-      # Retained Query Store history requires encrypted storage. This is the
+      # Retained Query Store history requires protected storage. This is the
       # operator-managed key path: because ProtectedStorage__Enabled is set
       # explicitly, nothing is generated and a missing key file fails closed.
       # (Drive the connection from a connection string instead and a key is

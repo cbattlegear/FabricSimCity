@@ -3,7 +3,7 @@
 ## Purpose and compatibility
 
 An `.ssca` file is a redacted, point-in-time SQLSimCity observation export for offline analysis. It
-is not a backup of encrypted protected storage and cannot restore collection state or credentials.
+is not a backup of protected storage and cannot restore collection state or credentials.
 Readers accept format major version `1`; an unsupported major version fails startup. Minor-version
 additions require an explicitly declared feature understood by the reader.
 

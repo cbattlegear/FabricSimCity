@@ -63,7 +63,49 @@ public sealed class ConnectedDatabaseCitySourceTests
             new CancellationToken(canceled: true)));
     }
 
-    private sealed class FakeCityProbeExecutor : IDatabaseCityProbeExecutor
+    [Fact]
+    public async Task QueryStoreFamiliesRoutesAndExposureReachTheConnectedPage()
+    {
+        var queryStore = new FakeQueryStore();
+        queryStore.AddFamily("family-1", cpu: "900", executions: "30", plans:
+            [FakeQueryStore.Plan("plan-1", FakeQueryStore.Reference(table: "Customer"))]);
+        queryStore.AddFamily("family-2", cpu: "400", executions: "12", plans:
+        [
+            FakeQueryStore.Plan(
+                "plan-2",
+                FakeQueryStore.Reference(table: "Customer"),
+                FakeQueryStore.Reference(table: "OrderHeader")),
+        ]);
+
+        var source = new ConnectedDatabaseCitySource(
+            new FakeAtlasSource(),
+            new FakeCityProbeExecutor(expectedTopN: 3),
+            new QueryStoreCityAttribution(queryStore));
+
+        var page = await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 2, null, CancellationToken.None);
+
+        Assert.NotNull(page);
+        Assert.Equal(["family-1", "family-2"], page!.TopQueryFamilies.Select(family => family.FamilyId));
+        Assert.Equal("900", page.TopQueryFamilies[0].TotalCpuMicroseconds);
+
+        var route = Assert.Single(page.Routes);
+        Assert.Equal("target/database/sales/object/10", route.FromObjectId);
+        Assert.Equal("target/database/sales/object/20", route.ToId);
+
+        // family-1 named only the Customer table, so its totals attach to that building;
+        // family-2 named two objects and is deliberately left at query level.
+        var customer = page.Objects.Single(item => item.ObjectId == "target/database/sales/object/10");
+        Assert.Equal("900", customer.AttributedExposure.TotalCpuMicroseconds);
+        Assert.Equal(QueryAttributionConfidence.Confirmed, customer.AttributedExposure.Confidence);
+        var orderHeader = page.Objects.Single(item => item.ObjectId == "target/database/sales/object/20");
+        Assert.Null(orderHeader.AttributedExposure.TotalCpuMicroseconds);
+        Assert.Equal(QueryAttributionConfidence.Unknown, orderHeader.AttributedExposure.Confidence);
+        Assert.Contains(
+            "not measured zero", orderHeader.AttributedExposure.Rationale, StringComparison.Ordinal);
+    }
+
+    private sealed class FakeCityProbeExecutor(int expectedTopN = 2) : IDatabaseCityProbeExecutor
     {
         public Task<DatabaseCityProbePage> CollectPageAsync(
             string databaseName,
@@ -73,7 +115,7 @@ public sealed class ConnectedDatabaseCitySourceTests
         {
             Assert.Equal("sales", databaseName);
             Assert.Equal(0, afterObjectId);
-            Assert.Equal(2, topN);
+            Assert.Equal(expectedTopN, topN);
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(new DatabaseCityProbePage(
                 [

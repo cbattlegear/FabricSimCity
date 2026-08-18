@@ -55,7 +55,7 @@ public sealed class QueryStoreProtectedPersistenceTests
     }
 
     [Fact]
-    public async Task QueryTextPlanAndSnapshotsLeaveNoPlaintextMarkers()
+    public async Task QueryTextPlanAndSnapshotsArePersistedInTheClear()
     {
         var directory = NewDirectory("query-store-persistence");
         var key = RandomNumberGenerator.GetBytes(32);
@@ -67,22 +67,24 @@ public sealed class QueryStoreProtectedPersistenceTests
                 await store.EnsureReadyAsync();
                 var repository = new ProtectedQueryStoreRepository(store);
                 await repository.StoreQueryTextAsync("db", "text", DateTimeOffset.UtcNow,
-                    "QUERY_TEXT_PRIVATE_MARKER");
+                    "QUERY_TEXT_MARKER");
                 await repository.StorePlanXmlAsync("db", "plan", DateTimeOffset.UtcNow,
-                    "<ShowPlanXML PRIVATE_PLAN_MARKER='yes' />");
+                    "<ShowPlanXML PLAN_MARKER='yes' />");
                 await repository.PublishSnapshotAsync(new QueryStorePublishedSnapshot(
-                    "1.0", "PRIVATE_SNAPSHOT_MARKER", 1, DateTimeOffset.UtcNow, [],
+                    "1.0", "SNAPSHOT_MARKER", 1, DateTimeOffset.UtcNow, [],
                     new("1.0", QueryStoreCollectorState.Ready, 1,
-                        DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, [], "PRIVATE_STATUS_MARKER")));
+                        DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null, [], "STATUS_MARKER")));
             }
-            foreach (var path in Directory.EnumerateFiles(directory))
-            {
-                var persisted = Encoding.Latin1.GetString(await File.ReadAllBytesAsync(path));
-                Assert.DoesNotContain("QUERY_TEXT_PRIVATE_MARKER", persisted, StringComparison.Ordinal);
-                Assert.DoesNotContain("PRIVATE_PLAN_MARKER", persisted, StringComparison.Ordinal);
-                Assert.DoesNotContain("PRIVATE_SNAPSHOT_MARKER", persisted, StringComparison.Ordinal);
-                Assert.DoesNotContain("PRIVATE_STATUS_MARKER", persisted, StringComparison.Ordinal);
-            }
+
+            // Captured plans and query text are the product, not a secret. An operator must be able
+            // to open the store with sqlite3 and read exactly what was collected.
+            var persisted = string.Concat(await Task.WhenAll(Directory
+                .EnumerateFiles(directory)
+                .Select(async path => Encoding.Latin1.GetString(await File.ReadAllBytesAsync(path)))));
+            Assert.Contains("QUERY_TEXT_MARKER", persisted, StringComparison.Ordinal);
+            Assert.Contains("PLAN_MARKER", persisted, StringComparison.Ordinal);
+            Assert.Contains("SNAPSHOT_MARKER", persisted, StringComparison.Ordinal);
+            Assert.Contains("STATUS_MARKER", persisted, StringComparison.Ordinal);
         }
         finally { Cleanup(directory, key); }
     }

@@ -123,7 +123,7 @@ docker run --rm --name sqlsimcity `
 Replace the host, port, database, and login with values reachable **from the container**. For Azure
 SQL Database, list databases explicitly with `Atlas__KnownDatabases__0`, `__1`, and so on.
 
-This basic profile enables the connected atlas and database city. Encrypted Query Store history and
+This basic profile enables the connected atlas and database city. Retained Query Store history and
 live incidents require additional settings because they have retention and cadence controls. See
 [`docs/connected-mode.md`](docs/connected-mode.md) for a complete Compose override, permissions, all
 authentication modes, protected-storage keys, Query Store, and live sampling.
