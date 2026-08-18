@@ -38,6 +38,7 @@ builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
 builder.Services.AddSingleton<LiveIncidentSamplerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
 builder.Services.AddFindings();
+builder.Services.AddSqlSimCityHttpSecurity(builder.Configuration);
 
 if (AtlasConfiguration.IsConnected(builder.Configuration))
 {
@@ -119,6 +120,7 @@ app.Use(async (context, next) =>
     context.Response.Headers["Cross-Origin-Opener-Policy"] = "same-origin";
     await next();
 });
+app.UseSqlSimCityHttpSecurity();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
