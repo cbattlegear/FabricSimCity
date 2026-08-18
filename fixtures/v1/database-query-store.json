@@ -1,0 +1,85 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureId": "database-query-store-v1",
+  "observedAt": "2026-08-17T17:01:00Z",
+  "records": [
+    {
+      "recordId": "qs:healthy",
+      "databaseId": "db:atlas-sales",
+      "availability": "available",
+      "desiredState": "READ_WRITE",
+      "actualState": "READ_WRITE",
+      "captureMode": "AUTO",
+      "currentStorageBytes": 12582912,
+      "maxStorageBytes": 9007199255789568,
+      "reasonCode": null,
+      "source": "sys.database_query_store_options",
+      "observedAt": "2026-08-17T17:00:01Z"
+    },
+    {
+      "recordId": "qs:off",
+      "databaseId": "db:atlas-ledger",
+      "availability": "available",
+      "desiredState": "OFF",
+      "actualState": "OFF",
+      "captureMode": "NONE",
+      "currentStorageBytes": 0,
+      "maxStorageBytes": null,
+      "reasonCode": null,
+      "source": "sys.database_query_store_options",
+      "observedAt": "2026-08-17T17:00:02Z"
+    },
+    {
+      "recordId": "qs:quota-readonly",
+      "databaseId": "db:atlas-warehouse",
+      "availability": "available",
+      "desiredState": "READ_WRITE",
+      "actualState": "READ_ONLY",
+      "captureMode": "AUTO",
+      "currentStorageBytes": 104857600,
+      "maxStorageBytes": 104857600,
+      "reasonCode": 65536,
+      "source": "sys.database_query_store_options",
+      "observedAt": "2026-08-17T17:00:03Z"
+    },
+    {
+      "recordId": "qs:error",
+      "databaseId": "db:atlas-telemetry",
+      "availability": "available",
+      "desiredState": "READ_WRITE",
+      "actualState": "ERROR",
+      "captureMode": "ALL",
+      "currentStorageBytes": 7340032,
+      "maxStorageBytes": 52428800,
+      "reasonCode": null,
+      "source": "sys.database_query_store_options",
+      "observedAt": "2026-08-17T17:00:04Z"
+    },
+    {
+      "recordId": "qs:permission-denied",
+      "databaseId": "db:atlas-archive",
+      "availability": "permission-denied",
+      "desiredState": null,
+      "actualState": null,
+      "captureMode": null,
+      "currentStorageBytes": null,
+      "maxStorageBytes": null,
+      "reasonCode": "permission-denied",
+      "source": "sys.database_query_store_options",
+      "observedAt": "2026-08-17T17:00:05Z"
+    },
+    {
+      "recordId": "qs:unsupported",
+      "databaseId": "db:atlas-crm",
+      "availability": "unsupported",
+      "desiredState": null,
+      "actualState": null,
+      "captureMode": null,
+      "currentStorageBytes": null,
+      "maxStorageBytes": null,
+      "reasonCode": "unsupported-on-target",
+      "source": "sys.database_query_store_options",
+      "observedAt": "2026-08-17T17:00:06Z"
+    }
+  ]
+}

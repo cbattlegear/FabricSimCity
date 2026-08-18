@@ -1,0 +1,123 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureId": "target-capabilities-v1",
+  "generatedAt": "2026-08-17T17:00:00Z",
+  "targets": [
+    {
+      "targetId": "sqlserver-2019-onprem",
+      "platform": "SQL Server",
+      "release": "2019",
+      "compatibilityLevel": 150,
+      "planMetadata": {
+        "hasPlanTypeDesc": false,
+        "hasIsOptimizedPlanForcingDisabled": false,
+        "hasCompileReplayScript": false,
+        "hasReplicaGroupId": false
+      },
+      "sourceScope": "server-and-database",
+      "sourceLimitations": [
+        "Server-level DMV visibility depends on VIEW SERVER STATE."
+      ],
+      "capabilities": {
+        "queryStore": "supported",
+        "parameterSensitivePlan": "unsupported",
+        "optionalParameterPlanOptimization": "unsupported",
+        "liveRequests": "supported",
+        "crossDatabaseEvidence": "supported"
+      }
+    },
+    {
+      "targetId": "sqlserver-2022-onprem",
+      "platform": "SQL Server",
+      "release": "2022",
+      "compatibilityLevel": 160,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
+      "sourceScope": "server-and-database",
+      "sourceLimitations": [
+        "Database Query Store is queried in each database."
+      ],
+      "capabilities": {
+        "queryStore": "supported",
+        "parameterSensitivePlan": "supported",
+        "optionalParameterPlanOptimization": "unsupported",
+        "liveRequests": "supported",
+        "crossDatabaseEvidence": "supported"
+      }
+    },
+    {
+      "targetId": "sqlserver-2025-onprem",
+      "platform": "SQL Server",
+      "release": "2025",
+      "compatibilityLevel": 170,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
+      "sourceScope": "server-and-database",
+      "sourceLimitations": [
+        "OPPO requires compatibility level 170 and its database-scoped configuration."
+      ],
+      "capabilities": {
+        "queryStore": "supported",
+        "parameterSensitivePlan": "supported",
+        "optionalParameterPlanOptimization": "supported",
+        "liveRequests": "supported",
+        "crossDatabaseEvidence": "supported"
+      }
+    },
+    {
+      "targetId": "azure-sql-database",
+      "platform": "Azure SQL Database",
+      "release": "current",
+      "compatibilityLevel": 170,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
+      "sourceScope": "database-only",
+      "sourceLimitations": [
+        "sys.dm_exec_requests and related DMVs expose only the current database.",
+        "Cross-database server visibility is not assumed."
+      ],
+      "capabilities": {
+        "queryStore": "supported",
+        "parameterSensitivePlan": "supported",
+        "optionalParameterPlanOptimization": "supported",
+        "liveRequests": "supported",
+        "crossDatabaseEvidence": "not-probed"
+      }
+    },
+    {
+      "targetId": "azure-sql-managed-instance",
+      "platform": "Azure SQL Managed Instance",
+      "release": "current",
+      "compatibilityLevel": 170,
+      "planMetadata": {
+        "hasPlanTypeDesc": true,
+        "hasIsOptimizedPlanForcingDisabled": true,
+        "hasCompileReplayScript": true,
+        "hasReplicaGroupId": true
+      },
+      "sourceScope": "server-and-database",
+      "sourceLimitations": [
+        "Server-scoped visibility still requires the granted permissions."
+      ],
+      "capabilities": {
+        "queryStore": "supported",
+        "parameterSensitivePlan": "supported",
+        "optionalParameterPlanOptimization": "supported",
+        "liveRequests": "permission-denied",
+        "crossDatabaseEvidence": "not-probed"
+      }
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+using System.Globalization;
+using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
+using SqlSimCity.Findings.Evidence;
+
+namespace SqlSimCity.Findings.Tests;
+
+public sealed class SourceBackedProviderTests
+{
+    [Fact]
+    public async Task Bounds_family_loading_against_a_100k_family_target()
+    {
+        var qs = new HugeQueryStoreSource(totalFamilies: 100_000);
+        var provider = new SourceBackedFindingsEvidenceProvider(
+            new FakeAtlasSource(), qs, new FakeCapabilitiesSource(), () => null,
+            new FixedTime(FindingsTestData.Now),
+            new FindingsEvidenceOptions { MaxFamilies = 25, MaxPlans = 10, Metrics = ["cpu"] });
+
+        var bundle = await provider.GetBundleAsync(CancellationToken.None);
+
+        Assert.True(bundle.Families.Count <= 25);
+        Assert.True(qs.FamilyDetailCalls <= 25, $"loaded {qs.FamilyDetailCalls} details");
+        // It must never have enumerated the whole store.
+        Assert.True(qs.MaxPageSizeRequested <= 50);
+    }
+
+    [Fact]
+    public async Task Honors_cancellation()
+    {
+        var qs = new HugeQueryStoreSource(totalFamilies: 100_000);
+        var provider = new SourceBackedFindingsEvidenceProvider(
+            new FakeAtlasSource(), qs, new FakeCapabilitiesSource(), () => null,
+            new FixedTime(FindingsTestData.Now));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provider.GetBundleAsync(cts.Token));
+    }
+
+    private sealed class HugeQueryStoreSource(int totalFamilies) : IQueryStoreHistorySource
+    {
+        public int FamilyDetailCalls { get; private set; }
+        public int MaxPageSizeRequested { get; private set; }
+
+        public Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(string? databaseId, string metric, int pageSize, string? pageToken, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            MaxPageSizeRequested = Math.Max(MaxPageSizeRequested, pageSize);
+            var offset = pageToken is null ? 0 : int.Parse(pageToken, CultureInfo.InvariantCulture);
+            var items = Enumerable.Range(offset, Math.Min(pageSize, totalFamilies - offset))
+                .Select(i => Summary($"fam-{i}"))
+                .ToArray();
+            var next = offset + items.Length < totalFamilies ? (offset + items.Length).ToString(CultureInfo.InvariantCulture) : null;
+            return Task.FromResult(new PageV1<QueryFamilySummaryV1>("1.0", items, next, pageSize, totalFamilies.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        public Task<QueryFamilyDetailV1?> GetFamilyAsync(string familyId, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            FamilyDetailCalls++;
+            var detail = FindingsTestData.Family(familyId, [FindingsTestData.Plan("p1")], [FindingsTestData.Bucket("p1")]);
+            return Task.FromResult<QueryFamilyDetailV1?>(detail);
+        }
+
+        public Task<NormalizedShowplanV1?> GetPlanAsync(string planId, CancellationToken cancellationToken) =>
+            Task.FromResult<NormalizedShowplanV1?>(FindingsTestData.Showplan(planId));
+
+        public Task<PlanComparisonV1?> ComparePlansAsync(string leftPlanId, string rightPlanId, CancellationToken cancellationToken) =>
+            Task.FromResult<PlanComparisonV1?>(null);
+
+        public Task<QueryStoreCollectorStatusV1> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new QueryStoreCollectorStatusV1("1.0", QueryStoreCollectorState.Ready, 1, null, null, null, [], "Fake."));
+
+        private static QueryFamilySummaryV1 Summary(string id) =>
+            new(id, "db1", "0x", "fp", FindingsTestData.Text(), [], "100", "100000", "100000", "200", "0",
+                FindingsTestData.Now.AddHours(-1), FindingsTestData.Now, FindingsTestData.QsEvidence());
+    }
+
+    private sealed class FakeAtlasSource : IAtlasSnapshotSource
+    {
+        public AtlasSnapshotV1 GetCurrent() => FindingsTestData.Atlas(
+            FindingsTestData.AtlasDb("db1", "db1", QueryStoreCapability.Available, QueryStoreHealth.Healthy, DataStatus.Available));
+    }
+
+    private sealed class FakeCapabilitiesSource : ICapabilitiesSource
+    {
+        public CapabilitiesSnapshotV1 GetCurrent() => new("1.0", FindingsTestData.Now, []);
+    }
+
+    private sealed class FixedTime(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+}

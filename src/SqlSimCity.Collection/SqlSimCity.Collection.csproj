@@ -1,0 +1,51 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SqlSimCity.Contracts\SqlSimCity.Contracts.csproj" />
+    <ProjectReference Include="..\SqlSimCity.SqlServer\SqlSimCity.SqlServer.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Domain\SqlSimCity.Domain.csproj" />
+    <ProjectReference Include="..\SqlSimCity.Storage\SqlSimCity.Storage.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SqlSimCity.Collection.Tests" />
+  </ItemGroup>
+
+  <!--
+    The SQL probe catalog (sql/manifest.json plus every sql/probes/**/*.sql file) is embedded
+    into this assembly so a published container image cannot start with a missing or partial
+    catalog: there is no runtime file-path dependency on the repository layout. ProbeCatalog
+    normalizes directory separators when matching logical names, so this works identically
+    whether the build ran on Windows or Linux.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\sql\manifest.json">
+      <LogicalName>sql/manifest.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\sql\probes\**\*.sql">
+      <LogicalName>sql/probes/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\fixtures\v1\target-capabilities.json">
+      <LogicalName>fixtures/v1/target-capabilities.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\fixtures\v1\database-query-store.json">
+      <LogicalName>fixtures/v1/database-query-store.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\fixtures\v1\live-cases.json">
+      <LogicalName>fixtures/v1/live-cases.json</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

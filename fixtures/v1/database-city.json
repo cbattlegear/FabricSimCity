@@ -1,0 +1,150 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureId": "database-city-v1",
+  "generatedAt": "2026-08-17T17:00:00Z",
+  "databaseId": "fixture-target-primary/database/sales",
+  "databaseName": "sales",
+  "resetEpochToken": "fixture-epoch-1",
+  "schemas": [
+    { "schemaId": "schema:dbo", "name": "dbo" },
+    { "schemaId": "schema:reporting", "name": "reporting" },
+    { "schemaId": "schema:zarchive", "name": "archive" }
+  ],
+  "objects": [
+    {
+      "objectId": "object:dbo:100",
+      "schemaId": "schema:dbo",
+      "name": "Customer",
+      "kind": "table",
+      "reservedPages8KiB": "65536",
+      "usedPages8KiB": "49152",
+      "sizeAvailability": "available",
+      "directActivity": {
+        "totalOperations": "11553",
+        "source": "index.usage_summary",
+        "availability": "available"
+      },
+      "attributedExposure": {
+        "totalCpuMicroseconds": "14089536",
+        "source": "normalized-query-store-plan",
+        "confidence": "confirmed",
+        "rationale": "Only normalized single-database plans that name dbo.Customer contribute; multi-object plans are excluded."
+      },
+      "indexes": [
+        { "indexId": "object:dbo:100/index/1", "name": "PK_Customer", "kind": "clustered", "totalOperations": "9512" },
+        { "indexId": "object:dbo:100/index/2", "name": "IX_Customer_Email", "kind": "nonclustered", "totalOperations": "2041" }
+      ]
+    },
+    {
+      "objectId": "object:dbo:110",
+      "schemaId": "schema:dbo",
+      "name": "OrderHeader",
+      "kind": "table",
+      "reservedPages8KiB": "131072",
+      "usedPages8KiB": "98304",
+      "sizeAvailability": "available",
+      "directActivity": {
+        "totalOperations": "32801",
+        "source": "index.usage_summary",
+        "availability": "available"
+      },
+      "attributedExposure": {
+        "totalCpuMicroseconds": "25000075",
+        "source": "normalized-query-store-plan",
+        "confidence": "confirmed",
+        "rationale": "Only normalized single-object plan references to dbo.OrderHeader contribute."
+      },
+      "indexes": [
+        { "indexId": "object:dbo:110/index/1", "name": "PK_OrderHeader", "kind": "clustered", "totalOperations": "24001" },
+        { "indexId": "object:dbo:110/index/3", "name": "IX_OrderHeader_Status", "kind": "nonclustered", "totalOperations": "8800" }
+      ]
+    },
+    {
+      "objectId": "object:reporting:300",
+      "schemaId": "schema:reporting",
+      "name": "SalesRollup",
+      "kind": "indexed-view",
+      "reservedPages8KiB": "8192",
+      "usedPages8KiB": "8100",
+      "sizeAvailability": "available",
+      "directActivity": {
+        "totalOperations": "144",
+        "source": "index.usage_summary",
+        "availability": "available"
+      },
+      "attributedExposure": {
+        "totalCpuMicroseconds": "13000039",
+        "source": "normalized-query-store-plan",
+        "confidence": "probable",
+        "rationale": "A normalized plan names the indexed view; optimizer expansion remains a caveat."
+      },
+      "indexes": [
+        { "indexId": "object:reporting:300/index/1", "name": "CIX_SalesRollup", "kind": "clustered", "totalOperations": "144" }
+      ]
+    },
+    {
+      "objectId": "object:zarchive:900",
+      "schemaId": "schema:zarchive",
+      "name": "ColdLedger",
+      "kind": "table",
+      "reservedPages8KiB": null,
+      "usedPages8KiB": null,
+      "sizeAvailability": "permission-denied",
+      "directActivity": {
+        "totalOperations": null,
+        "source": "index.usage_summary",
+        "availability": "permission-denied"
+      },
+      "attributedExposure": {
+        "totalCpuMicroseconds": null,
+        "source": "normalized-query-store-plan",
+        "confidence": "unknown",
+        "rationale": "No normalized plan evidence names this object."
+      },
+      "indexes": []
+    }
+  ],
+  "unavailableExamples": [
+    { "databaseId": "fixture-target-primary/database/warehouse", "availability": "permission-denied" },
+    { "databaseId": "fixture-target-primary/database/scratch", "availability": "unsupported" },
+    { "databaseId": "fixture-target-primary/database/ledger", "availability": "stale" }
+  ],
+  "queryFamilies": [
+    { "familyId": "qf:sales-orders", "cpu": "2089500", "objectIds": ["object:dbo:100"], "confidence": "confirmed" },
+    { "familyId": "family:sales:002", "cpu": "14000042", "objectIds": ["object:dbo:110"], "confidence": "confirmed" },
+    { "familyId": "family:sales:003", "cpu": "13000039", "objectIds": ["object:reporting:300"], "confidence": "confirmed" },
+    { "familyId": "family:sales:004", "cpu": "12000036", "objectIds": ["object:dbo:100"], "confidence": "confirmed" },
+    { "familyId": "family:sales:005", "cpu": "11000033", "objectIds": ["object:dbo:110"], "confidence": "confirmed" },
+    { "familyId": "family:sales:006", "cpu": "10000030", "objectIds": ["object:dbo:100", "object:dbo:110"], "confidence": "probable" },
+    { "familyId": "family:sales:007", "cpu": "9000027", "objectIds": ["object:dbo:110", "fixture-target-primary/database/warehouse"], "confidence": "probable" },
+    { "familyId": "family:sales:008", "cpu": "8000024", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:009", "cpu": "7000021", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:010", "cpu": "6000018", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:011", "cpu": "5000015", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:012", "cpu": "4000012", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:013", "cpu": "300", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:014", "cpu": "200", "objectIds": [], "confidence": "unknown" },
+    { "familyId": "family:sales:015", "cpu": "100", "objectIds": [], "confidence": "unknown" }
+  ],
+  "routes": [
+    {
+      "routeId": "route:customer-orders",
+      "kind": "object-reference",
+      "confidence": "confirmed",
+      "rationale": "Normalized plan evidence references both local objects; this route identifies co-reference, not row flow."
+    },
+    {
+      "routeId": "route:orders-warehouse",
+      "kind": "cross-database-reference",
+      "confidence": "probable",
+      "freshness": "stale",
+      "rationale": "A three-part normalized plan reference names warehouse; direction and row flow are not established."
+    },
+    {
+      "routeId": "route:rollup-ledger",
+      "kind": "cross-database-reference",
+      "confidence": "unknown",
+      "rationale": "Restricted plan evidence cannot establish a dependency or row flow."
+    }
+  ]
+}

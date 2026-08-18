@@ -1,0 +1,341 @@
+using Microsoft.Data.Sqlite;
+using System.Security.Cryptography;
+using SqlSimCity.Storage;
+using SqlSimCity.Storage.Crypto;
+
+namespace SqlSimCity.Storage.Sqlite;
+
+/// <summary>
+/// SQLite-backed <see cref="IProtectedRecordStore"/>. SQLite holds only
+/// opaque id, record kind, captured timestamp, resolution, and the encrypted
+/// envelope; it never sees plaintext payload bytes. A new connection is
+/// opened per operation (each with its own busy timeout), relying on WAL for
+/// reader/writer concurrency rather than in-process locking.
+/// <see cref="EnsureReadyAsync"/> must succeed before any other member is
+/// called; every other member throws <see cref="InvalidOperationException"/>
+/// otherwise, which keeps the store fail-closed if a host forgets to await
+/// startup initialization.
+/// </summary>
+public sealed class SqliteProtectedRecordStore : IProtectedRecordStore, IProtectedStorageInitializer, IDisposable
+{
+    private readonly string _connectionString;
+    private readonly KeyRing _keyRing;
+    private readonly RetentionOptions _retention;
+    private readonly TimeProvider _timeProvider;
+    private readonly int _maxRecordKindLength;
+    private readonly int _maxPayloadBytes;
+    private int _ready;
+    private bool _disposed;
+
+    public int MaxPayloadBytes => _maxPayloadBytes;
+
+    public SqliteProtectedRecordStore(
+        string dataDirectory,
+        string databaseFileName,
+        KeyRing keyRing,
+        RetentionOptions retention,
+        TimeProvider timeProvider,
+        int maxRecordKindLength = ProtectedStorageOptions.DefaultMaxRecordKindLength,
+        int maxPayloadBytes = ProtectedStorageOptions.DefaultMaxPayloadBytes)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(databaseFileName);
+        ArgumentNullException.ThrowIfNull(keyRing);
+        ArgumentNullException.ThrowIfNull(retention);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        if (maxRecordKindLength is < 1 or > ProtectedStorageOptions.MaximumRecordKindLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxRecordKindLength),
+                $"Record-kind length limit must be between 1 and {ProtectedStorageOptions.MaximumRecordKindLength}.");
+        }
+
+        if (maxPayloadBytes is < 1 or > ProtectedStorageOptions.MaximumPayloadBytes)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxPayloadBytes),
+                $"Payload size limit must be between 1 and {ProtectedStorageOptions.MaximumPayloadBytes}.");
+        }
+
+        Directory.CreateDirectory(dataDirectory);
+        var databasePath = Path.Combine(dataDirectory, databaseFileName);
+        _connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            // Pooling keeps a native handle open after the C# wrapper is disposed,
+            // which holds Windows file locks past the point tests (and operators)
+            // expect the file to be free. This store isn't a request hot path.
+            Pooling = false,
+        }.ToString();
+        _keyRing = keyRing;
+        _retention = retention;
+        _timeProvider = timeProvider;
+        _maxRecordKindLength = maxRecordKindLength;
+        _maxPayloadBytes = maxPayloadBytes;
+    }
+
+    public async Task EnsureReadyAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await SqliteSchema.EnsureReadyAsync(connection, _keyRing, _timeProvider, cancellationToken);
+        Volatile.Write(ref _ready, 1);
+    }
+
+    public async Task PutAsync(
+        ProtectedRecordId id,
+        string recordKind,
+        DateTimeOffset capturedAt,
+        StorageResolution resolution,
+        ReadOnlyMemory<byte> payload,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(recordKind);
+        if (recordKind.Length > _maxRecordKindLength)
+        {
+            throw new ArgumentException(
+                $"Record kind must be {_maxRecordKindLength} characters or fewer.", nameof(recordKind));
+        }
+
+        if (payload.Length > _maxPayloadBytes)
+        {
+            throw new ArgumentException(
+                $"Payload must be {_maxPayloadBytes} bytes or fewer.", nameof(payload));
+        }
+
+        var envelope = EnvelopeCodec.Seal(_keyRing, recordKind, id.Value, payload.Span);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO protected_records (id, record_kind, captured_at_unix_ms, resolution, envelope, stored_at_unix_ms)
+            VALUES ($id, $kind, $capturedAt, $resolution, $envelope, $storedAt)
+            ON CONFLICT(id) DO UPDATE SET
+                record_kind = excluded.record_kind,
+                captured_at_unix_ms = excluded.captured_at_unix_ms,
+                resolution = excluded.resolution,
+                envelope = excluded.envelope,
+                stored_at_unix_ms = excluded.stored_at_unix_ms;
+            """;
+        command.Parameters.AddWithValue("$id", id.Value);
+        command.Parameters.AddWithValue("$kind", recordKind);
+        command.Parameters.AddWithValue("$capturedAt", capturedAt.ToUnixTimeMilliseconds());
+        command.Parameters.AddWithValue("$resolution", resolution.ToString());
+        command.Parameters.AddWithValue("$envelope", envelope);
+        command.Parameters.AddWithValue("$storedAt", _timeProvider.GetUtcNow().ToUnixTimeMilliseconds());
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<ProtectedRecord?> GetAsync(ProtectedRecordId id, CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+
+        string recordKind;
+        long capturedAtUnixMs;
+        StorageResolution resolution;
+        byte[] envelope;
+
+        await using (var connection = await OpenConnectionAsync(cancellationToken))
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                "SELECT record_kind, captured_at_unix_ms, resolution, envelope FROM protected_records WHERE id = $id;";
+            command.Parameters.AddWithValue("$id", id.Value);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            recordKind = reader.GetString(0);
+            capturedAtUnixMs = reader.GetInt64(1);
+            resolution = Enum.Parse<StorageResolution>(reader.GetString(2));
+            envelope = (byte[])reader["envelope"];
+        }
+
+        var plaintext = EnvelopeCodec.Open(_keyRing, recordKind, id.Value, envelope);
+        try
+        {
+            return new ProtectedRecord(
+                id, recordKind, DateTimeOffset.FromUnixTimeMilliseconds(capturedAtUnixMs), resolution, plaintext);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
+    public async Task<bool> DeleteAsync(ProtectedRecordId id, CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM protected_records WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", id.Value);
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        return affected > 0;
+    }
+
+    public async Task ReplaceSetAsync(
+        string idPrefix,
+        IEnumerable<ProtectedRecordWrite> records,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(idPrefix);
+        ArgumentNullException.ThrowIfNull(records);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction =
+            (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await using (var delete = connection.CreateCommand())
+            {
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM protected_records WHERE substr(id, 1, $length) = $prefix;";
+                delete.Parameters.AddWithValue("$length", idPrefix.Length);
+                delete.Parameters.AddWithValue("$prefix", idPrefix);
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var put = connection.CreateCommand();
+            put.Transaction = transaction;
+            put.CommandText = """
+                INSERT INTO protected_records (id, record_kind, captured_at_unix_ms, resolution, envelope, stored_at_unix_ms)
+                VALUES ($id, $kind, $capturedAt, $resolution, $envelope, $storedAt);
+                """;
+            var idParameter = put.Parameters.Add("$id", SqliteType.Text);
+            var kindParameter = put.Parameters.Add("$kind", SqliteType.Text);
+            var capturedParameter = put.Parameters.Add("$capturedAt", SqliteType.Integer);
+            var resolutionParameter = put.Parameters.Add("$resolution", SqliteType.Text);
+            var envelopeParameter = put.Parameters.Add("$envelope", SqliteType.Blob);
+            var storedParameter = put.Parameters.Add("$storedAt", SqliteType.Integer);
+
+            foreach (var record in records)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ValidateWrite(record.RecordKind, record.Payload);
+                if (!record.Id.Value.StartsWith(idPrefix, StringComparison.Ordinal))
+                    throw new ArgumentException("Every replacement record id must start with the set prefix.", nameof(records));
+
+                var envelope = EnvelopeCodec.Seal(
+                    _keyRing, record.RecordKind, record.Id.Value, record.Payload.Span);
+                try
+                {
+                    idParameter.Value = record.Id.Value;
+                    kindParameter.Value = record.RecordKind;
+                    capturedParameter.Value = record.CapturedAt.ToUnixTimeMilliseconds();
+                    resolutionParameter.Value = record.Resolution.ToString();
+                    envelopeParameter.Value = envelope;
+                    storedParameter.Value = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+                    await put.ExecuteNonQueryAsync(cancellationToken);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(envelope);
+                }
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    public async Task<int> PruneExpiredAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureInitialized();
+
+        var now = _timeProvider.GetUtcNow();
+        var detailCutoffUnixMs = now.Subtract(_retention.DetailRetention).ToUnixTimeMilliseconds();
+        var rollupCutoffUnixMs = now.Subtract(_retention.HourlyRollupRetention).ToUnixTimeMilliseconds();
+        var batchSize = _retention.PruneBatchSize;
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var idsToDelete = new List<string>();
+        await using (var selectCommand = connection.CreateCommand())
+        {
+            selectCommand.CommandText = """
+                SELECT id FROM protected_records
+                WHERE (resolution = 'Detail' AND captured_at_unix_ms < $detailCutoff)
+                   OR (resolution = 'HourlyRollup' AND captured_at_unix_ms < $rollupCutoff)
+                LIMIT $batchSize;
+                """;
+            selectCommand.Parameters.AddWithValue("$detailCutoff", detailCutoffUnixMs);
+            selectCommand.Parameters.AddWithValue("$rollupCutoff", rollupCutoffUnixMs);
+            selectCommand.Parameters.AddWithValue("$batchSize", batchSize);
+            await using var reader = await selectCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                idsToDelete.Add(reader.GetString(0));
+            }
+        }
+
+        if (idsToDelete.Count == 0)
+        {
+            return 0;
+        }
+
+        await using var deleteCommand = connection.CreateCommand();
+        var parameterNames = new string[idsToDelete.Count];
+        for (var i = 0; i < idsToDelete.Count; i++)
+        {
+            var parameterName = $"$id{i}";
+            parameterNames[i] = parameterName;
+            deleteCommand.Parameters.AddWithValue(parameterName, idsToDelete[i]);
+        }
+
+        deleteCommand.CommandText =
+            $"DELETE FROM protected_records WHERE id IN ({string.Join(",", parameterNames)});";
+        return await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _keyRing.Dispose();
+        _disposed = true;
+    }
+
+    private void EnsureInitialized()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Volatile.Read(ref _ready) == 0)
+        {
+            throw new InvalidOperationException(
+                "Protected storage has not completed EnsureReadyAsync. Call it during startup before use.");
+        }
+    }
+
+    private void ValidateWrite(string recordKind, ReadOnlyMemory<byte> payload)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(recordKind);
+        if (recordKind.Length > _maxRecordKindLength)
+            throw new ArgumentException(
+                $"Record kind must be {_maxRecordKindLength} characters or fewer.", nameof(recordKind));
+        if (payload.Length > _maxPayloadBytes)
+            throw new ArgumentException(
+                $"Payload must be {_maxPayloadBytes} bytes or fewer.", nameof(payload));
+    }
+
+    private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;";
+        await command.ExecuteNonQueryAsync(cancellationToken);
+        return connection;
+    }
+}

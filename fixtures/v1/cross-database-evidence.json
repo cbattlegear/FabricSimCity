@@ -1,0 +1,37 @@
+{
+  "fixtureVersion": "1.0.0",
+  "fixtureId": "cross-database-evidence-v1",
+  "observedAt": "2026-08-17T17:05:00Z",
+  "evidence": [
+    {
+      "evidenceId": "evidence:confirmed-01",
+      "fromDatabaseId": "db:atlas-sales",
+      "toDatabaseId": "db:atlas-ledger",
+      "confidence": "confirmed",
+      "rationale": "Two independent synthetic sources identify the same directed dependency.",
+      "source": "synthetic-dependency-catalog",
+      "freshness": "fresh",
+      "observedAt": "2026-08-17T17:01:45Z"
+    },
+    {
+      "evidenceId": "evidence:probable-01",
+      "fromDatabaseId": "db:atlas-warehouse",
+      "toDatabaseId": "db:atlas-archive",
+      "confidence": "probable",
+      "rationale": "Synthetic scheduled-job text indicates an export but no resolved object reference exists.",
+      "source": "synthetic-job-text",
+      "freshness": "stale",
+      "observedAt": "2026-08-17T16:01:45Z"
+    },
+    {
+      "evidenceId": "evidence:unknown-01",
+      "fromDatabaseId": "db:atlas-crm",
+      "toDatabaseId": "db:atlas-sales",
+      "confidence": "unknown",
+      "rationale": "Both names appear in an incomplete synthetic trace; direction and relationship are unknown.",
+      "source": "synthetic-incomplete-trace",
+      "freshness": "unknown",
+      "observedAt": "2026-08-17T15:01:45Z"
+    }
+  ]
+}

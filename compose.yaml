@@ -1,0 +1,94 @@
+services:
+  sqlsimcity:
+    image: sqlsimcity:local
+    build:
+      context: .
+      args:
+        VERSION: 0.0.0-local
+        REVISION: local
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    volumes:
+      - sqlsimcity-data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Acquisition__Mode: Fixture
+      Atlas__Mode: Fixture
+      # Offline archive mode is an explicit local startup action:
+      # set Acquisition__Mode=Archive, set the two Archive values below, and
+      # mount exactly one archive file read-only under /archives.
+      # Acquisition__Archive__AllowedDirectory: /archives
+      # Acquisition__Archive__FileName: sqlsimcity.ssca
+      # volumes:
+      #   - ./artifacts/sqlsimcity.ssca:/archives/sqlsimcity.ssca:ro
+      # Connected mode is opt-in. Supply only non-secret profile values here;
+      # mount passwords/certificates/client secrets under /run/secrets.
+      # Replace Atlas__Mode above with Connected, then configure:
+      # Atlas__TargetId: production-east
+      # Atlas__DisplayName: Production East
+      # Atlas__Connection__Host: sql.example.internal
+      # Atlas__Connection__Port: "1433"
+      # Atlas__Connection__InitialDatabase: master
+      # Atlas__Connection__Encryption: Mandatory
+      # Atlas__Connection__Authentication__Mode: SqlLogin
+      # Atlas__Connection__Authentication__Username: sqlsimcity_reader
+      # Atlas__Connection__Authentication__PasswordSecret: sqlsimcity-sql-password
+      # Azure SQL Database must name each database explicitly:
+      # Atlas__KnownDatabases__0: sales
+      # Atlas__KnownDatabases__1: warehouse
+      # Protected storage is disabled by default; this app runs fine without
+      # the settings below. To enable the encrypted embedded record store,
+      # uncomment these three lines and mount a key file secret (see
+      # SECURITY.md for the key file format, rotation, and backup guidance).
+      # Losing the key file makes every record it protected permanently
+      # unrecoverable, so the key must be backed up independently of the
+      # sqlsimcity-data volume.
+      # ProtectedStorage__Enabled: "true"
+      # ProtectedStorage__DataDirectory: /data
+      # ProtectedStorage__KeyFilePath: /run/secrets/sqlsimcity-storage-key
+    # secrets:
+    #   - sqlsimcity-storage-key
+    #
+    # --- Connected authentication deployment requirements ---
+    # These apply only after Atlas__Mode is changed to Connected. Never commit
+    # a real password, keytab, certificate, or client secret to this repository.
+    #
+    # Linux Kerberos/SSPI service identity (Integrated Security):
+    #   - mount the keytab as a Docker/Compose secret, e.g.:
+    #       secrets:
+    #         - sqlsimcity-krb5-keytab
+    #   - KRB5_CONFIG: /etc/krb5.conf   (naming the realm and KDC; mount read-only)
+    #   - KRB5_KTNAME: /run/secrets/sqlsimcity-krb5-keytab
+    #   - register a MSSQLSvc/<target FQDN>:<port> SPN for the SQL Server target
+    #   - working forward/reverse DNS for the target FQDN and clock sync with
+    #     the KDC are required; Kerberos rejects meaningful clock skew
+    #   - there is no fallback to SQL login if Kerberos authentication fails
+    #
+    # Microsoft Entra ID (ManagedIdentity/WorkloadIdentity/ServicePrincipal*):
+    #   - outbound HTTPS to https://login.microsoftonline.com/<tenant-id>/... is required
+    #   - ManagedIdentity additionally requires the Azure IMDS endpoint
+    #     (http://169.254.169.254/metadata/identity/oauth2/token), reachable
+    #     only from Azure compute
+    #   - WorkloadIdentity reads the platform-projected federated token file
+    #     (AZURE_FEDERATED_TOKEN_FILE by default)
+    #   - ServicePrincipalCertificate/ServicePrincipalSecret read their
+    #     certificate/secret once per connection from a Docker/Compose secret
+    #     under /run/secrets, never from an environment variable
+    #   - DefaultAzureCredential and any credential chain are never used
+    restart: unless-stopped
+
+volumes:
+  sqlsimcity-data:
+
+# Uncomment to mount a key file as a Docker secret. `file:` must point to a
+# key ring JSON file (see SECURITY.md) that is NOT committed to this repo.
+# secrets:
+#   sqlsimcity-storage-key:
+#     file: ./secrets/sqlsimcity-storage-key.json
