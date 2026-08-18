@@ -19,6 +19,14 @@ public sealed class ArchiveRedactor(bool includeProtectedIdentifiers)
         {
             DatabaseId = Identifier(database.DatabaseId, "database"),
             Name = RequiredIdentifier(database.Name, "database"),
+            FileIo = database.FileIo is null
+                ? null
+                : database.FileIo with
+                {
+                    ResetEpochToken = OptionalIdentifier(
+                        database.FileIo.ResetEpochToken,
+                        "reset-epoch"),
+                },
         }).ToArray(),
         Edges = snapshot.Edges.Select(edge => edge with
         {
@@ -85,6 +93,7 @@ public sealed class ArchiveRedactor(bool includeProtectedIdentifiers)
         {
             PlanId = Identifier(runtime.PlanId, "plan"),
             IntervalId = Identifier(runtime.IntervalId, "interval"),
+            EpochId = Identifier(runtime.EpochId, "reset-epoch"),
             ReplicaGroupId = Identifier(runtime.ReplicaGroupId, "replica-group"),
         }).ToArray(),
     };
@@ -94,6 +103,7 @@ public sealed class ArchiveRedactor(bool includeProtectedIdentifiers)
         Databases = status.Databases.Select(database => database with
         {
             DatabaseId = Identifier(database.DatabaseId, "database"),
+            ResetEpoch = Identifier(database.ResetEpoch, "reset-epoch"),
             Reason = includeProtectedIdentifiers
                 ? database.Reason
                 : database.Reason.Replace(
@@ -182,6 +192,9 @@ public sealed class ArchiveRedactor(bool includeProtectedIdentifiers)
                     Name = RequiredIdentifier(index.Name, "index"),
                     DirectActivity = index.DirectActivity with
                     {
+                        ResetEpochToken = OptionalIdentifier(
+                            index.DirectActivity.ResetEpochToken,
+                            "reset-epoch"),
                         Evidence = index.DirectActivity.Evidence with
                         {
                             Reason = Scrub(index.DirectActivity.Evidence.Reason),
@@ -190,6 +203,9 @@ public sealed class ArchiveRedactor(bool includeProtectedIdentifiers)
                 }).ToArray(),
                 DirectActivity = value.DirectActivity with
                 {
+                    ResetEpochToken = OptionalIdentifier(
+                        value.DirectActivity.ResetEpochToken,
+                        "reset-epoch"),
                     Evidence = value.DirectActivity.Evidence with
                     {
                         Reason = Scrub(value.DirectActivity.Evidence.Reason),

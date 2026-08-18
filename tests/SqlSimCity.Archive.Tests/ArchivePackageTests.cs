@@ -170,6 +170,25 @@ public sealed class ArchivePackageTests : IDisposable
     }
 
     [Fact]
+    public void Redactor_preserves_epoch_boundaries_without_leaking_database_identity()
+    {
+        var status = new QueryStoreCollectorStatusV1(
+            "1.0", QueryStoreCollectorState.Ready, 1, At, At, null,
+            [new QueryStoreDatabaseStatusV1(
+                "sales", QueryStoreCollectionStateV1.ReadWrite, "query-store:sales",
+                At, At, "sales collection is current")],
+            "ready");
+
+        var redacted = new ArchiveRedactor(includeProtectedIdentifiers: false).Redact(status);
+        var protectedValue = new ArchiveRedactor(includeProtectedIdentifiers: true).Redact(status);
+
+        Assert.StartsWith("database-", redacted.Databases[0].DatabaseId, StringComparison.Ordinal);
+        Assert.StartsWith("reset-epoch-", redacted.Databases[0].ResetEpoch, StringComparison.Ordinal);
+        Assert.DoesNotContain("sales", redacted.Databases[0].Reason, StringComparison.Ordinal);
+        Assert.Equal("query-store:sales", protectedValue.Databases[0].ResetEpoch);
+    }
+
+    [Fact]
     public void Writer_is_atomic_and_refuses_overwrite_by_default()
     {
         var path = WriteSimple();

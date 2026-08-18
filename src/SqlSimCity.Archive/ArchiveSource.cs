@@ -44,9 +44,10 @@ public sealed class ArchiveSource :
         _package = package;
         _redactor = new ArchiveRedactor(package.Manifest.Redaction.ProtectedIdentifiersIncluded);
         RequireFeatures(package.Manifest);
-        _atlas = Import(_redactor.Redact(
+        var archivedAtlas = _redactor.Redact(
             ReadRequired<AtlasSnapshotV1>(AtlasSnapshotEntry),
-            package.Manifest.Target.DisplayAlias));
+            package.Manifest.Target.DisplayAlias);
+        _atlas = Import(archivedAtlas);
         _atlasStatus = ReadOptional<AtlasCollectorStatusV1>(AtlasStatusEntry) ??
             new AtlasCollectorStatusV1(
                 AtlasCollectorMode.Archive, AtlasCollectorState.Ready, 0,
@@ -55,7 +56,8 @@ public sealed class ArchiveSource :
                 "Imported archive; no SQL Server collector is running.");
         _capabilities = Import(_redactor.Redact(
             ReadOptional<CapabilitiesSnapshotV1>(CapabilitiesEntry) ??
-            new CapabilitiesSnapshotV1("1", package.Manifest.CreatedAt, [])));
+            new CapabilitiesSnapshotV1("1", package.Manifest.CreatedAt, [])),
+            archivedAtlas.Target.TargetId);
         _live = Import(_redactor.Redact(
             ReadOptional<LiveIncidentResponseV1>(LiveResponseEntry) ??
             new LiveIncidentResponseV1(null, StoppedCollector("Archive contains no live point-in-time sample."))));
@@ -279,6 +281,8 @@ public sealed class ArchiveSource :
             return Task.FromResult<DatabaseCityPageV1?>(page with { PageSize = pageSize, NextPageToken = null });
 
         var objects = new List<DatabaseCityObjectV1>(pageSize);
+        var contributingPages = new List<DatabaseCityPageV1>();
+        var contributingChunks = new HashSet<int>();
         var currentOffset = offset;
         while (objects.Count < pageSize && currentOffset < series.TotalCount)
         {
@@ -288,6 +292,8 @@ public sealed class ArchiveSource :
             if (wrappers.Count != 1)
                 throw new ArchiveValidationException("Archive database city chunk must contain exactly one page.");
             var chunkPage = Import(_redactor.Redact(wrappers[0]));
+            if (contributingChunks.Add(chunkIndex))
+                contributingPages.Add(chunkPage);
             var withinChunk = checked((int)(currentOffset % series.ChunkSize));
             var take = Math.Min(pageSize - objects.Count, chunkPage.Objects.Count - withinChunk);
             if (take <= 0)
@@ -296,10 +302,28 @@ public sealed class ArchiveSource :
             currentOffset += take;
         }
         var nextOffset = offset + objects.Count;
+        var objectIds = objects.Select(item => item.ObjectId).ToHashSet(StringComparer.Ordinal);
+        var schemaIds = objects.Select(item => item.SchemaId).ToHashSet(StringComparer.Ordinal);
         return Task.FromResult<DatabaseCityPageV1?>(page with
         {
             PageSize = pageSize,
             Objects = objects,
+            Schemas = contributingPages
+                .SelectMany(item => item.Schemas)
+                .Where(schema => schemaIds.Contains(schema.SchemaId))
+                .DistinctBy(schema => schema.SchemaId, StringComparer.Ordinal)
+                .ToArray(),
+            TopQueryFamilies = contributingPages
+                .SelectMany(item => item.TopQueryFamilies)
+                .Where(family => family.ObjectIds.Any(objectIds.Contains))
+                .DistinctBy(family => family.FamilyId, StringComparer.Ordinal)
+                .ToArray(),
+            Routes = contributingPages
+                .SelectMany(item => item.Routes)
+                .Where(route => objectIds.Contains(route.FromObjectId))
+                .DistinctBy(route => route.RouteId, StringComparer.Ordinal)
+                .ToArray(),
+            TotalObjects = series.TotalCount.ToString(CultureInfo.InvariantCulture),
             NextPageToken = nextOffset < series.TotalCount
                 ? EncodeToken(nextOffset, tokenScope, pageSize)
                 : null,
@@ -429,10 +453,29 @@ public sealed class ArchiveSource :
         Routes = value.Routes.Select(route => route with { Evidence = Import(route.Evidence) }).ToArray(),
     };
 
-    private static CapabilitiesSnapshotV1 Import(CapabilitiesSnapshotV1 value) => value with
+    private CapabilitiesSnapshotV1 Import(
+        CapabilitiesSnapshotV1 value,
+        string archivedAtlasTargetId)
     {
-        Targets = value.Targets.Select(Import).ToArray(),
-    };
+        var matchingTargets = value.Targets.Count(target =>
+            string.Equals(target.TargetId, archivedAtlasTargetId, StringComparison.Ordinal));
+        if (value.Targets.Count > 0 && matchingTargets != 1)
+            throw new ArchiveValidationException(
+                "Archive capabilities do not identify exactly one atlas target.");
+        return value with
+        {
+            Targets = value.Targets.Select(target =>
+            {
+                var imported = Import(target);
+                return imported with
+                {
+                    TargetId = string.Equals(target.TargetId, archivedAtlasTargetId, StringComparison.Ordinal)
+                        ? _package.Manifest.Target.OpaqueIdentity
+                        : imported.TargetId,
+                };
+            }).ToArray(),
+        };
+    }
 
     private static TargetCapabilityProfileV1 Import(TargetCapabilityProfileV1 value) => value with
     {
@@ -559,13 +602,25 @@ public sealed class ArchiveSource :
             }
         }
         ArchiveFindingsSnapshot? findings = null;
-        if (_package.Manifest.Entries.Any(entry => entry.Name == FindingsSnapshotEntry))
+        var hasFindingsSnapshot = _package.Manifest.Entries.Any(entry => entry.Name == FindingsSnapshotEntry);
+        var hasFindingsDescriptor = _package.Manifest.Entries.Any(entry => entry.Name == FindingsDescriptorEntry);
+        var declaresFindings = _package.Manifest.Features.Contains(
+            "findings-evidence-v1", StringComparer.Ordinal);
+        if (hasFindingsSnapshot)
         {
             findings = ReadRequired<ArchiveFindingsSnapshot>(FindingsSnapshotEntry);
-            if (string.IsNullOrWhiteSpace(findings.Evaluation.EngineVersion) ||
+            if (findings.Evaluation.SchemaVersion != "1.0" ||
+                findings.Export.SchemaVersion != "1.0" ||
+                string.IsNullOrWhiteSpace(findings.Evaluation.EngineVersion) ||
+                findings.Evaluation.Rules.Select(rule => rule.RuleId)
+                    .Distinct(StringComparer.Ordinal).Count() != findings.Evaluation.Rules.Count ||
                 findings.Evaluation.Rules.Any(rule =>
                     string.IsNullOrWhiteSpace(rule.RuleId) || string.IsNullOrWhiteSpace(rule.RuleVersion)) ||
-                findings.Export.EngineVersion != findings.Evaluation.EngineVersion)
+                findings.Export.EngineVersion != findings.Evaluation.EngineVersion ||
+                findings.Export.Findings.Any(finding =>
+                    finding.SchemaVersion != "1.0" ||
+                    string.IsNullOrWhiteSpace(finding.RuleId) ||
+                    string.IsNullOrWhiteSpace(finding.RuleVersion)))
                 throw new ArchiveValidationException("Archive findings engine or rule version metadata is invalid.");
         }
         if (_findingsDescriptor is not null)
@@ -582,13 +637,16 @@ public sealed class ArchiveSource :
                 findings.Evaluation.Rules.Count != _findingsDescriptor.RuleVersions.Count ||
                 findings.Evaluation.Rules.Any(rule =>
                     !_findingsDescriptor.RuleVersions.TryGetValue(rule.RuleId, out var version) ||
-                    version != rule.RuleVersion))
+                    version != rule.RuleVersion) ||
+                findings.Export.Findings.Any(finding =>
+                    !_findingsDescriptor.RuleVersions.TryGetValue(finding.RuleId, out var version) ||
+                    version != finding.RuleVersion))
                 throw new ArchiveValidationException("Archive findings descriptor is inconsistent.");
         }
-        if (_package.Manifest.Features.Contains("findings-evidence-v1", StringComparer.Ordinal) &&
-            (findings is null || _findingsDescriptor is null))
+        if (hasFindingsSnapshot != hasFindingsDescriptor ||
+            declaresFindings != hasFindingsSnapshot)
             throw new ArchiveValidationException(
-                "Archive declares findings evidence without its versioned snapshot and descriptor.");
+                "Archive findings feature, snapshot, and descriptor must be present together.");
     }
 
     private void ValidateIndexMap(IReadOnlyDictionary<string, string> values, string kind)

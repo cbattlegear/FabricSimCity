@@ -74,6 +74,9 @@ ScriptDom normalization path; default fixture export omits even normalized text 
 fingerprint. A parse/redaction failure must omit or fingerprint text, never pass raw text through.
 `--protected-identifiers` is an explicit local operator opt-in for already normalized text and
 protected identifiers; it never enables raw SQL or raw Showplan XML.
+Reset-epoch equality and boundaries are preserved. Because connected Query Store epoch tokens can
+embed a database identifier, the default policy replaces those token values with stable
+`reset-epoch-*` pseudonyms; `--protected-identifiers` retains their exact original strings.
 
 ## Export and validation
 

@@ -312,6 +312,11 @@ function ArchiveInfoPanel({ info }: { info: ArchiveInfo }) {
           Archived findings: engine {info.archivedFindings.engineVersion},{' '}
           {Object.keys(info.archivedFindings.ruleVersions).length} versioned rules.
           Current findings are reevaluated by this installation ({info.archivedFindings.mode}).
+          {' '}Archived rule versions:{' '}
+          {Object.entries(info.archivedFindings.ruleVersions)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([rule, version]) => `${rule} v${version}`)
+            .join(', ')}.
         </p>
       )}
     </details>

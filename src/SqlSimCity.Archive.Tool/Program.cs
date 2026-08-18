@@ -142,8 +142,16 @@ internal static class FixtureArchiveBuilder
         var atlasSource = new FixtureAtlasSnapshotSource();
         var querySource = new FixtureQueryStoreHistorySource();
         var citySource = new FixtureDatabaseCitySource();
-        var atlas = redactor.Redact(atlasSource.GetCurrent(), displayAlias);
-        var capabilities = redactor.Redact(await BuildCapabilitiesAsync(createdAt, cancellationToken));
+        var sourceAtlas = atlasSource.GetCurrent();
+        var atlas = redactor.Redact(sourceAtlas, displayAlias);
+        var sourceCapabilities = await BuildCapabilitiesAsync(createdAt, cancellationToken);
+        sourceCapabilities = sourceCapabilities with
+        {
+            Targets = sourceCapabilities.Targets.Take(1)
+                .Select(target => target with { TargetId = sourceAtlas.Target.TargetId })
+                .ToArray(),
+        };
+        var capabilities = redactor.Redact(sourceCapabilities);
         var liveSnapshot = await new FixtureLiveIncidentCollector(new FixedTimeProvider(createdAt))
             .CollectAsync(1, cancellationToken);
         var live = redactor.Redact(new LiveIncidentResponseV1(
@@ -249,9 +257,10 @@ internal static class FixtureArchiveBuilder
             var detail = await source.GetFamilyAsync(summary.FamilyId, cancellationToken)
                 ?? throw new InvalidOperationException($"Fixture family '{summary.FamilyId}' disappeared.");
             var familyEntry = $"query-store/families/{HashName(summary.FamilyId)}.json";
-            Add(payloads, familyEntry, "query-store", redactor.Redact(detail), 1,
+            var redactedDetail = redactor.Redact(detail);
+            Add(payloads, familyEntry, "query-store", redactedDetail, 1,
                 summary.LastObservedAt, summary.Evidence.FreshUntil,
-                detail.Runtime.Count == 0 ? null : detail.Runtime[0].EpochId);
+                redactedDetail.Runtime.Count == 0 ? null : redactedDetail.Runtime[0].EpochId);
             familyEntries.Add(redactor.Identifier(summary.FamilyId, "family"), familyEntry);
             foreach (var planSummary in detail.Plans)
             {
@@ -291,9 +300,11 @@ internal static class FixtureArchiveBuilder
                     if (page is null)
                         break;
                     var name = $"database-city/pages/{HashName(database.DatabaseId)}-{metric.ToString().ToLowerInvariant()}-{names.Count:D5}.json";
-                    Add(payloads, name, "database-city", new[] { redactor.Redact(page) }, page.Objects.Count,
+                    var redactedPage = redactor.Redact(page);
+                    Add(payloads, name, "database-city", new[] { redactedPage }, page.Objects.Count,
                         page.Evidence.ObservedAt, page.Evidence.FreshUntil,
-                        page.Objects.Select(value => value.DirectActivity.ResetEpochToken).FirstOrDefault(value => value is not null));
+                        redactedPage.Objects.Select(value => value.DirectActivity.ResetEpochToken)
+                            .FirstOrDefault(value => value is not null));
                     names.Add(name);
                     totalObjects += page.Objects.Count;
                     token = page.NextPageToken;
