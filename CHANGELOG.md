@@ -154,19 +154,27 @@ First MVP release candidate. There is no tagged release yet.
 ### Security
 
 - A connection string now auto-provisions the protected-storage AES-256 key that connected Query
-  Store history requires, at a `sqlsimcity-keys` directory beside the data directory. Encryption at
+  Store history requires, in a `sqlsimcity-keys` directory inside the data directory. Encryption at
   rest is unchanged and still mandatory; what changes is that the process generates the key instead
-  of an operator supplying it, so key custody is weaker than the hardened path — the key sits on the
-  host beside the data rather than arriving as a mounted secret. It is written `0600`, never
-  overwrites an existing key, is deliberately kept out of the data directory so a data backup cannot
-  carry the key that decrypts it, and is announced at startup with a warning naming the path. The
-  hardened path is untouched: setting `ProtectedStorage:Enabled=true`, or configuring the connection
-  field by field, still means operator-supplied key custody and still fails closed without a key.
-  Auto-provisioning never happens in archive or edge mode, and never overwrites a mounted key.
-- A key that cannot be written no longer takes the process down. Where the key location is
-  unwritable — notably the shipped container's read-only root filesystem — connected Query Store
-  history disables itself with a warning explaining the cause and the fix, preserving the previous
-  startup behavior instead of turning a convenience into an outage.
+  of an operator supplying it, so key custody is weaker than the hardened path. It is placed inside
+  the data directory deliberately, so the key is exactly as durable as the data it protects: in a
+  container every other location is either unwritable or ephemeral, and a key destroyed while its
+  data survives leaves every protected record permanently unopenable. The trade-off is that a raw
+  volume snapshot contains both. It is written `0600`, never overwrites an existing key, and is
+  announced at startup with a warning naming the path. The hardened path is untouched: setting
+  `ProtectedStorage:Enabled=true`, or configuring the connection field by field, still means
+  operator-supplied key custody and still fails closed without a key. Auto-provisioning never
+  happens in archive or edge mode, and never overwrites a mounted key.
+- `tools/backup-data.sh` now excludes the storage key from the archive instead of refusing to run
+  when the key resolves inside the data directory, and verifies the key is genuinely absent before
+  writing the backup. The guarantee that no backup carries its own decryption key is preserved;
+  what changes is that deployments using an auto-provisioned key can be backed up at all. A hard
+  link to the key inside the data directory is still refused, because it cannot be excluded by path.
+  **A backup therefore cannot restore a protected store on its own — the key must be kept
+  separately.**
+- A key that cannot be written no longer takes the process down. Where the data directory is not
+  writable, connected Query Store history disables itself with a warning explaining the cause and
+  the fix, preserving the previous startup behavior instead of turning a convenience into an outage.
 - A persistent, color-independent trusted-network / no-built-in-login notice is
   now shown on every analysis view, including on mobile, reinforcing the
   documented `AllowedHosts` and reverse-proxy guidance.

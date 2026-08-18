@@ -34,7 +34,12 @@ Query Store history without protected storage exits nonzero.
 
 Stop the application before a backup, or stop/quiesce the container so SQLite
 has no writer. `--quiesced` is an explicit operator assertion; the script cannot
-prove another process is not writing. Keep the key file outside `/data`.
+prove another process is not writing.
+
+Pass `--key-file` so the script can guarantee the key never enters the archive.
+An auto-provisioned key lives at `<data-directory>/sqlsimcity-keys/storage-key.json`;
+an operator-supplied one is normally mounted outside `/data`. Either way the
+script excludes it and then verifies it is absent before writing the backup.
 
 ```bash
 tools/backup-data.sh --quiesced \
@@ -44,7 +49,10 @@ tools/backup-data.sh --quiesced \
 
 The backup is written atomically to a new filename (existing archives are never
 overwritten), contains a versioned manifest and checksummed payload, rejects
-symlinks and unsafe paths, and never includes the configured key file. Back up
+symlinks and unsafe paths, and never includes the configured key file — it is
+excluded even when it lives inside the data directory, and its absence is
+verified before the archive is written. A hard link to the key inside the data
+directory is refused outright, because it cannot be excluded by path. Back up
 the key independently in a secrets manager. A data backup without its matching
 key is unrecoverable; storing both together defeats separation.
 

@@ -89,15 +89,28 @@ if [[ -e "${output_file}" || -L "${output_file}" ]]; then
   exit 73
 fi
 
+key_exclude=()
 if [[ -e "${key_file}" ]]; then
   resolved_key="$(realpath -e -- "${key_file}")"
   case "${resolved_key}" in
-    "${source_dir}"|"${source_dir}"/*)
-      echo "key file resolves inside the data directory; backup refused" >&2
+    "${source_dir}"/*)
+      # An auto-provisioned key lives inside the data directory, because that is
+      # the only location in a container that is both writable and exactly as
+      # durable as the data it protects. Refusing the backup outright would mean
+      # those deployments could never be backed up at all, so exclude the key
+      # instead: the guarantee that matters -- that no backup carries its own
+      # decryption key -- is preserved, and verified below.
+      key_exclude=(--exclude "./${resolved_key#"${source_dir}"/}")
+      ;;
+    "${source_dir}")
+      echo "key file resolves to the data directory itself; backup refused" >&2
       exit 65
       ;;
   esac
-  if find "${source_dir}" -type f -samefile "${resolved_key}" -print -quit |
+  # A hard link cannot be excluded by path: the same inode is reachable under
+  # another name, and --hard-dereference would archive its contents there.
+  if find "${source_dir}" -type f -samefile "${resolved_key}" \
+       ! -path "${resolved_key}" -print -quit |
      grep --quiet .; then
     echo "data directory contains a hard link to the key file; backup refused" >&2
     exit 65
@@ -114,7 +127,11 @@ trap cleanup EXIT
 
 epoch="${SOURCE_DATE_EPOCH:-$(date +%s)}"
 created_at="$(date --utc --date="@${epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
-file_count="$(find "${source_dir}" -type f | wc -l | tr -d '[:space:]')"
+if [[ "${#key_exclude[@]}" -gt 0 ]]; then
+  file_count="$(find "${source_dir}" -type f ! -path "${resolved_key}" | wc -l | tr -d '[:space:]')"
+else
+  file_count="$(find "${source_dir}" -type f | wc -l | tr -d '[:space:]')"
+fi
 
 tar --create \
   --file - \
@@ -127,7 +144,19 @@ tar --create \
   --hard-dereference \
   --format=pax \
   --pax-option=delete=atime,delete=ctime \
+  ${key_exclude[@]+"${key_exclude[@]}"} \
   . | gzip --no-name >"${work_dir}/data.tar.gz"
+
+# Prove the exclusion held rather than trusting the flag: a backup that silently
+# carried its own decryption key would protect nobody.
+if [[ "${#key_exclude[@]}" -gt 0 ]]; then
+  key_member="./${resolved_key#"${source_dir}"/}"
+  if tar --list --file "${work_dir}/data.tar.gz" |
+     grep --quiet --fixed-strings --line-regexp -- "${key_member}"; then
+    echo "backup unexpectedly contains the key file; backup refused" >&2
+    exit 65
+  fi
+fi
 
 payload_sha256="$(sha256sum "${work_dir}/data.tar.gz" | cut -d ' ' -f 1)"
 printf '%s\n' \
