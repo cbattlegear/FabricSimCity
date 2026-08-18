@@ -27,8 +27,7 @@ public sealed class QueryStoreCityAttributionTests
         IReadOnlyList<CityAttributionObject>? pageObjects = null,
         IReadOnlyDictionary<string, string>? databaseIdsByName = null) =>
         new QueryStoreCityAttribution(store).AttributeAsync(
-            DatabaseId,
-            "sales",
+            FakeQueryStore.DatabaseName,
             DatabaseCityMetric.Cpu,
             pageObjects ?? PageObjects,
             databaseIdsByName ?? new Dictionary<string, string> { ["sales"] = DatabaseId },

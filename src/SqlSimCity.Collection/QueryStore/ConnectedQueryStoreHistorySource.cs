@@ -51,8 +51,7 @@ public sealed class ConnectedQueryStoreHistorySource(
             return await GetLegacyQueriesAsync(
                 snapshot, databaseId, metric, pageSize, cursor, cancellationToken).ConfigureAwait(false);
 
-        var index = snapshot.IndexSets?.SingleOrDefault(item =>
-            item.Metric == NormalizeMetric(metric) && item.DatabaseId == databaseId);
+        var index = ResolveIndexSet(snapshot.IndexSets, NormalizeMetric(metric), databaseId);
         if (index is null) return Empty(pageSize, "No Query Store families match this database filter.");
         var pageIndex = cursor?.PageIndex ?? 0;
         var offset = cursor?.Offset ?? 0;
@@ -63,7 +62,7 @@ public sealed class ConnectedQueryStoreHistorySource(
         while (families.Count < pageSize && pageIndex < index.PageCount)
         {
             var indexPage = await repository.ReadIndexPageAsync(
-                snapshot, index.Metric, databaseId, pageIndex, cancellationToken)
+                snapshot, index.Metric, index.DatabaseId, pageIndex, cancellationToken)
                 .ConfigureAwait(false) ?? throw new InvalidDataException("A protected Query Store index page is missing.");
             if (cursor is not null && families.Count == 0 && offset >= indexPage.FamilyIds.Count)
                 throw new QueryStorePageTokenException("The Query Store page token is outside the published index.");
@@ -95,6 +94,28 @@ public sealed class ConnectedQueryStoreHistorySource(
         repository.ReadConsistentPublishedSnapshotAsync(
             (snapshot, token) => GetFamilyAsync(snapshot, familyId, token),
             cancellationToken);
+
+    /// <summary>
+    /// Finds the published index set for one metric and database filter. A database name that
+    /// differs only in case still resolves, because SQL Server database names are case-insensitive
+    /// and the collected key can come from configuration rather than from the server. An ambiguous
+    /// case-insensitive match resolves to nothing rather than to a guess.
+    /// </summary>
+    private static QueryStoreIndexSet? ResolveIndexSet(
+        IReadOnlyList<QueryStoreIndexSet>? indexSets,
+        string metric,
+        string? databaseId)
+    {
+        if (indexSets is null) return null;
+        var exact = indexSets.SingleOrDefault(item =>
+            item.Metric == metric && item.DatabaseId == databaseId);
+        if (exact is not null || databaseId is null) return exact;
+        var insensitive = indexSets
+            .Where(item => item.Metric == metric &&
+                string.Equals(item.DatabaseId, databaseId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        return insensitive.Length == 1 ? insensitive[0] : null;
+    }
 
     private async Task<QueryFamilyDetailV1?> GetFamilyAsync(
         QueryStorePublishedSnapshot? snapshot,
@@ -266,7 +287,8 @@ public sealed class ConnectedQueryStoreHistorySource(
         var normalizedMetric = NormalizeMetric(metric);
         var ordered = snapshot.Families
             .Select(item => item.Family)
-            .Where(item => databaseId is null || item.DatabaseId == databaseId)
+            .Where(item => databaseId is null ||
+                string.Equals(item.DatabaseId, databaseId, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(item => LegacyMetric(item, normalizedMetric))
             .ThenBy(item => item.FamilyId, StringComparer.Ordinal)
             .ToArray();

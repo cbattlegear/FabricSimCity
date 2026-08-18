@@ -268,6 +268,19 @@ First MVP release candidate. There is no tagged release yet.
   column on any engine edition degrades exactly one field, names itself in
   `diagnostics.unavailableFields`, and leaves the rest of the snapshot intact. Genuine programming
   faults are deliberately still allowed to propagate.
+- Every building in a connected database city no longer reports its attributed Query Store exposure
+  as unavailable. `ConnectedDatabaseCitySource` filtered the Query Store join by the *atlas*
+  database id (`{target}/database/{name}`), while connected Query Store history is collected,
+  indexed, and keyed by the SQL **database name** — so `ConnectedQueryStoreHistorySource` matched no
+  published index set, returned an empty page, and the join reported "no ranked Query Store family
+  names this object" for every object, every metric, and every page against a real server. The join
+  now filters by the database name, which is the key the history source actually publishes. The unit
+  tests could not see this because the in-memory Query Store fake asserted the very id the caller
+  passed, so the fake now models the two identifiers as the distinct things they are. Related, an
+  index set whose stored database name differs from the requested one only in case now resolves
+  rather than silently matching nothing, since SQL Server database names are case-insensitive and
+  the collected key can come from `Atlas:KnownDatabases` configuration instead of from the server;
+  an ambiguous case-insensitive match still resolves to nothing rather than to a guess.
 - Connected Query Store history now collects. `SqlQueryStoreIncrementalSource` issued every probe
   with `CommandBehavior.SequentialAccess`, which permits each column to be read once and only in
   ascending ordinal order, while all nine of its projectors read columns by name in whatever order
