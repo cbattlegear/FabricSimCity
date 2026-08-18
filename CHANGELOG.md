@@ -99,6 +99,14 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Fixed
 
+- `LiveIncidentSampler` no longer throws `ObjectDisposedException` when a stop races disposal. The
+  disposed check at the top of `StopAsync` is a check-then-act, so a caller could pass it and then be
+  preempted before awaiting the control lock that `DisposeAsync` had already disposed. Host shutdown
+  makes exactly that interleaving routine, because `IHostedService.StopAsync` and container disposal
+  run back to back and `StopAsync(TimeSpan)` can abandon a stop that is still running. The semaphore
+  is now left to the GC, which is safe because its `AvailableWaitHandle` is never touched. In CI this
+  surfaced as an intermittent "Test Class Cleanup Failure" that failed the build while every
+  individual test still reported as passing.
 - Rejected edge batches no longer create phantom targets, reserve ownership, mutate partial groups,
   advance generation state, or consume idempotency entries; both accepted-batch indexes now evict
   coherently at a deterministic bound.
