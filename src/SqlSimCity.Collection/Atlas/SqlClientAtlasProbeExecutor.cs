@@ -17,12 +17,14 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
     private readonly ConnectionProfile _profile;
     private readonly ProbeCatalog _catalog;
     private readonly TimeProvider _timeProvider;
+    private readonly EnginePlatform? _configuredPlatform;
 
     public SqlClientAtlasProbeExecutor(
         ISqlConnectionFactory connectionFactory,
         ConnectionProfile profile,
         ProbeCatalog catalog,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        EnginePlatform? configuredPlatform = null)
     {
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(profile);
@@ -31,6 +33,7 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         _profile = profile;
         _catalog = catalog;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _configuredPlatform = configuredPlatform;
     }
 
     public async Task<AtlasTargetIdentity> GetTargetIdentityAsync(CancellationToken cancellationToken)
@@ -284,7 +287,9 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         if (!probe.ConnectionScope.Equals(expectedScope, StringComparison.Ordinal))
             throw new InvalidOperationException($"Probe '{probeId}' does not have the required connection scope.");
         var profile = expectedScope == "master"
-            ? _profile.WithInitialDatabase("master")
+            ? _configuredPlatform == EnginePlatform.AzureSqlDatabase
+                ? _profile
+                : _profile.WithInitialDatabase("master")
             : expectedScope == "database" && databaseName is not null
                 ? _profile.WithInitialDatabase(databaseName)
                 : _profile;

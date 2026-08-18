@@ -499,7 +499,7 @@
     },
     {
       "id": "sessions.active_requests",
-      "title": "Live sessions/requests with current statement text",
+      "title": "Live sessions/requests with optional current statement text",
       "file": "probes/sessions/active_requests.sql",
       "connectionScope": "server",
       "minPlatform": "SQL Server 2016 (13.x)",
@@ -530,10 +530,17 @@
           "required": false,
           "default": null,
           "description": "When supplied, restricts active requests to their request database and idle sessions to their current session database. NULL returns all visible user sessions/requests."
+        },
+        {
+          "name": "@IncludeSqlText",
+          "sqlDbType": "Bit",
+          "required": false,
+          "default": true,
+          "description": "When false, SQL text resolution is skipped and batch/statement text columns are NULL."
         }
       ],
       "resultSets": 1,
-      "resultContract": "Zero or more rows, one per (session_id, request_id). Idle rows have NULL request_id and use the session's current database_id/name; active rows use the request database. current_statement_text is the offset-resolved substring of the executing statement; batch_text is the full submitted batch. No plan XML is fetched.",
+      "resultContract": "Zero or more rows, one per (session_id, request_id). Idle rows have NULL request_id and use the session's current database_id/name; active rows use the request database. With @IncludeSqlText=1 current_statement_text is the offset-resolved executing statement and batch_text is the submitted batch; with 0 both are NULL and sys.dm_exec_sql_text is not invoked. No plan XML is fetched.",
       "relativeCost": "low"
     },
     {
@@ -590,7 +597,15 @@
       },
       "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier; VIEW DATABASE STATE on Azure SQL Database) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+).",
       "cadenceClass": "frequent",
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "@IncludeSqlText",
+          "sqlDbType": "Bit",
+          "required": false,
+          "default": true,
+          "description": "When false, SQL text resolution is skipped and batch_text is NULL."
+        }
+      ],
       "resultSets": 1,
       "resultContract": "Zero or more rows, one per (session_id, request_id) with a memory grant request. Memory columns are KiB. grant_time IS NULL means still waiting for a grant (non-NULL once granted); wait_time_ms is the inverse -- populated only while waiting and NULL once granted. plan_handle/sql_handle are opaque; batch_text is resolved but no Showplan XML is fetched.",
       "relativeCost": "low"

@@ -109,6 +109,12 @@ reevaluated centrally. Source timestamps, freshness boundaries, and reset epochs
 Connector-captured live evidence is always labelled as a static point-in-time sample: the central
 service starts no SQL collector, live sampler, or SignalR trace in Edge mode.
 
+The connector's `SQLSIMCITY_EDGE_SOURCE_MODE` defaults to `Fixture` for the runnable Compose smoke.
+`Connected` builds a complete validated SQL profile and reuses the production Atlas, capability,
+live, Query Store, and database-city collectors near the remote target. Authentication is exactly one
+existing file-referenced SQL/Kerberos/Entra strategy with no fallback. No real SQL target has been
+validated; connected coverage uses fake probe executors.
+
 The UI shows the allowlisted target, connector, generation, state, captured time, included sections,
 and the point-in-time qualification. It never renders envelope bodies. The no-built-in-login warning
 remains visible on desktop and mobile.

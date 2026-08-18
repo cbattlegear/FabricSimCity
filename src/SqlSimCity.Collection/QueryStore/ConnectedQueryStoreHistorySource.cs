@@ -15,7 +15,8 @@ public sealed class ConnectedQueryStoreHistorySource(
     IQueryStoreIncrementalSource incrementalSource,
     SecureShowplanParser showplanParser,
     QueryStoreCollectionStatusTracker statusTracker,
-    TimeProvider timeProvider) : IQueryStoreHistorySource
+    TimeProvider timeProvider,
+    bool allowRawPayloadHydration = true) : IQueryStoreHistorySource
 {
     public Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(
         string? databaseId,
@@ -116,6 +117,16 @@ public sealed class ConnectedQueryStoreHistorySource(
             var descriptor = identity.Text;
             if (descriptor.Availability == QueryTextAvailability.Missing)
             {
+                if (!allowRawPayloadHydration)
+                {
+                    descriptor = new QueryTextDescriptorV1(
+                        QueryTextAvailability.Restricted,
+                        null,
+                        null,
+                        "Raw Query Store text hydration is disabled for this source.");
+                    physical.Add(identity with { Text = descriptor });
+                    continue;
+                }
                 descriptor = await repository.ReadTextDescriptorAsync(
                     identity.DatabaseId, identity.QueryTextId, cancellationToken).ConfigureAwait(false);
                 if (descriptor is null)
@@ -179,6 +190,7 @@ public sealed class ConnectedQueryStoreHistorySource(
     {
         var record = await repository.ReadNormalizedPlanAsync(planId, cancellationToken).ConfigureAwait(false);
         if (record is not null) return record;
+        if (!allowRawPayloadHydration) return null;
         if (planId.StartsWith("archived:", StringComparison.Ordinal)) return null;
         var separator = planId.LastIndexOf(':');
         if (separator <= 0 || separator == planId.Length - 1) return null;

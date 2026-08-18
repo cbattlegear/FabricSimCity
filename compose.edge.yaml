@@ -78,6 +78,9 @@ services:
       SQLSIMCITY_EDGE_CONNECTOR_ID: edge-a
       SQLSIMCITY_EDGE_TARGET_ID: sql-prod-east
       SQLSIMCITY_EDGE_KEY_ID: "2026-08"
+      # Fixture is the runnable no-SQL local smoke. Set Connected only with the complete SQL_
+      # profile and mounted authentication files documented in docs/edge-connector.md.
+      SQLSIMCITY_EDGE_SOURCE_MODE: Fixture
       # HTTPS remains required in production. Plain HTTP is allowed here only because the connector
       # shares the central service namespace and 127.0.0.1 is therefore true loopback.
       SQLSIMCITY_EDGE_INGEST_ENDPOINT: http://127.0.0.1:8080/api/v1/edge/ingest

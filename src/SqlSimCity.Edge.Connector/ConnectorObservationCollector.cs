@@ -49,8 +49,9 @@ public sealed class FixtureObservationProvider : IObservationProvider
         var capabilities = await BuildCapabilitiesAsync(now, cancellationToken).ConfigureAwait(false);
         var queryStore = await BuildQueryStoreAsync(cancellationToken).ConfigureAwait(false);
         var city = await BuildDatabaseCityAsync(cancellationToken).ConfigureAwait(false);
-        var liveSnapshot = await new FixtureLiveIncidentCollector(new FixedTimeProvider(now))
-            .CollectAsync(1, cancellationToken).ConfigureAwait(false);
+        var liveSnapshot = ConnectorObservationSanitizer.Live(
+            await new FixtureLiveIncidentCollector(new FixedTimeProvider(now))
+                .CollectAsync(1, cancellationToken).ConfigureAwait(false));
         liveSnapshot = liveSnapshot with
         {
             Target = liveSnapshot.Target with { TargetId = _targetId },

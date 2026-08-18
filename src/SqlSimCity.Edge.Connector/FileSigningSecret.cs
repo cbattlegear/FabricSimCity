@@ -20,7 +20,7 @@ public sealed class FileSigningSecret
         if (string.IsNullOrWhiteSpace(path))
             throw new ConnectorConfigurationException("A signing secret file path must be configured.");
         if (!File.Exists(path))
-            throw new ConnectorConfigurationException($"The signing secret file was not found at '{path}'.");
+            throw new ConnectorConfigurationException("The configured signing secret file was not found.");
 
         var secret = new FileSigningSecret(path);
         var probe = secret.Read();
@@ -47,7 +47,7 @@ public sealed class FileSigningSecret
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            throw new ConnectorConfigurationException($"The signing secret file at '{_path}' could not be read.");
+            throw new ConnectorConfigurationException("The configured signing secret file could not be read.");
         }
 
         try

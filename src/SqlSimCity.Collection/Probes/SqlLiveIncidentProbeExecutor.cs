@@ -2,6 +2,7 @@ using System.Data;
 using System.Globalization;
 using Azure.Identity;
 using Microsoft.Data.SqlClient;
+using SqlSimCity.Contracts.V1;
 using SqlSimCity.SqlServer;
 using SqlSimCity.SqlServer.Secrets;
 
@@ -21,8 +22,15 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
     private readonly ISqlConnectionFactory _connectionFactory;
     private readonly ConnectionProfile _profile;
     private readonly Catalog.ProbeCatalog _catalog;
+    private readonly EnginePlatform? _configuredPlatform;
+    private readonly bool _includeSqlText;
 
-    public SqlLiveIncidentProbeExecutor(ISqlConnectionFactory connectionFactory, ConnectionProfile profile, Catalog.ProbeCatalog catalog)
+    public SqlLiveIncidentProbeExecutor(
+        ISqlConnectionFactory connectionFactory,
+        ConnectionProfile profile,
+        Catalog.ProbeCatalog catalog,
+        EnginePlatform? configuredPlatform = null,
+        bool includeSqlText = true)
     {
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(profile);
@@ -30,6 +38,8 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
         _connectionFactory = connectionFactory;
         _profile = profile;
         _catalog = catalog;
+        _configuredPlatform = configuredPlatform;
+        _includeSqlText = includeSqlText;
     }
 
     public Task<ServerIdentityResult> GetServerIdentityAsync(CancellationToken cancellationToken) =>
@@ -97,7 +107,13 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                 return (IReadOnlyList<ActiveRequestRow>)rows;
             },
             cancellationToken,
-            new Dictionary<string, object?> { ["@IncludeIdleSessions"] = true, ["@MinElapsedMs"] = 0, ["@DatabaseId"] = null });
+            new Dictionary<string, object?>
+            {
+                ["@IncludeIdleSessions"] = true,
+                ["@MinElapsedMs"] = 0,
+                ["@DatabaseId"] = null,
+                ["@IncludeSqlText"] = _includeSqlText,
+            });
 
     public Task<IReadOnlyList<Blocking.WaitingTaskFact>> GetWaitingTasksAsync(CancellationToken cancellationToken) =>
         ExecuteAsync(
@@ -185,7 +201,11 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
 
                 return (IReadOnlyList<MemoryGrantRow>)rows;
             },
-            cancellationToken);
+            cancellationToken,
+            new Dictionary<string, object?>
+            {
+                ["@IncludeSqlText"] = _includeSqlText,
+            });
 
     /// <summary>Reads tempdb-only allocation DMVs; Azure SQL Database has no supported connection scope for this probe.</summary>
     public Task<TempdbUsageRaw> GetTempdbUsageAsync(bool azureScoped, CancellationToken cancellationToken) =>
@@ -408,7 +428,9 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
 
         var executionProfile = expectedConnectionScope switch
         {
-            "master" => _profile.WithInitialDatabase("master"),
+            "master" => _configuredPlatform == EnginePlatform.AzureSqlDatabase
+                ? _profile
+                : _profile.WithInitialDatabase("master"),
             "tempdb" => _profile.WithInitialDatabase("tempdb"),
             "database" => _profile,
             "server" => _profile,

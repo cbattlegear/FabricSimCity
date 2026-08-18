@@ -16,6 +16,8 @@
 --   @DatabaseId (int, optional, default NULL) -- when supplied, restricts active requests to their
 --     request database and idle sessions to their current session database; NULL returns all
 --     visible user sessions/requests.
+--   @IncludeSqlText (bit, optional, default 1) -- when 0, no SQL text function is invoked and both
+--     text columns are NULL. Edge collection uses 0 so raw SQL is never fetched or transmitted.
 -- Result contract: zero or more rows, one per (session_id, request_id). current_statement_text is
 --   the substring of the batch actually executing right now, resolved via statement offsets;
 --   batch_text is the full submitted batch. Both are NULL for idle sessions with no sql_handle.
@@ -71,7 +73,7 @@ SELECT
 FROM sys.dm_exec_sessions AS s
 LEFT JOIN sys.dm_exec_requests AS r
     ON r.session_id = s.session_id
-OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS st
+OUTER APPLY sys.dm_exec_sql_text(CASE WHEN @IncludeSqlText = 1 THEN r.sql_handle END) AS st
 WHERE s.is_user_process = 1
   AND s.session_id <> @@SPID
   AND (@IncludeIdleSessions = 1 OR r.session_id IS NOT NULL)

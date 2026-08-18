@@ -30,10 +30,19 @@ public sealed class ConnectorRuntime(
 
         var collection = CollectionLoopAsync(cancellationToken);
         var delivery = DeliveryLoopAsync(cancellationToken);
-        await Task.WhenAll(collection, delivery).ConfigureAwait(false);
-
-        await FinalDrainAsync().ConfigureAwait(false);
-        log.Info("connector.stopped", Status());
+        try
+        {
+            await Task.WhenAll(collection, delivery).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Requested shutdown still reaches the bounded final drain below.
+        }
+        finally
+        {
+            await FinalDrainAsync().ConfigureAwait(false);
+            log.Info("connector.stopped", Status());
+        }
     }
 
     private async Task CollectionLoopAsync(CancellationToken cancellationToken)

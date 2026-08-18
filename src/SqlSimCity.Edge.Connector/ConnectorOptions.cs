@@ -1,10 +1,27 @@
 using System.Globalization;
+using SqlSimCity.Collection.Atlas;
+using SqlSimCity.Collection.QueryStore;
+using SqlSimCity.Contracts.V1;
+using SqlSimCity.SqlServer;
+using SqlSimCity.SqlServer.Auth;
+using SqlSimCity.SqlServer.Secrets;
 
 namespace SqlSimCity.Edge.Connector;
 
+public enum ConnectorSourceMode { Fixture, Connected }
+
+public sealed record ConnectedSourceOptions(
+    ConnectionProfile Profile,
+    EnginePlatform Platform,
+    string TargetDisplayName,
+    IReadOnlyList<string> KnownDatabases,
+    SecretFileProviderOptions SecretFiles,
+    AtlasCollectionOptions Atlas,
+    QueryStoreCollectionOptions QueryStore);
+
 /// <summary>
-/// Immutable, validated connector configuration. Values come from environment variables (or a small
-/// JSON file); secrets are never configuration values — only file paths are configured, and the
+/// Immutable, validated connector configuration. Values come from prefixed environment variables;
+/// secrets are never configuration values — only file references are configured, and the
 /// bytes are read from those files at use time. HTTP is refused unless the endpoint is an explicit
 /// loopback development address.
 /// </summary>
@@ -14,6 +31,8 @@ public sealed record ConnectorOptions
     public required string TargetId { get; init; }
     public required string KeyId { get; init; }
     public required Uri IngestEndpoint { get; init; }
+    public ConnectorSourceMode SourceMode { get; init; } = ConnectorSourceMode.Fixture;
+    public ConnectedSourceOptions? Connected { get; init; }
 
     /// <summary>Path to the per-connector HMAC secret (base64, at least 32 bytes) file or Docker secret.</summary>
     public required string SigningSecretFile { get; init; }
@@ -46,7 +65,10 @@ public sealed record ConnectorOptions
         RequireNonEmpty(SigningSecretFile, nameof(SigningSecretFile));
         RequireNonEmpty(SpoolDirectory, nameof(SpoolDirectory));
         RequireNonEmpty(SpoolKeyFile, nameof(SpoolKeyFile));
-        RequireNonEmpty(FixturesDirectory, nameof(FixturesDirectory));
+        if (SourceMode == ConnectorSourceMode.Fixture)
+            RequireNonEmpty(FixturesDirectory, nameof(FixturesDirectory));
+        if (SourceMode == ConnectorSourceMode.Connected && Connected is null)
+            throw new ConnectorConfigurationException("Connected source options must be configured.");
         ArgumentNullException.ThrowIfNull(IngestEndpoint);
         if (!IngestEndpoint.IsAbsoluteUri)
             throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_INGEST_ENDPOINT must be an absolute URI.");
@@ -63,28 +85,221 @@ public sealed record ConnectorOptions
     {
         ArgumentNullException.ThrowIfNull(env);
         string? Get(string key) => env.TryGetValue("SQLSIMCITY_EDGE_" + key, out var value) ? value : null;
+        var sourceMode = ParseSourceMode(Get("SOURCE_MODE"));
 
-        var options = new ConnectorOptions
+        ConnectorOptions options;
+        try
         {
-            ConnectorId = Get("CONNECTOR_ID") ?? throw Missing("CONNECTOR_ID"),
-            TargetId = Get("TARGET_ID") ?? throw Missing("TARGET_ID"),
-            KeyId = Get("KEY_ID") ?? throw Missing("KEY_ID"),
-            IngestEndpoint = new Uri(Get("INGEST_ENDPOINT") ?? throw Missing("INGEST_ENDPOINT"), UriKind.Absolute),
-            SigningSecretFile = Get("SIGNING_SECRET_FILE") ?? throw Missing("SIGNING_SECRET_FILE"),
-            SpoolDirectory = Get("SPOOL_DIR") ?? throw Missing("SPOOL_DIR"),
-            SpoolKeyFile = Get("SPOOL_KEY_FILE") ?? throw Missing("SPOOL_KEY_FILE"),
-            FixturesDirectory = Get("FIXTURES_DIR") ?? throw Missing("FIXTURES_DIR"),
-            CollectInterval = ParseSeconds(Get("COLLECT_INTERVAL_SECONDS"), 15),
-            DeliverInterval = ParseSeconds(Get("DELIVER_INTERVAL_SECONDS"), 5),
-            AllowLoopbackHttp = ParseBool(Get("ALLOW_LOOPBACK_HTTP")),
-            LoopbackHealthPort = ParseInt(Get("LOOPBACK_HEALTH_PORT"), 0),
-            SpoolMaxBytes = ParseLong(Get("SPOOL_MAX_BYTES"), 64L * 1024 * 1024),
-            SpoolMaxItems = ParseInt(Get("SPOOL_MAX_ITEMS"), 4096),
-            SpoolMaxAge = ParseSeconds(Get("SPOOL_MAX_AGE_SECONDS"), 24 * 3600),
-        };
+            var targetId = Get("TARGET_ID") ?? throw Missing("TARGET_ID");
+            options = new ConnectorOptions
+            {
+                ConnectorId = Get("CONNECTOR_ID") ?? throw Missing("CONNECTOR_ID"),
+                TargetId = targetId,
+                KeyId = Get("KEY_ID") ?? throw Missing("KEY_ID"),
+                IngestEndpoint = new Uri(Get("INGEST_ENDPOINT") ?? throw Missing("INGEST_ENDPOINT"), UriKind.Absolute),
+                SourceMode = sourceMode,
+                Connected = sourceMode == ConnectorSourceMode.Connected
+                    ? BuildConnected(env, targetId)
+                    : null,
+                SigningSecretFile = Get("SIGNING_SECRET_FILE") ?? throw Missing("SIGNING_SECRET_FILE"),
+                SpoolDirectory = Get("SPOOL_DIR") ?? throw Missing("SPOOL_DIR"),
+                SpoolKeyFile = Get("SPOOL_KEY_FILE") ?? throw Missing("SPOOL_KEY_FILE"),
+                FixturesDirectory = Get("FIXTURES_DIR") ?? string.Empty,
+                CollectInterval = ParseSeconds(Get("COLLECT_INTERVAL_SECONDS"), 15),
+                DeliverInterval = ParseSeconds(Get("DELIVER_INTERVAL_SECONDS"), 5),
+                AllowLoopbackHttp = ParseBool(Get("ALLOW_LOOPBACK_HTTP")),
+                LoopbackHealthPort = ParseInt(Get("LOOPBACK_HEALTH_PORT"), 0),
+                SpoolMaxBytes = ParseLong(Get("SPOOL_MAX_BYTES"), 64L * 1024 * 1024),
+                SpoolMaxItems = ParseInt(Get("SPOOL_MAX_ITEMS"), 4096),
+                SpoolMaxAge = ParseSeconds(Get("SPOOL_MAX_AGE_SECONDS"), 24 * 3600),
+            };
+        }
+        catch (ConnectorConfigurationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (
+            ex is ArgumentException or FormatException or
+            ConnectionProfileValidationException or SecretResolutionException)
+        {
+            throw new ConnectorConfigurationException(
+                "Connected SQL source configuration is invalid; check the documented field shapes.");
+        }
 
         options.Validate();
         return options;
+    }
+
+    private static ConnectedSourceOptions BuildConnected(
+        IReadOnlyDictionary<string, string?> env,
+        string targetId)
+    {
+        string? Get(string key) => env.TryGetValue("SQLSIMCITY_EDGE_SQL_" + key, out var value) ? value : null;
+        foreach (var plaintext in new[] { "PASSWORD", "CLIENT_SECRET", "CERTIFICATE_PASSWORD", "FEDERATED_TOKEN" })
+        {
+            if (!string.IsNullOrEmpty(Get(plaintext)))
+                throw new ConnectorConfigurationException(
+                    $"SQLSIMCITY_EDGE_SQL_{plaintext} is a prohibited plaintext secret; configure its file reference instead.");
+        }
+
+        var secretsDirectory = Get("SECRETS_DIR") ?? SecretFileProviderOptions.DefaultSecretsDirectory;
+        var maxSecretSize = ParseIntStrict(
+            Get("MAX_SECRET_SIZE_BYTES"),
+            SecretFileProviderOptions.DefaultMaxSecretSizeBytes,
+            "SQL_MAX_SECRET_SIZE_BYTES");
+        if (maxSecretSize <= 0)
+            throw new ConnectorConfigurationException(
+                "SQLSIMCITY_EDGE_SQL_MAX_SECRET_SIZE_BYTES must be positive.");
+        var secretOptions = new SecretFileProviderOptions
+        {
+            SecretsDirectory = secretsDirectory,
+            MaxSecretSizeBytes = maxSecretSize,
+        };
+        var platform = ParseRequiredEnum<EnginePlatform>(Get("PLATFORM"), "SQL_PLATFORM");
+        if (platform is EnginePlatform.Unknown or EnginePlatform.Unsupported)
+            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_PLATFORM must identify a supported configured platform.");
+        var knownDatabases = ParseList(Get("KNOWN_DATABASES"));
+        if (platform == EnginePlatform.AzureSqlDatabase && knownDatabases.Length == 0)
+            throw new ConnectorConfigurationException("Azure SQL Database requires at least one configured known database.");
+        if (knownDatabases.Length > AtlasCollectionOptions.MaximumDatabases)
+            throw new ConnectorConfigurationException("Known database count exceeds the bounded maximum of 100.");
+
+        var initialDatabase = Get("INITIAL_DATABASE") ??
+            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_INITIAL_DATABASE is required.");
+        var authentication = BuildAuthentication(Get, secretsDirectory);
+        var profile = new ConnectionProfile(
+            new ConnectionProfileId($"edge:{targetId}"),
+            new ServerAddress(
+                Get("HOST") ?? throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_HOST is required."),
+                Get("INSTANCE"),
+                ParseNullableInt(Get("PORT"), "SQL_PORT")),
+            initialDatabase,
+            new ConnectionTimeouts(
+                ParseIntStrict(Get("CONNECT_TIMEOUT_SECONDS"), 15, "SQL_CONNECT_TIMEOUT_SECONDS"),
+                ParseIntStrict(Get("COMMAND_TIMEOUT_SECONDS"), 30, "SQL_COMMAND_TIMEOUT_SECONDS")),
+            new PoolBounds(
+                ParseIntStrict(Get("MIN_POOL_SIZE"), 0, "SQL_MIN_POOL_SIZE"),
+                ParseIntStrict(Get("MAX_POOL_SIZE"), 20, "SQL_MAX_POOL_SIZE")),
+            ParseRequiredEnum<EncryptionPolicy>(Get("ENCRYPTION") ?? "Mandatory", "SQL_ENCRYPTION"),
+            authentication,
+            Get("HOST_NAME_IN_CERTIFICATE"),
+            ParseBoolStrict(Get("TRUST_SERVER_CERTIFICATE"), false, "SQL_TRUST_SERVER_CERTIFICATE"));
+
+        var displayName = Get("TARGET_DISPLAY_NAME") ??
+            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_TARGET_DISPLAY_NAME is required.");
+        var atlas = new AtlasCollectionOptions
+        {
+            TargetId = targetId,
+            DisplayName = displayName,
+            KnownDatabases = knownDatabases,
+            DatabaseConcurrency = ParseIntStrict(Get("DATABASE_CONCURRENCY"), 4, "SQL_DATABASE_CONCURRENCY"),
+            QueryStoreWindow = TimeSpan.FromMinutes(
+                ParseIntStrict(Get("QUERY_STORE_WINDOW_MINUTES"), 1_440, "SQL_QUERY_STORE_WINDOW_MINUTES")),
+            RefreshInterval = TimeSpan.FromSeconds(10),
+            StaleAfter = TimeSpan.FromSeconds(
+                ParseIntStrict(Get("STALE_AFTER_SECONDS"), 180, "SQL_STALE_AFTER_SECONDS")),
+        };
+        atlas.Validate();
+        var queryStore = new QueryStoreCollectionOptions(
+            ParseIntStrict(Get("QUERY_STORE_PAGE_SIZE"), 1_000, "SQL_QUERY_STORE_PAGE_SIZE"),
+            ParseIntStrict(Get("DATABASE_CONCURRENCY"), 4, "SQL_DATABASE_CONCURRENCY"),
+            TimeSpan.FromMinutes(ParseIntStrict(
+                Get("QUERY_STORE_OVERLAP_MINUTES"), 65, "SQL_QUERY_STORE_OVERLAP_MINUTES")));
+        queryStore.Validate();
+        return new ConnectedSourceOptions(
+            profile, platform, displayName, knownDatabases, secretOptions, atlas, queryStore);
+    }
+
+    private static AuthenticationStrategy BuildAuthentication(
+        Func<string, string?> get,
+        string secretsDirectory)
+    {
+        var mode = get("AUTH_MODE") ??
+            throw new ConnectorConfigurationException("SQLSIMCITY_EDGE_SQL_AUTH_MODE is required.");
+        string Required(string name) => get(name) ??
+            throw new ConnectorConfigurationException($"SQLSIMCITY_EDGE_SQL_{name} is required for the configured authentication mode.");
+        SecretFileReference Secret(string name) => new(Required(name));
+        return mode.ToUpperInvariant() switch
+        {
+            "SQLLOGIN" => new SqlLoginAuthenticationStrategy(Required("USERNAME"), Secret("PASSWORD_SECRET_FILE")),
+            "KERBEROS" => new KerberosAuthenticationStrategy(),
+            "MANAGEDIDENTITY" => new ManagedIdentityAuthenticationStrategy(get("USER_ASSIGNED_CLIENT_ID")),
+            "WORKLOADIDENTITY" => new WorkloadIdentityAuthenticationStrategy(
+                Required("TENANT_ID"),
+                Required("CLIENT_ID"),
+                Path.Combine(secretsDirectory, Secret("FEDERATED_TOKEN_FILE").FileName)),
+            "SERVICEPRINCIPALCERTIFICATE" => new ServicePrincipalCertificateAuthenticationStrategy(
+                Required("TENANT_ID"),
+                Required("CLIENT_ID"),
+                Secret("CERTIFICATE_SECRET_FILE"),
+                get("CERTIFICATE_PASSWORD_SECRET_FILE") is { Length: > 0 } password
+                    ? new SecretFileReference(password)
+                    : (SecretFileReference?)null),
+            "SERVICEPRINCIPALSECRET" => new ServicePrincipalSecretAuthenticationStrategy(
+                Required("TENANT_ID"), Required("CLIENT_ID"), Secret("CLIENT_SECRET_FILE")),
+            _ => throw new ConnectorConfigurationException(
+                "SQLSIMCITY_EDGE_SQL_AUTH_MODE must be one of: SqlLogin, Kerberos, ManagedIdentity, WorkloadIdentity, ServicePrincipalCertificate, ServicePrincipalSecret."),
+        };
+    }
+
+    private static ConnectorSourceMode ParseSourceMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return ConnectorSourceMode.Fixture;
+        if (Enum.TryParse<ConnectorSourceMode>(value, true, out var parsed))
+            return parsed;
+        throw new ConnectorConfigurationException(
+            "SQLSIMCITY_EDGE_SOURCE_MODE must be Fixture or Connected.");
+    }
+
+    private static string[] ParseList(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return [];
+        var values = value.Split(
+            ',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (values.Distinct(StringComparer.OrdinalIgnoreCase).Count() != values.Length)
+            throw new ConnectorConfigurationException(
+                "SQLSIMCITY_EDGE_SQL_KNOWN_DATABASES must not contain duplicates.");
+        return values;
+    }
+
+    private static T ParseRequiredEnum<T>(string? value, string key, T? fallback = null)
+        where T : struct, Enum
+    {
+        if (value is null && fallback is { } fallbackValue)
+            return fallbackValue;
+        if (value is not null && Enum.TryParse<T>(value, true, out var parsed) && Enum.IsDefined(parsed))
+            return parsed;
+        throw new ConnectorConfigurationException($"SQLSIMCITY_EDGE_{key} is missing or invalid.");
+    }
+
+    private static int? ParseNullableInt(string? value, string key)
+    {
+        if (value is null)
+            return null;
+        return int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : throw new ConnectorConfigurationException($"SQLSIMCITY_EDGE_{key} must be an integer.");
+    }
+
+    private static int ParseIntStrict(string? value, int fallback, string key)
+    {
+        if (value is null)
+            return fallback;
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : throw new ConnectorConfigurationException($"SQLSIMCITY_EDGE_{key} must be an integer.");
+    }
+
+    private static bool ParseBoolStrict(string? value, bool fallback, string key)
+    {
+        if (value is null)
+            return fallback;
+        return bool.TryParse(value, out var parsed)
+            ? parsed
+            : throw new ConnectorConfigurationException(
+                $"SQLSIMCITY_EDGE_{key} must be true or false.");
     }
 
     private static ConnectorConfigurationException Missing(string key)

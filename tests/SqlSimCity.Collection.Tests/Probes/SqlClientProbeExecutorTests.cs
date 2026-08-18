@@ -1,6 +1,7 @@
 using SqlSimCity.Collection.Catalog;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Collection.Tests.Catalog;
+using SqlSimCity.Contracts.V1;
 using SqlSimCity.SqlServer;
 using SqlSimCity.SqlServer.Auth;
 using System.Data;
@@ -41,6 +42,26 @@ public sealed class SqlClientProbeExecutorTests
             () => executor.CheckServerPermissionAsync("VIEW SERVER STATE", CancellationToken.None));
 
         Assert.Equal(["master", "master", "original"], factory.OpenedProfiles.Select(p => p.InitialDatabase));
+    }
+
+    [Fact]
+    public async Task ConfiguredAzureSqlUsesContainedDatabaseForMasterScopedMetadata()
+    {
+        var factory = new CapturingConnectionFactory();
+        var executor = new SqlClientProbeExecutor(
+            factory,
+            BuildProfile("contained-db"),
+            ProbeCatalog.Load(),
+            EnginePlatform.AzureSqlDatabase);
+
+        await Assert.ThrowsAsync<StopAfterCaptureException>(
+            () => executor.GetServerIdentityAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<StopAfterCaptureException>(
+            () => executor.GetDatabaseDiscoveryAsync(CancellationToken.None));
+
+        Assert.All(
+            factory.OpenedProfiles,
+            profile => Assert.Equal("contained-db", profile.InitialDatabase));
     }
 
     [Fact]

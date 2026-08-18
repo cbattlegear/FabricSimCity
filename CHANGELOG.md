@@ -29,7 +29,9 @@ First MVP release candidate. There is no tagged release yet.
   allowlisted target generation projects through the existing Atlas, capabilities, Query Store,
   database-city, live, and findings APIs; partial next generations remain invisible. The UI shows a
   compact Edge source/status/target panel and labels live evidence as a static point-in-time sample.
-  No live SQL target was validated; the shipping connector provider is fixture-backed.
+  The connector supports fixture and opt-in connected sources; connected mode composes the production
+  SQL collectors over one validated file-secret profile, bounded volatile Query Store storage, and
+  text-disabled live probes. No live SQL target was validated; connected tests use fake executors.
 - Fixture-mode and opt-in read-only connected server **atlas** (`/api/v1/atlas`,
   `/api/v1/atlas/status`) with a three.js scene backed by a keyboard- and
   screen-reader-accessible database evidence table.

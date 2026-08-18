@@ -10,9 +10,9 @@ This document covers deployment, security, and operations. For the transport con
 see the `SqlSimCity.Edge` and `SqlSimCity.Edge.Connector` projects.
 
 > **No live SQL target validated.** As with the rest of SQLSimCity, the connector ships with a
-> deterministic fixture observation provider and has been validated end to end against fixtures.
-> A connector adapter backed by live `SqlSimCity.Collection` collectors does not ship yet; no real SQL
-> Server was contacted during development.
+> deterministic fixture observation provider and an opt-in connected provider built from the same
+> production collectors as central connected mode. End-to-end validation used fixtures and fake probe
+> executors only; no real SQL Server was contacted during development.
 
 ## Architecture
 
@@ -98,6 +98,7 @@ separators, `..`, and rooted paths are rejected. Each secret file holds base64 o
 | `SQLSIMCITY_EDGE_CONNECTOR_ID` | Opaque connector identity (must be allowlisted centrally). |
 | `SQLSIMCITY_EDGE_TARGET_ID` | Opaque monitored-target identity. |
 | `SQLSIMCITY_EDGE_KEY_ID` | Signing key id (for rotation). |
+| `SQLSIMCITY_EDGE_SOURCE_MODE` | `Fixture` (default) or `Connected`. |
 | `SQLSIMCITY_EDGE_INGEST_ENDPOINT` | Absolute central ingestion URL (HTTPS in production). |
 | `SQLSIMCITY_EDGE_SIGNING_SECRET_FILE` | File holding the base64 HMAC secret. |
 | `SQLSIMCITY_EDGE_SPOOL_DIR` | Spool directory (a bounded volume). |
@@ -108,6 +109,58 @@ separators, `..`, and rooted paths are rejected. Each secret file holds base64 o
 | `SQLSIMCITY_EDGE_SPOOL_MAX_BYTES` / `_MAX_ITEMS` / `_MAX_AGE_SECONDS` | Spool bounds. |
 | `SQLSIMCITY_EDGE_ALLOW_LOOPBACK_HTTP` | Allow plain HTTP only for a loopback dev endpoint. |
 | `SQLSIMCITY_EDGE_LOOPBACK_HEALTH_PORT` | Optional loopback-only generic health port (0 disables). |
+
+### Connected SQL source
+
+`Connected` uses `SqlConnectionFactory` and the production live, Atlas, capability, incremental
+Query Store, and database-city collectors. Collector instances, delta baselines, Query Store
+watermarks, and the bounded volatile protected-record store persist across connector cycles. The
+store is capped at 4,096 records, 1 MiB per record, and 64 MiB total; it never writes plaintext to
+disk and clears rejected/replaced/disposed buffers. Restarting the
+connector starts a new transport epoch and intentionally resets that in-process history.
+
+The complete profile is required before the process starts:
+
+| Variable | Meaning |
+| --- | --- |
+| `SQLSIMCITY_EDGE_SQL_HOST` | SQL Server DNS name or IPv4 address. |
+| `SQLSIMCITY_EDGE_SQL_PORT` / `_INSTANCE` | Optional port or named instance; configure at most one. |
+| `SQLSIMCITY_EDGE_SQL_INITIAL_DATABASE` | Initial/contained database. |
+| `SQLSIMCITY_EDGE_SQL_PLATFORM` | `SqlServerOnPremises`, `AzureSqlDatabase`, or `AzureSqlManagedInstance`; never inferred. |
+| `SQLSIMCITY_EDGE_SQL_TARGET_DISPLAY_NAME` | Non-secret display label. |
+| `SQLSIMCITY_EDGE_SQL_KNOWN_DATABASES` | Comma-separated, unique names (maximum 100). Required for Azure SQL Database. |
+| `SQLSIMCITY_EDGE_SQL_CONNECT_TIMEOUT_SECONDS` / `_COMMAND_TIMEOUT_SECONDS` | Bounded connection/command timeouts (defaults 15/30). |
+| `SQLSIMCITY_EDGE_SQL_MIN_POOL_SIZE` / `_MAX_POOL_SIZE` | Validated pool bounds (defaults 0/20). |
+| `SQLSIMCITY_EDGE_SQL_ENCRYPTION` | `Mandatory` (default) or `Strict`. |
+| `SQLSIMCITY_EDGE_SQL_HOST_NAME_IN_CERTIFICATE` | Optional explicit TLS certificate host. |
+| `SQLSIMCITY_EDGE_SQL_TRUST_SERVER_CERTIFICATE` | Explicit per-profile opt-in; incompatible with `Strict`. |
+| `SQLSIMCITY_EDGE_SQL_SECRETS_DIR` | Directory containing SQL authentication files (default `/run/secrets`). |
+| `SQLSIMCITY_EDGE_SQL_DATABASE_CONCURRENCY` | Atlas/Query Store database concurrency, 1–16 (default 4). |
+| `SQLSIMCITY_EDGE_SQL_QUERY_STORE_WINDOW_MINUTES` | Atlas Query Store window (default 1440). |
+| `SQLSIMCITY_EDGE_SQL_QUERY_STORE_PAGE_SIZE` | Incremental page bound, 1–10000 (default 1000). |
+| `SQLSIMCITY_EDGE_SQL_QUERY_STORE_OVERLAP_MINUTES` | Incremental overlap, 0–1440 (default 65). |
+
+Select exactly one `SQLSIMCITY_EDGE_SQL_AUTH_MODE`:
+
+- `SqlLogin`: `SQL_USERNAME` plus `SQL_PASSWORD_SECRET_FILE`.
+- `Kerberos`: the container service identity and standard `KRB5_CONFIG`/`KRB5_KTNAME` mounted-file
+  deployment described in `SECURITY.md`; no password fallback exists.
+- `ManagedIdentity`: optional `SQL_USER_ASSIGNED_CLIENT_ID`.
+- `WorkloadIdentity`: `SQL_TENANT_ID`, `SQL_CLIENT_ID`, and
+  `SQL_FEDERATED_TOKEN_FILE` (a simple file name resolved under `SQL_SECRETS_DIR`).
+- `ServicePrincipalCertificate`: `SQL_TENANT_ID`, `SQL_CLIENT_ID`,
+  `SQL_CERTIFICATE_SECRET_FILE`, and optional `SQL_CERTIFICATE_PASSWORD_SECRET_FILE`.
+- `ServicePrincipalSecret`: `SQL_TENANT_ID`, `SQL_CLIENT_ID`, and
+  `SQL_CLIENT_SECRET_FILE`.
+
+Every name above is appended to the `SQLSIMCITY_EDGE_` prefix. Secret values in environment
+variables are rejected; configured authentication files are preflighted before collection starts.
+There is no `DefaultAzureCredential`, interactive login, credential chain, or auth fallback.
+
+The connector fetches Query Store normalized facts only. It never calls the raw query-text or
+Showplan XML lookup methods. Its live probes set `@IncludeSqlText=0`, which prevents
+`sys.dm_exec_sql_text` invocation; login, host, program, and any defensive text fields are also
+cleared before the envelope is built.
 
 Spool key file format:
 
@@ -132,6 +185,11 @@ The connector uses the same read-only collection as connected central mode. Gran
 `VIEW SERVER STATE` + `VIEW DATABASE STATE` (SQL Server 2016–2019) or `VIEW SERVER PERFORMANCE STATE`
 + `VIEW DATABASE PERFORMANCE STATE` (SQL Server 2022+), plus `CONNECT` to each collected database.
 SQLSimCity never executes grants. See the main `README.md` and `SECURITY.md`.
+
+Permit outbound traffic only to the configured central HTTPS endpoint and SQL Server endpoint.
+Microsoft Entra modes additionally require the documented authority/token endpoints; managed identity
+requires its platform identity endpoint, workload identity requires its mounted token, and Kerberos
+requires DNS plus KDC/realm traffic. No inbound connector control port is required.
 
 ## Central projection and status
 

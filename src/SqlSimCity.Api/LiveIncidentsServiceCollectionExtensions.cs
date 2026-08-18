@@ -98,7 +98,8 @@ public static class LiveIncidentsServiceCollectionExtensions
             new SqlLiveIncidentProbeExecutor(
                 sp.GetRequiredKeyedService<ISqlConnectionFactory>(ConnectionFactoryServiceKey),
                 profile,
-                probeCatalog));
+                probeCatalog,
+                platform));
         services.AddSingleton<ILiveIncidentCollector>(sp =>
             new LiveIncidentCollector(
                 sp.GetRequiredService<ILiveIncidentProbeExecutor>(),

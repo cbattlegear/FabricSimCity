@@ -1,4 +1,7 @@
 -- Probe: sessions.memory_grants
+-- Parameters:
+--   @IncludeSqlText (bit, optional, default 1) -- when 0, no SQL text function is invoked and
+--     batch_text is NULL. Edge collection uses 0.
 -- Purpose: Queries that currently hold, or are waiting for, a workspace memory grant. Returns
 --   plan_handle/sql_handle as opaque identifiers plus the resolved batch text; does not fetch
 --   Showplan XML (no CROSS/OUTER APPLY sys.dm_exec_query_plan here), consistent with keeping this
@@ -50,4 +53,4 @@ SELECT
     mg.sql_handle,
     st.text AS batch_text
 FROM sys.dm_exec_query_memory_grants AS mg
-OUTER APPLY sys.dm_exec_sql_text(mg.sql_handle) AS st;
+OUTER APPLY sys.dm_exec_sql_text(CASE WHEN @IncludeSqlText = 1 THEN mg.sql_handle END) AS st;

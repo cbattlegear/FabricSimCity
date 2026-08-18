@@ -8,6 +8,23 @@ The application exposes operational-shaped evidence to every client that can rea
 
 Security headers enforce a same-origin baseline: no permissive CORS, no remote scripts, no `unsafe-eval`, and locked-down object, base, and frame-ancestor policies. SignalR uses same-origin `connect-src 'self'`. Health probes return only generic status and no target identity.
 
+### Connected edge connector
+
+The outward-only connector defaults to fixtures. `SQLSIMCITY_EDGE_SOURCE_MODE=Connected` requires a
+complete platform/TLS/pool/timeout profile and exactly one SQL login, Kerberos, managed identity,
+workload identity, service-principal certificate, or service-principal secret strategy. Passwords,
+client secrets, certificates, certificate passwords, and workload tokens are file references under
+the configured secrets directory; plaintext secret environment variables and credential-chain
+fallback are rejected. Required authentication files are checked before collection starts.
+
+Connected edge Query Store collection reads normalized facts only and never calls raw query-text or
+Showplan XML lookups. Live probes set `@IncludeSqlText=0`, preventing `sys.dm_exec_sql_text` from
+being invoked, and identity/text fields are cleared defensively before signing. Query Store working
+state uses a bounded process-memory `IProtectedRecordStore`; it is never persisted as plaintext and
+owned buffers are zeroed on replacement and shutdown. Permit outbound traffic only to the configured
+central HTTPS endpoint, SQL endpoint, and the identity/Kerberos endpoints required by the selected
+strategy. The connector exposes no inbound control API.
+
 ## Data and storage
 
 The `/data` mount hosts an optional encrypted protected storage layer. It is **disabled by default**, and atlas collection does not persist snapshots there. Nothing writes to `/data` unless an operator explicitly enables protected storage and provides a key. A standard Docker named volume is not application-level encryption by itself; protected storage's AES-256-GCM envelope is what makes retained bytes unreadable without the key, and the volume must still be backed up and access-controlled like any other data at rest.

@@ -49,7 +49,11 @@ try
 
     var bootId = Guid.NewGuid().ToString("N");
     var epochId = bootId; // A fresh process boot is a fresh epoch; the central resets deltas accordingly.
-    var provider = new FixtureObservationProvider(options.FixturesDirectory, options.TargetId);
+    await using var connectedProvider = options.SourceMode == ConnectorSourceMode.Connected
+        ? await ConnectedObservationProvider.CreateAsync(options.Connected!)
+        : null;
+    IObservationProvider provider = (IObservationProvider?)connectedProvider ??
+        new FixtureObservationProvider(options.FixturesDirectory, options.TargetId);
     var collector = new ConnectorObservationCollector(options, provider, bootId, epochId);
 
     using var cts = new CancellationTokenSource();
@@ -73,6 +77,6 @@ catch (ConnectorConfigurationException ex)
 }
 catch (Exception ex)
 {
-    log.Error("connector.fatal", new Dictionary<string, object?> { ["error"] = ex.GetType().Name, ["message"] = ex.Message });
+    log.Error("connector.fatal", new Dictionary<string, object?> { ["error"] = ex.GetType().Name });
     return 1;
 }

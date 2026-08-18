@@ -1,6 +1,7 @@
 using System.Data;
 using System.Globalization;
 using Microsoft.Data.SqlClient;
+using SqlSimCity.Contracts.V1;
 using SqlSimCity.SqlServer;
 
 namespace SqlSimCity.Collection.Probes;
@@ -21,8 +22,13 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
     private readonly ISqlConnectionFactory _connectionFactory;
     private readonly ConnectionProfile _profile;
     private readonly Catalog.ProbeCatalog _catalog;
+    private readonly EnginePlatform? _configuredPlatform;
 
-    public SqlClientProbeExecutor(ISqlConnectionFactory connectionFactory, ConnectionProfile profile, Catalog.ProbeCatalog catalog)
+    public SqlClientProbeExecutor(
+        ISqlConnectionFactory connectionFactory,
+        ConnectionProfile profile,
+        Catalog.ProbeCatalog catalog,
+        EnginePlatform? configuredPlatform = null)
     {
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(profile);
@@ -30,6 +36,7 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         _connectionFactory = connectionFactory;
         _profile = profile;
         _catalog = catalog;
+        _configuredPlatform = configuredPlatform;
     }
 
     public Task<ServerIdentityResult> GetServerIdentityAsync(CancellationToken cancellationToken) =>
@@ -212,7 +219,9 @@ public sealed class SqlClientProbeExecutor : IProbeExecutor
         var boundParameters = BuildParameters(probe, parameters);
         var executionProfile = expectedConnectionScope switch
         {
-            "master" => _profile.WithInitialDatabase("master"),
+            "master" => _configuredPlatform == EnginePlatform.AzureSqlDatabase
+                ? _profile
+                : _profile.WithInitialDatabase("master"),
             "database" when !string.IsNullOrWhiteSpace(databaseName) => _profile.WithInitialDatabase(databaseName),
             "database" => throw new InvalidOperationException($"Database-scoped probe '{probeId}' requires a target database."),
             "server" => _profile,

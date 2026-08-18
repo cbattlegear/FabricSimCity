@@ -19,7 +19,8 @@ public sealed class SqlQueryStoreIncrementalSource(
     ISqlConnectionFactory connectionFactory,
     ConnectionProfile profile,
     ProbeCatalog catalog,
-    TimeProvider timeProvider) : IQueryStoreIncrementalSource, IDisposable
+    TimeProvider timeProvider,
+    EnginePlatform? configuredPlatform = null) : IQueryStoreIncrementalSource, IDisposable
 {
     private readonly SemaphoreSlim _capabilityGate = new(1, 1);
     private ServerCapabilities? _capabilities;
@@ -476,7 +477,9 @@ public sealed class SqlQueryStoreIncrementalSource(
         if (!string.Equals(probe.ConnectionScope, expectedScope, StringComparison.Ordinal))
             throw new InvalidOperationException($"Probe '{probeId}' has unexpected connection scope.");
         var executionProfile = expectedScope == "master"
-            ? profile.WithInitialDatabase("master")
+            ? configuredPlatform == EnginePlatform.AzureSqlDatabase
+                ? profile
+                : profile.WithInitialDatabase("master")
             : profile.WithInitialDatabase(databaseId ??
                 throw new InvalidOperationException("A database-scoped probe requires a database."));
         try
