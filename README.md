@@ -8,6 +8,8 @@ SQLSimCity is a self-hosted visual performance tool for Microsoft SQL Server. It
 - evidence-backed findings with caveats and next checks;
 - offline archives and an optional outward-only edge connector.
 
+**Heavily inspired by [PGSimCity](https://github.com/NikolayS/PGSimCity).**
+
 SQLSimCity is strictly read-only against monitored SQL Servers. Query Store history is aggregate
 evidence, live DMVs are point-in-time samples, and inferred relationships are always labelled with
 their confidence.
@@ -163,8 +165,8 @@ development; connected paths are covered by deterministic fakes, production comp
 fail-closed container smokes.
 
 SQLSimCity is independent software. It is not affiliated with, sponsored by, or endorsed by
-Microsoft, Electronic Arts, Maxis, the SimCity franchise, the PostgreSQL project, or PGSimCity. No
-SimCity assets are included.
+Microsoft, Electronic Arts, Maxis, the SimCity franchise, or the PostgreSQL project. No SimCity
+assets are included.
 
 ## License
 
