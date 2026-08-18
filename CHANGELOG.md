@@ -214,6 +214,13 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Fixed
 
+- `tools/container-smoke.sh` asserted a fail-closed startup message that no longer exists, so the
+  `container` CI job failed on the commit that reworded it. The connected Query Store requirement
+  message dropped its "plaintext fallback is forbidden" clause when payload sealing was removed —
+  that clause had become false — but the smoke test still grepped for it with `--fixed-strings`. It
+  now matches the current wording, which is asserted against real captured startup output rather
+  than read off the source.
+
 - Three protected-storage log messages and two `Program.cs` comments asserted encryption that had
   already been removed: that query text is encrypted at rest with the generated key, that losing that
   key makes every stored record permanently unrecoverable and the store refuses to open, and that
