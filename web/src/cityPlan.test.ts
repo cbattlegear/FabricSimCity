@@ -11,6 +11,7 @@ import {
   planCity,
   streetPath,
   streetPolyline,
+  streetPolylineThrough,
 } from './cityPlan'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import type { Evidence } from './contracts'
@@ -199,13 +200,32 @@ describe('planCity', () => {
     expect(planCity(sampleCity()).civic).toEqual(plan.civic)
   })
 
-  it('packs a full block before starting the next one', () => {
-    const objects = Array.from({ length: CELLS_PER_BLOCK + 1 }, (_unused, index) =>
+  it('gives every building its own block, ringed by street', () => {
+    const objects = Array.from({ length: 9 }, (_unused, index) =>
       object(`object:dbo:${index}`, 'schema:dbo', 0, index))
     const plan = planCity(objects)
     const blocks = new Set([...plan.lots.values()].map(lot => lot.blockId))
-    expect(blocks.size).toBe(2)
+
+    // The separation that schema tints used to provide now lives in the street lattice, so no two
+    // buildings may share a block no matter how many objects the district holds.
+    expect(blocks.size).toBe(objects.length)
+    expect(CELLS_PER_BLOCK).toBe(1)
     expect(BLOCK_COLS * BLOCK_ROWS).toBe(CELLS_PER_BLOCK)
+  })
+
+  it('separates every pair of buildings by at least a street width', () => {
+    const plan = planCity(sampleCity())
+    const lots = [...plan.lots.values()]
+    for (const left of lots) {
+      for (const right of lots) {
+        if (left.objectId === right.objectId) continue
+        // Lots sit one per block, so any two buildings differ by a full block pitch on at least one
+        // axis. Their footprints are bounded by the cell, leaving the street clear between them.
+        const gapX = Math.abs(left.x - right.x)
+        const gapZ = Math.abs(left.z - right.z)
+        expect(Math.max(gapX, gapZ)).toBeGreaterThanOrEqual(plan.cell)
+      }
+    }
   })
 
   it('plans a usable city from a single object', () => {
@@ -276,6 +296,43 @@ describe('street graph', () => {
         Math.abs(previous.x - current.x) < 0.001 || Math.abs(previous.z - current.z) < 0.001
       expect(axisAligned).toBe(true)
     }
+  })
+
+  it('threads one continuous street path through every waypoint in order', () => {
+    const plan = planCity(sampleCity())
+    const lots = [...plan.lots.values()]
+    const stops = [lots[0]!, lots[2]!, lots[lots.length - 1]!].map(lot => ({
+      x: lot.accessX,
+      z: lot.accessZ,
+    }))
+    const threaded = streetPolylineThrough(plan, stops)
+
+    // Every waypoint is actually visited, so a shared lane really does pass each building it names.
+    for (const stop of stops) {
+      expect(threaded.some(point => point.x === stop.x && point.z === stop.z)).toBe(true)
+    }
+    // Waypoints appear in the order given: the path is one journey, not three overlapping ones.
+    const visits = stops.map(stop =>
+      threaded.findIndex(point => point.x === stop.x && point.z === stop.z))
+    expect(visits).toEqual([...visits].sort((left, right) => left - right))
+    // Still drives on streets rather than cutting the corner between legs.
+    for (let index = 1; index < threaded.length; index += 1) {
+      const previous = threaded[index - 1]!
+      const current = threaded[index]!
+      expect(
+        Math.abs(previous.x - current.x) < 0.001 || Math.abs(previous.z - current.z) < 0.001,
+      ).toBe(true)
+    }
+    // No duplicated vertex where one leg hands over to the next.
+    for (let index = 1; index < threaded.length; index += 1) {
+      expect(threaded[index]).not.toEqual(threaded[index - 1])
+    }
+  })
+
+  it('draws nothing for a lane with fewer than two waypoints', () => {
+    const plan = planCity(sampleCity())
+    expect(streetPolylineThrough(plan, [])).toEqual([])
+    expect(streetPolylineThrough(plan, [{ x: 0, z: 0 }])).toEqual([])
   })
 
   it('snaps a world point to the nearest intersection', () => {

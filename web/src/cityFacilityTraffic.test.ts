@@ -163,20 +163,31 @@ describe('projectFacilityTraffic', () => {
     ])
   })
 
-  it('reports a multi-object family whole instead of dividing it between its buildings', () => {
+  it('draws a multi-object family as one shared lane instead of dividing it between its buildings', () => {
     const traffic = projectFacilityTraffic(
       [family({ familyId: 'f1', objectIds: ['a', 'b'], waitMillisecondsByCategory: { 'Lock': '1000' } })],
       objects,
     )
 
+    // Never a per-object lane: no building may claim time the family measured across several.
     expect(traffic.lanes).toHaveLength(0)
-    expect(traffic.shared).toEqual([{ category: 'Lock', waitMilliseconds: '1000' }])
+    expect(traffic.shared).toEqual([])
+    expect(traffic.sharedLanes).toHaveLength(1)
+    const [lane] = traffic.sharedLanes
+    // Whole, undivided, and drawn exactly once through both buildings it names.
+    expect(lane.waitMilliseconds).toBe('1000')
+    expect(lane.objectIds).toEqual(['a', 'b'])
+    expect(lane.namedObjectCount).toBe(2)
+    expect(lane.offPageObjectCount).toBe(0)
+    expect(lane.facility).toBe('lock')
+    expect(lane.rationale).toMatch(/not divided/)
     expect(traffic.measuredFamilyCount).toBe(1)
   })
 
-  it('does not hand a multi-object family to the one building that happens to be loaded', () => {
+  it('threads a shared lane through only the named objects on this page, and says so', () => {
     // Giving 'a' all 1000 ms because the cross-database object is off this page would be a worse
-    // fabrication than splitting it: the family never attributed that time to 'a' alone.
+    // fabrication than splitting it: the family never attributed that time to 'a' alone. The lane
+    // still carries the whole figure, but discloses that its drawn path is short of the relationship.
     const traffic = projectFacilityTraffic(
       [family({
         familyId: 'f1',
@@ -187,7 +198,47 @@ describe('projectFacilityTraffic', () => {
     )
 
     expect(traffic.lanes).toHaveLength(0)
+    expect(traffic.sharedLanes).toHaveLength(1)
+    const [lane] = traffic.sharedLanes
+    expect(lane.objectIds).toEqual(['a'])
+    expect(lane.namedObjectCount).toBe(2)
+    expect(lane.offPageObjectCount).toBe(1)
+    expect(lane.waitMilliseconds).toBe('1000')
+    expect(lane.rationale).toMatch(/not on this page/)
+  })
+
+  it('reports a multi-object family whole in text when none of its objects are on this page', () => {
+    const traffic = projectFacilityTraffic(
+      [family({
+        familyId: 'f1',
+        objectIds: ['off-page', 'other-database/table'],
+        waitMillisecondsByCategory: { 'Lock': '1000' },
+      })],
+      objects,
+    )
+
+    // Nothing to thread a path through, so it stays text rather than being drawn from a building
+    // the family never named.
+    expect(traffic.lanes).toHaveLength(0)
+    expect(traffic.sharedLanes).toHaveLength(0)
     expect(traffic.shared).toEqual([{ category: 'Lock', waitMilliseconds: '1000' }])
+  })
+
+  it('keeps a shared lane out of every per-object total', () => {
+    const traffic = projectFacilityTraffic(
+      [
+        family({ familyId: 'solo', objectIds: ['a'], waitMillisecondsByCategory: { 'Lock': '10' } }),
+        family({ familyId: 'pair', objectIds: ['a', 'b'], waitMillisecondsByCategory: { 'Lock': '900' } }),
+      ],
+      objects,
+    )
+
+    // 'a' owns only the 10 ms measured against it alone; the 900 ms stays on the shared lane.
+    expect(traffic.lanes).toHaveLength(1)
+    expect(traffic.lanes[0].objectId).toBe('a')
+    expect(traffic.lanes[0].waitMilliseconds).toBe('10')
+    expect(traffic.sharedLanes).toHaveLength(1)
+    expect(traffic.sharedLanes[0].waitMilliseconds).toBe('900')
   })
 
   it('keeps wait time from a family whose single named object is off this page', () => {

@@ -12,6 +12,7 @@ import type { LiveIncidentResponse } from './liveContracts'
 import type { LiveFeedConnectionState } from './liveIncidents'
 import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
 import { DatabaseCityViewport } from './DatabaseCityViewport'
+import type { CityLayerToggles } from './DatabaseCityScene'
 import { liveBlockingEdges } from './cityBlocking'
 import { planCity } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
@@ -45,6 +46,9 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get('object'))
   const [selectedRoadId, setSelectedRoadId] = useState<string | null>(null)
+  // Mirrors the viewport's Schema neighborhoods layer. The count line and the schema strip both
+  // describe that layer, so they follow it rather than announcing a grouping the map is not drawing.
+  const [showNeighborhoods, setShowNeighborhoods] = useState(false)
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -110,6 +114,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
     const url = new URL(window.location.href)
     url.searchParams.set('object', objectId)
     window.history.replaceState(null, '', url)
+  }, [])
+
+  const onLayersChange = useCallback((layers: CityLayerToggles) => {
+    setShowNeighborhoods(layers.districts)
   }, [])
 
   const selectRoad = useCallback((routeId: string | null) => {
@@ -453,7 +461,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
         <div>
           <p className="eyebrow">Database city · factual projection</p>
           <h2 id="database-city-title" ref={headingRef} tabIndex={-1}>{databaseName}</h2>
-          <p>{page?.totalObjects ?? '—'} objects · {displayedSchemas.length || '—'} schema neighborhoods loaded</p>
+          <p>
+            {page?.totalObjects ?? '—'} objects
+            {showNeighborhoods && <> · {displayedSchemas.length || '—'} schema neighborhoods loaded</>}
+          </p>
         </div>
         <div className="city-controls">
           <label>Rank workload
@@ -485,6 +496,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           finder={finder}
           panel={panel}
           liveStatus={liveStatus}
+          onLayersChange={onLayersChange}
         />
 
         <p className="mapping-note">
@@ -497,15 +509,20 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           lock names that object; route line pattern maps co-reference confidence, never row flow.
           Wait-lane width maps the captured Query Store wait milliseconds a building&apos;s workload
           spent queued at one infrastructure facility, and lane colour names that destination; a
-          category with no facility here is listed, never folded into one, and a family naming more
-          than one object is reported whole rather than divided.
+          category with no facility here is listed, never folded into one. A query family naming
+          several objects draws one shared lane threaded through each of them before reaching the
+          facility: that lane carries the family&apos;s whole captured wait, drawn once, so it is
+          neither divided between those buildings nor counted inside any of their own totals.
           Unknown size or unavailable activity uses fixed wireframe geometry and makes no quantity
           claim. Ground labels name each building and facility and carry identity only — a label
-          never restates or qualifies a measurement. Everything else — roof shapes, windows, doors,
-          setbacks, crowns, sidewalks, schema neighborhood tints — is decoration seeded from each
-          object&apos;s stable id and encodes nothing. Schema neighborhood tints are off by default,
-          because the schema name a tint grouped by is now written on every building label; turn
-          them back on from the Layers control.
+          never restates or qualifies a measurement. Every building stands alone on its own block,
+          which separates one table from the next without depending on a layer being switched on;
+          a building&apos;s block position comes from its stable layout ordinals and encodes nothing,
+          so neighbouring buildings are not related by being neighbours. Everything else — roof
+          shapes, windows, doors, setbacks, crowns, sidewalks, schema neighborhood tints — is
+          decoration seeded from each object&apos;s stable id and encodes nothing. Schema
+          neighborhood tints are off by default, because the schema name a tint grouped by is now
+          written on every building label; turn them back on from the Layers control.
         </p>
 
         <details className="evidence-tables" open>
@@ -517,12 +534,12 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
             <span><i className="legend-unknown">×</i> unknown, nonquantitative size</span>
             <span><i className="legend-route" /> confidence-graded co-reference, never row flow</span>
           </div>
-          <div className="city-schema-strip" aria-label="Schema neighborhoods">
+          {showNeighborhoods && <div className="city-schema-strip" aria-label="Schema neighborhoods">
             {displayedSchemas.map(schema => <div key={schema.schemaId}>
               <strong>{schema.name}</strong>
               <span>{schema.objectCount} objects · neighborhood {schema.neighborhoodOrdinal + 1}</span>
             </div>)}
-          </div>
+          </div>}
 
           <div className="analysis-grid city-analysis">
             <section className="table-region" aria-labelledby="city-object-table">
@@ -700,6 +717,32 @@ function FacilityTrafficTable({
           <td>{lane.confidence}<small>{lane.rationale}</small></td>
         </tr>)}</tbody>
       </table></div>}
+      {traffic.sharedLanes.length > 0 && <div className="table-scroll"><table>
+        <caption>
+          Shared lanes — one multi-object query family each, drawn once through every object it
+          names. Each figure is the family&apos;s whole captured wait: it is not divided between these
+          buildings, is not part of any building&apos;s total above, and must not be summed with them.
+        </caption>
+        <thead><tr>
+          <th>Query family</th><th>Buildings it threads</th><th>Facility</th>
+          <th>Captured wait (ms)</th><th>Categories</th><th>Attribution</th>
+        </tr></thead>
+        <tbody>{traffic.sharedLanes.map(lane => <tr key={lane.laneId}>
+          <th scope="row">{lane.familyId}</th>
+          <td>{lane.objectIds.map(nameOf).join(' · ')}
+            {lane.offPageObjectCount > 0 && <small>{lane.offPageObjectCount} further named
+              object/objects are not on this page, so the drawn path is shorter than the
+              relationship.</small>}</td>
+          <td>{lane.facilityLabel}</td>
+          <td>{exact(lane.waitMilliseconds)}
+            {lane.saturated && <small>Wider than the map can draw; this figure is exact, the lane
+              width is a floor.</small>}</td>
+          <td>{lane.categories
+            .map(total => `${total.category} ${exact(total.waitMilliseconds)}`)
+            .join(' · ')}</td>
+          <td>{lane.confidence}<small>{lane.rationale}</small></td>
+        </tr>)}</tbody>
+      </table></div>}
       {traffic.unmapped.length > 0 && <div className="source-note">
         <strong>Captured waits with no facility on this map</strong>
         <ul>{traffic.unmapped.map(entry => <li key={entry.category}>
@@ -707,10 +750,12 @@ function FacilityTrafficTable({
         </li>)}</ul>
       </div>}
       {traffic.shared.length > 0 && <div className="source-note">
-        <strong>Wait time from families naming more than one object</strong>
+        <strong>Wait time from multi-object families with nothing on this page</strong>
         <p>
-          Query Store reports one wait total per query, not per object, so this time is reported
-          whole rather than divided between the buildings the family names.
+          Query Store reports one wait total per query, not per object. These families name only
+          objects absent from this page, so there is no honest path to thread a shared lane through;
+          the time is reported whole here rather than divided or handed to a building that the
+          family never named.
         </p>
         <ul>{traffic.shared.map(entry => <li key={entry.category}>
           {entry.category}: {exact(entry.waitMilliseconds)} ms

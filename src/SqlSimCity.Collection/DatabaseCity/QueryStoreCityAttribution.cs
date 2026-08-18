@@ -120,7 +120,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             families,
             OtherWorkload(page, families.Count, pageEvidence),
             routes.Build(),
-            BuildExposure(exposureEligible, index, pageEvidence),
+            BuildExposure(families, exposureEligible, index, pageEvidence),
             pageEvidence);
     }
 
@@ -344,12 +344,31 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
     /// Attributes a family's totals to an object only when its plans named that object and nothing
     /// else at all. Families that also named an off-page object, another database, or an
     /// unresolvable reference are excluded rather than split by an invented ratio.
+    /// <para>
+    /// Excluded is not the same as hidden. A multi-object family still reaches the map as a route
+    /// between the objects it named and as a shared wait lane threaded through them, both carrying
+    /// its figures whole. Only this scalar per-object total refuses it, because folding it in here
+    /// would require a per-object share that Query Store never measured. The rationale therefore
+    /// says how many such families named the object, so the reader knows where to look for them.
+    /// </para>
     /// </summary>
     private static ReadOnlyDictionary<string, DatabaseCityAttributedExposureV1> BuildExposure(
+        IReadOnlyList<DatabaseCityQueryEvidence> allFamilies,
         IReadOnlyList<DatabaseCityQueryEvidence> families,
         PageObjectIndex index,
         EvidenceV1 evidence)
     {
+        var sharedCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var family in allFamilies)
+        {
+            if (family.ObjectIds.Count <= 1) continue;
+            foreach (var objectId in family.ObjectIds)
+            {
+                if (!index.IsOnPage(objectId)) continue;
+                sharedCounts[objectId] = sharedCounts.GetValueOrDefault(objectId) + 1;
+            }
+        }
+
         var totals = new Dictionary<string, ExposureTotals>(StringComparer.Ordinal);
         foreach (var family in families)
         {
@@ -367,7 +386,8 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         return new ReadOnlyDictionary<string, DatabaseCityAttributedExposureV1>(
             totals.ToDictionary(
                 entry => entry.Key,
-                entry => entry.Value.ToContract(index.NameOf(entry.Key), evidence),
+                entry => entry.Value.ToContract(
+                    index.NameOf(entry.Key), sharedCounts.GetValueOrDefault(entry.Key), evidence),
                 StringComparer.Ordinal));
     }
 
@@ -459,13 +479,19 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             if (family.Confidence > _confidence) _confidence = family.Confidence;
         }
 
-        public DatabaseCityAttributedExposureV1 ToContract(string name, EvidenceV1 evidence) => new(
+        public DatabaseCityAttributedExposureV1 ToContract(
+            string name,
+            int sharedFamilies,
+            EvidenceV1 evidence) => new(
             _executions.ToString(CultureInfo.InvariantCulture),
             _cpu.ToString(CultureInfo.InvariantCulture),
             _duration.ToString(CultureInfo.InvariantCulture),
             _reads.ToString(CultureInfo.InvariantCulture),
             _confidence,
-            $"Only the {_families.ToString(CultureInfo.InvariantCulture)} ranked Query Store family or families whose normalized plans name {name} and no other object contribute; multi-object plans are excluded rather than divided.",
+            $"Counts the {_families.ToString(CultureInfo.InvariantCulture)} ranked Query Store family or families whose normalized plans name {name} and no other object, because only those measured this object on its own." +
+            (sharedFamilies > 0
+                ? $" A further {sharedFamilies.ToString(CultureInfo.InvariantCulture)} ranked family or families name {name} alongside other objects. Query Store measures one total per query, not per object, so their figures are not added here; they are shown whole as routes between the objects they name and as shared wait lanes threaded through them."
+                : string.Empty),
             evidence);
 
         private static BigInteger Parse(string value) =>

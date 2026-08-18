@@ -163,6 +163,48 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Multi-object query plans are drawn instead of footnoted.** A query family naming more than one
+  object used to be dropped from the wait layer entirely: its milliseconds went into a text-only
+  "shared" bucket and nothing reached the map. The refusal was sound — Query Store measures one wait
+  total per query, not per object, so splitting it fabricates a per-building number, and handing it
+  whole to whichever named object happened to be loaded is worse still — but the conclusion was
+  wrong. Showing a *relationship* needs no division at all. Such a family now draws a **shared lane**
+  (`SharedFacilityLane` in `web/src/cityFacilityTraffic.ts`): one lane per family and facility, its
+  path threaded through every named object on the page before running out to the facility, carrying
+  the family's whole captured wait **exactly once**. Because it is drawn once and kept out of
+  `FacilityTraffic.lanes`, nothing is divided and nothing is double-counted; per-object totals still
+  contain only the families that measured that object alone. A shared lane sits above exclusive lanes
+  so overlaps stay readable, and its own row in the evidence table names the buildings it threads,
+  states that the figure belongs to none of them individually, and discloses how many named objects
+  are off the page and therefore missing from the drawn path. Only a family with *nothing* on this
+  page — leaving no honest path to draw — still falls back to text.
+- **Per-object exposure now says where the multi-object work went.** The attributed-exposure
+  rationale in `QueryStoreCityAttribution.cs` read "multi-object plans are excluded rather than
+  divided", which stated a true policy but implied the evidence was discarded. It now counts the
+  ranked families that name the object alongside others and points at the routes and shared lanes
+  that carry them whole. The scalar totals themselves are unchanged: still only families that named
+  the object and nothing else, still never divided by an invented ratio.
+
+- **Every building stands alone on its own block.** A block used to hold eight buildings in two
+  back-to-back rows, and the schema neighborhood tint was what visually separated one cluster from
+  the next. Once that tint went off by default the packed blocks read as an undifferentiated mass of
+  geometry, so the separation moved into the street lattice itself: `BLOCK_COLS`/`BLOCK_ROWS` in
+  `web/src/cityPlan.ts` are now `1`, giving each object a lot ringed by street on every side. Block
+  position is still derived purely from the backend's stable layout ordinals and encodes nothing —
+  neighbouring buildings are not related by being neighbours, and the map's own prose now says so.
+  The change costs roughly 1.7x the ground area per building, paid deliberately for separation that
+  does not depend on a layer being switched on. Because the reserved civic rectangle is measured in
+  blocks, it was resized from 3x2 to 5x3 so the six infrastructure facilities keep the footprint they
+  had before rather than shrinking to the size of the tables they serve. Routing cost was measured
+  rather than assumed: 30 street paths across a 500-object city (672 intersections) take ~8.5 ms.
+
+- **The schema-neighborhood count and strip follow the layer that draws them.** The city heading
+  advertised "N schema neighborhoods loaded" and the legend showed a per-neighborhood strip even
+  when the neighborhoods layer was switched off, describing a grouping the map was not drawing. Both
+  now track the toggle, so with the layer off the heading reads plainly as "N objects". No evidence
+  is lost when they are hidden: every object stays listed, schema-qualified, in the objects table
+  that is the text-first equivalent of the map.
+
 - **Schema neighborhoods are off by default and the layer that draws them is now named for what it
   draws.** The toggle was called "Districts" and started switched on, tinting a translucent plate
   under every schema so the map met you pre-coloured by a grouping that encodes nothing measured.

@@ -115,9 +115,21 @@ export interface CityPlan {
   readonly civic: CityDistrict
 }
 
-/** Lots per block face. A block is two rows of lots back to back, so each lot fronts a street. */
-export const BLOCK_COLS = 4
-export const BLOCK_ROWS = 2
+/**
+ * Lots per block. One building stands alone on its own block, ringed by street on every side.
+ *
+ * Blocks used to hold eight buildings in two back-to-back rows, and schema neighborhood tints were
+ * what visually separated one group of buildings from the next. Those tints are off by default now,
+ * which left a packed block reading as an undifferentiated mass of geometry. Giving every building
+ * its own block moves that separation into the street lattice itself, where it does not depend on a
+ * layer being switched on.
+ *
+ * This costs roughly 1.7x the ground area per building -- a lot plus its share of the surrounding
+ * street, rather than a lot plus a shared eighth of one. That is the price of the separation and it
+ * is paid deliberately.
+ */
+export const BLOCK_COLS = 1
+export const BLOCK_ROWS = 1
 export const CELLS_PER_BLOCK = BLOCK_COLS * BLOCK_ROWS
 
 export const STREET_WIDTH = 15
@@ -137,8 +149,15 @@ export const ARCHETYPE_THRESHOLD_PAGES = {
   tower: 524288n, // < 4 GiB
 } as const
 
-const CIVIC_BLOCK_COLS = 3
-const CIVIC_BLOCK_ROWS = 2
+/**
+ * Civic district size in blocks. Blocks are one lot each now, so the reserved rectangle is sized in
+ * many small blocks rather than a few large ones; {@link layoutFacilities} divides whatever rectangle
+ * it is given into a fixed 3x2 grid, and these dimensions keep each facility's footprint close to
+ * what it was when a block held eight buildings. Facilities are civic landmarks and must not shrink
+ * to the size of the tables they serve.
+ */
+const CIVIC_BLOCK_COLS = 5
+const CIVIC_BLOCK_ROWS = 3
 export const CIVIC_DISTRICT_ID = 'civic:infrastructure'
 
 /**
@@ -299,6 +318,33 @@ export function streetPath(plan: CityPlan, fromId: string, toId: string): string
   return path.reverse()
 }
 
+/**
+ * World-space polyline that visits every waypoint in order, following streets the whole way.
+ *
+ * Used by shared wait lanes, which must thread through each object a multi-object query family names
+ * before running out to its facility: one continuous path, drawn once, so the family's whole wait
+ * total is never duplicated across the buildings it touches. Consecutive duplicate points are
+ * dropped where one leg ends exactly where the next begins, so the joins are seamless.
+ *
+ * Fewer than two waypoints describes no journey, so the result is empty rather than a degenerate
+ * point: a lane with nowhere to go is not drawn at all.
+ */
+export function streetPolylineThrough(
+  plan: CityPlan,
+  waypoints: ReadonlyArray<{ x: number; z: number }>,
+): Array<{ x: number; z: number }> {
+  if (waypoints.length < 2) return []
+  const points: Array<{ x: number; z: number }> = []
+  for (let index = 0; index < waypoints.length - 1; index += 1) {
+    for (const point of streetPolyline(plan, waypoints[index], waypoints[index + 1])) {
+      const last = points[points.length - 1]
+      if (last && last.x === point.x && last.z === point.z) continue
+      points.push(point)
+    }
+  }
+  return points
+}
+
 /** World-space polyline that follows streets between two world points. */
 /**
  * World-space polyline from one point to another that only ever travels along street centre lines.
@@ -423,6 +469,7 @@ function chooseCell(objects: readonly DatabaseCityObject[]): number {
   return Math.max(MIN_CELL, Math.ceil(widest + LOT_MARGIN))
 }
 
+/** One block per building, so a district needs exactly as many blocks as it has members. */
 function blocksNeeded(memberCount: number): number {
   return Math.max(1, Math.ceil(memberCount / CELLS_PER_BLOCK))
 }
@@ -482,13 +529,11 @@ function placeLot(
   const x = blockOriginX + (cellCol + 0.5) * cell
   const z = blockOriginZ + (cellRow + 0.5) * cell
 
-  // Two rows per block, so the front row fronts the street to the north and the back row to the south.
-  const facesNorth = cellRow < BLOCK_ROWS / 2
-  const facing: Facing = facesNorth ? 'north' : 'south'
-  const kerbZ = facesNorth ? blockRow * pitchZ : (blockRow + 1) * pitchZ
-  const frontageStreetId = facesNorth
-    ? streetIdFor('x', blockCol, blockRow)
-    : streetIdFor('x', blockCol, blockRow + 1)
+  // One lot per block, so the building fronts the street along its block's north edge and the other
+  // three sides are open street too. There is no back row to face the other way.
+  const facing: Facing = 'north'
+  const kerbZ = blockRow * pitchZ
+  const frontageStreetId = streetIdFor('x', blockCol, blockRow)
 
   return {
     objectId: object.objectId,
@@ -496,7 +541,7 @@ function placeLot(
     blockId: `${placement.districtId}/block/${blockCol}-${blockRow}`,
     x,
     z,
-    rotationY: facesNorth ? Math.PI : 0,
+    rotationY: Math.PI,
     facing,
     accessX: x,
     accessZ: kerbZ,

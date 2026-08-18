@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { ARTERIAL_WIDTH, planCity, streetPolyline, type CityLot, type CityPlan } from './cityPlan'
+import { ARTERIAL_WIDTH, planCity, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan } from './cityPlan'
 import { ARCHETYPE_COLORS, buildBuildingGeometry } from './cityBuildings'
 import { type RoadTraffic } from './cityTraffic'
 import {
@@ -15,7 +15,7 @@ import {
   type DashPattern,
 } from './cityRoads'
 import { layoutFacilities, type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
-import type { FacilityLane } from './cityFacilityTraffic'
+import type { FacilityLane, SharedFacilityLane } from './cityFacilityTraffic'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
 import {
   buildingLabelText,
@@ -54,7 +54,10 @@ export type DatabaseCitySceneController = {
   setRoads(roads: readonly RoadTraffic[]): void
   setFacilities(facilities: readonly Facility[]): void
   /** Measured wait lanes from buildings to the facility their workload queued at. */
-  setFacilityLanes(lanes: readonly FacilityLane[]): void
+  setFacilityLanes(
+    lanes: readonly FacilityLane[],
+    sharedLanes: readonly SharedFacilityLane[],
+  ): void
   setRoute(route: CityRoute | null): void
   setSelected(objectId: string | null): void
   /** Highlights one road and pins both of its endpoints. */
@@ -212,6 +215,7 @@ export function createDatabaseCityScene(
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
   let currentLanes: readonly FacilityLane[] = []
+  let currentSharedLanes: readonly SharedFacilityLane[] = []
   let selectedId: string | null = null
   let selectedRoadId: string | null = null
   let hoveredRoadId: string | null = null
@@ -529,7 +533,10 @@ export function createDatabaseCityScene(
     })
   }
 
-  function buildFacilityLanes(lanes: readonly FacilityLane[]) {
+  function buildFacilityLanes(
+    lanes: readonly FacilityLane[],
+    sharedLanes: readonly SharedFacilityLane[],
+  ) {
     clearGroup(laneGroup)
     if (!plan) return
     for (const lane of lanes) {
@@ -548,6 +555,25 @@ export function createDatabaseCityScene(
       const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid'))
       // Lanes sit above every road lane so a lane and a road sharing a street stay distinguishable.
       mesh.position.y = 0.2
+      mesh.userData.laneId = lane.laneId
+      laneGroup.add(mesh)
+    }
+    for (const lane of sharedLanes) {
+      const site = facilitySites.get(lane.facility)
+      if (!site) continue
+      const stops = lane.objectIds
+        .map(objectId => plan?.lots.get(objectId))
+        .filter((lot): lot is NonNullable<typeof lot> => lot !== undefined)
+        .map(lot => ({ x: lot.accessX, z: lot.accessZ }))
+      if (stops.length === 0) continue
+      // One continuous path: building to building along the objects the family names, then out to the
+      // facility. Drawn once, so the family's whole wait total is never double-counted on the map.
+      const points = streetPolylineThrough(plan, [...stops, { x: site.x, z: site.z }])
+      const ribbon = ribbonGeometry(points, lane.width, DASH_PATTERNS[lane.pattern])
+      if (!ribbon) continue
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid'))
+      // Above exclusive lanes: where a shared lane overlaps one, the shared path stays readable.
+      mesh.position.y = 0.32
       mesh.userData.laneId = lane.laneId
       laneGroup.add(mesh)
     }
@@ -799,7 +825,7 @@ export function createDatabaseCityScene(
       buildDistricts(plan)
       buildBuildings(objects, plan)
       buildRoads(currentRoads, plan)
-      buildFacilityLanes(currentLanes)
+      buildFacilityLanes(currentLanes, currentSharedLanes)
       buildInfrastructure(currentFacilities)
       buildRoute(currentRoute)
       applySelection()
@@ -822,9 +848,10 @@ export function createDatabaseCityScene(
       buildInfrastructure(facilities)
       requestRender()
     },
-    setFacilityLanes(lanes) {
+    setFacilityLanes(lanes, sharedLanes) {
       currentLanes = lanes
-      buildFacilityLanes(lanes)
+      currentSharedLanes = sharedLanes
+      buildFacilityLanes(lanes, sharedLanes)
       requestRender()
     },
     setRoute(route) {

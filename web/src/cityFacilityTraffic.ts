@@ -15,11 +15,20 @@ import { confidencePattern, type RoadPattern } from './cityTraffic'
  * - **colour** = which facility the lane ends at, so the destination stays readable when lanes cross.
  * - **pattern** = the contributing families' attribution confidence, the same channel roads use.
  *
+ * Lanes come in two shapes. A family naming exactly one loaded object draws an **exclusive lane** from
+ * that building, and such families' milliseconds accumulate per building. A family naming several
+ * objects draws one **shared lane** ({@link SharedFacilityLane}) that threads through every named
+ * object on this page before reaching the facility, carrying the family's whole total exactly once.
+ * The shared shape exists so a multi-object query is visible as the relationship it is — these tables,
+ * queried together, queued here — instead of vanishing into a footnote.
+ *
  * Three deliberate refusals, because each alternative would invent a fact:
  *
- * 1. A family naming more than one object is **never divided** between its objects. Query Store
- *    reports one wait total per query, not per object, so splitting it would fabricate a per-building
- *    number. Those milliseconds are reported whole in {@link FacilityTraffic.shared}.
+ * 1. A family naming more than one object is **never divided** between its objects, and its total is
+ *    **never added into a per-object lane**. Query Store reports one wait total per query, not per
+ *    object, so either move would fabricate a per-building number. The shared lane keeps the figure
+ *    whole and unowned; only when nothing it names is on this page, leaving no path to draw, does it
+ *    fall back to text in {@link FacilityTraffic.shared}.
  * 2. A wait category with no physical counterpart in this city — Parallelism, Network IO, Compilation,
  *    Idle and friends — is **never folded into the CPU yard**. It is reported in
  *    {@link FacilityTraffic.unmapped} with the reason it has no destination.
@@ -197,6 +206,35 @@ export interface FacilityLane {
   readonly rationale: string
 }
 
+/**
+ * One query family's captured wait time to one facility, where the family names more than one
+ * object. The figure is the family's whole captured wait: it is never divided between the objects
+ * and never handed to whichever of them happens to be loaded. It is drawn exactly once, as a single
+ * lane that threads through every named object on this page before reaching the facility, so the
+ * relationship is visible without any object claiming the time as its own.
+ */
+export interface SharedFacilityLane {
+  readonly laneId: string
+  readonly familyId: string
+  /** Named objects that are on this page, in stable order; the lane's path threads through these. */
+  readonly objectIds: readonly string[]
+  /** How many objects the family names in total, including any not loaded on this page. */
+  readonly namedObjectCount: number
+  /** Named objects absent from this page, so the drawn path is a subset of the real relationship. */
+  readonly offPageObjectCount: number
+  readonly facility: FacilityKind
+  readonly facilityLabel: string
+  /** Exact captured milliseconds for the whole family, as a lossless base-10 string. */
+  readonly waitMilliseconds: string
+  readonly width: number
+  readonly saturated: boolean
+  readonly color: number
+  readonly pattern: RoadPattern
+  readonly confidence: QueryAttributionConfidence
+  readonly categories: readonly CategoryTotal[]
+  readonly rationale: string
+}
+
 export interface CategoryTotal {
   readonly category: string
   readonly waitMilliseconds: string
@@ -209,11 +247,17 @@ export interface UnmappedWait extends CategoryTotal {
 
 export interface FacilityTraffic {
   readonly lanes: readonly FacilityLane[]
+  /**
+   * Wait time from families naming more than one loaded object, drawn whole as one threaded lane per
+   * family and facility. These are deliberately kept out of {@link lanes} so that no per-object total
+   * absorbs time the family never attributed to a single object.
+   */
+  readonly sharedLanes: readonly SharedFacilityLane[]
   /** Categories that have no destination facility, summed across every captured family. */
   readonly unmapped: readonly UnmappedWait[]
   /**
-   * Wait time from families naming more than one object: reported whole, never divided, and never
-   * handed to whichever of those objects happens to be loaded.
+   * Wait time from multi-object families with no named object on this page, so there is nothing to
+   * thread a lane through: reported whole, never divided, and never handed to an unnamed building.
    */
   readonly shared: readonly CategoryTotal[]
   /** Wait time from families naming no object, or naming one object that is not on this page. */
@@ -265,6 +309,7 @@ export function projectFacilityTraffic(
 ): FacilityTraffic {
   const loaded = new Set(objects.map(object => object.objectId))
   const lanes = new Map<string, MutableLane>()
+  const sharedLanes = new Map<string, MutableSharedLane>()
   const unmapped = new Map<string, bigint>()
   const shared = new Map<string, bigint>()
   const unattributed = new Map<string, bigint>()
@@ -277,10 +322,15 @@ export function projectFacilityTraffic(
 
     // The refusal to divide is decided by what the family *names*, not by what happens to be loaded.
     // A family naming two objects where only one is on this page must not have all of its wait time
-    // handed to that one building: that would be a worse fabrication than splitting it.
+    // handed to that one building. So a multi-object family never feeds a per-object lane; it gets
+    // its own lane threaded through the objects it names, carrying the undivided family total.
     const namesOneObject = family.objectIds.length === 1
     const attributableObjectId =
       namesOneObject && loaded.has(family.objectIds[0]) ? family.objectIds[0] : null
+    // Sorted for a stable path: the same family threads the same route on every render.
+    const threadable = namesOneObject
+      ? []
+      : [...new Set(family.objectIds.filter(id => loaded.has(id)))].sort()
 
     for (const { category, milliseconds } of captured) {
       const routing = routeWaitCategory(category)
@@ -289,7 +339,24 @@ export function projectFacilityTraffic(
         continue
       }
       if (!namesOneObject && family.objectIds.length > 0) {
-        add(shared, category, milliseconds)
+        // Nothing this family names is on the page, so there is no honest path to draw.
+        if (threadable.length === 0) {
+          add(shared, category, milliseconds)
+          continue
+        }
+        const sharedId = `shared:${family.familyId}->${routing.facility}`
+        const sharedLane = sharedLanes.get(sharedId) ?? {
+          familyId: family.familyId,
+          objectIds: threadable,
+          namedObjectCount: new Set(family.objectIds).size,
+          facility: routing.facility,
+          milliseconds: 0n,
+          categories: new Map<string, bigint>(),
+          confidence: family.confidence,
+        }
+        sharedLane.milliseconds += milliseconds
+        add(sharedLane.categories, category, milliseconds)
+        sharedLanes.set(sharedId, sharedLane)
         continue
       }
       if (attributableObjectId === null) {
@@ -324,6 +391,13 @@ export function projectFacilityTraffic(
           compareDescending(left.waitMilliseconds, right.waitMilliseconds) ||
           left.laneId.localeCompare(right.laneId),
       ),
+    sharedLanes: [...sharedLanes.entries()]
+      .map(([laneId, lane]) => finishShared(laneId, lane))
+      .sort(
+        (left, right) =>
+          compareDescending(left.waitMilliseconds, right.waitMilliseconds) ||
+          left.laneId.localeCompare(right.laneId),
+      ),
     unmapped: sortTotals(unmapped).map(total => ({
       ...total,
       reason: routeWaitCategory(total.category).reason,
@@ -332,7 +406,7 @@ export function projectFacilityTraffic(
     unattributed: sortTotals(unattributed),
     measuredFamilyCount,
     familyCount: families.length,
-    note: describe(measuredFamilyCount, families.length),
+    note: describe(measuredFamilyCount, families.length, sharedLanes.size),
   }
 }
 
@@ -343,6 +417,53 @@ interface MutableLane {
   categories: Map<string, bigint>
   familyIds: Set<string>
   confidence: QueryAttributionConfidence
+}
+
+interface MutableSharedLane {
+  familyId: string
+  objectIds: readonly string[]
+  namedObjectCount: number
+  facility: FacilityKind
+  milliseconds: bigint
+  categories: Map<string, bigint>
+  confidence: QueryAttributionConfidence
+}
+
+function finishShared(laneId: string, lane: MutableSharedLane): SharedFacilityLane {
+  const categories = sortTotals(lane.categories)
+  const label = FACILITY_LABELS[lane.facility]
+  const saturated = lane.milliseconds > BigInt(LANE_WIDTH_SATURATION_MILLISECONDS)
+  const offPageObjectCount = lane.namedObjectCount - lane.objectIds.length
+  return {
+    laneId,
+    familyId: lane.familyId,
+    objectIds: lane.objectIds,
+    namedObjectCount: lane.namedObjectCount,
+    offPageObjectCount,
+    facility: lane.facility,
+    facilityLabel: label,
+    waitMilliseconds: lane.milliseconds.toString(),
+    width: laneWidth(lane.milliseconds),
+    saturated,
+    color: LANE_COLORS[lane.facility],
+    pattern: confidencePattern(lane.confidence as EdgeConfidence),
+    confidence: lane.confidence,
+    categories,
+    rationale:
+      `${lane.milliseconds.toLocaleString()} captured wait ms to the ${label} from query family ` +
+      `${lane.familyId}, which names ${lane.namedObjectCount} objects ` +
+      `(${categories.map(total => `${total.category} ${BigInt(total.waitMilliseconds).toLocaleString()} ms`).join(', ')}). ` +
+      'This is the whole family total, drawn once along the objects it names: it is not divided ' +
+      'between them and no single object waited this long on its own account. ' +
+      (offPageObjectCount > 0
+        ? `${offPageObjectCount} named object/objects are not on this page, so the drawn path is ` +
+          'shorter than the relationship it stands for. '
+        : '') +
+      `Attribution is ${lane.confidence.toLocaleLowerCase()}; this is captured wait time, not live traffic.` +
+      (saturated
+        ? ' This lane exceeds the widest drawable value, so its width is a floor and only this figure is exact.'
+        : ''),
+  }
 }
 
 function finish(laneId: string, lane: MutableLane): FacilityLane {
@@ -376,7 +497,7 @@ function finish(laneId: string, lane: MutableLane): FacilityLane {
   }
 }
 
-function describe(measured: number, total: number): string {
+function describe(measured: number, total: number, sharedLaneCount: number): string {
   if (total === 0) {
     return 'No query family was returned for this page, so no wait lane is drawn and none is claimed.'
   }
@@ -388,9 +509,12 @@ function describe(measured: number, total: number): string {
     )
   }
   return (
-    `${measured} of ${total} ranked query families carried wait-category evidence. Lanes cover only ` +
-    'the families ranked onto this page, and only those naming exactly one loaded object; wait time ' +
-    'from multi-object and unloaded-object families is reported separately rather than divided.'
+    `${measured} of ${total} ranked query families carried wait-category evidence. A family naming ` +
+    'one loaded object draws a lane from that building. A family naming several draws one shared ' +
+    'lane threaded through each of them, carrying the whole family total exactly once: shared lanes ' +
+    'are never divided between the objects and never added into a per-object total. ' +
+    (sharedLaneCount > 0 ? `${sharedLaneCount} shared lane/lanes are drawn. ` : '') +
+    'Wait time from families naming nothing on this page is reported separately rather than assigned.'
   )
 }
 
