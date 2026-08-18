@@ -125,7 +125,7 @@ if [[ "${fail_status}" -eq 0 ]]; then
   exit 1
 fi
 if ! grep --fixed-strings --quiet \
-  "Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden." \
+  "Connected Query Store history retains query text and plan XML, so it requires ProtectedStorage:Enabled=true." \
   "${work_dir}/fail-closed.log"; then
   echo "connected Query Store mode did not emit the curated protected-storage requirement" >&2
   exit 1
