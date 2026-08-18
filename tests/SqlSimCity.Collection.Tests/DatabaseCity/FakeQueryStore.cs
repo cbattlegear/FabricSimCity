@@ -10,7 +10,15 @@ namespace SqlSimCity.Collection.Tests.DatabaseCity;
 /// </summary>
 internal sealed class FakeQueryStore : IQueryStoreHistorySource
 {
+    /// <summary>The atlas contract id of the same database, which the city page is addressed by.</summary>
     public const string DatabaseId = "target/database/sales";
+
+    /// <summary>
+    /// The key Query Store history is actually collected and indexed under: the SQL database name.
+    /// It is deliberately different from <see cref="DatabaseId"/>, because a join that filters by
+    /// the atlas id matches nothing and unattributes the whole page.
+    /// </summary>
+    public const string DatabaseName = "sales";
 
     /// <summary>Builds a showplan object reference, honouring showplan's optional bracket quoting.</summary>
     public static ShowplanObjectV1 Reference(
@@ -38,6 +46,9 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
     public bool ReturnNullPlans { get; init; }
     public int PlansRequested { get; private set; }
 
+    /// <summary>The database filter the last families read asked for.</summary>
+    public string? RequestedDatabaseId { get; private set; }
+
     public void AddFamily(
         string familyId,
         string cpu,
@@ -48,7 +59,7 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
     {
         var text = new QueryTextDescriptorV1(QueryTextAvailability.Available, "SELECT 1", "fp", "Captured.");
         var summary = new QueryFamilySummaryV1(
-            familyId, DatabaseId, $"hash-{familyId}", "fp", text, [],
+            familyId, DatabaseName, $"hash-{familyId}", "fp", text, [],
             executions, cpu, "2000", "300", waitMilliseconds, Observed, Observed, Evidence);
         _families.Add(summary);
 
@@ -89,7 +100,8 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
             throw new InvalidDataException("Query Store index is unreadable.");
         }
 
-        Assert.Equal(DatabaseId, databaseId);
+        RequestedDatabaseId = databaseId;
+        Assert.Equal(DatabaseName, databaseId);
         Assert.Equal("cpu", metric);
         return Task.FromResult(new PageV1<QueryFamilySummaryV1>(
             "1.0", _families.Take(pageSize).ToArray(), null, pageSize, TotalCount) { Evidence = Evidence });

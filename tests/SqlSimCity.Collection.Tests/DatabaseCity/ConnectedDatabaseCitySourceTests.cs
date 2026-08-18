@@ -105,6 +105,33 @@ public sealed class ConnectedDatabaseCitySourceTests
             "not measured zero", orderHeader.AttributedExposure.Rationale, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Query Store history is collected per database name, while the city page is addressed by the
+    /// atlas contract id. Filtering the join by the atlas id matches no published Query Store index,
+    /// which silently reports every object on the page as having no attributed exposure.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreIsFilteredByDatabaseNameNotTheAtlasDatabaseId()
+    {
+        var queryStore = new FakeQueryStore();
+        queryStore.AddFamily("family-1", cpu: "900", executions: "30", plans:
+            [FakeQueryStore.Plan("plan-1", FakeQueryStore.Reference(table: "Customer"))]);
+
+        var source = new ConnectedDatabaseCitySource(
+            new FakeAtlasSource(),
+            new FakeCityProbeExecutor(expectedTopN: 3),
+            new QueryStoreCityAttribution(queryStore));
+
+        var page = await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 2, null, CancellationToken.None);
+
+        Assert.Equal("sales", queryStore.RequestedDatabaseId);
+        Assert.Equal(
+            "900",
+            page!.Objects.Single(item => item.ObjectId == "target/database/sales/object/10")
+                .AttributedExposure.TotalCpuMicroseconds);
+    }
+
     private sealed class FakeCityProbeExecutor(int expectedTopN = 2) : IDatabaseCityProbeExecutor
     {
         public Task<DatabaseCityProbePage> CollectPageAsync(

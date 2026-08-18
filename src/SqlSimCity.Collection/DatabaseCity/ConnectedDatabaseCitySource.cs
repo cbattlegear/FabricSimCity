@@ -92,10 +92,12 @@ public sealed class ConnectedDatabaseCitySource(
             .Select(row => new CityAttributionObject(
                 ObjectId(databaseId, row.ObjectId), row.SchemaName, row.ObjectName, row.Kind))
             .ToArray();
+        // Query Store history is collected and indexed per database name, so the join is filtered by
+        // the name, never by the atlas contract id this page is addressed by: an atlas id matches no
+        // published Query Store index and would leave every object on the page unattributed.
         var joined = attribution is null
             ? null
             : await attribution.AttributeAsync(
-                databaseId,
                 database.Name,
                 metric,
                 attributionObjects,

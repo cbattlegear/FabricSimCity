@@ -56,8 +56,14 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         EvidenceSource.NotProbed, DataStatus.Unknown, null, null,
         "No Query Store history source is available for this page, so no plan attribution was attempted.");
 
+    /// <param name="databaseName">
+    /// The SQL database name. It is both the key connected Query Store history is collected and
+    /// indexed under, and the name a three-part showplan reference is matched against to decide
+    /// whether it stays local. It is deliberately not the atlas contract id the city page is
+    /// addressed by: that id matches no published Query Store index set, which would silently
+    /// unattribute every object on the page.
+    /// </param>
     public async Task<CityAttributionResult> AttributeAsync(
-        string databaseId,
         string databaseName,
         DatabaseCityMetric metric,
         IReadOnlyList<CityAttributionObject> pageObjects,
@@ -65,7 +71,6 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         int topFamilyCount,
         CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databaseId);
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         ArgumentNullException.ThrowIfNull(pageObjects);
         ArgumentNullException.ThrowIfNull(databaseIdsByName);
@@ -76,7 +81,8 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         try
         {
             page = await queryStore.GetQueriesAsync(
-                databaseId, MetricToken(metric), topFamilyCount, null, cancellationToken).ConfigureAwait(false);
+                databaseName, MetricToken(metric), topFamilyCount, null, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
