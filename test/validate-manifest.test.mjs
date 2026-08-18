@@ -1209,3 +1209,49 @@ describe('probe executors only read columns the probe SQL emits', () => {
     });
   }
 });
+
+describe('regression: by-name column readers never use CommandBehavior.SequentialAccess', () => {
+  // SequentialAccess lets each column be read once, in ascending ordinal order,
+  // and throws InvalidOperationException otherwise. Reading by name gives no
+  // hint of the underlying ordinal, so the constraint is invisible at the call
+  // site and breaks only against a live server. SqlQueryStoreIncrementalSource
+  // shipped with SequentialAccess and read is_query_store_on (ordinal 8) before
+  // database_name (ordinal 1) in database discovery, so connected Query Store
+  // history threw on the first cycle and never collected a single row.
+  function listCsFilesRecursive(dir) {
+    const results = [];
+    for (const entry of readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) {
+        results.push(...listCsFilesRecursive(full));
+      } else if (entry.endsWith('.cs')) {
+        results.push(full);
+      }
+    }
+    return results;
+  }
+
+  const collectionDir = path.join(repoRoot, 'src/SqlSimCity.Collection');
+  const offenders = [];
+  for (const file of listCsFilesRecursive(collectionDir)) {
+    // Strip comments first: the fix itself is documented in prose that names
+    // the behavior, and a naive substring scan would flag that explanation.
+    const source = readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/^\s*\/\/.*$/gm, ' ');
+    if (/reader\[\s*"/.test(source) && source.includes('CommandBehavior.SequentialAccess')) {
+      offenders.push(path.relative(repoRoot, file).replaceAll('\\', '/'));
+    }
+  }
+
+  test('no file reads columns by name under SequentialAccess', () => {
+    assert.deepEqual(
+      offenders.sort(),
+      [],
+      'these files read reader["column"] while using CommandBehavior.SequentialAccess, ' +
+        'which requires ascending-ordinal single reads and will throw at runtime: ' +
+        offenders.join(', '),
+    );
+  });
+});

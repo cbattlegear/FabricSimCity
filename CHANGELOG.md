@@ -132,23 +132,59 @@ First MVP release candidate. There is no tagged release yet.
   column on any engine edition degrades exactly one field, names itself in
   `diagnostics.unavailableFields`, and leaves the rest of the snapshot intact. Genuine programming
   faults are deliberately still allowed to propagate.
+- Connected Query Store history now collects. `SqlQueryStoreIncrementalSource` issued every probe
+  with `CommandBehavior.SequentialAccess`, which permits each column to be read once and only in
+  ascending ordinal order, while all nine of its projectors read columns by name in whatever order
+  the record needs. Database discovery read `is_query_store_on` (ordinal 8) before `database_name`
+  (ordinal 1), so the very first step of every cycle threw
+  `InvalidOperationException: Invalid attempt to read from column ordinal '1'` and connected Query
+  Store history had never collected a single row against a real server. Nothing in that file uses a
+  streaming accessor, so sequential access bought no memory saving and only made by-name projection
+  illegal; it now uses the default behavior, matching the Atlas, live-incident, and connector
+  executors. A corpus-wide guard asserts no probe reader combines by-name column access with
+  `SequentialAccess`.
+- Supplying a connection string no longer produces query views that are emptier than the sample
+  data. Connected Query Store history requires encryption at rest and has no plaintext fallback, but
+  a connection string enabled Atlas and live incidents while leaving Query Store history on
+  `UnavailableQueryStoreHistorySource`, so pointing SQLSimCity at a real server silently downgraded
+  the query views to nothing at all — with no error and no log line. A connection string now enables
+  connected Query Store history and provisions the required AES-256 key, so the encryption
+  requirement is met rather than relaxed.
 
 ### Security
 
+- A connection string now auto-provisions the protected-storage AES-256 key that connected Query
+  Store history requires, at a `sqlsimcity-keys` directory beside the data directory. Encryption at
+  rest is unchanged and still mandatory; what changes is that the process generates the key instead
+  of an operator supplying it, so key custody is weaker than the hardened path — the key sits on the
+  host beside the data rather than arriving as a mounted secret. It is written `0600`, never
+  overwrites an existing key, is deliberately kept out of the data directory so a data backup cannot
+  carry the key that decrypts it, and is announced at startup with a warning naming the path. The
+  hardened path is untouched: setting `ProtectedStorage:Enabled=true`, or configuring the connection
+  field by field, still means operator-supplied key custody and still fails closed without a key.
+  Auto-provisioning never happens in archive or edge mode, and never overwrites a mounted key.
+- A key that cannot be written no longer takes the process down. Where the key location is
+  unwritable — notably the shipped container's read-only root filesystem — connected Query Store
+  history disables itself with a warning explaining the cause and the fix, preserving the previous
+  startup behavior instead of turning a convenience into an outage.
 - A persistent, color-independent trusted-network / no-built-in-login notice is
   now shown on every analysis view, including on mobile, reinforcing the
   documented `AllowedHosts` and reverse-proxy guidance.
 
 ### Known limitations
 
-- **Live SQL Server validation is partial.** Connected Atlas collection and live-incident sampling
-  have now been exercised end to end against a real local SQL Server (Kerberos/integrated auth),
-  which is what surfaced the transaction-log column defect above. The Azure SQL Database
+- **Live SQL Server validation is partial.** Connected Atlas collection, live-incident sampling, and
+  connected Query Store history have now been exercised end to end against a real local SQL Server
+  (Kerberos/integrated auth), which is what surfaced the transaction-log column defect and the
+  `SequentialAccess` defect above. Query Store history was confirmed collecting real queries with
+  real runtime metrics from a live database. The Azure SQL Database
   `IsHadrEnabled` defect above was reported from a real Azure SQL Database and was reproduced and
   verified locally by making the identity probe emit NULL for that column, but no Azure SQL Database
   or Managed Instance target was available for direct end-to-end confirmation, so platform-specific
   behavior on those, and every Entra authentication strategy, remains otherwise exercised only
-  against fakes and deterministic fixtures.
+  against fakes and deterministic fixtures. Query Store collection past database discovery has been
+  observed only against a single local server, so engine-version-specific projectors (the 2016/2022
+  variant and 2025 replica paths in particular) are still unproven on the editions that select them.
 - GHCR image publication, SBOM, and provenance attestation are defined in the
   release workflow but are not executed as part of this candidate; their outputs
   are unverified until a tagged release runs.

@@ -13,7 +13,24 @@ public sealed record QueryStoreHistoryHostOptions(
 
 public static class QueryStoreHistoryConfiguration
 {
+    /// <summary>
+    /// Connected Query Store history runs when it is asked for explicitly, or
+    /// when a connection string is supplying the connected profile.
+    ///
+    /// The second case exists because a connection string already turns on
+    /// connected Atlas and live incidents. Leaving Query Store history behind
+    /// made connecting a real server actively worse than fixture mode -- the
+    /// query views fell back to <c>UnavailableQueryStoreHistorySource</c> and
+    /// returned nothing, silently, which is the opposite of why anyone connects
+    /// a database to this tool. <c>Mode=Disabled</c> remains an explicit opt-out
+    /// and always wins.
+    /// </summary>
     public static bool IsConnected(IConfiguration configuration) =>
+        !IsDisabled(configuration)
+        && (IsExplicitlyConnected(configuration)
+            || AtlasConfiguration.ResolveConnectionString(configuration) is not null);
+
+    private static bool IsExplicitlyConnected(IConfiguration configuration) =>
         configuration.GetValue<string>("QueryStoreHistory:Mode")
             ?.Equals("Connected", StringComparison.OrdinalIgnoreCase) == true;
 

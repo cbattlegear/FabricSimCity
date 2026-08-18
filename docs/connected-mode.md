@@ -13,11 +13,24 @@ ConnectionStrings__SqlSimCity=Server=sql01.example.internal,1433;Database=master
 
 `SQLSIMCITY_CONNECTION_STRING` works identically, for parity with the edge connector's naming.
 
-Setting either one turns connected mode on by itself — Atlas and live incidents switch off the
-fixture path with no `Atlas:Mode` or `LiveIncidents:Mode` needed. With no connection string
-configured, fixtures stay the default. (Connected Query Store history is the one exception: it also
-needs `QueryStoreHistory:Mode=Connected` and `ProtectedStorage:Enabled=true`, because it writes
-collected plans to disk.)
+Setting either one turns connected mode on by itself — Atlas, live incidents, and Query Store
+history all switch off the fixture path with no `Atlas:Mode`, `LiveIncidents:Mode`, or
+`QueryStoreHistory:Mode` needed. With no connection string configured, fixtures stay the default.
+
+Query Store history stores query *text*, so it requires encryption at rest and has no plaintext
+fallback. Rather than make you turn that on by hand, a connection string provisions the key for you:
+an AES-256 key ring is generated at a `sqlsimcity-keys` directory beside `ProtectedStorage:DataDirectory`
+and announced at startup with a warning naming the path. **Back that file up and keep it — if it is
+lost or replaced, every stored query history record becomes permanently unrecoverable and the store
+refuses to open.** It is deliberately placed outside the data directory so a data backup cannot carry
+its own decryption key; `tools/backup-data.sh` refuses to run when the two are nested. In a
+container, that path needs a persistent writable volume (see the Compose example below) or the key
+will not survive recreation. If the key cannot be written at all, Query Store history disables itself
+with a warning rather than blocking startup.
+
+To keep key custody entirely in your own hands, set `ProtectedStorage:Enabled=true` and mount your
+own key file at `ProtectedStorage:KeyFilePath`; nothing is then generated, and a missing key fails
+closed as before. `QueryStoreHistory:Mode=Disabled` opts out of collection completely.
 
 The connection string is parsed into exactly the same validated `ConnectionProfile` the settings
 below produce, so every downstream guarantee still holds: the password is passed as a
@@ -113,7 +126,11 @@ services:
       Atlas__Connection__Authentication__PasswordSecret: sql-password
       Atlas__SecretsDirectory: /run/secrets
 
-      # Retained Query Store history requires encrypted storage.
+      # Retained Query Store history requires encrypted storage. This is the
+      # operator-managed key path: because ProtectedStorage__Enabled is set
+      # explicitly, nothing is generated and a missing key file fails closed.
+      # (Drive the connection from a connection string instead and the key is
+      # provisioned for you — give it a persistent volume, as in compose.yaml.)
       QueryStoreHistory__Mode: Connected
       ProtectedStorage__Enabled: "true"
       ProtectedStorage__DataDirectory: /data
@@ -212,12 +229,18 @@ refresh cycles. Database-city object/index pages are queried only when entered.
 
 ### Query Store history
 
-`QueryStoreHistory__Mode=Connected` requires Atlas connected mode and protected storage. The
+Connected Query Store history is enabled by a connection string, or explicitly with
+`QueryStoreHistory__Mode=Connected`. Either way it requires Atlas connected mode and protected
+storage, which a connection string provisions automatically (see the quick start above). The
 collector uses keyset pages, overlap watermarks, reset epochs, active-interval replacement, bounded
 encrypted generations, and a final publication pointer.
 
 Raw SQL and Showplan XML are fetched only on demand and stored as 7-day encrypted detail. Normalized
 facts and hourly history are retained for 90 days by default.
+
+Collection needs Query Store to be enabled on the databases themselves (`ALTER DATABASE ... SET
+QUERY_STORE = ON`); databases with it off are discovered and skipped. It cannot be enabled on
+`master`, so a connection string pointing only at `master` collects nothing.
 
 ### Live incidents
 

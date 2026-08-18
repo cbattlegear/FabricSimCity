@@ -491,7 +491,19 @@ public sealed class SqlQueryStoreIncrementalSource(
             command.CommandType = CommandType.Text;
             command.CommandTimeout = executionProfile.Timeouts.CommandTimeoutSeconds;
             BindParameters(command, probe, values);
-            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken)
+
+            // Every projector here reads columns by name and in whatever order the
+            // result record needs them. CommandBehavior.SequentialAccess forbids
+            // that: it allows each column to be read once, in ascending ordinal
+            // order, and throws otherwise. Nothing in this file uses a streaming
+            // accessor (GetStream/GetTextReader/GetChars), so sequential access
+            // bought no memory saving and only made by-name projection illegal --
+            // database discovery reads is_query_store_on (ordinal 8) before
+            // database_name (ordinal 1) and threw on the very first cycle, so
+            // connected Query Store history never collected anything at all. The
+            // Atlas, live-incident, and connector executors all use the default
+            // behavior; this one now matches them.
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken)
                 .ConfigureAwait(false);
             return await projector(reader, cancellationToken).ConfigureAwait(false);
         }
