@@ -4,8 +4,8 @@
 .findings-heading p { margin: 4px 0 0; color: #9bafc1; font-size: 0.85rem; }
 .findings-engine { display: flex; flex-direction: column; gap: 2px; font: 0.75rem ui-monospace, "SFMono-Regular", Consolas, monospace; color: #aabccd; text-align: right; }
 
-.findings-disclosure { margin: 14px 0 0; padding: 10px 14px; border: 1px solid #315547; background: #102019; color: #bfe0d1; font-size: 0.78rem; line-height: 1.5; }
-.findings-trust { border-color: #3a4a5b; background: #0f1a24; color: #b6c8d8; }
+.findings-disclosure { margin: 14px 0 0; padding: 9px 13px; border: 1px solid #315547; border-left: 3px solid #72f4c4; background: #102019; color: #bfe0d1; font-size: 0.78rem; line-height: 1.5; }
+.findings-trust { margin-top: 8px; border-color: #3a4a5b; border-left-color: #6c86a0; background: #0f1a24; color: #b6c8d8; }
 
 .findings-controls { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center; margin: 18px 0 10px; }
 .findings-controls fieldset { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; border: 1px solid #293847; background: #0d131c; padding: 8px 12px; margin: 0; }
@@ -26,8 +26,13 @@
 
 .findings-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 18px; margin-top: 4px; }
 .findings-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 620px; overflow-y: auto; }
-.findings-list li { display: flex; flex-direction: column; border: 1px solid #293847; background: #0d131c; }
-.findings-list li.is-selected { border-color: #72f4c4; }
+/* A severity-colored left accent bar supplements the glyph + text label; severity is never color-alone. */
+.findings-list li { display: flex; flex-direction: column; border: 1px solid #293847; border-left-width: 3px; border-left-color: #3a4a5b; background: #0d131c; }
+.findings-list li.sev-row-serious { border-left-color: #ff9d7a; }
+.findings-list li.sev-row-notable { border-left-color: #ffc96b; }
+.findings-list li.sev-row-advisory { border-left-color: #72f4c4; }
+.findings-list li.sev-row-informational { border-left-color: #7f93a5; }
+.findings-list li.is-selected { border-color: #72f4c4; border-left-color: #72f4c4; background: #10202a; }
 .finding-row { display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left; border: 0; background: transparent; color: inherit; padding: 12px 14px; cursor: pointer; }
 .finding-row:hover { background: #14212c; }
 .finding-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -43,16 +48,22 @@
 .finding-detail { border: 1px solid #293847; background: #0d131c; padding: 16px 18px; align-self: start; }
 .finding-detail-head h3 { margin: 0 0 8px; }
 .finding-detail-badges { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 8px; font-size: 0.82rem; }
-.finding-detail dl { display: grid; gap: 10px; margin: 12px 0; }
-.finding-detail dt { color: #91a8bb; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
-.finding-detail dd { margin: 2px 0 0; color: #dce8f1; display: flex; flex-direction: column; gap: 3px; }
+/* The drawer holds prose (window caveat, source reason), so it overrides the atlas's right-aligned
+   scalar dl: label above value, left-aligned, readable body font — ids stay legible without mono. */
+.finding-detail dl { display: grid; gap: 0; margin: 12px 0 4px; }
+.finding-detail dl div { display: block; grid-template-columns: none; gap: 0; padding: 9px 0; border-bottom: 1px solid #1b2732; }
+.finding-detail dl div:last-child { border-bottom: 0; }
+.finding-detail dt { color: #8fa5b8; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.09em; }
+.finding-detail dd { margin: 4px 0 0; color: #e2ecf4; text-align: left; font-family: inherit; font-size: 0.86rem; line-height: 1.5; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .finding-detail dd small, .rule-reason { color: #93a8ba; font-size: 0.76rem; line-height: 1.45; }
-.finding-detail h4 { margin: 16px 0 6px; color: #bed0df; font-size: 0.82rem; }
-.finding-evidence { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.finding-evidence li { display: flex; flex-direction: column; gap: 2px; border-left: 2px solid #426f65; padding-left: 10px; }
+.finding-detail h4 { margin: 18px 0 6px; color: #bed0df; font-size: 0.82rem; }
+.finding-evidence { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.finding-evidence li { display: flex; flex-direction: column; gap: 3px; border-left: 2px solid #426f65; padding-left: 11px; }
+.finding-evidence strong { color: #e2ecf4; font-size: 0.86rem; }
+.finding-evidence li span:last-child { color: #b7c8d6; font-size: 0.82rem; line-height: 1.45; }
 .evidence-kind { color: #8399a9; font: 0.72rem ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .finding-notes { margin: 0; padding-left: 18px; color: #cad9e6; font-size: 0.82rem; line-height: 1.5; }
-.finding-recommendation { margin-top: 14px; padding: 10px 12px; border: 1px solid #315547; background: #102019; }
+.finding-recommendation { margin-top: 16px; padding: 11px 13px; border: 1px solid #315547; border-left: 3px solid #72f4c4; background: #102019; }
 .finding-recommendation p { margin: 0; color: #cae8dc; font-size: 0.82rem; line-height: 1.5; }
 
 .findings-rules { margin-top: 24px; border-top: 2px solid #52687b; padding-top: 14px; }

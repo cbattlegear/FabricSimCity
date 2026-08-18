@@ -166,7 +166,7 @@ export function FindingsPanel() {
               const acknowledged = presentation.acknowledged.has(finding.findingId)
               const suppressed = presentation.suppressed.has(finding.findingId)
               return (
-                <li key={finding.findingId} className={finding.findingId === selectedId ? 'is-selected' : undefined}>
+                <li key={finding.findingId} className={`sev-row-${finding.severity.toLowerCase()}${finding.findingId === selectedId ? ' is-selected' : ''}`}>
                   <button
                     type="button"
                     className="finding-row"
