@@ -325,11 +325,20 @@ public sealed partial class LiveIncidentSampler : IAsyncDisposable
         {
             return; // Idempotent: a caller registered both as a concrete singleton and as
                      // IHostedService (the same instance under two DI descriptors) can otherwise be
-                     // disposed twice by the container, which would double-dispose _controlLock.
+                     // disposed twice by the container.
         }
 
         await StopAsync().ConfigureAwait(false);
-        _controlLock.Dispose();
+
+        // _controlLock is deliberately NOT disposed. The _disposed check at the top of StopAsync is
+        // a check-then-act: a caller can pass it and then be preempted before reaching
+        // _controlLock.WaitAsync(). Host shutdown makes exactly that interleaving routine, because
+        // IHostedService.StopAsync and container disposal run back to back, and StopAsync(TimeSpan)
+        // can abandon a still-running stop task that resumes later. Disposing the semaphore under
+        // any of those races throws ObjectDisposedException out of an unrelated caller. A
+        // SemaphoreSlim that never had its AvailableWaitHandle touched (this one never does) holds
+        // no unmanaged resource, so leaving it to the GC is both safe and cheaper than the
+        // synchronization it would take to prove no one is about to wait on it.
     }
 
     private async Task RunLoopAsync(CancellationToken cancellationToken)

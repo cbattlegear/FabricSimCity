@@ -375,6 +375,38 @@ public class LiveIncidentSamplerTests
         Assert.Equal(SamplerRunState.Stopped, sampler.GetStatus().State);
     }
 
+    /// <summary>
+    /// Host shutdown routinely calls <see cref="LiveIncidentSampler.StopAsync()"/> and
+    /// <see cref="LiveIncidentSampler.DisposeAsync"/> back to back, and
+    /// <see cref="LiveIncidentSampler.StopAsync(TimeSpan)"/> can abandon a stop that is still
+    /// running. The disposed check at the top of StopAsync is a check-then-act, so a caller can
+    /// pass it and then be preempted before it awaits the control lock. Disposing that lock during
+    /// the window threw ObjectDisposedException out of the surviving caller, which surfaced in CI
+    /// as an intermittent "Test Class Cleanup Failure" while every test still reported as passing.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentStopAndDisposeNeverThrows()
+    {
+        for (var attempt = 0; attempt < 500; attempt++)
+        {
+            var collector = new StubLiveIncidentCollector
+            {
+                OnCollect = (sequence, _) => Task.FromResult(StubLiveIncidentCollector.MinimalSnapshot(sequence)),
+            };
+            var sampler = new LiveIncidentSampler(
+                collector,
+                new LiveIncidentSamplerOptions { Cadence = TimeSpan.FromSeconds(2) });
+
+            await sampler.StartAsync(CancellationToken.None);
+
+            var stop = Task.Run(async () => await sampler.StopAsync());
+            var dispose = Task.Run(async () => await sampler.DisposeAsync());
+
+            var failure = await Record.ExceptionAsync(() => Task.WhenAll(stop, dispose));
+            Assert.True(failure is null, $"attempt {attempt} threw {failure}");
+        }
+    }
+
     /// <summary>Yields control back to the scheduler a few times with no time advance, so a cycle that completes synchronously (e.g. the immediate first cycle on start) is observed before assertions run.</summary>
     private static async Task SettleAsync()
     {

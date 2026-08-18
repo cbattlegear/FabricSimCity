@@ -11,7 +11,24 @@ namespace SqlSimCity.Api.Tests;
 internal sealed class RecordingHubContext : IHubContext<CurrentSnapshotHub>
 {
     private readonly Func<CancellationToken, Task>? _onSend;
-    public List<(string Method, object?[] Args)> Sent { get; } = [];
+    private readonly List<(string Method, object?[] Args)> _sent = [];
+
+    /// <summary>
+    /// A point-in-time copy of every payload broadcast so far. The sampler appends from its own
+    /// background loop, so this snapshots under the same lock the writer takes; handing out the
+    /// live list let callers enumerate it mid-<c>Add</c> (throwing "Collection was modified") or
+    /// read a count without the element it refers to.
+    /// </summary>
+    public IReadOnlyList<(string Method, object?[] Args)> Sent
+    {
+        get
+        {
+            lock (_sent)
+            {
+                return _sent.ToArray();
+            }
+        }
+    }
 
     public IHubClients Clients { get; }
 
@@ -50,9 +67,9 @@ internal sealed class RecordingHubContext : IHubContext<CurrentSnapshotHub>
     {
         public Task SendCoreAsync(string method, object?[] args, CancellationToken cancellationToken = default)
         {
-            lock (owner.Sent)
+            lock (owner._sent)
             {
-                owner.Sent.Add((method, args));
+                owner._sent.Add((method, args));
             }
 
             return owner._onSend?.Invoke(cancellationToken) ?? Task.CompletedTask;

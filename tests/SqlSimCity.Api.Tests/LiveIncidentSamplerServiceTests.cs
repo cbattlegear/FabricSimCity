@@ -47,13 +47,20 @@ public sealed class LiveIncidentSamplerServiceTests
 
         // The very first cycle throws, transitioning the sampler into Reconnecting; requirement 13
         // says that transition itself must broadcast, not only a hypothetical later success.
-        await WaitForAsync(() => hub.Sent.Count > 0);
-        var (_, args) = hub.Sent[^1];
+        // The sampler also broadcasts its initial Running state, so waiting for "any broadcast"
+        // raced that first payload and read Running on a slow machine; wait for the specific
+        // transition under test instead.
+        await WaitForAsync(() => hub.Sent.Any(IsReconnectingBroadcast));
+
+        var (_, args) = hub.Sent.First(IsReconnectingBroadcast);
         var payload = Assert.IsType<LiveIncidentResponseV1>(Assert.Single(args));
         Assert.Equal(SamplerRunState.Reconnecting, payload.Collector.State);
 
         await service.StopAsync(CancellationToken.None);
     }
+
+    private static bool IsReconnectingBroadcast((string Method, object?[] Args) sent) =>
+        sent.Args is [LiveIncidentResponseV1 { Collector.State: SamplerRunState.Reconnecting }];
 
     [Fact]
     public async Task CurrentSnapshotDiagnosticsIncludeSamplerSkippedCycles()
