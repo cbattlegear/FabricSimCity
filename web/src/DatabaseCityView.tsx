@@ -509,8 +509,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           lock names that object; route line pattern maps co-reference confidence, never row flow.
           Wait-lane width maps the captured Query Store wait milliseconds a building&apos;s workload
           spent queued at one infrastructure facility, and lane colour names that destination; a
-          category with no facility here is listed, never folded into one, and a family naming more
-          than one object is reported whole rather than divided.
+          category with no facility here is listed, never folded into one. A query family naming
+          several objects draws one shared lane threaded through each of them before reaching the
+          facility: that lane carries the family&apos;s whole captured wait, drawn once, so it is
+          neither divided between those buildings nor counted inside any of their own totals.
           Unknown size or unavailable activity uses fixed wireframe geometry and makes no quantity
           claim. Ground labels name each building and facility and carry identity only — a label
           never restates or qualifies a measurement. Every building stands alone on its own block,
@@ -715,6 +717,32 @@ function FacilityTrafficTable({
           <td>{lane.confidence}<small>{lane.rationale}</small></td>
         </tr>)}</tbody>
       </table></div>}
+      {traffic.sharedLanes.length > 0 && <div className="table-scroll"><table>
+        <caption>
+          Shared lanes — one multi-object query family each, drawn once through every object it
+          names. Each figure is the family&apos;s whole captured wait: it is not divided between these
+          buildings, is not part of any building&apos;s total above, and must not be summed with them.
+        </caption>
+        <thead><tr>
+          <th>Query family</th><th>Buildings it threads</th><th>Facility</th>
+          <th>Captured wait (ms)</th><th>Categories</th><th>Attribution</th>
+        </tr></thead>
+        <tbody>{traffic.sharedLanes.map(lane => <tr key={lane.laneId}>
+          <th scope="row">{lane.familyId}</th>
+          <td>{lane.objectIds.map(nameOf).join(' · ')}
+            {lane.offPageObjectCount > 0 && <small>{lane.offPageObjectCount} further named
+              object/objects are not on this page, so the drawn path is shorter than the
+              relationship.</small>}</td>
+          <td>{lane.facilityLabel}</td>
+          <td>{exact(lane.waitMilliseconds)}
+            {lane.saturated && <small>Wider than the map can draw; this figure is exact, the lane
+              width is a floor.</small>}</td>
+          <td>{lane.categories
+            .map(total => `${total.category} ${exact(total.waitMilliseconds)}`)
+            .join(' · ')}</td>
+          <td>{lane.confidence}<small>{lane.rationale}</small></td>
+        </tr>)}</tbody>
+      </table></div>}
       {traffic.unmapped.length > 0 && <div className="source-note">
         <strong>Captured waits with no facility on this map</strong>
         <ul>{traffic.unmapped.map(entry => <li key={entry.category}>
@@ -722,10 +750,12 @@ function FacilityTrafficTable({
         </li>)}</ul>
       </div>}
       {traffic.shared.length > 0 && <div className="source-note">
-        <strong>Wait time from families naming more than one object</strong>
+        <strong>Wait time from multi-object families with nothing on this page</strong>
         <p>
-          Query Store reports one wait total per query, not per object, so this time is reported
-          whole rather than divided between the buildings the family names.
+          Query Store reports one wait total per query, not per object. These families name only
+          objects absent from this page, so there is no honest path to thread a shared lane through;
+          the time is reported whole here rather than divided or handed to a building that the
+          family never named.
         </p>
         <ul>{traffic.shared.map(entry => <li key={entry.category}>
           {entry.category}: {exact(entry.waitMilliseconds)} ms

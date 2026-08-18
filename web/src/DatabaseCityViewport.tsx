@@ -119,7 +119,7 @@ export function DatabaseCityViewport({
   useEffect(() => sceneRef.current?.setRoads(roads), [roads])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
   useEffect(
-    () => sceneRef.current?.setFacilityLanes(facilityTraffic.lanes),
+    () => sceneRef.current?.setFacilityLanes(facilityTraffic.lanes, facilityTraffic.sharedLanes),
     [facilityTraffic])
   useEffect(() => sceneRef.current?.setRoute(route), [route])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
@@ -154,7 +154,10 @@ export function DatabaseCityViewport({
   // Only facilities that actually received a lane are given a legend swatch, so the legend never
   // advertises a colour for traffic that was not measured.
   const laneFacilities: FacilityKind[] = [
-    ...new Set(facilityTraffic.lanes.map(lane => lane.facility)),
+    ...new Set([
+      ...facilityTraffic.lanes.map(lane => lane.facility),
+      ...facilityTraffic.sharedLanes.map(lane => lane.facility),
+    ]),
   ].sort()
 
   const hoverLabel = hoveredRoadId === null ? null : roadLabels.get(hoveredRoadId) ?? null
@@ -255,7 +258,10 @@ export function DatabaseCityViewport({
           </ul>
           <p className="legend-caveat">
             A building with no wait lane is not idle: it means no ranked query family carried Query
-            Store wait-category evidence naming only that object. {facilityTraffic.note}
+            Store wait-category evidence naming it. A lane that threads through several buildings
+            before reaching a facility is a shared lane: it carries one multi-object family&apos;s whole
+            wait total, drawn once along the objects it names, and belongs to none of them
+            individually. {facilityTraffic.note}
             {facilityTraffic.unmapped.length > 0 &&
               ` ${facilityTraffic.unmapped.length} captured wait category/categories have no facility` +
               ' on this map and are listed in the evidence tables rather than folded into one.'}

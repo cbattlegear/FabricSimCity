@@ -11,6 +11,7 @@ import {
   planCity,
   streetPath,
   streetPolyline,
+  streetPolylineThrough,
 } from './cityPlan'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import type { Evidence } from './contracts'
@@ -295,6 +296,43 @@ describe('street graph', () => {
         Math.abs(previous.x - current.x) < 0.001 || Math.abs(previous.z - current.z) < 0.001
       expect(axisAligned).toBe(true)
     }
+  })
+
+  it('threads one continuous street path through every waypoint in order', () => {
+    const plan = planCity(sampleCity())
+    const lots = [...plan.lots.values()]
+    const stops = [lots[0]!, lots[2]!, lots[lots.length - 1]!].map(lot => ({
+      x: lot.accessX,
+      z: lot.accessZ,
+    }))
+    const threaded = streetPolylineThrough(plan, stops)
+
+    // Every waypoint is actually visited, so a shared lane really does pass each building it names.
+    for (const stop of stops) {
+      expect(threaded.some(point => point.x === stop.x && point.z === stop.z)).toBe(true)
+    }
+    // Waypoints appear in the order given: the path is one journey, not three overlapping ones.
+    const visits = stops.map(stop =>
+      threaded.findIndex(point => point.x === stop.x && point.z === stop.z))
+    expect(visits).toEqual([...visits].sort((left, right) => left - right))
+    // Still drives on streets rather than cutting the corner between legs.
+    for (let index = 1; index < threaded.length; index += 1) {
+      const previous = threaded[index - 1]!
+      const current = threaded[index]!
+      expect(
+        Math.abs(previous.x - current.x) < 0.001 || Math.abs(previous.z - current.z) < 0.001,
+      ).toBe(true)
+    }
+    // No duplicated vertex where one leg hands over to the next.
+    for (let index = 1; index < threaded.length; index += 1) {
+      expect(threaded[index]).not.toEqual(threaded[index - 1])
+    }
+  })
+
+  it('draws nothing for a lane with fewer than two waypoints', () => {
+    const plan = planCity(sampleCity())
+    expect(streetPolylineThrough(plan, [])).toEqual([])
+    expect(streetPolylineThrough(plan, [{ x: 0, z: 0 }])).toEqual([])
   })
 
   it('snaps a world point to the nearest intersection', () => {

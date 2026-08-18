@@ -163,6 +163,28 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Multi-object query plans are drawn instead of footnoted.** A query family naming more than one
+  object used to be dropped from the wait layer entirely: its milliseconds went into a text-only
+  "shared" bucket and nothing reached the map. The refusal was sound — Query Store measures one wait
+  total per query, not per object, so splitting it fabricates a per-building number, and handing it
+  whole to whichever named object happened to be loaded is worse still — but the conclusion was
+  wrong. Showing a *relationship* needs no division at all. Such a family now draws a **shared lane**
+  (`SharedFacilityLane` in `web/src/cityFacilityTraffic.ts`): one lane per family and facility, its
+  path threaded through every named object on the page before running out to the facility, carrying
+  the family's whole captured wait **exactly once**. Because it is drawn once and kept out of
+  `FacilityTraffic.lanes`, nothing is divided and nothing is double-counted; per-object totals still
+  contain only the families that measured that object alone. A shared lane sits above exclusive lanes
+  so overlaps stay readable, and its own row in the evidence table names the buildings it threads,
+  states that the figure belongs to none of them individually, and discloses how many named objects
+  are off the page and therefore missing from the drawn path. Only a family with *nothing* on this
+  page — leaving no honest path to draw — still falls back to text.
+- **Per-object exposure now says where the multi-object work went.** The attributed-exposure
+  rationale in `QueryStoreCityAttribution.cs` read "multi-object plans are excluded rather than
+  divided", which stated a true policy but implied the evidence was discarded. It now counts the
+  ranked families that name the object alongside others and points at the routes and shared lanes
+  that carry them whole. The scalar totals themselves are unchanged: still only families that named
+  the object and nothing else, still never divided by an invented ratio.
+
 - **Every building stands alone on its own block.** A block used to hold eight buildings in two
   back-to-back rows, and the schema neighborhood tint was what visually separated one cluster from
   the next. Once that tint went off by default the packed blocks read as an undifferentiated mass of

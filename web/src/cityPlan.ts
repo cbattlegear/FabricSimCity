@@ -318,6 +318,33 @@ export function streetPath(plan: CityPlan, fromId: string, toId: string): string
   return path.reverse()
 }
 
+/**
+ * World-space polyline that visits every waypoint in order, following streets the whole way.
+ *
+ * Used by shared wait lanes, which must thread through each object a multi-object query family names
+ * before running out to its facility: one continuous path, drawn once, so the family's whole wait
+ * total is never duplicated across the buildings it touches. Consecutive duplicate points are
+ * dropped where one leg ends exactly where the next begins, so the joins are seamless.
+ *
+ * Fewer than two waypoints describes no journey, so the result is empty rather than a degenerate
+ * point: a lane with nowhere to go is not drawn at all.
+ */
+export function streetPolylineThrough(
+  plan: CityPlan,
+  waypoints: ReadonlyArray<{ x: number; z: number }>,
+): Array<{ x: number; z: number }> {
+  if (waypoints.length < 2) return []
+  const points: Array<{ x: number; z: number }> = []
+  for (let index = 0; index < waypoints.length - 1; index += 1) {
+    for (const point of streetPolyline(plan, waypoints[index], waypoints[index + 1])) {
+      const last = points[points.length - 1]
+      if (last && last.x === point.x && last.z === point.z) continue
+      points.push(point)
+    }
+  }
+  return points
+}
+
 /** World-space polyline that follows streets between two world points. */
 /**
  * World-space polyline from one point to another that only ever travels along street centre lines.
