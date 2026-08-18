@@ -1,419 +1,174 @@
 # SQLSimCity
 
-SQLSimCity is a self-hosted, evidence-first visual atlas for SQL Server performance data. It starts in deterministic **fixture mode** and can be explicitly configured for read-only connected collection.
+SQLSimCity is a self-hosted visual performance tool for Microsoft SQL Server. It combines:
 
-The fixture is not a benchmark or a description of a real server. SQLSimCity is independent software and is not affiliated with, sponsored by, or endorsed by Microsoft, Electronic Arts, Maxis, the SimCity franchise, or the PGSimCity project. No SimCity assets are included.
+- a server atlas and database-city map;
+- Query Store history and compiled-plan comparison;
+- sampled live requests, waits, blocking, memory grants, tempdb, I/O, and log pressure;
+- evidence-backed findings with caveats and next checks;
+- offline archives and an optional outward-only edge connector.
 
-## What works
+**Heavily inspired by [PGSimCity](https://github.com/NikolayS/PGSimCity).**
 
-- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/atlas/status`, `/api/v1/database-city`, `/api/v1/database-city/{databaseId}`, `/api/v1/capabilities`, `/api/v1/live`, health endpoints, a `/hubs/current-snapshot` SignalR hub, and the production Vite bundle.
-- Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
-- React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
-- Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
-- A keyboard and screen-reader-friendly table contains the same records. Exact bytes and Query Store integer aggregates cross the wire as nonnegative decimal strings and are formatted with `BigInt`, avoiding JavaScript precision loss.
-- The Query Store history tab and read-only `/api/v1/query-store/*` endpoints expose paged query families, physical query/context splits, execution-type and replica-separated runtime, plan history, normalized compiled-plan trees, and structural plan comparison from sanitized fixtures.
-- Entering a database adds a semantic-zoom level with deterministic schema neighborhoods, exact table/indexed-view page geometry, parent-attached indexes, separately styled direct DMV and attributed Query Store evidence, confidence-graded co-reference routes, bounded top query families, and an explicit `other workload` aggregate.
+SQLSimCity is strictly read-only against monitored SQL Servers. Query Store history is aggregate
+evidence, live DMVs are point-in-time samples, and inferred relationships are always labelled with
+their confidence.
 
-## Accuracy boundary
+> **Security:** SQLSimCity has no built-in login. Keep it on loopback or a trusted network, or place
+> it behind an authenticating reverse proxy. The UI repeats this warning on every view.
 
-The contract keeps three evidence classes separate:
+## Quick start with Docker
 
-1. **Query Store aggregate history** describes a time window. It is not current execution activity. Duration is microseconds and logical reads are counts of 8-KiB pages.
-2. **Live DMV samples** are point-in-time observations with explicit observation and freshness timestamps. Missing, stale, disconnected, and permission-denied values remain unavailable, never numeric zero. The live-incident sampler below is this class of evidence, taken on a bounded cadence, not a continuous trace: a request that starts and finishes between two samples never appears, and blocking that resolves between samples is invisible to it. See [Live incident sampling](#live-incident-sampling) for exactly what a cadence-based sample can and cannot show, and how it differs from Query Store's retained history.
-3. **Topology is inferred evidence.** Confirmed, probable, and unknown confidence carry rationale; the atlas is not claiming a complete dependency graph.
+### Fixture mode
 
-There is no opaque health score. Query Store capability, health, data status, and reasons remain separate. Connected mode executes only validated static SQL embedded in the application. It does not fetch plan XML or fabricate live traffic. When the live sampler and atlas target IDs match, the atlas projects only the latest available request sample; otherwise activity remains explicitly unavailable.
-
-## Architecture
-
-```text
-src/SqlSimCity.Contracts  versioned transport records and evidence enums
-src/SqlSimCity.Domain     fixture source and API source seam
-src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
-src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
-src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, live-incident sampler, and refresh coordination
-src/SqlSimCity.Findings   pure deterministic findings rule engine, rules, and bounded evidence provider
-src/SqlSimCity.Archive    hostile-input archive format, validator, and source-neutral offline adapters
-src/SqlSimCity.Archive.Tool deterministic local preview/export/validation CLI
-src/SqlSimCity.Edge       signed envelope, replay defense, encrypted spool, atomic generation store
-src/SqlSimCity.Edge.Connector outward-only fixture connector and delivery runtime
-src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
-sql/                      versioned probe catalog (manifest.json + probes/*.sql)
-fixtures/                 deterministic JSON fixtures for the atlas, capabilities, and live-incident APIs
-web/                      strict TypeScript React shell and three.js scene
- tests/                    serialization, fixture, endpoint, storage, connection, catalog, negotiation, and live-incident tests
-```
-
-The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
-
-## Database city semantic zoom
-
-`/api/v1/database-city` returns database-level availability. The detail route accepts only validated stable database IDs, `cpu|duration|reads|executions`, page sizes from 1 through 50, and opaque request-bound continuation tokens. Parent objects are paged before attached-index expansion. Query families are backend-ranked to a fixed top 12 and all remaining fixture families are represented by one exact `other workload` aggregate; the browser never receives or lays out an unbounded Query Store population.
-
-Tables and indexed views use exact decimal-string 8-KiB page counts. Reserved pages determine footprint and used pages determine height. Unknown size uses a fixed wireframe and is explicitly nonquantitative. Indexes render only as structures attached to their parent object. Cyan index slabs represent direct cumulative index DMV operations; the fixture discloses its reset epoch, while connected mode leaves the epoch unavailable because database detach/shutdown resets are not timestamped by the DMV. Amber roof caps represent Query Store history only when normalized plan evidence supports attribution; multi-object query totals remain query-level and are never copied to each object. Solid, dashed, and dotted routes communicate confirmed, probable, and unknown co-reference evidence and never claim row direction or row flow.
-
-Fixture mode provides the full sanitized city surface, including unavailable and stale cases. Connected mode uses the static keyset-bounded `city.object_inventory_page` and `city.index_usage_page` catalog probes. When same-window normalized plan attribution, an exact object-reserved summary, or an exact `other workload` aggregate is unavailable, connected responses return explicit `NotProbed` evidence instead of manufacturing heat.
-
-## Query Store history
-
-Fixture mode includes deterministic, sanitized history covering active-interval duplicate aggregation, fractional count-weighted averages, regular/aborted/exception executions, replica groups, context splits, restricted text, force failures, PSP and SQL Server 2025 OPPO dispatcher/variant relationships. Dispatcher runtime is excluded while variant runtime retains its plan and rolls into the family.
-
-All list/detail routes are GET-only and return versioned contracts with decimal-string integers, explicit source/freshness/caveats, and opaque continuation tokens. Summary probes exclude SQL text and Showplan XML. The two single-record payload probes are on-demand only; `ProtectedQueryStoreRepository` writes those payloads only through `IProtectedRecordStore`. The Showplan parser prohibits DTDs and resolvers, enforces character/depth/node/text limits and cancellation, tolerates namespace version changes, and emits a normalized structural graph. Query Store supplies aggregate query runtime, not actual operator progress or actual operator metrics.
-
-Connected atlas mode never substitutes fixture Query Store history. Set `QueryStoreHistory:Mode=Connected` together with `Atlas:Mode=Connected` and protected storage to opt in. The collector uses static keyset probes, per-database overlap watermarks, bounded pages/concurrency, cancellation, partial failures, reset epochs, and per-bucket active-interval replacement. It publishes encrypted, bounded snapshot chunks through one final encrypted pointer, so a failed cycle or process crash leaves the prior complete snapshot current. `Disabled` remains an explicit unavailable state; fixture mode remains the default.
-
-## Fixture and connected collection
-
-`Atlas:Mode` defaults to `Fixture`; this mode opens no network connection and remains deterministic. Set it to `Connected` only with a validated `Atlas:Connection` profile. Connected collection:
-
-- discovers at most 100 visible databases from `master` on SQL Server and Managed Instance;
-- requires `Atlas:KnownDatabases` for Azure SQL Database, where sibling databases cannot be inferred from one database connection;
-- records exact data/log allocation and use, bounded Query Store totals, cumulative file I/O plus reset epoch, and per-database partial failures;
-- limits database concurrency to 4 by default (hard maximum 16), uses the profile command timeout, never overlaps refresh cycles, and backs off after target-level connection failures.
-
-## Offline observation archives
-
-SQLSimCity can export a redacted, versioned observation archive and serve it with no SQL Server or
-identity connectivity. Archives are **not backups** of protected storage: they are bounded,
-point-in-time evidence exports whose default policy removes credentials, authentication metadata,
-raw SQL, raw Showplan XML, endpoint/user/client fields, secret paths, and database/object names.
+Fixture mode needs no SQL Server and is the fastest way to explore the product.
 
 ```powershell
-dotnet run --project src\SqlSimCity.Archive.Tool -- preview-fixture
-dotnet run --project src\SqlSimCity.Archive.Tool -- export-fixture --output C:\archives\sqlsimcity.ssca
-dotnet run --project src\SqlSimCity.Archive.Tool -- validate C:\archives\sqlsimcity.ssca
-dotnet run --project src\SqlSimCity.Archive.Tool -- smoke-import C:\archives\sqlsimcity.ssca
-dotnet run --project src\SqlSimCity.Api -- `
-  --Acquisition:Mode=Archive `
-  --Acquisition:Archive:AllowedDirectory=C:\archives `
-  --Acquisition:Archive:FileName=sqlsimcity.ssca
+docker build -t sqlsimcity:local .
+
+docker run --rm --name sqlsimcity `
+  --publish 127.0.0.1:8080:8080 `
+  --read-only `
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m `
+  --tmpfs /data:rw,noexec,nosuid,size=64m `
+  --cap-drop ALL `
+  --security-opt no-new-privileges `
+  sqlsimcity:local
 ```
 
-Mount the configured archive file read-only in containers. Archive mode validates the complete file
-before the host is built, registers no SQL connection factory or live sampler, disables the live
-SignalR hub, and labels the one imported live sample static/stale. See
-[the archive format and operator guide](docs/archive-format.md).
+Open <http://127.0.0.1:8080>.
 
-## Edge acquisition
-
-`Acquisition:Mode=Edge` is a strict, opt-in single-target source mode for an outward-only connector.
-It requires `EdgeIngestion:Enabled=true` and an exact `Acquisition:Edge:TargetId`; it refuses to start
-with archive mode, local connected Atlas/Query Store/live collection, or protected storage. The
-receiver endpoint is absent by default.
-
-A projection becomes visible only after Atlas, capabilities, Query Store, database-city, and live
-sections for one connector, target, epoch, boot, and sequence are complete. Until then the previous
-complete generation remains current. The ordinary Atlas, capabilities, Query Store, database-city,
-live, and findings APIs then serve that one generation through source-neutral adapters; findings are
-reevaluated centrally. Source timestamps, freshness boundaries, and reset epochs are retained.
-Connector-captured live evidence is always labelled as a static point-in-time sample: the central
-service starts no SQL collector, live sampler, or SignalR trace in Edge mode.
-
-The connector's `SQLSIMCITY_EDGE_SOURCE_MODE` defaults to `Fixture` for the runnable Compose smoke.
-`Connected` builds a complete validated SQL profile and reuses the production Atlas, capability,
-live, Query Store, and database-city collectors near the remote target. Authentication is exactly one
-existing file-referenced SQL/Kerberos/Entra strategy with no fallback. No real SQL target has been
-validated; connected coverage uses fake probe executors.
-
-The UI shows the allowlisted target, connector, generation, state, captured time, included sections,
-and the point-in-time qualification. It never renders envelope bodies. The no-built-in-login warning
-remains visible on desktop and mobile.
-
-The local `compose.edge.yaml` example shares the central service network namespace and connects to
-`http://127.0.0.1:8080`; plain HTTP is allowed only for that explicit loopback example. Production
-connector endpoints remain HTTPS-only. See [the edge connector operator guide](docs/edge-connector.md).
-
-Example non-secret settings are in `compose.yaml`. Authentication supports the explicit strategies in `SqlSimCity.SqlServer`. Passwords, certificates, and client secrets are file references under `Atlas:SecretsDirectory` (`/run/secrets` by default), never configuration values. For SQL Server 2016–2019 grant the collector login `VIEW SERVER STATE` and `VIEW DATABASE STATE` in each collected database; SQL Server 2022+ uses `VIEW SERVER PERFORMANCE STATE` and `VIEW DATABASE PERFORMANCE STATE`. Also grant `CONNECT` to each database and preserve the default `VIEW ANY DATABASE` only when server discovery is desired. Azure SQL Database should use the smallest documented database-scoped permission/role that exposes the required DMVs for its service tier. SQLSimCity never executes grants.
-
-## Development
-
-Requires .NET SDK 10, Node.js 24 (Node 22.12+ is also supported by the frontend toolchain), and npm.
-
-Terminal 1:
-
-```powershell
-dotnet run --project src\SqlSimCity.Api --urls http://localhost:5080
-```
-
-Terminal 2:
-
-```powershell
-Set-Location web
-npm install
-npm run dev
-```
-
-Vite proxies API and hub paths to port 5080. Production is a single ASP.NET process:
-
-```powershell
-Set-Location web
-npm ci
-npm run build
-Set-Location ..
-dotnet publish src\SqlSimCity.Api -c Release -o artifacts\publish
-dotnet C:\path\to\artifacts\publish\SqlSimCity.Api.dll --urls http://127.0.0.1:8080
-```
-
-## Container
+The equivalent Compose command is:
 
 ```powershell
 docker compose up --build
 ```
 
-Compose publishes only `127.0.0.1:8080`, runs as the .NET image's non-root user, drops all Linux capabilities, enables `no-new-privileges`, uses a read-only root filesystem, mounts `/tmp` as tmpfs, and reserves named `/data`. The fixture slice writes nothing to `/data`: `SqlSimCity.Storage` (see below) is disabled by default and only touches `/data` when explicitly enabled with a key.
+### Connect to SQL Server
 
-The image targets Linux containers on x86-64 and ARM64 where the selected official .NET and Node images are available. Current Chromium, Firefox, and Safari with WebGL2 are the browser targets; the complete text/table view remains usable when the 3D viewport cannot render.
+SQLSimCity intentionally does **not** accept a raw semicolon-delimited connection string because
+those strings commonly expose passwords. Set the connection fields as environment variables and
+mount the password as a read-only file secret.
 
-## Protected storage
+A conventional connection string such as:
 
-`SqlSimCity.Storage` is the source-neutral encrypted embedded record store used by opt-in connected Query Store history. It ships **disabled by default** and is unused by the fixture path. When enabled it:
+```text
+Server=sql01.example.internal,1433;Initial Catalog=master;Encrypt=True;User ID=sqlsimcity_reader
+```
 
-- encrypts every payload with AES-256-GCM inside a versioned envelope (format version, key version, nonce, tag, ciphertext) before any byte reaches SQLite, with record kind, opaque record ID, and key version bound as authenticated associated data so ciphertext cannot be swapped between records;
-- loads its key ring only from an explicitly configured file (see [SECURITY.md](SECURITY.md) for the exact JSON format, key rotation, and backup guidance) and never logs key material;
-- fails closed: a missing/wrong key, corrupt or tampered envelope, failed canary check, or migration error prevents the application from becoming ready rather than silently degrading to an unencrypted or partially working store;
-- exposes only opaque record IDs, record kind, captured timestamp, and resolution (`Detail`/`HourlyRollup`) as plaintext metadata — payload bytes are always encrypted;
-- prunes at most `ProtectedStorage:Retention:PruneBatchSize` expired records per invocation (call again to drain more), under a default retention of 7 days for `Detail` and 90 days for `HourlyRollup`; the batch size is bounded from 1 through 500.
-- retains published Query Store snapshot pointers, indexes, families, and chunks as `HourlyRollup` records so the readable 90-day history survives a collector outage; raw SQL and raw Showplan XML remain 7-day `Detail` records.
-- restricts the database filename to a simple filename, record-kind metadata to 128 characters (maximum 1,024), and plaintext payloads to 1 MiB (maximum 16 MiB); `MaxRecordKindLength` and `MaxPayloadBytes` are explicit protected-storage configuration limits.
-- chunks oversized normalized Query Store family and plan records below `MaxPayloadBytes`. Raw Showplan XML above that limit is deliberately not cached; its sanitized normalized plan remains available from bounded encrypted chunks.
+maps to:
 
-Enable it with `ProtectedStorage:Enabled=true`, `ProtectedStorage:DataDirectory`, and `ProtectedStorage:KeyFilePath` (see `compose.yaml` for a commented example). Connected Query Store history refuses to start without it. Raw SQL and Showplan XML enter only protected detail records; normalized facts, watermarks, reset epochs, and atomically published indexes are protected as well. The background collector invokes bounded retention pruning after successful publication.
+| Connection-string field | SQLSimCity setting |
+| --- | --- |
+| `Server` | `Atlas__Connection__Host` plus `Atlas__Connection__Port` or `Instance` |
+| `Initial Catalog` | `Atlas__Connection__InitialDatabase` |
+| `Encrypt=True` | `Atlas__Connection__Encryption=Mandatory` |
+| `TrustServerCertificate` | `Atlas__Connection__TrustServerCertificate` |
+| `User ID` | `Atlas__Connection__Authentication__Username` |
+| `Password` | mounted secret named by `Atlas__Connection__Authentication__PasswordSecret` |
 
-## SQL Server connection and authentication
+Create a password file without placing the password in shell history:
 
-`SqlSimCity.SqlServer` is the source-neutral connection and authentication library used by explicitly enabled connected collection. Fixture mode does not instantiate it or open a connection. It ships:
+```powershell
+New-Item -ItemType Directory -Force .\secrets | Out-Null
+$credential = Get-Credential -UserName "sqlsimcity_reader" -Message "Enter the SQL login password"
+[IO.File]::WriteAllText(
+  (Join-Path (Resolve-Path .\secrets) "sql-password"),
+  $credential.GetNetworkCredential().Password)
+Remove-Variable credential
+```
 
-- an immutable, fully validated `ConnectionProfile` (DNS/FQDN or IPv4 host, optional named instance or explicit port — never both, initial database, bounded connect/command timeouts and pool bounds, a fixed `SQLSimCity` application name, an explicit `EncryptionPolicy`, and a per-profile `TrustServerCertificate` opt-in that is never inherited or global; IPv6 literals are rejected until their SqlClient TCP syntax is implemented);
-- a closed authentication-strategy hierarchy with **no fallback between strategies**: SQL login (username plus a secret-file password reference), a Linux Kerberos/SSPI service identity, and four explicit Microsoft Entra ID strategies (`ManagedIdentity`, `WorkloadIdentity`, `ServicePrincipalCertificate`, `ServicePrincipalSecret`) — **never `DefaultAzureCredential` or any credential chain**, enforced by a static test;
-- an `ISecretFileProvider` that resolves only simple, validated file-name references under one configured secrets directory (default `/run/secrets`), enforces a size limit, and fails closed (`SecretResolutionException`) on anything missing, oversized, or invalid — never logging secret content;
-- an `ISqlConnectionFactory` that builds every connection through `SqlConnectionStringBuilder` only (a password or Entra token is never concatenated into the connection string); retains SQL-login credentials, and Entra credentials plus their `AccessTokenCallback` delegate, for the lifetime of their pool — reusing the exact same callback delegate per stable security context, since `AccessTokenCallback` is itself part of SqlClient's connection pool key (see the [official documentation](https://learn.microsoft.com/sql/connect/ado-net/sql/azure-active-directory-authentication#using-accesstokencallback)) — and provides explicit per-profile invalidation after password, certificate, or client-secret rotation, clearing each credential's pool before releasing its material; and a secret-free `SafeConnectionSettings` DTO for authorized UI and protected storage. `SafeConnectionSettings` contains operationally sensitive target and identity metadata, so it must not be logged or exposed indiscriminately.
+Then run the connected atlas:
 
-See [SECURITY.md](SECURITY.md) for the Kerberos keytab/SPN/DNS/clock-sync and Entra endpoint/IMDS deployment requirements.
+```powershell
+$passwordFile = (Resolve-Path .\secrets\sql-password).Path
 
-## Capability negotiation
+docker run --rm --name sqlsimcity `
+  --publish 127.0.0.1:8080:8080 `
+  --read-only `
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m `
+  --mount type=volume,src=sqlsimcity-data,dst=/data `
+  --mount "type=bind,src=$passwordFile,dst=/run/secrets/sql-password,readonly" `
+  --cap-drop ALL `
+  --security-opt no-new-privileges `
+  --env ASPNETCORE_ENVIRONMENT=Production `
+  --env Atlas__Mode=Connected `
+  --env Atlas__TargetId=primary `
+  --env Atlas__DisplayName="Production SQL Server" `
+  --env Atlas__Connection__Host=sql01.example.internal `
+  --env Atlas__Connection__Port=1433 `
+  --env Atlas__Connection__InitialDatabase=master `
+  --env Atlas__Connection__Encryption=Mandatory `
+  --env Atlas__Connection__Authentication__Mode=SqlLogin `
+  --env Atlas__Connection__Authentication__Username=sqlsimcity_reader `
+  --env Atlas__Connection__Authentication__PasswordSecret=sql-password `
+  --env Atlas__SecretsDirectory=/run/secrets `
+  sqlsimcity:local
+```
 
-`SqlSimCity.Collection` contains capability negotiation and the source-neutral atlas collector. Both fixture/fake and real executors use the same typed seams.
+Replace the host, port, database, and login with values reachable **from the container**. For Azure
+SQL Database, list databases explicitly with `Atlas__KnownDatabases__0`, `__1`, and so on.
 
-- **Versioned, embedded probe catalog.** `sql/manifest.json` and every `sql/probes/**/*.sql`
-  file are embedded resources in `SqlSimCity.Collection.dll`, so a published container image
-  cannot start with a missing or partial catalog. `ProbeCatalog.Load` validates the manifest
-  version, unique probe IDs and files, safe relative paths (no `..`, no absolute or
-  drive-rooted paths, forward slashes only), that every referenced file actually exists,
-  that declared parameters match exactly what each `.sql` file references, and that every
-  `connectionScope`/`cadenceClass`/`relativeCost`/`versionVariantOf` value is one this
-  loader documents. It also strips comments and rejects mutating statements, dynamic SQL,
-  `SELECT ... INTO`, unsafe top-level shapes, and undocumented `SET` options. Program startup
-  eagerly loads this catalog in fixture mode too; any inconsistency throws
-  `ProbeCatalogException` before the host is built or can become ready. The JS manifest guard
-  (`npm test`) remains an independent CI check; the .NET loader never shells out to Node.
-- **Canonical capability contracts** (`SqlSimCity.Contracts.V1`) give every fact -- engine
-  platform, product version, edition, database-discovery evidence, per-database compatibility level, Query Store
-  desired/actual state, read-only reason, capture mode, size, server-vs-database
-  visibility, waits, live sessions, plans/text, Parameter Sensitive Plan (PSP), Optional
-  Parameter Plan Optimization (OPPO), readable-secondary Query Store, Azure resource
-  metrics, and a source timestamp -- one of six explicit states: `Supported`,
-  `Unsupported`, `PermissionDenied`, `Unavailable`, `NotProbed`, `Preview`. A value that
-  could not be determined is always one of these states, never a false Boolean or a
-  numeric zero standing in for "unknown."
-- **Source-neutral negotiation.** `ICapabilityNegotiator`/`IProbeExecutor` let the full
-  gating algorithm (`CapabilityNegotiator`) be unit-tested with no SQL Server at all,
-  against either a `FixtureProbeExecutor` (backed by `fixtures/v1/target-capabilities.json`
-  and `fixtures/v1/database-query-store.json`) or a real `SqlClientProbeExecutor`
-  (`ISqlConnectionFactory`, opened connections, static catalog SQL only, named parameters,
-  command timeout from the connection profile, cancellation, no mutation).
-- **Version-and-metadata-gated feature selection.** Major engine version only narrows
-  which probe candidates are even safe to attempt; the actual verdict always requires
-  runtime confirmation from `capability.query_store_plan_metadata` plus the database's own
-  compatibility level. PSP requires compatibility level 160+ and confirmed plan-variant
-  metadata; OPPO requires compatibility level 170+, a supported platform, and the same
-  metadata confirmation; readable-secondary Query Store stays `Preview` and is
-  platform-policy dependent. Azure SQL Database's database IDs are never treated as
-  server-global, and its server-visibility state is explicitly reported as
-  database-scoped, not server-scoped.
-- **Tight failure classification.** `SqlExceptionClassifier` distinguishes permission
-  denial, missing object/column, transient connection failure, timeout/cancellation, and
-  Query Store `OFF`/`READ_ONLY`/`ERROR` states from each other and from an unknown/unhandled
-  error; nothing is broad-caught into a false `Supported`. Public diagnostics preserve the
-  non-secret SQL error number and severity class but never server name, query text, or
-  credentials. An exception this classifier does not recognize propagates unhandled rather
-  than being silently swallowed into `Unavailable`.
-- **Least-privilege guidance, never execution.** `LeastPrivilegeGuidanceGenerator`
-  produces the exact `GRANT`/role-membership *text* an operator would run for an observed
-  target/version/capability combination (`VIEW SERVER/DATABASE STATE` on SQL Server 2019,
-  `VIEW SERVER/DATABASE PERFORMANCE STATE` on 2022+, the tiered Azure SQL Database roles
-  above) -- SQLSimCity never executes a grant itself. Every identifier is quoted through a
-  tested `QUOTENAME`-equivalent helper (`SqlIdentifierQuoting`) so a hostile principal name
-  cannot break out of its bracketed identifier.
-- **A deterministic fixture negotiator today.** `FixtureProbeExecutor` maps
-  `fixtures/v1/target-capabilities.json` and `fixtures/v1/database-query-store.json` into
-  the same canonical `TargetCapabilityProfileV1` a live `SqlClientProbeExecutor` will
-  eventually produce, so API and frontend work can consume the real contract before any
-  live SQL Server connection exists. `/api/v1/capabilities` (read-only, versioned,
-  `Cache-Control: no-store`) exposes exactly this: one negotiated profile per known fixture
-  target. There is no corresponding write/mutation endpoint.
+This basic profile enables the connected atlas and database city. Encrypted Query Store history and
+live incidents require additional settings because they have retention and cadence controls. See
+[`docs/connected-mode.md`](docs/connected-mode.md) for a complete Compose override, permissions, all
+authentication modes, protected-storage keys, Query Store, and live sampling.
 
-`SqlSimCity.Collection.Tests` covers catalog tampering (missing/duplicate/unsafe-path/
-parameter/undocumented-variant), the full platform/compatibility matrix across SQL Server
-2019/2022/2025 and Azure SQL Database/Managed Instance, PSP/OPPO/secondary-replica gating,
-every Query Store operational state, exception classification, cancellation, parameter
-binding, least-privilege script quoting, and fixture-to-contract mapping.
+## Documentation
 
-## Live incident sampling
+| Guide | Contents |
+| --- | --- |
+| [Architecture and evidence](docs/architecture.md) | Components, evidence boundaries, visual semantics, scale, and API surfaces |
+| [Connected mode](docs/connected-mode.md) | SQL connection profiles, permissions, Query Store, live incidents, TLS, and secrets |
+| [Operations](docs/operations.md) | Reverse proxy and `AllowedHosts`, backup/restore, upgrades, rollback, SBOM, and provenance |
+| [Security](SECURITY.md) | Threat model, key rotation, Kerberos, Microsoft Entra ID, and fail-closed behavior |
+| [Offline archives](docs/archive-format.md) | Redacted export format and offline import |
+| [Edge connector](docs/edge-connector.md) | Outward-only remote collection, signing, replay defense, and encrypted spool |
+| [SQL probe catalog](sql/README.md) | Read-only probe contracts, permissions, platform scope, and units |
+| [Fixture contract](fixtures/v1/README.md) | Sanitized deterministic evidence used by tests and demos |
 
-`SqlSimCity.Collection`'s live-incident sampler is a second, independent evidence path from
-the capability negotiator above: it samples *current* activity — sessions, requests, blocking,
-memory grants, tempdb, file I/O, scheduler pressure, and log-space use — on a bounded cadence,
-rather than the Query Store aggregates negotiation decides how to request.
+## Development
 
-- **What "sampled now" means, and what it is not.** Every live-incident snapshot carries its
-  own `sourceTimestamp` (when the target produced the data), `collectedAt` (when this process
-  observed it), and `freshUntil` (the cadence-derived staleness boundary), so a reader never
-  mistakes a sample for a live trace. A request, a lock wait, or a blocking chain that starts
-  and fully resolves *between* two samples is invisible to this path; short, fast queries are
-  the case most likely to be missed entirely. This is a materially different accuracy claim
-  from Query Store: Query Store retains and aggregates every execution across the whole
-  retention window, while polling only ever proves what was true at the instant of the last
-  sample. Neither the API nor the UI (`web/src/liveIncidents.ts`'s `POLLING_DISCLOSURE`)
-  describes this as complete query capture.
-- **Canonical, versioned contracts** (`LiveIncidentContractsV1` in
-  `src/SqlSimCity.Collection/LiveIncidents/`) cover sampled requests and per-task waits
-  (preserving `exec_context_id` so parallel workers are never collapsed onto their
-  coordinator's wait), a blocking graph with nodes/edges/roots/cycle state and the four
-  negative blocking-session sentinels (`-2` orphaned, `-3` deferred-recovery, `-4`
-  interleaved-checkpoint, `-5` untracked latch owner — `-5` is explicitly never described as a
-  blocking problem by itself), memory grants (`grant_time IS NULL` is the waiting state),
-  tempdb task/session/file use, cumulative file-I/O and scheduler counters expressed as a
-  delta against a same-epoch prior sample, log-space pressure, and explicit
-  `Unavailable`/`PermissionDenied`/`Timeout` reasons for anything a target does not expose.
-  Every bigint count or byte value crosses the wire as a decimal string, never a `number`, so
-  large counters survive JSON without silent precision loss.
-- **Cumulative counters are epoch-scoped, not free-running.** File I/O, scheduler, and log
-  counters only ever produce a rate across two samples of the same target *and* the same
-  epoch. A first sample, an engine restart/failover, or any observed counter regression starts
-  a new epoch and reports `FirstSample`/`EpochReset` explicitly instead of manufacturing a
-  negative or zero rate. `sample_ms` is the sampling process's own OS uptime, never the target
-  engine's uptime, and instantaneous gauges (scheduler queue depth, log-space percent) are
-  never treated as cumulative.
-- **Source-neutral collection.** `ILiveIncidentCollector`/`ILiveIncidentProbeExecutor` let the
-  blocking-graph reconstruction, delta math, and sampler cadence be fully unit-tested with no
-  SQL Server at all, against either the default `FixtureLiveIncidentCollector` (backed by
-  `fixtures/v1/live-cases.json`) or a real `SqlLiveIncidentProbeExecutor`
-  (`ISqlConnectionFactory`, static embedded probes, named parameters, bounded command timeouts,
-  and negotiated platform/capability scope). Azure SQL Database stays strictly
-  database-scoped; server-wide fields it cannot expose remain `Unavailable`, never zero.
-- **`LiveIncidentSampler`** runs on a configurable, bounded cadence (default 2-5 seconds), never
-  overlaps a cycle with the previous one still running, publishes one immutable latest snapshot
-  plus a monotonically increasing sequence number and missed/skipped-cycle counts, supports
-  pause/resume, and reconnects through a capped exponential backoff with deterministic jitter.
-  All of its cadence/backoff/shutdown behavior is driven by `TimeProvider`, so tests never
-  depend on wall-clock timing.
-- **API and UI.** `/api/v1/live` (`Cache-Control: no-store`) returns the current
-  `LiveIncidentResponseV1`; `/hubs/current-snapshot` pushes the same snapshot to connected
-  clients on every successful cycle, keeping only the single latest snapshot in memory (no
-  unbounded history). Both are read-only: there is no mutation endpoint anywhere in this path.
-  The React "Live Incidents" tab (`web/src/LiveIncidentsPanel.tsx`) is keyboard- and
-  screen-reader-accessible: freshness/collector state is a glyph plus text (never color alone),
-  motion respects `prefers-reduced-motion`, every parallel wait is listed individually, and
-  disappeared requests, sentinel blockers, and unavailable fields are called out explicitly
-  rather than silently omitted.
+Requires .NET SDK 10 and Node.js 24 (Node 22.12+ is also supported by the frontend toolchain).
 
-`SqlSimCity.Collection.Tests`' live-incident suite covers blocking roots/chains/cycles/MARS
-dedup/sentinels, parallel-wait exposure, disappearing requests, memory-grant waiting state,
-first-sample/valid-delta/epoch-reset counter transitions, Azure scope, partial-permission and
-timeout handling, and cadence/no-overlap/pause/backoff/shutdown; `SqlSimCity.Api.Tests` covers
-the endpoint shape, exact-bigint serialization, GET-only enforcement, and the SignalR push/pull
-round-trip; `web/src/liveIncidents.test.ts` covers the same accessibility and disclosure
-guarantees on the frontend.
+```powershell
+# Terminal 1
+dotnet run --project src\SqlSimCity.Api --urls http://127.0.0.1:5080
 
-## Findings
+# Terminal 2
+Set-Location web
+npm install
+npm run dev
+```
 
-`SqlSimCity.Findings` turns the atlas, Query Store, and live evidence into deterministic,
-evidence-reproducible performance **findings**. It is not an automated tuning oracle: every finding
-exposes its observed window, exact measured magnitude, confidence, navigable evidence references,
-caveats and alternate explanations, a read-only recommendation, and concrete next checks. Low-confidence
-or stale evidence only ever downgrades a finding; it never becomes a definitive diagnosis, and
-insufficient/stale/unsupported data is never reported as a measured zero.
-
-- **Versioned contracts** (`FindingsContractsV1` in `SqlSimCity.Contracts`) carry the finding, its
-  deterministic scope fingerprint (stable across runs, used as the local acknowledgment/suppression
-  key), status/severity/impact/confidence, evidence references to visible facts, source freshness, the
-  engine status (including explicitly disclosed **unsupported** rules), a paged list, and a literal-safe
-  redacted export shape.
-- **A pure rule engine.** Rules are independently testable, never mutate SQL Server, and return
-  `NotEvaluated`/`InsufficientEvidence` rather than an empty success when prerequisites or evidence are
-  missing. The engine orders findings by severity, then confidence, then measured impact, then id, and
-  guards that every finding id is the deterministic scope fingerprint.
-- **The initial rules.** Query Store health (disabled/read-only/error/nearly-full/permission/stale),
-  same-family plan regression (comparable replica/epoch/execution-type windows, minimum execution
-  evidence, ranked by total measured impact), plan instability, forced-plan failure, PSP/OPPO variant
-  imbalance, high aborted/exception share, dominant Query Store wait category, query CPU dominance over
-  the bounded loaded set, current root blocker (excluding the -5 sentinel), current memory-grant queue,
-  log-space pressure, file-I/O stall pressure, and material Showplan warnings/missing-index suggestions
-  as advisory. tempdb-to-query and per-operator cost attribution are marked **unsupported** and never
-  fabricated, because the current contracts cannot support them.
-- **Bounded evidence.** `SourceBackedFindingsEvidenceProvider` pages a bounded number of top families
-  per ranking metric, deduplicates them, and loads detail and Showplans only for that bounded set, so
-  evaluation stays bounded even against a 100k-family target and never opens its own SQL connection.
-- **Read-only API.** `/api/v1/findings` (paged/sorted/filterable), `/api/v1/findings/{id}`,
-  `/api/v1/findings/rules/{ruleId}`, `/api/v1/findings/status`, and `/api/v1/findings/export` (a
-  redacted JSON export/preview). All are GET-only, `Cache-Control: no-store`, with bounded page tokens,
-  filters, and export size. The export omits or hashes any string that could contain raw SQL, plan XML,
-  credentials, or host/user/client identifiers; raw text is never passed through.
-- **React Findings tab** (`web/src/FindingsPanel.tsx`) is a keyboard- and screen-reader-accessible
-  inbox plus evidence drawer with severity/confidence sorting, filters, caveats, alternate explanations,
-  next checks, and the read-only recommendation. Severity and confidence are communicated with glyphs
-  plus text, never color alone, and the qualifications survive on mobile. Acknowledgment and suppression
-  are local presentation state only (versioned `localStorage` keyed by the finding fingerprint); they
-  never change engine truth. A persistent trusted-network/no-login disclosure is always shown.
-
-`SqlSimCity.Findings.Tests` covers each rule's direction, prerequisites, false-positive controls,
-confidence downgrade, comparable-window enforcement, the -5 sentinel exclusion, total-impact ranking,
-deterministic ordering/fingerprints, redacted export, paging/token DoS bounds, and bounded 100k-family
-evaluation; `SqlSimCity.Api.Tests` covers the endpoint shapes, GET-only enforcement, string-typed
-magnitudes, and export redaction; `web/src/findings.test.ts` covers the color-independent
-severity/confidence encoding, impact formatting, and local presentation-state behavior.
-
-## Security and privacy
-
-SQLSimCity has no login and is intended for a trusted network. Loopback is the safe default; do not expose it through a reverse proxy until authentication and authorization exist. A persistent, color-independent trusted-network / no-built-in-login notice is shown on every analysis view (including on mobile) so this constraint is never off-screen; see [`docs/operations.md`](docs/operations.md) for how to set `AllowedHosts` behind a reverse proxy. The application sends no analytics or telemetry and loads no CDN, remote font, image, or script. Fixture mode has no application network dependency after loading; connected mode contacts only its configured SQL target and explicit identity endpoints required by the selected authentication strategy.
-
-Atlas and live-incident collection are strictly read-only and fail closed: no probe or endpoint mutates the target, and unavailable secrets or identity providers never fall back to plaintext, anonymous access, or another authentication strategy. The `/data` volume itself is not encrypted by the platform; protected storage (above) is what makes bytes written there unreadable without the configured key, and it is unused unless explicitly enabled. See [SECURITY.md](SECURITY.md).
+Vite serves the UI and proxies API/SignalR traffic to port 5080.
 
 ## Validation
 
 ```powershell
+npm test
+node --test fixtures\v1\test\validate-fixtures.test.mjs
 dotnet test SqlSimCity.slnx
-node --test fixtures/v1/test/validate-fixtures.test.mjs
+
 Set-Location web
 npm test
 npm run typecheck
 npm run build
-Set-Location ..
-dotnet publish src\SqlSimCity.Api -c Release -o artifacts\publish
-docker build -t sqlsimcity:foundation .
 ```
 
-## Changelog
+See [CHANGELOG.md](CHANGELOG.md) for shipped changes and known validation gaps.
 
-See [CHANGELOG.md](CHANGELOG.md) for the notable changes in this unreleased MVP
-release candidate, including the explicit no-live-target validation gap.
+## Project status and affiliation
 
-## Edge connector (outward-only remote monitoring)
+No real SQL Server, Azure SQL Database, or Azure SQL Managed Instance target was available during
+development; connected paths are covered by deterministic fakes, production composition tests, and
+fail-closed container smokes.
 
-For SQL Servers the central container cannot reach, the optional **edge connector**
-(`src/SqlSimCity.Edge`, `src/SqlSimCity.Edge.Connector`) runs near SQL Server and connects **outward**
-to a configured central ingestion endpoint over HTTPS. It forwards the same source-neutral
-observations in a versioned envelope, signs every request with HMAC-SHA-256, and buffers a bounded,
-AES-256-GCM-encrypted spool when the central server is unavailable. It never accepts inbound control,
-never centralizes SQL credentials, and never mutates SQL Server.
-
-Central ingestion is **opt-in and disabled by default** (`EdgeIngestion:Enabled`); when off, the app
-stays strictly GET-only. When on, it adds one bounded `POST /api/v1/edge/ingest` plus read-only
-`GET /api/v1/edge/status` endpoints, and reconstructs delivered evidence into immutable generations.
-See [`docs/edge-connector.md`](docs/edge-connector.md) and [`compose.edge.yaml`](compose.edge.yaml).
-As elsewhere, no live SQL target was validated: the connector is exercised end to end against fixtures
-and a fake collector only.
+SQLSimCity is independent software. It is not affiliated with, sponsored by, or endorsed by
+Microsoft, Electronic Arts, Maxis, the SimCity franchise, or the PostgreSQL project. No SimCity
+assets are included.
 
 ## License
 
-Copyright 2026 SQLSimCity contributors. Licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Copyright 2026 SQLSimCity contributors. Licensed under Apache-2.0; see [LICENSE](LICENSE) and
+[NOTICE](NOTICE).

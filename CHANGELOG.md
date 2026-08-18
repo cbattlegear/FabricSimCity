@@ -6,8 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 SQLSimCity is independent software and is not affiliated with, sponsored by, or
-endorsed by Microsoft, Electronic Arts, Maxis, the SimCity franchise, or the
-PGSimCity project. No SimCity assets are included.
+endorsed by Microsoft, Electronic Arts, Maxis, or the SimCity franchise. No
+SimCity assets are included.
 
 ## [Unreleased]
 
