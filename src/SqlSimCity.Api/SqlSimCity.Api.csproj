@@ -10,4 +10,8 @@
   <ItemGroup Condition="Exists('..\..\web\dist')">
     <Content Include="..\..\web\dist\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\LICENSE" Link="legal\LICENSE" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\NOTICE" Link="legal\NOTICE" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

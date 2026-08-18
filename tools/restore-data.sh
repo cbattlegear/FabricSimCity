@@ -7,7 +7,7 @@ if [[ "$#" -ne 3 || "$1" != "--quiesced" ]]; then
 fi
 shift
 
-for command in chown find gzip realpath sha256sum stat tar; do
+for command in chown find gzip id realpath sha256sum stat tar; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "required command not found: ${command}" >&2
     exit 69
@@ -31,17 +31,20 @@ fi
 
 target_parent="$(dirname -- "${target_dir}")"
 work_dir="$(mktemp -d "${target_parent}/.sqlsimcity-restore-work.XXXXXX")"
-staging_dir="$(mktemp -d "${target_parent}/.sqlsimcity-restore-data.XXXXXX")"
 cleanup() {
   rm -rf -- "${work_dir}"
-  if [[ -n "${staging_dir}" ]]; then
-    rm -rf -- "${staging_dir}"
-  fi
 }
 trap cleanup EXIT
 target_uid="$(stat --format='%u' "${target_dir}")"
 target_gid="$(stat --format='%g' "${target_dir}")"
-chmod --reference="${target_dir}" "${staging_dir}"
+current_uid="$(id -u)"
+current_gid="$(id -g)"
+if [[ "${current_uid}" -ne 0 &&
+      ("${current_uid}" -ne "${target_uid}" ||
+       "${current_gid}" -ne "${target_gid}") ]]; then
+  echo "restore must run as root or as the restore target owner and group" >&2
+  exit 77
+fi
 
 tar --list --gzip --file "${backup_file}" >"${work_dir}/outer-members.txt"
 tar --list --verbose --gzip --file "${backup_file}" >"${work_dir}/outer-listing.txt"
@@ -116,18 +119,18 @@ if [[ "${actual_file_count}" -ne "${expected_file_count}" ]]; then
   exit 65
 fi
 
-tar --extract --gzip --file "${work_dir}/data.tar.gz" \
-  --directory "${staging_dir}" \
-  --no-same-owner \
-  --no-same-permissions
-chown --recursive "${target_uid}:${target_gid}" "${staging_dir}"
-
 if [[ ! -d "${target_dir}" || -L "${target_dir}" ]] ||
    find "${target_dir}" -mindepth 1 -print -quit | grep --quiet .; then
   echo "restore target changed or is no longer empty" >&2
   exit 65
 fi
-mv --no-target-directory -- "${staging_dir}" "${target_dir}"
-staging_dir=""
+tar --extract --gzip --file "${work_dir}/data.tar.gz" \
+  --directory "${target_dir}" \
+  --no-same-owner \
+  --no-same-permissions \
+  --keep-old-files
+if [[ "${current_uid}" -eq 0 ]]; then
+  chown --recursive "${target_uid}:${target_gid}" "${target_dir}"
+fi
 
 echo "restore completed: ${target_dir}"

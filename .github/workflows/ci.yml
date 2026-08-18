@@ -73,6 +73,11 @@ jobs:
           -p:Deterministic=true
           -p:UseAppHost=false
 
+      - name: Verify published legal notices
+        run: |
+          cmp LICENSE artifacts/publish/legal/LICENSE
+          cmp NOTICE artifacts/publish/legal/NOTICE
+
       - name: Test operational scripts
         run: tools/tests/operations.test.sh
 

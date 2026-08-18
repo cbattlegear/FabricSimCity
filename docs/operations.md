@@ -57,10 +57,10 @@ tools/restore-data.sh \
 ```
 
 The restore validates wrapper paths, manifest version, checksum, payload paths,
-and file types, extracts into a sibling staging directory, preserves the target
-owner, then atomically replaces the still-empty target. After restoring, mount
-the independently backed-up matching key and start the exact image version that
-created the data.
+and file types before writing to the still-empty target. Run it as the target
+owner/group or as root; root restores assign the target's existing owner/group
+to the restored tree. After restoring, mount the independently backed-up matching
+key and start the exact image version that created the data.
 Confirm `/readyz`, then exercise Query Store status and findings export. The CI
 operations test performs a deterministic backup/restore round trip and negative
 tests for symlinks, traversal, non-empty targets, key placement/hard links, and
