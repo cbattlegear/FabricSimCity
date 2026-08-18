@@ -18,6 +18,12 @@
 --   Database (only SQL Server and Azure SQL Managed Instance), so joining it here would break this
 --   probe on Azure SQL Database. Use server.host_info (SQL Server 2017 (14.x)+ / Managed Instance
 --   only) for host OS platform detection.
+-- NULL columns by platform: SERVERPROPERTY returns NULL for any property not supported on the
+--   connected engine, so consumers must never assume a non-NULL scalar. is_hadr_enabled and
+--   product_major_version are documented "Applies to: SQL Server" and are therefore NULL on BOTH
+--   Azure SQL Database and Azure SQL Managed Instance; machine_name is NULL on Azure SQL Database
+--   and instance_name is NULL on both. Availability groups are a SQL Server feature, so a NULL
+--   is_hadr_enabled means "not applicable" and is read as not enabled.
 -- Result contract: exactly one row describing the connected instance.
 -- Relative cost: trivial (in-memory server state, no per-database scan).
 SET NOCOUNT ON;

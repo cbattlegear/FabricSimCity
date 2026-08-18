@@ -59,7 +59,7 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                     reader["product_level"] as string,
                     reader["edition"] as string,
                     Convert.ToInt32(reader["engine_edition"], CultureInfo.InvariantCulture),
-                    Convert.ToInt32(reader["is_hadr_enabled"], CultureInfo.InvariantCulture) != 0,
+                    SqlClientProbeExecutor.IsHadrEnabled(reader["is_hadr_enabled"]),
                     Convert.ToInt32(reader["cpu_count"], CultureInfo.InvariantCulture),
                     Convert.ToInt32(reader["scheduler_count"], CultureInfo.InvariantCulture),
                     reader["physical_memory_mb"] is DBNull ? null : Convert.ToInt64(reader["physical_memory_mb"], CultureInfo.InvariantCulture),
@@ -493,8 +493,33 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
             {
                 throw ClassifyCredentialFailure(ex, probeId);
             }
+            catch (Exception ex) when (IsRowShapeFailure(ex))
+            {
+                throw ClassifyRowShapeFailure(ex, probeId);
+            }
         }
     }
+
+    /// <summary>
+    /// True for the exceptions a row projection raises when the engine's actual result shape
+    /// disagrees with what the projection expects: a column that is NULL on this platform but not
+    /// another (<see cref="InvalidCastException"/> from <c>Convert</c>), a column the probe does not
+    /// emit (<see cref="IndexOutOfRangeException"/>), or a value outside the target type
+    /// (<see cref="FormatException"/>, <see cref="OverflowException"/>).
+    ///
+    /// These are classified rather than left to propagate because the live-incident collector is
+    /// built to degrade one subsystem at a time -- it records an <c>UnavailableFieldV1</c> for any
+    /// <see cref="ProbeExecutionException"/> and still publishes the rest of the snapshot. An
+    /// unclassified cast failure instead escapes to the sampler and destroys the whole cycle, so a
+    /// single platform-specific NULL silently costs every other subsystem's evidence too. That is
+    /// exactly what <c>SERVERPROPERTY('IsHadrEnabled')</c> did on Azure SQL Database.
+    /// </summary>
+    internal static bool IsRowShapeFailure(Exception ex) =>
+        ex is InvalidCastException or IndexOutOfRangeException or FormatException or OverflowException;
+
+    private static ProbeDataFormatException ClassifyRowShapeFailure(Exception ex, string probeId) =>
+        new($"Probe '{probeId}' returned a row shape its result contract cannot represent, which " +
+            "usually means a column is NULL or absent on this engine edition.", ex);
 
     /// <summary>
     /// True for the non-<see cref="SqlException"/> failure types a connection open can raise before
