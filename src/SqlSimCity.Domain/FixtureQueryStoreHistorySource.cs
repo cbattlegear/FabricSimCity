@@ -151,7 +151,7 @@ public sealed class FixtureQueryStoreHistorySource : IQueryStoreHistorySource
         };
         var summary = new QueryFamilySummaryV1(
             "qf:sales-orders", "sales", "0x94A001", text.NormalizedTextFingerprint, text, physical,
-            "1064", "2089500", "4179000", "1046.8", "287",
+            "1064", "2089500", "4179000", "1047", "287",
             new DateTimeOffset(2026, 8, 17, 16, 0, 0, TimeSpan.Zero), CapturedAt, Evidence);
 
         var restrictedText = new QueryTextDescriptorV1(

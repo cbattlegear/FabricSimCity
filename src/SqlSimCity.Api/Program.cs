@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
 using SqlSimCity.Collection.Atlas;
 using SqlSimCity.Collection.LiveIncidents;
+using SqlSimCity.Collection.DatabaseCity;
 using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Domain;
 using SqlSimCity.SqlServer;
@@ -65,6 +66,8 @@ if (AtlasConfiguration.IsConnected(builder.Configuration))
     builder.Services.AddSingleton<ConnectedAtlasSource>();
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
+    builder.Services.AddSingleton<IDatabaseCityProbeExecutor, SqlClientDatabaseCityProbeExecutor>();
+    builder.Services.AddSingleton<IDatabaseCitySource, ConnectedDatabaseCitySource>();
     builder.Services.AddHostedService<AtlasRefreshBackgroundService>();
     if (queryStoreConnected)
     {
@@ -94,6 +97,7 @@ else
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
     builder.Services.AddSingleton<IQueryStoreHistorySource, FixtureQueryStoreHistorySource>();
+    builder.Services.AddSingleton<IDatabaseCitySource, FixtureDatabaseCitySource>();
 }
 
 var app = builder.Build();
@@ -245,6 +249,7 @@ queryStore.MapGet("/status", async (
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(await source.GetStatusAsync(cancellationToken));
 });
+app.MapDatabaseCity();
 app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 app.MapFindings();
 app.MapFallbackToFile("index.html");

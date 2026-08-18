@@ -12,6 +12,7 @@ const atlas = load('atlas-projection.json');
 const runtime = load('query-store-runtime.json');
 const live = load('live-cases.json');
 const evidence = load('cross-database-evidence.json');
+const city = load('database-city.json');
 
 const allowedCapabilityStates = new Set(['supported', 'unsupported', 'not-probed', 'permission-denied']);
 const jsonFiles = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -25,7 +26,7 @@ const asTime = (value) => {
 };
 
 test('fixture documents are versioned, timestamped, and capability states are explicit', () => {
-  for (const doc of [capabilities, queryStore, atlas, runtime, live, evidence]) {
+  for (const doc of [capabilities, queryStore, atlas, runtime, live, evidence, city]) {
     assert.equal(doc.fixtureVersion, '1.0.0');
     assert.match(doc.fixtureId, /^[a-z][a-z0-9-]*-v1$/);
   }
@@ -159,6 +160,26 @@ test('cross-database edges carry every confidence with rationale and match atlas
     assert.ok(row.rationale.length > 20);
     assert.ok(atlas.edges.some((edge) => edge.fromDatabaseId === row.fromDatabaseId && edge.toDatabaseId === row.toDatabaseId && edge.confidence === row.confidence));
     asTime(row.observedAt);
+  }
+});
+
+test('database city keeps geometry, activity, attribution, and routes factual', () => {
+  assert.ok(city.schemas.length >= 2);
+  assert.ok(city.objects.some((object) => object.kind === 'indexed-view'));
+  assert.ok(city.objects.some((object) => object.reservedPages8KiB === null));
+  assert.ok(city.objects.some((object) => object.directActivity.totalOperations === '144'));
+  assert.ok(city.queryFamilies.length > 12, 'fixture must exercise the other workload aggregate');
+  assert.ok(city.queryFamilies.some((family) => family.objectIds.length > 1));
+  assert.ok(city.queryFamilies.some((family) => family.objectIds.some((id) => id.includes('/database/'))));
+  assert.deepEqual(new Set(city.routes.map((route) => route.confidence)), new Set(['confirmed', 'probable', 'unknown']));
+  assert.ok(city.routes.filter((route) => route.kind === 'cross-database-reference')
+    .every((route) => /not establish|cannot establish/i.test(route.rationale)));
+  for (const object of city.objects) {
+    if (object.reservedPages8KiB === null) assert.equal(object.usedPages8KiB, null);
+    if (object.reservedPages8KiB !== null) {
+      assert.ok(BigInt(object.usedPages8KiB) <= BigInt(object.reservedPages8KiB));
+    }
+    assert.ok(object.attributedExposure.rationale);
   }
 });
 

@@ -1,6 +1,7 @@
 import * as signalR from '@microsoft/signalr'
 import type { AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
 import type { LiveIncidentResponse } from './liveContracts'
+import type { DatabaseCityPage, DatabaseCitySummarySnapshot } from './databaseCityContracts'
 import { assertAtlasSnapshot } from './atlas'
 import { assertLiveIncidentResponse, computeReconnectDelayMs } from './liveIncidents'
 import { assertFindingsPage, assertFindingsEngineStatus } from './findings'
@@ -233,3 +234,16 @@ export const fetchFindings = async (
 
 export const fetchFindingsStatus = async (signal?: AbortSignal) =>
   assertFindingsEngineStatus(await fetchJson<unknown>('/api/v1/findings/status', signal))
+
+export const fetchDatabaseCitySummaries = (signal?: AbortSignal) =>
+  fetchJson<DatabaseCitySummarySnapshot>('/api/v1/database-city', signal)
+
+export const fetchDatabaseCity = (
+  databaseId: string,
+  metric: string,
+  pageToken?: string | null,
+  signal?: AbortSignal,
+) => fetchJson<DatabaseCityPage>(
+  `/api/v1/database-city/${encodeURIComponent(databaseId)}?metric=${encodeURIComponent(metric)}&pageSize=24${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`,
+  signal,
+)

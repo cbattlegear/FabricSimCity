@@ -4,7 +4,7 @@ import type { NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamily
 
 const metrics = ['execution', 'cpu', 'duration', 'reads', 'waits'] as const
 
-export function QueryStoreView() {
+export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: string | null }) {
   const [metric, setMetric] = useState<(typeof metrics)[number]>('cpu')
   const [families, setFamilies] = useState<QueryFamilySummary[]>([])
   const [detail, setDetail] = useState<QueryFamilyDetail | null>(null)
@@ -17,6 +17,7 @@ export function QueryStoreView() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const requests = useRef(new Set<AbortController>())
+  const headingRef = useRef<HTMLHeadingElement>(null)
 
   function tracked<T>(request: (signal: AbortSignal) => Promise<T>, accept: (value: T) => void) {
     const controller = new AbortController()
@@ -47,7 +48,8 @@ export function QueryStoreView() {
         setFamilies(page.items)
         setNextPageToken(page.nextPageToken)
         setPageEvidence(page.evidence)
-        if (page.items[0]) return fetchQueryFamily(page.items[0].familyId, controller.signal)
+        const familyId = initialFamilyId ?? page.items[0]?.familyId
+        if (familyId) return fetchQueryFamily(familyId, controller.signal)
         return null
       })
       .then(value => { if (value) setDetail(value) })
@@ -57,7 +59,11 @@ export function QueryStoreView() {
       .then(setStatus)
       .catch(reason => { if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason)) })
     return () => controller.abort()
-  }, [metric])
+  }, [initialFamilyId, metric])
+
+  useEffect(() => {
+    if (initialFamilyId) headingRef.current?.focus()
+  }, [initialFamilyId])
 
   useEffect(() => {
     if (!detail?.plans[0]) { setPlan(null); return }
@@ -92,7 +98,7 @@ export function QueryStoreView() {
   return (
     <section className="query-store" aria-labelledby="query-store-title">
       <div className="section-heading">
-        <div><h2 id="query-store-title">Query Store history</h2><p>Read-only factual history · fixture source by default</p></div>
+        <div><h2 id="query-store-title" ref={headingRef} tabIndex={-1}>Query Store history</h2><p>Read-only factual history · fixture source by default</p></div>
         <label>Rank by <select value={metric} onChange={event => setMetric(event.target.value as typeof metric)}>
           {metrics.map(value => <option key={value} value={value}>{value}</option>)}
         </select></label>

@@ -27,6 +27,10 @@ production connection strings, credentials, hosts, or customer data.
   marker.
 - `cross-database-evidence.json` keeps confidence and rationale alongside each
   relationship instead of treating every inferred edge as fact.
+- `database-city.json` supplies deterministic schema neighborhoods, tables,
+  indexed views, attached indexes, direct cumulative activity, normalized-plan
+  attribution, unavailable evidence, confidence-graded routes, and more query
+  families than the API top-N so `other workload` is always exercised.
 
 ## Schemas and units
 

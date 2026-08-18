@@ -5,6 +5,7 @@ import { AtlasViewport } from './AtlasViewport'
 import LiveIncidents from './LiveIncidentsPanel'
 import { QueryStoreView } from './QueryStoreView'
 import FindingsPanel from './FindingsPanel'
+import { DatabaseCityView } from './DatabaseCityView'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
 
@@ -17,6 +18,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('atlas')
+  const [cityDatabaseId, setCityDatabaseId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('view') === 'city' ? params.get('database') : null
+  })
+  const [queryFamilyId, setQueryFamilyId] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -56,6 +62,27 @@ export default function App() {
   )
   const hovered = snapshot?.databases.find(database => database.databaseId === hoveredId) ?? null
   const sourceState = collectorDisplayState(snapshot?.collection, refreshError !== null)
+  const cityDatabase = snapshot?.databases.find(database => database.databaseId === cityDatabaseId) ?? null
+  const enterDatabase = useCallback((database: DatabaseAtlasItem) => {
+    setCityDatabaseId(database.databaseId)
+    const url = new URL(window.location.href)
+    url.searchParams.set('view', 'city')
+    url.searchParams.set('database', database.databaseId)
+    url.searchParams.delete('object')
+    window.history.replaceState(null, '', url)
+  }, [])
+  const leaveDatabase = useCallback(() => {
+    setCityDatabaseId(null)
+    const url = new URL(window.location.href)
+    url.searchParams.delete('view')
+    url.searchParams.delete('database')
+    url.searchParams.delete('object')
+    window.history.replaceState(null, '', url)
+  }, [])
+  const openQuery = useCallback((familyId: string) => {
+    setQueryFamilyId(familyId)
+    setTab('queries')
+  }, [])
 
   return (
     <main>
@@ -111,7 +138,7 @@ export default function App() {
       </div>
 
       <div id="panel-queries" role="tabpanel" aria-labelledby="tab-queries" hidden={tab !== 'queries'}>
-        {tab === 'queries' && <QueryStoreView />}
+        {tab === 'queries' && <QueryStoreView initialFamilyId={queryFamilyId} />}
       </div>
 
       <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>
@@ -119,7 +146,14 @@ export default function App() {
       </div>
 
       <div id="panel-atlas" role="tabpanel" aria-labelledby="tab-atlas" hidden={tab !== 'atlas'}>
-      {error ? (
+      {cityDatabase ? (
+        <DatabaseCityView
+          databaseId={cityDatabase.databaseId}
+          databaseName={cityDatabase.name}
+          onBack={leaveDatabase}
+          onOpenQuery={openQuery}
+        />
+      ) : error ? (
         <section className="error" role="alert">
           <h2>Atlas unavailable</h2>
           <p>{error}. Confirm the ASP.NET API is running, then reload this page.</p>
@@ -209,7 +243,7 @@ export default function App() {
               </div>
             </section>
 
-            <DetailPanel database={selected} />
+            <DetailPanel database={selected} onEnterDatabase={enterDatabase} />
           </div>
 
           <section className="topology" aria-labelledby="topology-title">
@@ -241,11 +275,17 @@ function StatusCell({ database, kind }: { database: DatabaseAtlasItem; kind: 'li
   return <><strong>{database.liveActivity.evidence.status}</strong><small>{database.liveActivity.evidence.reason}</small></>
 }
 
-function DetailPanel({ database }: { database: DatabaseAtlasItem | null }) {
+function DetailPanel({ database, onEnterDatabase }: {
+  database: DatabaseAtlasItem | null
+  onEnterDatabase: (database: DatabaseAtlasItem) => void
+}) {
   if (!database) return <aside className="detail"><p>Select a database to inspect exact evidence.</p></aside>
   return (
     <aside className="detail" aria-labelledby="detail-title">
       <div className="detail-title"><h2 id="detail-title">{database.name}</h2><span>exact record</span></div>
+      <button className="enter-database" type="button" onClick={() => onEnterDatabase(database)}>
+        Enter database city
+      </button>
       <dl>
         <div><dt>Stable ID</dt><dd>{database.databaseId}</dd></div>
         <div><dt>Allocated</dt><dd>{formatBytes(database.allocated)}</dd></div>

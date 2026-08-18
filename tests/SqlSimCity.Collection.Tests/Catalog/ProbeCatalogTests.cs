@@ -32,6 +32,28 @@ public class ProbeCatalogTests
     }
 
     [Fact]
+    public void DatabaseCityInventoryIsKeysetBoundedAndKeepsIndexesAttached()
+    {
+        var probe = ProbeCatalog.Load().Get("city.object_inventory_page");
+        var sql = probe.CommandText;
+
+        Assert.Equal("database", probe.ConnectionScope);
+        Assert.Contains(probe.Parameters, parameter => parameter.Name == "@AfterObjectId");
+        Assert.Contains(probe.Parameters, parameter => parameter.Name == "@TopN");
+        Assert.Contains("TOP (@TopN)", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("object_id > @AfterObjectId", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("JOIN selected_objects", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("sys.indexes", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("reserved_pages", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("schema_layout_ordinal", sql, StringComparison.OrdinalIgnoreCase);
+
+        var usage = ProbeCatalog.Load().Get("city.index_usage_page");
+        Assert.Contains("TOP (@TopN)", usage.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("object_id > @AfterObjectId", usage.CommandText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("JOIN selected_objects", usage.CommandText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void GetUnknownIdThrows()
     {
         var catalog = ProbeCatalog.Load();

@@ -53,6 +53,7 @@ export function evidenceText(evidence: Evidence): string {
     QueryStoreAggregate: 'Query Store aggregate history',
     InferredTopology: 'Inferred topology',
     LiveDmvCumulative: 'Cumulative file I/O DMV sample',
+    CatalogSnapshot: 'Catalog snapshot',
     NotProbed: 'Not probed',
   }
   const observed = evidence.observedAt ? ` Observed ${new Date(evidence.observedAt).toLocaleString()}.` : ''

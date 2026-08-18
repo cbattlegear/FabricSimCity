@@ -6,12 +6,13 @@ The fixture is not a benchmark or a description of a real server. SQLSimCity is 
 
 ## What works
 
-- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/atlas/status`, `/api/v1/capabilities`, `/api/v1/live`, health endpoints, a `/hubs/current-snapshot` SignalR hub, and the production Vite bundle.
+- ASP.NET Core .NET 10 serves `/api/v1/atlas`, `/api/v1/atlas/status`, `/api/v1/database-city`, `/api/v1/database-city/{databaseId}`, `/api/v1/capabilities`, `/api/v1/live`, health endpoints, a `/hubs/current-snapshot` SignalR hub, and the production Vite bundle.
 - Eight deterministic databases cover known, zero, and unknown allocation; live fresh, stale, disconnected, permission-denied, and unknown states; and varied Query Store capability and health.
 - React owns selection, detail, tables, and request state. `AtlasScene` owns three.js objects and animation imperatively; no frame updates pass through React state.
 - Database footprint follows the documented allocated-KiB mapping. Unknown allocation is marked with an × and never receives a quantitative footprint.
 - A keyboard and screen-reader-friendly table contains the same records. Exact bytes and Query Store integer aggregates cross the wire as nonnegative decimal strings and are formatted with `BigInt`, avoiding JavaScript precision loss.
 - The Query Store history tab and read-only `/api/v1/query-store/*` endpoints expose paged query families, physical query/context splits, execution-type and replica-separated runtime, plan history, normalized compiled-plan trees, and structural plan comparison from sanitized fixtures.
+- Entering a database adds a semantic-zoom level with deterministic schema neighborhoods, exact table/indexed-view page geometry, parent-attached indexes, separately styled direct DMV and attributed Query Store evidence, confidence-graded co-reference routes, bounded top query families, and an explicit `other workload` aggregate.
 
 ## Accuracy boundary
 
@@ -40,6 +41,14 @@ web/                      strict TypeScript React shell and three.js scene
 ```
 
 The API is the source of truth. The frontend fetches `/api/v1/atlas`; fixture records are not duplicated in TypeScript.
+
+## Database city semantic zoom
+
+`/api/v1/database-city` returns database-level availability. The detail route accepts only validated stable database IDs, `cpu|duration|reads|executions`, page sizes from 1 through 50, and opaque request-bound continuation tokens. Parent objects are paged before attached-index expansion. Query families are backend-ranked to a fixed top 12 and all remaining fixture families are represented by one exact `other workload` aggregate; the browser never receives or lays out an unbounded Query Store population.
+
+Tables and indexed views use exact decimal-string 8-KiB page counts. Reserved pages determine footprint and used pages determine height. Unknown size uses a fixed wireframe and is explicitly nonquantitative. Indexes render only as structures attached to their parent object. Cyan index slabs represent direct cumulative index DMV operations; the fixture discloses its reset epoch, while connected mode leaves the epoch unavailable because database detach/shutdown resets are not timestamped by the DMV. Amber roof caps represent Query Store history only when normalized plan evidence supports attribution; multi-object query totals remain query-level and are never copied to each object. Solid, dashed, and dotted routes communicate confirmed, probable, and unknown co-reference evidence and never claim row direction or row flow.
+
+Fixture mode provides the full sanitized city surface, including unavailable and stale cases. Connected mode uses the static keyset-bounded `city.object_inventory_page` and `city.index_usage_page` catalog probes. When same-window normalized plan attribution, an exact object-reserved summary, or an exact `other workload` aggregate is unavailable, connected responses return explicit `NotProbed` evidence instead of manufacturing heat.
 
 ## Query Store history
 

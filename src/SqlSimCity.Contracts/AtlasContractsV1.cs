@@ -1,7 +1,7 @@
 namespace SqlSimCity.Contracts.V1;
 
 public enum MeasurementStatus { Known, Unknown }
-public enum EvidenceSource { Fixture, LiveDmvSample, QueryStoreAggregate, InferredTopology, LiveDmvCumulative, NotProbed }
+public enum EvidenceSource { Fixture, LiveDmvSample, QueryStoreAggregate, InferredTopology, LiveDmvCumulative, CatalogSnapshot, NotProbed }
 public enum DataStatus { Available, Stale, Disconnected, PermissionDenied, Disabled, Unsupported, Unknown }
 public enum QueryStoreCapability { Available, Disabled, PermissionDenied, Unsupported, Unknown }
 public enum QueryStoreHealth { Healthy, ReadOnly, ReadableSecondary, Error, Stale, Unavailable, Unknown }
