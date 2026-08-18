@@ -6,18 +6,28 @@ using SqlSimCity.Storage;
 namespace SqlSimCity.Storage.Crypto;
 
 /// <summary>
-/// Seals and opens the versioned protected storage envelope:
-/// <c>[formatVersion:1][keyVersion:4 BE][nonce:12][tag:16][ciphertext:N]</c>.
-/// AES-256-GCM authenticated associated data binds record kind, opaque record
-/// id, and key version (length-prefixed to avoid delimiter ambiguity), so a
-/// ciphertext copied onto a different record's row fails authentication.
+/// Writes and reads the versioned protected storage envelope.
+/// <para>
+/// New records are written in the clear as <c>[formatVersion=2:1][plaintext:N]</c>.
+/// SQL SimCity exists to show query plans, object attribution, and workload evidence, so
+/// captured payloads stay readable: the value of the archive is inspection, not secrecy.
+/// Protect the storage directory with filesystem permissions if the captured plans and
+/// query text are sensitive, because plan XML can contain literal parameter values.
+/// </para>
+/// <para>
+/// Records written by earlier versions use <c>[formatVersion=1:1][keyVersion:4 BE][nonce:12][tag:16][ciphertext:N]</c>
+/// and are still opened with AES-256-GCM so an existing store keeps working across the
+/// upgrade. Nothing writes that format any more.
+/// </para>
 /// </summary>
 internal static class EnvelopeCodec
 {
-    private const byte FormatVersion1 = 1;
+    private const byte SealedFormatVersion1 = 1;
+    private const byte PlaintextFormatVersion2 = 2;
     private const int NonceSizeBytes = 12;
     private const int TagSizeBytes = 16;
-    private const int HeaderSizeBytes = 1 + 4 + NonceSizeBytes + TagSizeBytes;
+    private const int SealedHeaderSizeBytes = 1 + 4 + NonceSizeBytes + TagSizeBytes;
+    private const int PlaintextHeaderSizeBytes = 1;
 
     public static byte[] Seal(KeyRing keyRing, string recordKind, string recordId, ReadOnlySpan<byte> plaintext)
     {
@@ -25,27 +35,9 @@ internal static class EnvelopeCodec
         ArgumentException.ThrowIfNullOrEmpty(recordKind);
         ArgumentException.ThrowIfNullOrEmpty(recordId);
 
-        var keyVersion = keyRing.ActiveKeyVersion;
-        var key = keyRing.GetKey(keyVersion);
-
-        Span<byte> nonce = stackalloc byte[NonceSizeBytes];
-        RandomNumberGenerator.Fill(nonce);
-        Span<byte> tag = stackalloc byte[TagSizeBytes];
-        var ciphertext = new byte[plaintext.Length];
-        var aad = BuildAssociatedData(recordKind, recordId, keyVersion);
-
-        using (var aesGcm = new AesGcm(key, TagSizeBytes))
-        {
-            aesGcm.Encrypt(nonce, plaintext, ciphertext, tag, aad);
-        }
-
-        var envelope = new byte[HeaderSizeBytes + ciphertext.Length];
-        var span = envelope.AsSpan();
-        span[0] = FormatVersion1;
-        BinaryPrimitives.WriteUInt32BigEndian(span.Slice(1, 4), keyVersion);
-        nonce.CopyTo(span.Slice(5, NonceSizeBytes));
-        tag.CopyTo(span.Slice(5 + NonceSizeBytes, TagSizeBytes));
-        ciphertext.CopyTo(span[HeaderSizeBytes..]);
+        var envelope = new byte[PlaintextHeaderSizeBytes + plaintext.Length];
+        envelope[0] = PlaintextFormatVersion2;
+        plaintext.CopyTo(envelope.AsSpan(PlaintextHeaderSizeBytes));
         return envelope;
     }
 
@@ -63,22 +55,33 @@ internal static class EnvelopeCodec
         ArgumentException.ThrowIfNullOrEmpty(recordKind);
         ArgumentException.ThrowIfNullOrEmpty(recordId);
 
-        if (envelope.Length < HeaderSizeBytes)
+        if (envelope.Length < PlaintextHeaderSizeBytes)
         {
             throw new EnvelopeIntegrityException(
-                $"Envelope is {envelope.Length} bytes, shorter than the {HeaderSizeBytes}-byte header.");
+                $"Envelope is {envelope.Length} bytes, shorter than the {PlaintextHeaderSizeBytes}-byte header.");
         }
 
         var formatVersion = envelope[0];
-        if (formatVersion != FormatVersion1)
+        if (formatVersion == PlaintextFormatVersion2)
+        {
+            return envelope[PlaintextHeaderSizeBytes..].ToArray();
+        }
+
+        if (formatVersion != SealedFormatVersion1)
         {
             throw new EnvelopeIntegrityException($"Unsupported envelope format version {formatVersion}.");
+        }
+
+        if (envelope.Length < SealedHeaderSizeBytes)
+        {
+            throw new EnvelopeIntegrityException(
+                $"Envelope is {envelope.Length} bytes, shorter than the {SealedHeaderSizeBytes}-byte header.");
         }
 
         var keyVersion = BinaryPrimitives.ReadUInt32BigEndian(envelope.Slice(1, 4));
         var nonce = envelope.Slice(5, NonceSizeBytes);
         var tag = envelope.Slice(5 + NonceSizeBytes, TagSizeBytes);
-        var ciphertext = envelope[HeaderSizeBytes..];
+        var ciphertext = envelope[SealedHeaderSizeBytes..];
 
         var key = keyRing.GetKey(keyVersion);
         var aad = BuildAssociatedData(recordKind, recordId, keyVersion);

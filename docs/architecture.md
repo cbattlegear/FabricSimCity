@@ -11,7 +11,7 @@ src/SqlSimCity.Contracts  versioned transport and evidence contracts
 src/SqlSimCity.Domain     source-neutral API seams and fixture sources
 src/SqlSimCity.SqlServer  validated connection and authentication strategies
 src/SqlSimCity.Collection static SQL probes, capability negotiation, Atlas/City/Query Store/live collectors
-src/SqlSimCity.Storage    AES-256-GCM protected SQLite records and retention
+src/SqlSimCity.Storage    plaintext protected SQLite records and retention (legacy sealed records still open)
 src/SqlSimCity.Findings   deterministic rules and evidence references
 src/SqlSimCity.Archive    hostile-input archive format and offline adapters
 src/SqlSimCity.Edge       signed delivery, replay defense, encrypted spool, atomic edge generations

@@ -154,6 +154,36 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Query Store is now wired into the connected map.** `ConnectedDatabaseCitySource` used to emit
+  `topQueryFamilies: []` and `routes: []` against a live server, so on a real connection the city had
+  buildings but no workload, no roads, and no wait lanes. A new
+  `SqlSimCity.Collection.DatabaseCity.QueryStoreCityAttribution` reads each ranked family's
+  normalized compiled plans and resolves their showplan object references against the bounded catalog
+  page, producing the families, co-reference routes, per-object attributed exposure, and wait-category
+  totals the fixture city already published. The join never guesses: a plan naming several objects
+  keeps its totals at query level and is never divided; a reference to a real object outside the
+  bounded page is reported by qualified name instead of being dropped; a reference to another database
+  becomes a `CrossDatabaseReference` route only when the atlas can resolve that database, and is
+  otherwise disclosed by name; a single reference to an indexed view stays `Probable` because the
+  optimizer can expand it. An object is credited with a family's totals only when the plans named that
+  object and nothing else at all. Wait categories are published only when they reconcile exactly with
+  the family's total wait milliseconds, otherwise they are withheld as "not captured" rather than
+  shown as a partial account.
+- The top query-family table in the database city gained a **Show on map** action that reads the
+  family's own plan and draws it as a route through the buildings it names, so ranked workload and the
+  3D map are the same evidence rather than two views an operator has to reconnect by hand.
+- **Protected storage records are written in the clear.** Sealing captured plan XML and query text
+  worked against the purpose of a tool whose entire job is to show that evidence: it made the store
+  unreadable to the operator who collected it while protecting nothing that filesystem permissions did
+  not already have to protect. `EnvelopeCodec` writes a new plaintext envelope (format version 2) and
+  still opens the AES-256-GCM envelope (format version 1), so existing stores keep working with no
+  migration and no data loss. The key ring is now read-only legacy support; a store created before
+  this change still authenticates it through its sealed canary. `SECURITY.md`, `docs/connected-mode.md`,
+  and `docs/operations.md` were corrected, including the removal of the at-rest-encryption claim and
+  the addition of an explicit statement that the data volume is the trust boundary.
+  Edge spool encryption (`SqlSimCity.Edge.Spool.EncryptedSpool`, separate key, outward-only transport
+  threat model) and archive redaction are unaffected, as is `SecureShowplanParser`'s XXE and
+  entity-expansion hardening, which is XML safety rather than confidentiality.
 - Frontend build is code-split: the three.js atlas/city viewports and the Query
   Store, Live, and Findings tabs load as lazy chunks, and three.js is isolated
   into its own vendor chunk. The initial-path bundle drops from ~848 KiB to
@@ -227,6 +257,11 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Security
 
+- **Superseded within this same unreleased block:** the three protected-storage entries immediately
+  below describe key custody as it was when payloads were sealed. Payloads are now written in the
+  clear (see Changed), so the key ring only opens records written by an earlier version, and a backup
+  of a store written by this version needs no key to restore. The at-rest-encryption claims below no
+  longer hold; the data volume's access control is the trust boundary.
 - A connection string now auto-provisions the protected-storage AES-256 key that connected Query
   Store history requires, in a `sqlsimcity-keys` directory inside the data directory. Encryption at
   rest is unchanged and still mandatory; what changes is that the process generates the key instead

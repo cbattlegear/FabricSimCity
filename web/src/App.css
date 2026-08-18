@@ -275,6 +275,9 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .city-workload { margin-top: 24px; border-top: 2px solid #e2a957; background: #0d131c; }
 .city-workload tbody button { border: 0; padding: 0; color: #efc16e; background: transparent; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .city-workload tfoot { background: #161b1e; color: #e6c889; }
+.city-workload .map-cell { white-space: nowrap; }
+.city-workload .map-cell small { display: block; margin-top: 4px; white-space: normal; color: #92a7b7; }
+.city-workload tbody button[disabled] { color: #7d8a94; cursor: progress; text-decoration: none; }
 .city-workload tfoot small, .city-workload th small { display: block; margin-top: 4px; color: #92a7b7; font-weight: 400; }
 .city-routes { border-top-color: #8496a5; }
 

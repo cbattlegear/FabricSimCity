@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using SqlSimCity.Storage.Crypto;
@@ -95,29 +94,25 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task NoPlaintextBytesReachTheSqliteFile()
+    public async Task PayloadBytesAreReadableInTheSqliteFile()
     {
         using var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
         var store = NewStore(keyRing);
         await store.EnsureReadyAsync();
 
-        const string secretMarker = "unmistakable-secret-marker-4b7e91";
+        // Captured evidence is stored in the clear on purpose: the point of this tool is to show
+        // plans and query text, and an operator must be able to read the store with sqlite3.
+        const string marker = "SELECT * FROM dbo.Customer WHERE Email = @p0";
         await store.PutAsync(
-            "record-1", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, Encoding.UTF8.GetBytes(secretMarker));
+            "record-1", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, Encoding.UTF8.GetBytes(marker));
 
         await CheckpointAsync();
 
-        foreach (var candidate in new[] { DbPath, DbPath + "-wal", DbPath + "-shm" })
-        {
-            if (!File.Exists(candidate))
-            {
-                continue;
-            }
-
-            var bytes = await File.ReadAllBytesAsync(candidate);
-            var text = Encoding.Latin1.GetString(bytes);
-            Assert.DoesNotContain(secretMarker, text, StringComparison.Ordinal);
-        }
+        var found = new[] { DbPath, DbPath + "-wal", DbPath + "-shm" }
+            .Where(File.Exists)
+            .Select(candidate => Encoding.Latin1.GetString(File.ReadAllBytes(candidate)))
+            .Any(text => text.Contains(marker, StringComparison.Ordinal));
+        Assert.True(found, "The payload should be readable in the SQLite database or its WAL.");
     }
 
     [Fact]
@@ -143,12 +138,14 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task WrongKeyOnExistingStoreFailsReadyCheck()
+    public async Task WrongKeyOnAStoreWithALegacySealedCanaryFailsReadyCheck()
     {
-        using (var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes()))
+        var originalKey = KeyRingTestHelpers.NewKeyBytes();
+        using (var keyRing = NewRing(1, originalKey))
         {
             var store = NewStore(keyRing);
             await store.EnsureReadyAsync();
+            await ReplaceCanaryWithLegacySealAsync(keyRing, keyVersion: 1);
         }
 
         var wrongKeyBytes = KeyRingTestHelpers.NewKeyBytes();
@@ -160,12 +157,13 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task MissingKeyVersionOnExistingStoreFailsReadyCheck()
+    public async Task MissingKeyVersionOnAStoreWithALegacySealedCanaryFailsReadyCheck()
     {
         using (var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes()))
         {
             var store = NewStore(keyRing);
             await store.EnsureReadyAsync();
+            await ReplaceCanaryWithLegacySealAsync(keyRing, keyVersion: 1);
         }
 
         using var ringWithoutVersion1 = NewRing(2, KeyRingTestHelpers.NewKeyBytes());
@@ -175,16 +173,16 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ActiveAndOldKeyVersionsBothDecryptAndNewWritesUseActiveVersion()
+    public async Task LegacySealedRecordsStillOpenWhileNewWritesArePlaintext()
     {
         var key1 = KeyRingTestHelpers.NewKeyBytes();
-        var oldPayload = Encoding.UTF8.GetBytes("payload-from-before-rotation");
+        var oldPayload = Encoding.UTF8.GetBytes("payload-sealed-before-the-change");
 
         using (var ringV1 = NewRing(1, key1))
         {
             var store = NewStore(ringV1);
             await store.EnsureReadyAsync();
-            await store.PutAsync("old-record", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, oldPayload);
+            await WriteLegacyRecordAsync("old-record", "kind", ringV1, keyVersion: 1, oldPayload);
         }
 
         var key2 = KeyRingTestHelpers.NewKeyBytes();
@@ -200,20 +198,20 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
             "new-record", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "new-payload"u8.ToArray());
         var newRecord = await rotatedStore.GetAsync("new-record");
         Assert.NotNull(newRecord);
+        Assert.Equal("new-payload"u8.ToArray(), newRecord!.Payload.ToArray());
 
-        var newRecordKeyVersion = await ReadEnvelopeKeyVersionAsync("new-record");
-        var oldRecordKeyVersion = await ReadEnvelopeKeyVersionAsync("old-record");
-        Assert.Equal(2u, newRecordKeyVersion);
-        Assert.Equal(1u, oldRecordKeyVersion);
+        // The legacy row keeps its sealed header; the new row carries the plaintext format version.
+        Assert.Equal(1, (await ReadEnvelopeAsync("old-record"))[0]);
+        Assert.Equal(2, (await ReadEnvelopeAsync("new-record"))[0]);
     }
 
     [Fact]
-    public async Task TamperedNonceCausesGetToFail()
+    public async Task TamperedLegacyNonceCausesGetToFail()
     {
         using var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
         var store = NewStore(keyRing);
         await store.EnsureReadyAsync();
-        await store.PutAsync("record-1", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "payload"u8.ToArray());
+        await WriteLegacyRecordAsync("record-1", "kind", keyRing, keyVersion: 1, "payload"u8.ToArray());
 
         await TamperEnvelopeByteAsync("record-1", offset: 5); // first nonce byte
 
@@ -221,12 +219,12 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task TamperedTagCausesGetToFail()
+    public async Task TamperedLegacyTagCausesGetToFail()
     {
         using var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
         var store = NewStore(keyRing);
         await store.EnsureReadyAsync();
-        await store.PutAsync("record-1", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "payload"u8.ToArray());
+        await WriteLegacyRecordAsync("record-1", "kind", keyRing, keyVersion: 1, "payload"u8.ToArray());
 
         await TamperEnvelopeByteAsync("record-1", offset: 17); // first tag byte
 
@@ -234,12 +232,12 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task TamperedCiphertextCausesGetToFail()
+    public async Task TamperedLegacyCiphertextCausesGetToFail()
     {
         using var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
         var store = NewStore(keyRing);
         await store.EnsureReadyAsync();
-        await store.PutAsync("record-1", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "payload-bytes"u8.ToArray());
+        await WriteLegacyRecordAsync("record-1", "kind", keyRing, keyVersion: 1, "payload-bytes"u8.ToArray());
 
         await TamperEnvelopeByteAsync("record-1", offset: 33); // first ciphertext byte
 
@@ -247,13 +245,13 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task CrossRecordCiphertextSwapIsRejected()
+    public async Task LegacyCrossRecordCiphertextSwapIsRejected()
     {
         using var keyRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
         var store = NewStore(keyRing);
         await store.EnsureReadyAsync();
-        await store.PutAsync("record-a", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "payload-a"u8.ToArray());
-        await store.PutAsync("record-b", "kind", DateTimeOffset.UtcNow, StorageResolution.Detail, "payload-b"u8.ToArray());
+        await WriteLegacyRecordAsync("record-a", "kind", keyRing, keyVersion: 1, "payload-a"u8.ToArray());
+        await WriteLegacyRecordAsync("record-b", "kind", keyRing, keyVersion: 1, "payload-b"u8.ToArray());
 
         var envelopeA = await ReadEnvelopeAsync("record-a");
         await WriteEnvelopeAsync("record-b", envelopeA); // move record A's ciphertext onto record B's row
@@ -387,13 +385,14 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ExistingStoreAuthenticatesBeforeAnyFutureMigrationHook()
+    public async Task ExistingStoreVerifiesTheCanaryBeforeAnyFutureMigrationHook()
     {
         var key = KeyRingTestHelpers.NewKeyBytes();
         using (var validRing = NewRing(1, key))
         {
             var store = NewStore(validRing);
             await store.EnsureReadyAsync();
+            await ReplaceCanaryWithLegacySealAsync(validRing, keyVersion: 1);
         }
 
         using var wrongRing = NewRing(1, KeyRingTestHelpers.NewKeyBytes());
@@ -490,10 +489,47 @@ public sealed class SqliteProtectedRecordStoreTests : IDisposable
         return (byte[])(await command.ExecuteScalarAsync())!;
     }
 
-    private async Task<uint> ReadEnvelopeKeyVersionAsync(string id)
+    /// <summary>
+    /// Writes a record in the retired AES-256-GCM format so the compatibility read path stays covered.
+    /// Production writes are plaintext now, so only the test project can produce a sealed row.
+    /// </summary>
+    private async Task WriteLegacyRecordAsync(string id, string kind, KeyRing keyRing, uint keyVersion, byte[] payload)
     {
-        var envelope = await ReadEnvelopeAsync(id);
-        return BinaryPrimitives.ReadUInt32BigEndian(envelope.AsSpan(1, 4));
+        var envelope = LegacyEnvelope.Seal(keyRing, keyVersion, kind, id, payload);
+        var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        await using var connection = new SqliteConnection(RawConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO protected_records (id, record_kind, captured_at_unix_ms, resolution, envelope, stored_at_unix_ms)
+            VALUES ($id, $kind, $capturedAt, 'Detail', $envelope, $storedAt)
+            ON CONFLICT(id) DO UPDATE SET envelope = excluded.envelope;
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$kind", kind);
+        command.Parameters.AddWithValue("$capturedAt", nowUnixMs);
+        command.Parameters.AddWithValue("$envelope", envelope);
+        command.Parameters.AddWithValue("$storedAt", nowUnixMs);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Rewrites the canary row in the retired sealed format, reproducing a store created before
+    /// payloads moved to plaintext. Such a store still authenticates its key ring on open.
+    /// </summary>
+    private async Task ReplaceCanaryWithLegacySealAsync(KeyRing keyRing, uint keyVersion)
+    {
+        var envelope = LegacyEnvelope.Seal(
+            keyRing, keyVersion, "__canary__", "__canary__",
+            Encoding.UTF8.GetBytes("sqlsimcity-protected-storage-canary-v1"));
+
+        await using var connection = new SqliteConnection(RawConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE storage_canary SET envelope = $envelope WHERE id = 1;";
+        command.Parameters.AddWithValue("$envelope", envelope);
+        await command.ExecuteNonQueryAsync();
     }
 
     private async Task WriteEnvelopeAsync(string id, byte[] envelope)

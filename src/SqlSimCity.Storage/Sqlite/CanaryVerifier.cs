@@ -7,10 +7,11 @@ using SqlSimCity.Storage.Crypto;
 namespace SqlSimCity.Storage.Sqlite;
 
 /// <summary>
-/// Verifies or creates the single-row encrypted canary that proves the
-/// configured key ring matches this store. A fresh store (no canary row) may
-/// create one; an existing store must decrypt and match the expected
-/// plaintext before any record access is permitted.
+/// Verifies or creates the single-row canary that proves the configured key ring matches this
+/// store. Payloads are written in the clear now, so a fresh store gets a plaintext canary that
+/// identifies the store format rather than authenticating a key. A store created before that
+/// change still carries a sealed canary, and it must open and match the expected plaintext
+/// before any record access is permitted.
 /// </summary>
 internal static class CanaryVerifier
 {
@@ -77,7 +78,7 @@ internal static class CanaryVerifier
         {
             if (!plaintext.AsSpan().SequenceEqual(ExpectedPlaintext))
             {
-                throw new CanaryVerificationException("Protected storage canary decrypted to an unexpected value.");
+                throw new CanaryVerificationException("Protected storage canary held an unexpected value.");
             }
         }
         finally

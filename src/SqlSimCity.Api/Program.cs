@@ -121,7 +121,10 @@ if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
     builder.Services.AddSingleton<IAtlasCollectorStatusSource>(services => services.GetRequiredService<ConnectedAtlasSource>());
     builder.Services.AddSingleton<IDatabaseCityProbeExecutor, SqlClientDatabaseCityProbeExecutor>();
-    builder.Services.AddSingleton<IDatabaseCitySource, ConnectedDatabaseCitySource>();
+    builder.Services.AddSingleton<IDatabaseCitySource>(services => new ConnectedDatabaseCitySource(
+        services.GetRequiredService<IAtlasSnapshotSource>(),
+        services.GetRequiredService<IDatabaseCityProbeExecutor>(),
+        services.GetService<QueryStoreCityAttribution>()));
     builder.Services.AddHostedService<AtlasRefreshBackgroundService>();
     if (queryStoreConnected)
     {
@@ -138,6 +141,9 @@ if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
         builder.Services.AddSingleton<ConnectedQueryStoreHistorySource>();
         builder.Services.AddSingleton<IQueryStoreHistorySource>(services =>
             services.GetRequiredService<ConnectedQueryStoreHistorySource>());
+        // Joins Query Store families to catalog objects so the live map shows attributed
+        // exposure, co-reference roads, and wait lanes instead of an unattributed city.
+        builder.Services.AddSingleton<QueryStoreCityAttribution>();
         builder.Services.AddHostedService<QueryStoreHistoryBackgroundService>();
     }
     else

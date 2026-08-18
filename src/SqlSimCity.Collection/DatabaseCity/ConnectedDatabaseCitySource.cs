@@ -9,7 +9,8 @@ namespace SqlSimCity.Collection.DatabaseCity;
 
 public sealed class ConnectedDatabaseCitySource(
     IAtlasSnapshotSource atlasSource,
-    IDatabaseCityProbeExecutor probeExecutor) : IDatabaseCitySource
+    IDatabaseCityProbeExecutor probeExecutor,
+    QueryStoreCityAttribution? attribution = null) : IDatabaseCitySource
 {
     public ValueTask<DatabaseCitySummarySnapshotV1> GetSummariesAsync(CancellationToken cancellationToken)
     {
@@ -44,7 +45,8 @@ public sealed class ConnectedDatabaseCitySource(
         cancellationToken.ThrowIfCancellationRequested();
         if (pageSize is < 1 or > 50)
             throw new ArgumentOutOfRangeException(nameof(pageSize));
-        var database = atlasSource.GetCurrent().Databases.SingleOrDefault(
+        var atlas = atlasSource.GetCurrent();
+        var database = atlas.Databases.SingleOrDefault(
             item => item.DatabaseId.Equals(databaseId, StringComparison.Ordinal));
         if (database is null)
             return null;
@@ -85,6 +87,24 @@ public sealed class ConnectedDatabaseCitySource(
             null,
             null,
             "Normalized plan attribution is unavailable for this bounded connected page.");
+        var attributionObjects = selectedGroups
+            .Select(group => group.First())
+            .Select(row => new CityAttributionObject(
+                ObjectId(databaseId, row.ObjectId), row.SchemaName, row.ObjectName, row.Kind))
+            .ToArray();
+        var joined = attribution is null
+            ? null
+            : await attribution.AttributeAsync(
+                databaseId,
+                database.Name,
+                metric,
+                attributionObjects,
+                DatabaseIdsByName(atlas),
+                QueryStoreCityAttribution.DefaultTopFamilyCount,
+                cancellationToken).ConfigureAwait(false);
+        var familyIdsByObject = (joined?.Families ?? [])
+            .SelectMany(family => family.ObjectIds.Select(objectId => (objectId, family.FamilyId)))
+            .ToLookup(pair => pair.objectId, pair => pair.FamilyId, StringComparer.Ordinal);
         var schemas = selectedGroups
             .Select(group => group.First())
             .GroupBy(row => row.SchemaId)
@@ -144,7 +164,7 @@ public sealed class ConnectedDatabaseCitySource(
                 first.ReservedPages8KiB,
                 first.UsedPages8KiB,
                 indexes,
-                [])
+                [.. familyIdsByObject[objectId]])
             {
                 SizeReason = first.ReservedPages8KiB is null || first.UsedPages8KiB is null
                     ? "Current catalog partition page counts are unavailable; geometry is nonquantitative."
@@ -154,11 +174,7 @@ public sealed class ConnectedDatabaseCitySource(
                     totalOperations,
                     null,
                     directEvidence),
-                AttributedExposure = new DatabaseCityAttributedExposureV1(
-                    null, null, null, null,
-                    QueryAttributionConfidence.Unknown,
-                    "No normalized plan evidence was joined; query totals are not assigned to this object.",
-                    unavailableAttribution),
+                AttributedExposure = Exposure(joined, objectId, unavailableAttribution),
             };
         }).ToArray();
         var projected = DatabaseCityProjector.ProjectObjects(schemas, evidenceObjects);
@@ -182,7 +198,7 @@ public sealed class ConnectedDatabaseCitySource(
             .ToArray();
         var workloadEvidence = new EvidenceV1(
             EvidenceSource.NotProbed, DataStatus.Unknown, null, null,
-            "Other workload is unavailable because no same-window normalized plan attribution aggregate was collected.");
+            "Other workload is unavailable because no Query Store history source is wired into this page.");
         var pageEvidence = new EvidenceV1(
             EvidenceSource.CatalogSnapshot, DataStatus.Available, probe.ObservedAt, null,
             "Static keyset-bounded catalog SELECT; parent objects were bounded before attached-index expansion.");
@@ -197,11 +213,59 @@ public sealed class ConnectedDatabaseCitySource(
             null,
             schemaContracts,
             projected,
-            [],
-            new DatabaseCityWorkloadAggregateV1(null, null, null, null, null, null, workloadEvidence),
-            [],
+            [.. (joined?.Families ?? []).Select(family => ToContract(family, joined!.Evidence))],
+            joined?.OtherWorkload ??
+                new DatabaseCityWorkloadAggregateV1(null, null, null, null, null, null, workloadEvidence),
+            joined?.Routes ?? [],
             pageEvidence);
     }
+
+    private static DatabaseCityQueryFamilyV1 ToContract(
+        DatabaseCityQueryEvidence family,
+        EvidenceV1 evidence) => new(
+        family.FamilyId,
+        family.QueryHash,
+        family.ExecutionCount,
+        family.TotalCpuMicroseconds,
+        family.TotalDurationMicroseconds,
+        family.TotalLogicalReads8KiBPages,
+        family.TotalWaitMilliseconds,
+        family.WaitMillisecondsByCategory,
+        family.ObjectIds,
+        family.Confidence,
+        family.Rationale,
+        evidence);
+
+    private static DatabaseCityAttributedExposureV1 Exposure(
+        CityAttributionResult? joined,
+        string objectId,
+        EvidenceV1 unavailable)
+    {
+        if (joined is null)
+        {
+            return new DatabaseCityAttributedExposureV1(
+                null, null, null, null, QueryAttributionConfidence.Unknown,
+                "No normalized plan evidence was joined; query totals are not assigned to this object.",
+                unavailable);
+        }
+
+        if (joined.ExposureByObjectId.TryGetValue(objectId, out var exposure))
+            return exposure;
+        return new DatabaseCityAttributedExposureV1(
+            null, null, null, null, QueryAttributionConfidence.Unknown,
+            "No ranked Query Store family names this object on its own, so no query totals are attributed to it; this is absent evidence, not measured zero.",
+            joined.Evidence);
+    }
+
+    /// <summary>
+    /// Maps database names to atlas identities so a three-part plan reference can name a real
+    /// neighbouring city. Ambiguous names are dropped rather than resolved arbitrarily.
+    /// </summary>
+    private static Dictionary<string, string> DatabaseIdsByName(AtlasSnapshotV1 atlas) =>
+        atlas.Databases
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.First().DatabaseId, StringComparer.OrdinalIgnoreCase);
 
     private static DatabaseCityPageV1 UnavailablePage(
         DatabaseAtlasItemV1 database,

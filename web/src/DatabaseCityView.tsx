@@ -7,7 +7,7 @@ import {
   subscribeToLiveIncidents,
 } from './api'
 import { accessibleObjectLabel, databaseCityMetricValue, formatKiB } from './databaseCity'
-import type { DatabaseCityObject, DatabaseCityPage } from './databaseCityContracts'
+import type { DatabaseCityObject, DatabaseCityPage, DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import type { LiveFeedConnectionState } from './liveIncidents'
 import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
@@ -53,6 +53,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const [planSearchState, setPlanSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [planSearchError, setPlanSearchError] = useState<string | null>(null)
   const [activePlan, setActivePlan] = useState<{ choice: PlanChoice; showplan: NormalizedShowplan } | null>(null)
+  const [mappingFamilyId, setMappingFamilyId] = useState<string | null>(null)
   const [routeError, setRouteError] = useState<string | null>(null)
   const requests = useRef(new Set<AbortController>())
   const headingRef = useRef<HTMLHeadingElement>(null)
@@ -234,6 +235,46 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
       setRouteError(String(reason))
     } finally {
       requests.current.delete(controller)
+    }
+  }, [])
+
+  /**
+   * Draws a ranked family's own plan on the map. The family row already carries the workload
+   * evidence; this reads the one plan behind it so the same evidence becomes a route through the
+   * buildings it named, instead of requiring the operator to rediscover it in the plan finder.
+   */
+  const showFamilyOnMap = useCallback(async (family: DatabaseCityQueryFamily) => {
+    setRouteError(null)
+    setMappingFamilyId(family.familyId)
+    const controller = new AbortController()
+    requests.current.add(controller)
+    try {
+      const detail = await fetchQueryFamily(family.familyId, controller.signal)
+      // Prefer a plan whose runtime is counted; a dispatcher plan carries no operator tree to walk.
+      const plan = detail.plans.find(candidate => candidate.runtimeCounted) ?? detail.plans[0]
+      if (!plan) {
+        setRouteError(
+          `Query Store retains no compiled plan for ${family.familyId}, so this family cannot be drawn as a route.`)
+        return
+      }
+      const showplan = await fetchPlan(plan.planId, controller.signal)
+      setActivePlan({
+        choice: {
+          planId: plan.planId,
+          familyId: family.familyId,
+          queryHash: family.queryHash,
+          text: detail.family.text.normalizedText,
+          textReason: detail.family.text.reason,
+          executionCount: family.executionCount,
+        },
+        showplan,
+      })
+    } catch (reason) {
+      if (reason instanceof DOMException && reason.name === 'AbortError') return
+      setRouteError(String(reason))
+    } finally {
+      requests.current.delete(controller)
+      setMappingFamilyId(current => (current === family.familyId ? null : current))
     }
   }, [])
 
@@ -450,7 +491,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
                 <p>Backend-ranked top 12; no browser-side 100k layout</p></div>
             </div>
             <div className="table-scroll"><table>
-              <thead><tr><th>Family</th><th>Executions</th><th>CPU µs</th><th>Duration µs</th><th>Reads (8-KiB)</th><th>Attribution</th></tr></thead>
+              <thead><tr><th>Family</th><th>Executions</th><th>CPU µs</th><th>Duration µs</th><th>Reads (8-KiB)</th><th>Attribution</th><th>Map</th></tr></thead>
               <tbody>{page.topQueryFamilies.map(family => <tr key={family.familyId}>
                 <th scope="row">{family.familyId.startsWith('qf:')
                   ? <button type="button" onClick={() => onOpenQuery(family.familyId)}>{family.familyId}</button>
@@ -458,12 +499,21 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
                 <td>{family.executionCount}</td><td>{family.totalCpuMicroseconds}</td>
                 <td>{family.totalDurationMicroseconds}</td><td>{family.totalLogicalReads8KiBPages}</td>
                 <td>{family.confidence}<small>{family.rationale}</small></td>
+                <td className="map-cell"><button
+                  type="button"
+                  disabled={mappingFamilyId === family.familyId}
+                  aria-label={`Draw the plan for ${family.familyId} on the map`}
+                  onClick={() => void showFamilyOnMap(family)}
+                >{mappingFamilyId === family.familyId ? 'Reading plan…' : 'Show on map'}</button>
+                  {activePlan?.choice.familyId === family.familyId &&
+                    <small>Drawn as plan {activePlan.choice.planId}</small>}</td>
               </tr>)}</tbody>
               <tfoot><tr><th scope="row">Other workload ({page.otherWorkload.familyCount ?? 'count unavailable'} families)</th>
                 <td>{page.otherWorkload.executionCount ?? 'Unavailable'}</td><td>{page.otherWorkload.totalCpuMicroseconds ?? 'Unavailable'}</td>
                 <td>{page.otherWorkload.totalDurationMicroseconds ?? 'Unavailable'}</td>
                 <td>{page.otherWorkload.totalLogicalReads8KiBPages ?? 'Unavailable'}</td>
-                <td>Aggregate only<small>{page.otherWorkload.evidence.reason}</small></td></tr></tfoot>
+                <td>Aggregate only<small>{page.otherWorkload.evidence.reason}</small></td>
+                <td>Not a single query<small>An aggregate has no one plan to draw.</small></td></tr></tfoot>
             </table></div>
           </section>
 
