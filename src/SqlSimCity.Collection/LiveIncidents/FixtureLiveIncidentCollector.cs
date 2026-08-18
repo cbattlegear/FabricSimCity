@@ -43,7 +43,13 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
         cancellationToken.ThrowIfCancellationRequested();
         var now = _timeProvider.GetUtcNow();
 
-        var requests = _document.Requests.Select(MapRequest).ToList();
+        var lockResolutions = (_document.LockResourceResolutions ?? [])
+            .GroupBy(r => r.HobtId)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var requests = _document.Requests
+            .Select(row => ApplyLockResolution(MapRequest(row), lockResolutions))
+            .ToList();
 
         var blockingFacts = _document.Requests
             .Where(r => r.Availability == "available" && r.BlockingSessionId is not null and not 0)
@@ -172,6 +178,45 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
     private static IEnumerable<(int DatabaseId, int FileId, string Metric)> FileIoMetrics(int databaseId, int fileId) =>
         FileIoMetricNames.Select(metric => (databaseId, fileId, metric));
 
+    /// <summary>
+    /// Applies the fixture's declared hobt resolution table, mirroring what connected mode does with
+    /// the <c>sessions.lock_resource_objects</c> probe result. A hobt the table does not cover keeps
+    /// <see cref="LockResolutionStatus.RequiresLookup"/> and says so, so the fixture demonstrates the
+    /// unresolved path as well as the resolved one.
+    /// </summary>
+    private static LiveRequestV1 ApplyLockResolution(
+        LiveRequestV1 request,
+        IReadOnlyDictionary<long, FixtureLockResolutionRow> resolutions)
+    {
+        var resource = request.LockResource;
+        if (resource is null || resource.Status != LockResolutionStatus.RequiresLookup || resource.HobtId is null)
+        {
+            return request;
+        }
+
+        if (!resolutions.TryGetValue(resource.HobtId.Value, out var row))
+        {
+            return request with
+            {
+                LockResource = LockResourceParser.MarkLookupMissed(
+                    resource,
+                    "The fixture's declared lock-resolution table does not cover this hobt_id, so the lock is reported unresolved."),
+            };
+        }
+
+        return request with
+        {
+            LockResource = LockResourceParser.Resolve(
+                resource,
+                row.ObjectId,
+                row.IndexId,
+                row.SchemaName,
+                row.ObjectName,
+                row.IndexName,
+                "Resolved from the fixture's declared lock-resolution table, which stands in for the sessions.lock_resource_objects probe offline."),
+        };
+    }
+
     private static LiveRequestV1 MapRequest(FixtureRequestRow row)
     {
         var availability = row.Availability switch
@@ -215,7 +260,13 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
             availability,
             row.AvailabilityReason,
             planState,
-            row.PlanAvailabilityReason);
+            row.PlanAvailabilityReason)
+        {
+            // The fixture has no catalog to look a hobt_id up in, so a KEY/HOBT resource stays
+            // RequiresLookup here. Fixture cases that need a resolved lock state it as an OBJECT
+            // resource, which resolves with no lookup at all.
+            LockResource = LockResourceParser.Parse(row.WaitResource),
+        };
     }
 
     private static MemoryGrantV1 MapMemoryGrant(FixtureMemoryGrantRow row) => new(
@@ -380,8 +431,22 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
             identityElement.GetProperty("serverName").GetString()!,
             DateTimeOffset.Parse(identityElement.GetProperty("sqlServerStartTimeUtc").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal));
 
+        var lockResolutions = root.TryGetProperty("lockResourceResolutions", out var lockElement)
+            && lockElement.ValueKind == JsonValueKind.Array
+            ? lockElement.EnumerateArray().Select(e => new FixtureLockResolutionRow(
+                e.GetProperty("hobtId").GetInt64(),
+                e.GetProperty("objectId").GetInt32(),
+                GetNullableInt32(e, "indexId"),
+                GetString(e, "schemaName"),
+                GetString(e, "objectName"),
+                GetString(e, "indexName"))).ToList()
+            : [];
+
         return new FixtureDocument(observedAt, requests, waitingTasks, memoryGrants,
-            new FixtureTempdbUsage(tempdbFiles, tempdbSessions, tempdbTasks), fileIo, schedulerPressure, logSpace, serverIdentity);
+            new FixtureTempdbUsage(tempdbFiles, tempdbSessions, tempdbTasks), fileIo, schedulerPressure, logSpace, serverIdentity)
+        {
+            LockResourceResolutions = lockResolutions,
+        };
     }
 
     private static string? GetString(JsonElement element, string propertyName) =>
@@ -410,7 +475,24 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
         IReadOnlyList<FixtureFileIoRow> FileIo,
         IReadOnlyList<FixtureSchedulerRow> SchedulerPressure,
         FixtureLogSpaceRow LogSpace,
-        FixtureServerIdentity ServerIdentity);
+        FixtureServerIdentity ServerIdentity)
+    {
+        /// <summary>
+        /// The sanitized stand-in for what the <c>sessions.lock_resource_objects</c> probe would
+        /// return against a live catalog. Declaring it in the fixture keeps hobt resolution honest
+        /// offline: nothing is inferred, the mapping is stated, and it flows through the same
+        /// <see cref="LockResourceParser.Resolve"/> path connected mode uses.
+        /// </summary>
+        public IReadOnlyList<FixtureLockResolutionRow>? LockResourceResolutions { get; init; }
+    }
+
+    private sealed record FixtureLockResolutionRow(
+        long HobtId,
+        int ObjectId,
+        int? IndexId,
+        string? SchemaName,
+        string? ObjectName,
+        string? IndexName);
 
     private sealed record FixtureRequestRow(
         string RequestId,

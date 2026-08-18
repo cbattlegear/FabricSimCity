@@ -332,5 +332,15 @@
     "schedulerCount": 4,
     "physicalMemoryMb": 65536,
     "sqlServerStartTimeUtc": "2026-08-16T09:12:00Z"
-  }
+  },
+  "lockResourceResolutions": [
+    {
+      "hobtId": 72057594043170816,
+      "objectId": 110,
+      "indexId": 1,
+      "schemaName": "dbo",
+      "objectName": "OrderHeader",
+      "indexName": "PK_OrderHeader"
+    }
+  ]
 }

@@ -14,3 +14,7 @@ artifacts/
 # filesystems and silently excluded new source files from commits.
 /secrets/
 *.log
+
+# Local cache written by the impeccable design-review tooling. It records
+# per-file hook state for this checkout only and carries no project meaning.
+.impeccable/

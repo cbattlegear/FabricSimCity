@@ -1576,6 +1576,36 @@
       "resultSets": 1,
       "resultContract": "Exactly one row; oldest_interval_start is NULL when no runtime interval is retained. Used for retention-gap/reset detection, never as a zero.",
       "relativeCost": "trivial"
+    },
+    {
+      "id": "sessions.lock_resource_objects",
+      "title": "Resolve lock hobt_id values to schema/object/index",
+      "file": "probes/sessions/lock_resource_objects.sql",
+      "connectionScope": "database",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported. sys.partitions, sys.objects, sys.indexes, and sys.schemas are per-database catalog views available on Azure SQL Database, and the probe already runs in the database connection context. STRING_SPLIT additionally requires database compatibility level 130 or higher."
+      },
+      "requiredPermission": "Ordinary access to the current database. Catalog-view metadata visibility means objects the caller has no permission on are silently absent, so absence must be reported as unresolved rather than as a lock that is not on a user object.",
+      "cadenceClass": "realtime",
+      "parameters": [
+        {
+          "name": "@HobtIds",
+          "sqlDbType": "NVarChar",
+          "required": true,
+          "description": "Comma-separated hobt_id values taken verbatim from the current wait sample. Bounded by the caller and passed as a parameter, so no SQL text is ever concatenated."
+        },
+        {
+          "name": "@TopN",
+          "sqlDbType": "Int",
+          "required": true,
+          "description": "Caps the row count via TOP(@TopN). Must be a small, positive, application-chosen bound."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, at most one per (hobt_id, object_id, index_id): hobt_id, object_id, index_id, schema_name, object_name, index_name, object_type_desc, database_id, database_name. A requested hobt_id missing from the result was not resolved and must be reported as unresolved.",
+      "relativeCost": "low"
     }
   ]
 }

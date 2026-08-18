@@ -314,7 +314,13 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         PlanState: PlanCollectionState.NotRequested,
         PlanReason: "Plan XML is never fetched during routine sampling; only statement text is captured " +
                     "(requirement 6). A request that both started and finished between two sampling cycles " +
-                    "is never observed here at all.");
+                    "is never observed here at all.")
+    {
+        // Parsing is pure and costs nothing: an OBJECT:/TAB: lock resolves outright because the text
+        // already names the object id, while a KEY:/HOBT: lock is reported RequiresLookup and names
+        // the probe that would resolve it. No object is ever guessed.
+        LockResource = LockResourceParser.Parse(row.WaitResource),
+    };
 
     private static MemoryGrantV1 MapMemoryGrant(MemoryGrantRow row) => new(
         row.SessionId,

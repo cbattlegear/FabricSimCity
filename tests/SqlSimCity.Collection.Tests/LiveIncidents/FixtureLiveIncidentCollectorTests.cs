@@ -145,4 +145,46 @@ public class FixtureLiveIncidentCollectorTests
         Assert.NotNull(withReads.Reads);
         Assert.True(long.TryParse(withReads.Reads, out _), "Reads must be a parseable decimal string, not a JSON number.");
     }
+
+    [Fact]
+    public async Task ResolvesAKeyLockToItsObjectUsingTheFixtureResolutionTable()
+    {
+        var collector = new FixtureLiveIncidentCollector(TimeProvider.System);
+        var snapshot = await collector.CollectAsync(1, CancellationToken.None);
+
+        var blocked = Assert.Single(snapshot.Requests, r => r.SessionId == 82);
+        var resource = blocked.LockResource;
+
+        Assert.NotNull(resource);
+        Assert.Equal(LockResourceKind.Key, resource!.Kind);
+        Assert.Equal(LockResolutionStatus.Resolved, resource.Status);
+        Assert.Equal(110, resource.ObjectId);
+        Assert.Equal("dbo", resource.SchemaName);
+        Assert.Equal("OrderHeader", resource.ObjectName);
+        Assert.Contains("fixture", resource.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReportsAnUnprefixedWaitResourceAsUnrecognizedRatherThanGuessingAnObject()
+    {
+        var collector = new FixtureLiveIncidentCollector(TimeProvider.System);
+        var snapshot = await collector.CollectAsync(1, CancellationToken.None);
+
+        var latch = Assert.Single(snapshot.Requests, r => r.SessionId == 83);
+
+        Assert.NotNull(latch.LockResource);
+        Assert.Equal(LockResolutionStatus.Unrecognized, latch.LockResource!.Status);
+        Assert.Null(latch.LockResource.ObjectId);
+    }
+
+    [Fact]
+    public async Task LeavesLockResourceNullWhenTheEngineReportedNoWaitResource()
+    {
+        var collector = new FixtureLiveIncidentCollector(TimeProvider.System);
+        var snapshot = await collector.CollectAsync(1, CancellationToken.None);
+
+        var noWait = Assert.Single(snapshot.Requests, r => r.SessionId == 85);
+
+        Assert.Null(noWait.LockResource);
+    }
 }
