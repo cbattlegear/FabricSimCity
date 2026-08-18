@@ -99,6 +99,14 @@ export default function App() {
           </div>
         )}
       </header>
+      <aside className="deploy-warning" role="note" aria-label="Deployment security notice">
+        <span className="deploy-warning-badge" aria-hidden="true">⚠</span>
+        <p>
+          <strong>Deployment notice:</strong> SQLSimCity has <strong>no built-in login or authentication</strong>.
+          Anyone who can reach this page sees all evidence. Serve it only on a trusted network or behind an
+          authenticating reverse proxy, and set <code>AllowedHosts</code> to the exact host(s) it is served on.
+        </p>
+      </aside>
       <div className="tabs" role="tablist" aria-label="Analysis views">
         <button
           type="button"

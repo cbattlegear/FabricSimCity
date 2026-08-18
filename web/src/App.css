@@ -20,6 +20,10 @@ h2 { margin-bottom: 7px; letter-spacing: -0.02em; }
 .capture { display: flex; gap: 9px; align-items: center; color: #bed0df; font: 0.78rem ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .capture-dot, .legend-live { width: 8px; height: 8px; border-radius: 50%; background: #72f4c4; box-shadow: 0 2px 10px rgba(114, 244, 196, 0.35); }
 .capture-dot.is-degraded { background: #ffc96b; box-shadow: 0 2px 10px rgba(255, 201, 107, 0.35); }
+.deploy-warning { margin-top: 16px; display: flex; align-items: flex-start; gap: 12px; padding: 11px 15px; border: 1px solid #7a6327; border-left: 4px solid #d9a441; background: #201a0e; color: #f0e2c4; }
+.deploy-warning-badge { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid #d9a441; border-radius: 50%; font-size: 0.82rem; font-weight: 700; }
+.deploy-warning p { margin: 0; font-size: 0.8rem; line-height: 1.5; }
+.deploy-warning code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 0.9em; padding: 0 3px; background: #2c2413; border: 1px solid #4a3d1c; }
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 18px; }
 .tabs button, .compare-controls button, select { border: 1px solid #42576a; background: #111d28; color: #dce8f1; padding: 8px 11px; }
 .tabs button[aria-selected="true"] { border-color: #72f4c4; color: #8be7ce; }
