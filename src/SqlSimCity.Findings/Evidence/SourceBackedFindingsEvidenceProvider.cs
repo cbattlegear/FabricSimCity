@@ -1,3 +1,4 @@
+using System.Xml;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
 using SqlSimCity.Findings.Engine;
@@ -62,6 +63,15 @@ public sealed class SourceBackedFindingsEvidenceProvider : IFindingsEvidenceProv
         var reason = families.Count == 0
             ? "No Query Store families were available; findings rest on atlas, capability, and live evidence only."
             : $"Bounded evaluation over the top {families.Count} query families (cap {_options.MaxFamilies}) plus atlas, capability, and live evidence.";
+        if (plans.Skipped.Count > 0)
+        {
+            // Disclosed rather than silently dropped: a plan that cannot be normalized is missing
+            // evidence, and the Showplan rules must not be read as if it had been examined.
+            reason +=
+                $" {plans.Skipped.Count} Showplan(s) could not be normalized and were excluded from Showplan rules: " +
+                string.Join("; ", plans.Skipped.Take(3)) +
+                (plans.Skipped.Count > 3 ? "; …" : string.Empty);
+        }
 
         return new FindingsEvidenceBundle(
             atlas.Target.TargetId,
@@ -72,7 +82,7 @@ public sealed class SourceBackedFindingsEvidenceProvider : IFindingsEvidenceProv
             live,
             status,
             families,
-            plans,
+            plans.Plans,
             reason);
     }
 
@@ -109,23 +119,40 @@ public sealed class SourceBackedFindingsEvidenceProvider : IFindingsEvidenceProv
         return ordered;
     }
 
-    private async Task<IReadOnlyList<NormalizedShowplanV1>> LoadPlansAsync(
+    /// <summary>The plans that loaded, and a reason for every plan that could not be normalized.</summary>
+    private sealed record PlanLoad(IReadOnlyList<NormalizedShowplanV1> Plans, IReadOnlyList<string> Skipped);
+
+    private async Task<PlanLoad> LoadPlansAsync(
         IReadOnlyList<QueryFamilyDetailV1> families, CancellationToken cancellationToken)
     {
         if (_options.MaxPlans == 0)
-            return [];
+            return new PlanLoad([], []);
         var planIds = families
             .SelectMany(family => family.Plans.Select(plan => plan.PlanId))
             .Distinct(StringComparer.Ordinal)
             .Take(_options.MaxPlans)
             .ToArray();
         var plans = new List<NormalizedShowplanV1>(planIds.Length);
+        var skipped = new List<string>();
         foreach (var planId in planIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (await _queryStore.GetPlanAsync(planId, cancellationToken).ConfigureAwait(false) is { } plan)
-                plans.Add(plan);
+            try
+            {
+                if (await _queryStore.GetPlanAsync(planId, cancellationToken).ConfigureAwait(false) is { } plan)
+                    plans.Add(plan);
+            }
+            // One unusable Showplan -- oversized, malformed, or unreadable -- must never take down the
+            // whole findings evaluation. Every other source in the bundle is still valid evidence.
+            catch (XmlException ex)
+            {
+                skipped.Add($"{planId}: {ex.Message}");
+            }
+            catch (InvalidDataException ex)
+            {
+                skipped.Add($"{planId}: {ex.Message}");
+            }
         }
-        return plans;
+        return new PlanLoad(plans, skipped);
     }
 }

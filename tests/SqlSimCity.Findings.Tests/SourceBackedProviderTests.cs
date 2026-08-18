@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Xml;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
 using SqlSimCity.Findings.Evidence;
@@ -73,6 +74,47 @@ public sealed class SourceBackedProviderTests
         private static QueryFamilySummaryV1 Summary(string id) =>
             new(id, "db1", "0x", "fp", FindingsTestData.Text(), [], "100", "100000", "100000", "200", "0",
                 FindingsTestData.Now.AddHours(-1), FindingsTestData.Now, FindingsTestData.QsEvidence());
+    }
+
+    [Fact]
+    public async Task Discloses_a_showplan_it_cannot_normalize_instead_of_failing_the_evaluation()
+    {
+        // A single oversized or malformed Showplan used to escape as an unhandled 500 and take the
+        // whole findings page with it, even though every other source in the bundle was fine.
+        var qs = new RejectingPlanQueryStoreSource();
+        var provider = new SourceBackedFindingsEvidenceProvider(
+            new FakeAtlasSource(), qs, new FakeCapabilitiesSource(), () => null,
+            new FixedTime(FindingsTestData.Now),
+            new FindingsEvidenceOptions { MaxFamilies = 2, MaxPlans = 5, Metrics = ["cpu"] });
+
+        var bundle = await provider.GetBundleAsync(CancellationToken.None);
+
+        Assert.Empty(bundle.Plans);
+        Assert.Contains("could not be normalized", bundle.BundleReason, StringComparison.Ordinal);
+        Assert.Contains("20000-operator limit", bundle.BundleReason, StringComparison.Ordinal);
+    }
+
+    private sealed class RejectingPlanQueryStoreSource : IQueryStoreHistorySource
+    {
+        public Task<PageV1<QueryFamilySummaryV1>> GetQueriesAsync(string? databaseId, string metric, int pageSize, string? pageToken, CancellationToken cancellationToken) =>
+            Task.FromResult(new PageV1<QueryFamilySummaryV1>(
+                "1.0",
+                [new QueryFamilySummaryV1("fam-1", "db1", "0x", "fp", FindingsTestData.Text(), [], "100", "100000", "100000", "200", "0",
+                    FindingsTestData.Now.AddHours(-1), FindingsTestData.Now, FindingsTestData.QsEvidence())],
+                null, pageSize, "1"));
+
+        public Task<QueryFamilyDetailV1?> GetFamilyAsync(string familyId, CancellationToken cancellationToken) =>
+            Task.FromResult<QueryFamilyDetailV1?>(
+                FindingsTestData.Family(familyId, [FindingsTestData.Plan("p1")], [FindingsTestData.Bucket("p1")]));
+
+        public Task<NormalizedShowplanV1?> GetPlanAsync(string planId, CancellationToken cancellationToken) =>
+            throw new XmlException("Showplan exceeds the 20000-operator limit.");
+
+        public Task<PlanComparisonV1?> ComparePlansAsync(string leftPlanId, string rightPlanId, CancellationToken cancellationToken) =>
+            Task.FromResult<PlanComparisonV1?>(null);
+
+        public Task<QueryStoreCollectorStatusV1> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new QueryStoreCollectorStatusV1("1.0", QueryStoreCollectorState.Ready, 1, null, null, null, [], "Fake."));
     }
 
     private sealed class FakeAtlasSource : IAtlasSnapshotSource

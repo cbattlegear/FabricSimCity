@@ -110,6 +110,11 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 .load-more { margin: 14px; border: 1px solid #42576a; background: #111d28; color: #8be7ce; padding: 9px 12px; cursor: pointer; }
 .query-grid th small { display: block; margin-top: 5px; color: #93a8ba; font-weight: 400; }
 .query-detail { min-width: 0; padding: 18px 20px 28px; }
+.query-detail .detail-title { gap: 14px; align-items: start; }
+.query-detail .detail-title h3 { margin: 0; overflow-wrap: anywhere; }
+.query-detail .detail-title small { display: block; margin-top: 4px; color: #93a8ba; font: .66rem ui-monospace, Consolas, monospace; }
+.detail-close { flex: none; padding: 5px 12px; color: #dbe7f0; background: #14202c; border: 1px solid #3b4b5b; font: inherit; cursor: pointer; }
+.detail-close:hover { color: #8be7ce; border-color: #72f4c4; }
 .query-detail h3 { margin: 20px 0 8px; font-size: .9rem; }
 .query-detail ul, .plan-tree { color: #b7c7d3; font: .74rem/1.65 ui-monospace, Consolas, monospace; }
 .plan-list { padding-left: 18px; }
@@ -167,6 +172,14 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 .hud-bottom-left { bottom: 12px; left: 12px; }
 .hud-bottom-right { bottom: 12px; right: 12px; justify-items: end; }
 .hud-panel { top: 12px; right: 12px; bottom: 12px; width: min(360px, 40%); max-width: none; align-content: start; overflow: auto; }
+.hud-road-readout {
+  left: 50%; bottom: 12px; transform: translateX(-50%); max-width: min(520px, 70%);
+  grid-auto-flow: column; gap: 9px; align-items: baseline; justify-content: start;
+  padding: 7px 11px; background: rgba(8, 13, 20, 0.92); border: 1px solid #33475a;
+  color: #dbe7f0; backdrop-filter: blur(6px); font-size: .72rem;
+}
+.hud-road-readout strong { color: #93a8ba; font: .62rem ui-monospace, Consolas, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.hud-road-readout span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .city-viewport:has(.hud-panel) .hud-top-right { right: calc(min(360px, 40%) + 24px); }
 .city-viewport:has(.hud-panel) .hud-bottom-right { right: calc(min(360px, 40%) + 24px); }
 
@@ -205,6 +218,9 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .legend-footprint { background: #4a5c70; }
 .legend-height { background: linear-gradient(#8ca6bd, #35485c); }
 .legend-lane { width: 18px; height: 5px; border: 0; border-radius: 3px; background: linear-gradient(90deg, #4ea9f5, #f5a04e); }
+.legend-solid { background: #93a8ba; border-color: #93a8ba; }
+.legend-dashed { background: repeating-linear-gradient(90deg, #93a8ba 0 7px, transparent 7px 11px); border-color: #5d7183; }
+.legend-sparse { background: repeating-linear-gradient(90deg, #93a8ba 0 3px, transparent 3px 9px); border-color: #5d7183; }
 .legend-decoration { margin: 8px 0 0; color: #7f93a5; font-size: .65rem; line-height: 1.45; }
 .legend-caveat { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid #2b3b4b; color: #9bb0c2; font-size: .66rem; line-height: 1.5; }
 .city-wait-lanes { margin-top: 24px; }
@@ -280,6 +296,14 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .city-workload tbody button[disabled] { color: #7d8a94; cursor: progress; text-decoration: none; }
 .city-workload tfoot small, .city-workload th small { display: block; margin-top: 4px; color: #92a7b7; font-weight: 400; }
 .city-routes { border-top-color: #8496a5; }
+.city-routes li.is-selected { border-left: 2px solid #72f4c4; padding-left: 9px; }
+.route-endpoints, .link-button {
+  padding: 0; color: #8be7ce; background: transparent; border: 0; font: inherit;
+  cursor: pointer; text-align: left; text-decoration: underline; text-underline-offset: 3px;
+}
+.route-endpoints:hover, .link-button:hover { color: #baf5e2; }
+.road-endpoints { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: .78rem; }
+.road-endpoints small { color: #93a8ba; font-size: .65rem; }
 
 .loading, .error { margin-top: 32px; padding: 28px; border: 1px solid #334657; background: #0e1721; }
 .loading { color: #b8cad8; }

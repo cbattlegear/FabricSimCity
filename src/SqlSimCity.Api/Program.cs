@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Xml;
 using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
 using SqlSimCity.Collection.Atlas;
@@ -302,17 +303,37 @@ queryStore.MapGet("/plans/{planId}", async (
     IQueryStoreHistorySource source, HttpContext context, string planId, CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return await source.GetPlanAsync(planId, cancellationToken) is { } plan
-        ? Results.Ok(plan) : Results.NotFound();
+    try
+    {
+        return await source.GetPlanAsync(planId, cancellationToken) is { } plan
+            ? Results.Ok(plan) : Results.NotFound();
+    }
+    // The Showplan exists but exceeds a parser bound or is malformed. That is a fact about this plan,
+    // not a server fault, so it is reported with its reason instead of an opaque 500.
+    catch (XmlException ex)
+    {
+        return Results.Json(
+            new { error = $"This Showplan could not be normalized. {ex.Message}" },
+            statusCode: StatusCodes.Status422UnprocessableEntity);
+    }
 });
 queryStore.MapGet("/plans/compare", async (
     IQueryStoreHistorySource source, HttpContext context, string leftPlanId, string rightPlanId,
     CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return await source.ComparePlansAsync(leftPlanId, rightPlanId, cancellationToken) is { } comparison
-        ? Results.Ok(comparison)
-        : Results.NotFound();
+    try
+    {
+        return await source.ComparePlansAsync(leftPlanId, rightPlanId, cancellationToken) is { } comparison
+            ? Results.Ok(comparison)
+            : Results.NotFound();
+    }
+    catch (XmlException ex)
+    {
+        return Results.Json(
+            new { error = $"One of these Showplans could not be normalized, so no comparison is claimed. {ex.Message}" },
+            statusCode: StatusCodes.Status422UnprocessableEntity);
+    }
 });
 queryStore.MapGet("/status", async (
     IQueryStoreHistorySource source, HttpContext context, CancellationToken cancellationToken) =>

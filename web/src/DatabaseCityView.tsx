@@ -6,7 +6,7 @@ import {
   fetchQueryFamily,
   subscribeToLiveIncidents,
 } from './api'
-import { accessibleObjectLabel, databaseCityMetricValue, formatKiB } from './databaseCity'
+import { accessibleObjectLabel, databaseCityMetricValue, formatKiB, shouldRenderRoute } from './databaseCity'
 import type { DatabaseCityObject, DatabaseCityPage, DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import type { LiveFeedConnectionState } from './liveIncidents'
@@ -15,6 +15,7 @@ import { DatabaseCityViewport } from './DatabaseCityViewport'
 import { liveBlockingEdges } from './cityBlocking'
 import { planCity } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
+import { CONGESTION_LABELS, gradeRoads, type RoadTraffic } from './cityTraffic'
 import { FACILITY_LABELS, layoutFacilities, projectFacilities } from './cityInfrastructure'
 import { projectFacilityTraffic, type FacilityTraffic } from './cityFacilityTraffic'
 
@@ -43,6 +44,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const [objects, setObjects] = useState<DatabaseCityObject[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get('object'))
+  const [selectedRoadId, setSelectedRoadId] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -57,6 +59,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const [routeError, setRouteError] = useState<string | null>(null)
   const requests = useRef(new Set<AbortController>())
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const roadInvokerRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     for (const request of requests.current) request.abort()
@@ -102,10 +105,51 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
 
   const selectObject = useCallback((objectId: string) => {
     setSelectedId(objectId)
+    // A building click answers a different question than a road click, so it takes over the panel.
+    setSelectedRoadId(null)
     const url = new URL(window.location.href)
     url.searchParams.set('object', objectId)
     window.history.replaceState(null, '', url)
   }, [])
+
+  const selectRoad = useCallback((routeId: string | null) => {
+    // Remember what opened the panel. Its own controls unmount it, so closing has to hand focus
+    // back deliberately instead of dropping the reader on document.body, where Tab restarts at
+    // the top of the page.
+    if (routeId) {
+      const active = document.activeElement
+      roadInvokerRef.current = active instanceof HTMLElement && active !== document.body ? active : null
+    }
+    setSelectedRoadId(routeId)
+  }, [])
+
+  const restoreRoadFocus = useCallback(() => {
+    const invoker = roadInvokerRef.current
+    roadInvokerRef.current = null
+    if (invoker?.isConnected) invoker.focus()
+    else headingRef.current?.focus()
+  }, [])
+
+  const closeRoad = useCallback(() => {
+    setSelectedRoadId(null)
+    restoreRoadFocus()
+  }, [restoreRoadFocus])
+
+  const selectRoadEndpoint = useCallback((objectId: string) => {
+    selectObject(objectId)
+    restoreRoadFocus()
+  }, [selectObject, restoreRoadFocus])
+
+  // Escape closes the road panel from anywhere, because selecting a road on the map leaves focus
+  // outside the panel entirely.
+  useEffect(() => {
+    if (!selectedRoadId) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeRoad()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [selectedRoadId, closeRoad])
 
   const selected = objects.find(object => object.objectId === selectedId) ?? null
   const visibleObjects = useMemo(() => {
@@ -140,6 +184,44 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const facilityTraffic = useMemo(
     () => projectFacilityTraffic(families, visibleObjects),
     [families, visibleObjects])
+
+  // Roads are graded here rather than inside the scene so the map, the hover readout, the road
+  // panel, and the evidence table are all reading one set of numbers.
+  const roads = useMemo(() => {
+    if (!page) return [] as RoadTraffic[]
+    const visible = new Set(visibleObjects.map(object => object.objectId))
+    return gradeRoads(
+      page.routes.filter(candidate => shouldRenderRoute(candidate, visible)),
+      page.topQueryFamilies,
+      blocking.edges,
+    )
+  }, [page, visibleObjects, blocking.edges])
+
+  /** Schema-qualified name for an endpoint, falling back to the raw id for anything off this map. */
+  const endpointName = useCallback((objectId: string) => {
+    const object = objects.find(candidate => candidate.objectId === objectId)
+    return object ? `${object.schemaName}.${object.name}` : objectId
+  }, [objects])
+
+  const roadLabels = useMemo(() => {
+    const labels = new Map<string, string>()
+    for (const road of roads) {
+      const volume = road.executions === null
+        ? 'volume unavailable'
+        : `${road.executions.toLocaleString()} executions`
+      labels.set(
+        road.routeId,
+        `${endpointName(road.fromObjectId)} ↔ ${endpointName(road.toId)} · ${volume} · ${CONGESTION_LABELS[road.grade]}`,
+      )
+    }
+    return labels
+  }, [roads, endpointName])
+
+  const selectedRoad = roads.find(road => road.routeId === selectedRoadId) ?? null
+  useEffect(() => {
+    // A road that filtering or a refresh removed must not leave a stale panel behind.
+    if (selectedRoadId !== null && !roads.some(road => road.routeId === selectedRoadId)) setSelectedRoadId(null)
+  }, [roads, selectedRoadId])
 
   const route: CityRoute | null = useMemo(() => {
     if (!activePlan) return null
@@ -345,9 +427,18 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
 
   const panel = route
     ? <RoutePanel route={route} plan={activePlan!} onClear={() => setActivePlan(null)} />
-    : selected
-      ? <BuildingPanel object={selected} metric={metric} facilityCount={facilities.length} />
-      : null
+    : selectedRoad
+      ? <RoadPanel
+        road={selectedRoad}
+        fromName={endpointName(selectedRoad.fromObjectId)}
+        toName={endpointName(selectedRoad.toId)}
+        onSelectEndpoint={selectRoadEndpoint}
+        hasEndpoint={objectId => objects.some(object => object.objectId === objectId)}
+        onClose={closeRoad}
+      />
+      : selected
+        ? <BuildingPanel object={selected} metric={metric} facilityCount={facilities.length} />
+        : null
 
   return (
     <section className="database-city" aria-labelledby="database-city-title">
@@ -382,14 +473,15 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
 
         <DatabaseCityViewport
           objects={visibleObjects}
-          routes={page.routes}
-          families={families}
+          roads={roads}
           facilities={facilities}
           facilityTraffic={facilityTraffic}
-          liveBlocking={blocking.edges}
           route={route}
           selectedId={selectedId}
+          selectedRoadId={selectedRoadId}
           onSelect={selectObject}
+          onSelectRoad={selectRoad}
+          roadLabels={roadLabels}
           finder={finder}
           panel={panel}
           liveStatus={liveStatus}
@@ -520,11 +612,30 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           <section className="topology city-routes" aria-labelledby="city-routes-title">
             <div className="section-heading"><div><h2 id="city-routes-title">Evidence-labeled routes</h2>
               <p>Confidence is encoded by pattern and text; routes do not claim row flow</p></div></div>
-            <ul>{page.routes.map(route => <li key={route.routeId}>
-              <span className={`edge-mark edge-${route.confidence.toLowerCase()}`} aria-hidden="true" />
-              <strong>{route.kind} · {route.confidence}</strong>
-              <span>{route.fromObjectId} ↔ {route.toId}<br />{route.rationale} · {route.evidence.status}</span>
-            </li>)}</ul>
+            <ul>{page.routes.map(route => {
+              const graded = roads.find(road => road.routeId === route.routeId) ?? null
+              return <li key={route.routeId} className={route.routeId === selectedRoadId ? 'is-selected' : undefined}>
+                <span className={`edge-mark edge-${route.confidence.toLowerCase()}`} aria-hidden="true" />
+                <strong>{route.kind} · {route.confidence}</strong>
+                <span>
+                  {graded
+                    ? <button
+                      type="button"
+                      className="route-endpoints"
+                      aria-pressed={route.routeId === selectedRoadId}
+                      onClick={() => selectRoad(route.routeId)}
+                    >
+                      {endpointName(route.fromObjectId)} ↔ {endpointName(route.toId)}
+                    </button>
+                    : <>{endpointName(route.fromObjectId)} ↔ {endpointName(route.toId)}</>}
+                  <br />
+                  {graded
+                    ? `${CONGESTION_LABELS[graded.grade]} · ${graded.rationale} `
+                    : 'Not drawn on the map: an endpoint is outside the loaded page or filter. '}
+                  {route.rationale} · {route.evidence.status}
+                </span>
+              </li>
+            })}</ul>
           </section>
         </details>
       </>}
@@ -657,6 +768,59 @@ function RoutePanel({
         <strong>Compiled plan shape only</strong>
         <p>{route.runtimeOverlayCaveat}</p>
       </div>
+    </aside>
+  )
+}
+
+function RoadPanel({
+  road,
+  fromName,
+  toName,
+  onSelectEndpoint,
+  hasEndpoint,
+  onClose,
+}: {
+  road: RoadTraffic
+  fromName: string
+  toName: string
+  onSelectEndpoint: (objectId: string) => void
+  hasEndpoint: (objectId: string) => boolean
+  onClose: () => void
+}) {
+  const endpoint = (objectId: string, name: string) =>
+    hasEndpoint(objectId)
+      ? <button type="button" className="link-button" onClick={() => onSelectEndpoint(objectId)}>{name}</button>
+      : <span>{name} <small>(not on this map)</small></span>
+
+  return (
+    <aside className="hud-slideover" aria-labelledby="city-road-title">
+      <div className="detail-title">
+        <h2 id="city-road-title">Road</h2>
+        <button type="button" onClick={onClose}>Close</button>
+      </div>
+      <p className="road-endpoints">
+        {endpoint(road.fromObjectId, fromName)}
+        <span aria-hidden="true"> ↔ </span>
+        <span className="visually-hidden">is referenced together with</span>
+        {endpoint(road.toId, toName)}
+      </p>
+      <dl>
+        <div><dt>Reference</dt><dd>{road.kind} · {road.confidence}</dd></div>
+        <div><dt>Executions</dt><dd>{road.executions?.toLocaleString() ?? 'Unavailable'}</dd></div>
+        <div><dt>Query families</dt><dd>{road.familyIds.length}</dd></div>
+        <div><dt>Wait share</dt><dd>
+          {road.waitShare === null ? 'Unavailable' : `${(road.waitShare * 100).toFixed(1)}%`}
+        </dd></div>
+        <div><dt>Congestion</dt><dd>{CONGESTION_LABELS[road.grade]}</dd></div>
+      </dl>
+      <div className="source-note">
+        <strong>Why this road looks like this</strong>
+        <p>{road.rationale}</p>
+      </div>
+      <p className="hud-note">
+        Width maps captured executions naming both endpoints; colour maps captured wait share. The
+        road follows the street grid and claims a reference between these two objects, never row flow.
+      </p>
     </aside>
   )
 }
