@@ -26,6 +26,20 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton(probeCatalog);
+
+// Connected Query Store history requires encryption at rest and has no plaintext
+// fallback, so an operator whose whole configuration is a connection string would
+// otherwise get empty query views with no explanation. Provision the key for them
+// instead of relaxing the requirement -- but never in archive or edge mode, which
+// forbid connected collection outright and would only leave a stray key behind.
+var protectedStorageProvisioning = archiveMode || edgeMode
+    ? null
+    : ProtectedStorageAutoProvisioning.TryProvision(builder.Configuration);
+if (protectedStorageProvisioning is not null)
+{
+    builder.Configuration.AddInMemoryCollection(protectedStorageProvisioning.ConfigurationOverrides);
+}
+
 builder.Services.AddProtectedStorage(builder.Configuration);
 var queryStoreConnected = QueryStoreHistoryConfiguration.IsConnected(builder.Configuration);
 var atlasConnected = AtlasConfiguration.IsConnected(builder.Configuration);
@@ -48,7 +62,10 @@ if (!edgeMode && edgeIngestionEnabled)
 if (queryStoreConnected && !atlasConnected)
     throw new InvalidOperationException("Connected Query Store history requires Atlas:Mode=Connected so both share one validated profile and authentication strategy.");
 if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled"))
-    throw new InvalidOperationException("Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden.");
+    throw new InvalidOperationException(
+        "Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden. " +
+        "Set ProtectedStorage:Enabled=true and mount a key file at ProtectedStorage:KeyFilePath (see SECURITY.md " +
+        "for the format), or drive the connection from a connection string, which provisions one automatically.");
 
 builder.Services.AddSqlSimCityHttpSecurity(builder.Configuration);
 builder.Services.AddEdgeIngestion(builder.Configuration);
@@ -144,6 +161,11 @@ var app = builder.Build();
 // Say so once at startup rather than letting the trade-off pass silently.
 SqlSimCityConnectionString.WarnIfConfigured(
     builder.Configuration, app.Services.GetRequiredService<ILoggerFactory>());
+
+// A generated storage key is a credential the operator never asked for and now
+// depends on; announce it rather than letting it appear silently on disk.
+ProtectedStorageAutoProvisioning.Report(
+    protectedStorageProvisioning, app.Services.GetRequiredService<ILoggerFactory>());
 
 // Protected storage is opt-in and fails closed: when enabled, a missing/invalid
 // key, corrupt canary, or migration error must stop the process before it

@@ -57,6 +57,27 @@ Set `ProtectedStorage:Enabled` to `true` and provide two mandatory settings:
 
 If either is missing when `Enabled` is `true`, the process fails at startup rather than falling back to an unencrypted or partially configured store. If the key file is missing, unreadable, malformed, or declares an invalid key, resolving the storage service fails with `SqlSimCity.Storage.KeyRingConfigurationException` and the process does not become ready. This is intentional: there is no unencrypted fallback mode.
 
+### Auto-provisioned keys (connection-string deployments)
+
+Connected Query Store history persists query *text*, so it requires protected storage and has no plaintext fallback. Requiring operators to have configured a key before that requirement is ever mentioned meant a connection string produced permanently empty query views with no error, so a connection string now provisions the key itself.
+
+This is a deliberate, bounded reduction in key custody, not a reduction in encryption. Encryption at rest is unchanged and still mandatory; what changes is that the process generates the key rather than an operator supplying it out of band. The generated key sits on the host beside the data directory instead of arriving as a mounted secret, so it is protected by filesystem permissions alone — an attacker with host filesystem access has both halves. Deployments that need the stronger separation should keep supplying their own key.
+
+The narrow trigger keeps the hardened path intact. Auto-provisioning happens **only** when all of the following hold, and is skipped entirely otherwise:
+
+- a connection string (`ConnectionStrings:SqlSimCity` or `SQLSIMCITY_CONNECTION_STRING`) is what drives the connection;
+- `ProtectedStorage:Enabled` is not already `true` — an operator who set it has made deliberate custody choices and no key is ever generated over the top of them;
+- `QueryStoreHistory:Mode` is not `Disabled`;
+- the mode is neither archive nor edge, both of which forbid connected collection outright.
+
+The generated key ring is written to a `sqlsimcity-keys` directory beside `ProtectedStorage:DataDirectory` with mode `0600`, in the same strict format documented below. Placement is load-bearing in two ways. It is never written *inside* the data directory, because a backup that contains its own decryption key protects nobody — `tools/backup-data.sh` refuses to run in that arrangement. It is also never generated at the shipped `/run/secrets/...` default, which is tmpfs under Docker and would yield a key that vanishes on restart, leaving a store that fails its canary check and can never be opened again; that path is honoured only when a file genuinely exists there, so a mounted key always wins.
+
+An existing key file is never inspected, rewritten, or replaced, and losing a race to a concurrent creator is treated as finding the file already present. Overwriting a key whose data still exists would permanently orphan every record it protected.
+
+Key generation is announced at startup with a warning naming the path (`ProtectedStorageKeyGenerated`). **A generated key is still a production credential and still your responsibility to back up** — the recovery consequences below apply to it in full. In a container it needs a persistent writable volume, or it will not survive recreation.
+
+Where the key cannot be written at all — notably the shipped container's read-only root filesystem — connected Query Store history disables itself with a warning explaining the cause and the fix (`ProtectedStorageKeyUnavailable`), preserving previous startup behavior. Convenience is never allowed to turn into an outage, and never into plaintext.
+
 ### Key file format
 
 The key file is strict JSON:
