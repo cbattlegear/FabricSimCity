@@ -55,17 +55,13 @@ services:
       # Atlas__KnownDatabases__0: sales
       # Atlas__KnownDatabases__1: warehouse
       # Protected storage is disabled by default; this app runs fine without
-      # the settings below. To enable the encrypted embedded record store,
-      # uncomment these three lines and mount a key file secret (see
-      # SECURITY.md for the key file format, rotation, and backup guidance).
-      # Losing the key file makes every record it protected permanently
-      # unrecoverable, so the key must be backed up independently of the
-      # sqlsimcity-data volume.
+      # the settings below. Enable it to keep Query Store history -- captured
+      # query text, plan XML, and published snapshots -- across restarts. What
+      # is written is exactly what was collected, in the clear, so treat the
+      # sqlsimcity-data volume as sensitive as the SQL Server it observes
+      # (see SECURITY.md).
       # ProtectedStorage__Enabled: "true"
       # ProtectedStorage__DataDirectory: /data
-      # ProtectedStorage__KeyFilePath: /run/secrets/sqlsimcity-storage-key
-    # secrets:
-    #   - sqlsimcity-storage-key
     #
     # --- Connected authentication deployment requirements ---
     # These apply only after Atlas__Mode is changed to Connected. Never commit
@@ -97,9 +93,3 @@ services:
 
 volumes:
   sqlsimcity-data:
-
-# Uncomment to mount a key file as a Docker secret. `file:` must point to a
-# key ring JSON file (see SECURITY.md) that is NOT committed to this repo.
-# secrets:
-#   sqlsimcity-storage-key:
-#     file: ./secrets/sqlsimcity-storage-key.json

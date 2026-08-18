@@ -32,8 +32,6 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
         var settings = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
         {
             ["ProtectedStorage:DataDirectory"] = DataDirectory,
-            // The shipped default, which is tmpfs under Docker.
-            ["ProtectedStorage:KeyFilePath"] = "/run/secrets/sqlsimcity-storage-key",
         };
 
         foreach (var (key, value) in values)
@@ -78,96 +76,43 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
 
         Assert.True(QueryStoreHistoryConfiguration.IsConnected(configuration));
 
-        // The hardened path provisions nothing: that operator supplies a key and
-        // still fails closed without one.
+        // The hardened path provisions nothing: that operator supplies
+        // ProtectedStorage:Enabled themselves and still fails closed without it.
         Assert.Null(ProtectedStorageAutoProvisioning.TryProvision(configuration));
     }
 
     [Fact]
-    public void ProvisioningEnablesProtectedStorageAndCreatesAKey()
+    public void ProvisioningEnablesProtectedStorageAndPointsAtTheDataDirectory()
     {
         var configuration = Build(("ConnectionStrings:SqlSimCity", ConnectionString));
 
         var provisioning = ProtectedStorageAutoProvisioning.TryProvision(configuration);
 
         Assert.NotNull(provisioning);
-        Assert.True(provisioning.KeyCreated);
-        Assert.True(File.Exists(provisioning.KeyFilePath));
+        Assert.Null(provisioning.UnavailableReason);
         Assert.Equal("true", provisioning.ConfigurationOverrides["ProtectedStorage:Enabled"]);
         Assert.Equal(
-            provisioning.KeyFilePath,
-            provisioning.ConfigurationOverrides["ProtectedStorage:KeyFilePath"]);
+            provisioning.DataDirectory,
+            provisioning.ConfigurationOverrides["ProtectedStorage:DataDirectory"]);
+        Assert.True(Directory.Exists(provisioning.DataDirectory));
     }
 
     [Fact]
-    public void TheGeneratedKeyIsAsDurableAsTheDataItProtects()
+    public void ProvisioningLeavesNothingBehindInTheDataDirectory()
     {
-        // The key must live inside the data directory. It is the only location in
-        // a container that is both writable and exactly as durable as the data:
-        // anywhere else either fails on a read-only root filesystem or lands on
-        // the ephemeral container layer, where it is lost on recreate while the
-        // data survives, leaving every protected record permanently unopenable.
-        // tools/backup-data.sh excludes it so no backup carries its own key.
+        // The write probe proves the directory is usable before the app commits to
+        // it. It must not survive that check -- a stray file in the data directory
+        // would show up in every backup and every operator's listing.
         var configuration = Build(("ConnectionStrings:SqlSimCity", ConnectionString));
 
         var provisioning = ProtectedStorageAutoProvisioning.TryProvision(configuration);
 
         Assert.NotNull(provisioning);
-        var data = Path.GetFullPath(DataDirectory);
-        var key = Path.GetFullPath(provisioning.KeyFilePath);
-        Assert.StartsWith(data + Path.DirectorySeparatorChar, key, StringComparison.Ordinal);
-
-        // Kept in its own subdirectory so the backup tool can exclude it by path
-        // without having to reason about which file in the data directory is a key.
-        Assert.Equal(
-            "sqlsimcity-keys",
-            Path.GetFileName(Path.GetDirectoryName(key)));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(provisioning.DataDirectory));
     }
 
     [Fact]
-    public void TheEphemeralDefaultKeyPathIsNeverUsedAsAGenerationTarget()
-    {
-        // Generating into /run/secrets (tmpfs) would produce a key that vanishes
-        // on restart and leaves an unopenable store behind.
-        var configuration = Build(("ConnectionStrings:SqlSimCity", ConnectionString));
-
-        var provisioning = ProtectedStorageAutoProvisioning.TryProvision(configuration);
-
-        Assert.NotNull(provisioning);
-        Assert.NotEqual("/run/secrets/sqlsimcity-storage-key", provisioning.KeyFilePath);
-    }
-
-    [Fact]
-    public void AnAlreadyMountedKeyIsPreferredOverGeneratingANewOne()
-    {
-        var mounted = Path.Combine(_root, "mounted-key.json");
-        Directory.CreateDirectory(_root);
-        File.WriteAllText(mounted, "{}");
-
-        var configuration = Build(
-            ("ConnectionStrings:SqlSimCity", ConnectionString),
-            ("ProtectedStorage:KeyFilePath", mounted));
-
-        var provisioning = ProtectedStorageAutoProvisioning.TryProvision(configuration);
-
-        Assert.NotNull(provisioning);
-        Assert.False(provisioning.KeyCreated);
-        Assert.Equal(mounted, provisioning.KeyFilePath);
-        Assert.Equal("{}", File.ReadAllText(mounted));
-    }
-
-    [Fact]
-    public void AnOperatorWhoEnabledProtectedStorageKeepsFullControlOfKeyCustody()
-    {
-        var configuration = Build(
-            ("ConnectionStrings:SqlSimCity", ConnectionString),
-            ("ProtectedStorage:Enabled", "true"));
-
-        Assert.Null(ProtectedStorageAutoProvisioning.TryProvision(configuration));
-    }
-
-    [Fact]
-    public void ProvisioningTwiceReusesTheFirstKey()
+    public void ProvisioningIsIdempotent()
     {
         var configuration = Build(("ConnectionStrings:SqlSimCity", ConnectionString));
 
@@ -176,9 +121,18 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
 
         Assert.NotNull(first);
         Assert.NotNull(second);
-        Assert.True(first.KeyCreated);
-        Assert.False(second.KeyCreated);
-        Assert.Equal(first.KeyFilePath, second.KeyFilePath);
+        Assert.Null(second.UnavailableReason);
+        Assert.Equal(first.DataDirectory, second.DataDirectory);
+    }
+
+    [Fact]
+    public void AnOperatorWhoEnabledProtectedStorageIsLeftAlone()
+    {
+        var configuration = Build(
+            ("ConnectionStrings:SqlSimCity", ConnectionString),
+            ("ProtectedStorage:Enabled", "true"));
+
+        Assert.Null(ProtectedStorageAutoProvisioning.TryProvision(configuration));
     }
 
     [Fact]
@@ -190,12 +144,12 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
     }
 
     [Fact]
-    public void AnUnwritableKeyLocationDisablesQueryStoreInsteadOfFailingStartup()
+    public void AnUnwritableDataDirectoryDisablesQueryStoreInsteadOfFailingStartup()
     {
-        // The key now lives inside the data directory, so this stands in for a
-        // data directory that cannot be created at all -- an unwritable mount, or
-        // a path whose parent is a file, as here. Adding a convenience must never
-        // stop a deployment that boots today.
+        // Program.cs awaits EnsureReadyAsync at startup, so a data directory that
+        // cannot be created at all -- an unwritable mount, or a path whose parent is
+        // a file, as here -- would take the process down. Adding a convenience must
+        // never stop a deployment that boots today.
         Directory.CreateDirectory(_root);
         var blocker = Path.Combine(_root, "blocked");
         File.WriteAllText(blocker, "not a directory");
@@ -212,7 +166,6 @@ public sealed class QueryStoreAutoEnableTests : IDisposable
 
         Assert.NotNull(provisioning);
         Assert.NotNull(provisioning!.UnavailableReason);
-        Assert.False(provisioning.KeyCreated);
 
         // The overrides must actually leave the app in a startable state: protected
         // storage stays off, and Query Store history is off with it, because the

@@ -36,25 +36,17 @@ Stop the application before a backup, or stop/quiesce the container so SQLite
 has no writer. `--quiesced` is an explicit operator assertion; the script cannot
 prove another process is not writing.
 
-Pass `--key-file` so the script can guarantee the key never enters the archive.
-An auto-provisioned key lives at `<data-directory>/sqlsimcity-keys/storage-key.json`;
-an operator-supplied one is normally mounted outside `/data`. Either way the
-script excludes it and then verifies it is absent before writing the backup.
-
 ```bash
 tools/backup-data.sh --quiesced \
-  --key-file /run/secrets/sqlsimcity-storage-key \
   /var/lib/sqlsimcity/data /backups/sqlsimcity-data-v1.tar.gz
 ```
 
 The backup is written atomically to a new filename (existing archives are never
-overwritten), contains a versioned manifest and checksummed payload, rejects
-symlinks and unsafe paths, and never includes the configured key file — it is
-excluded even when it lives inside the data directory, and its absence is
-verified before the archive is written. A hard link to the key inside the data
-directory is refused outright, because it cannot be excluded by path. Back up
-the key independently in a secrets manager. A data backup without its matching
-key is unrecoverable; storing both together defeats separation.
+overwritten), contains a versioned manifest and checksummed payload, and rejects
+symlinks and unsafe paths. There is no key to exclude or store separately: a
+backup of the data directory is everything needed to restore. That also makes the
+backup itself sensitive — it holds captured query text and plan XML in the clear,
+so protect it like the data volume.
 
 Restore only while the application is stopped and only into an existing, empty
 directory:
@@ -68,27 +60,32 @@ tools/restore-data.sh \
 The restore validates wrapper paths, manifest version, checksum, payload paths,
 and file types before writing to the still-empty target. Run it as the target
 owner/group or as root; root restores assign the target's existing owner/group
-to the restored tree. After restoring, mount the independently backed-up matching
-key and start the exact image version that created the data.
-Confirm `/readyz`, then exercise Query Store status and findings export. The CI
-operations test performs a deterministic backup/restore round trip and negative
-tests for symlinks, traversal, non-empty targets, key placement/hard links, and
-tampering. Paths that the restore format cannot represent safely are rejected
-at backup time.
+to the restored tree. After restoring, start the exact image version that created
+the data. Confirm `/readyz`, then exercise Query Store status and findings export.
+The CI operations test performs a deterministic backup/restore round trip and
+negative tests for symlinks, traversal, non-empty targets, and tampering. Paths
+that the restore format cannot represent safely are rejected at backup time.
 
-## Key rotation
+## Starting the store over
 
-New records are written in the clear, so rotation no longer changes how anything
-is written. It still matters for a store that holds records written before that
-change, which are AES-256-GCM sealed. Add a new 32-byte key as a new version
-while retaining all old versions and deploy that key ring. Retain every old key
-until no surviving legacy record or backup needs it. Test a restore with the
-rotated ring before retiring anything. Removing a still-needed key permanently
-makes its records unreadable.
+Query Store history is a cache the collector rebuilds from SQL Server, not a
+system of record, so discarding it costs one collection interval. Stop the app
+and delete the database and its sidecars from the data directory:
+
+```bash
+rm -f /var/lib/sqlsimcity/data/protected-storage.db \
+      /var/lib/sqlsimcity/data/protected-storage.db-wal \
+      /var/lib/sqlsimcity/data/protected-storage.db-shm
+```
+
+Delete all three. A `-wal` or `-shm` left beside a deleted database yields a
+store that fails its canary check on the next start. A store written by a version
+that encrypted payloads must be discarded this way — this version has no key and
+cannot open it, and says so at startup rather than serving nothing.
 
 ## Upgrade and rollback
 
-1. Back up `/data` and its key independently and test the restore.
+1. Back up `/data` and test the restore.
 2. Resolve the release image to a digest and record the current digest.
 3. Review release notes and deploy the new digest with the existing read-only,
    capability-drop, and no-new-privileges settings.

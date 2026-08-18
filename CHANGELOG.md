@@ -172,15 +172,14 @@ First MVP release candidate. There is no tagged release yet.
 - The top query-family table in the database city gained a **Show on map** action that reads the
   family's own plan and draws it as a route through the buildings it names, so ranked workload and the
   3D map are the same evidence rather than two views an operator has to reconnect by hand.
-- **Protected storage records are written in the clear.** Sealing captured plan XML and query text
-  worked against the purpose of a tool whose entire job is to show that evidence: it made the store
-  unreadable to the operator who collected it while protecting nothing that filesystem permissions did
-  not already have to protect. `EnvelopeCodec` writes a new plaintext envelope (format version 2) and
-  still opens the AES-256-GCM envelope (format version 1), so existing stores keep working with no
-  migration and no data loss. The key ring is now read-only legacy support; a store created before
-  this change still authenticates it through its sealed canary. `SECURITY.md`, `docs/connected-mode.md`,
-  and `docs/operations.md` were corrected, including the removal of the at-rest-encryption claim and
-  the addition of an explicit statement that the data volume is the trust boundary.
+- **Protected storage records are written in the clear, and there is no longer a key at all.** Sealing
+  captured plan XML and query text worked against the purpose of a tool whose entire job is to show
+  that evidence: it made the store unreadable to the operator who collected it while protecting
+  nothing that filesystem permissions did not already have to protect. `EnvelopeCodec` now writes and
+  reads a plaintext envelope (format version 2) whose only header is that version byte; `Seal`/`Open`
+  became `Wrap`/`Unwrap`. `SECURITY.md`, `docs/connected-mode.md`, `docs/operations.md`, and
+  `docs/architecture.md` were corrected, including the removal of the at-rest-encryption claim and the
+  addition of an explicit statement that the data volume is the trust boundary.
   Edge spool encryption (`SqlSimCity.Edge.Spool.EncryptedSpool`, separate key, outward-only transport
   threat model) and archive redaction are unaffected, as is `SecureShowplanParser`'s XXE and
   entity-expansion hardening, which is XML safety rather than confidentiality.
@@ -193,7 +192,33 @@ First MVP release candidate. There is no tagged release yet.
   matching `runtime_stats_summary` and `wait_stats_summary`, so the atlas
   database-wide totals reconcile with the per-plan drill-down over the same window.
 
+### Removed
+
+- **The protected-storage key ring is gone.** With payloads written in the clear it protected nothing
+  and could only cause harm: it regenerated itself on every startup on the connection-string path, and
+  on the explicit path a missing key file failed startup outright to guard data that was already
+  plaintext. Deleted: `KeyRing`, `KeyRingLoader`, `KeyRingProvisioner`, `KeyRingFileDto`, the
+  `ProtectedStorage:KeyFilePath` setting, the `sqlsimcity-keys` directory, the `sqlsimcity-storage-key`
+  Compose secret, and `backup-data.sh`'s `--key-file` flag with its exclusion, hard-link refusal, and
+  post-archive verification. `KeyRingConfigurationException` became
+  `ProtectedStorageConfigurationException`, which is what it always actually reported. The backup
+  manifest keeps its `keyIncluded: false` field because `restore-data.sh` matches the manifest line for
+  line; it is now a statement about the product rather than about that run.
+  Startup still verifies the data directory is writable before committing to it, using a probe file it
+  deletes, so a deployment with an unusable mount still degrades to "Query Store history off" instead
+  of failing to boot.
+- **Support for reading AES-256-GCM (format version 1) records was removed with it.** A store written
+  by a version that encrypted payloads now fails its canary check at startup with a message naming the
+  fix — stop the app and delete the store directory. Query Store history is a cache the collector
+  rebuilds from SQL Server, not a system of record, so the cost is one collection interval.
+
 ### Fixed
+
+- Three protected-storage log messages and two `Program.cs` comments asserted encryption that had
+  already been removed: that query text is encrypted at rest with the generated key, that losing that
+  key makes every stored record permanently unrecoverable and the store refuses to open, and that
+  query text cannot be persisted without encryption at rest. All were false when written and are gone
+  along with the key.
 
 - `LiveIncidentSampler` no longer throws `ObjectDisposedException` when a stop races disposal. The
   disposed check at the top of `StopAsync` is a check-then-act, so a caller could pass it and then be
@@ -314,9 +339,9 @@ First MVP release candidate. There is no tagged release yet.
 
 - **Superseded within this same unreleased block:** the three protected-storage entries immediately
   below describe key custody as it was when payloads were sealed. Payloads are now written in the
-  clear (see Changed), so the key ring only opens records written by an earlier version, and a backup
-  of a store written by this version needs no key to restore. The at-rest-encryption claims below no
-  longer hold; the data volume's access control is the trust boundary.
+  clear and the key ring has been removed entirely (see Changed and Removed), so none of the key
+  custody, rotation, or backup-exclusion guidance below applies. The data volume's access control is
+  the trust boundary.
 - A connection string now auto-provisions the protected-storage AES-256 key that connected Query
   Store history requires, in a `sqlsimcity-keys` directory inside the data directory. Encryption at
   rest is unchanged and still mandatory; what changes is that the process generates the key instead

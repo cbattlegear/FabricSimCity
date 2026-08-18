@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using SqlSimCity.Storage;
@@ -7,11 +6,11 @@ using SqlSimCity.Storage.Crypto;
 namespace SqlSimCity.Storage.Sqlite;
 
 /// <summary>
-/// Verifies or creates the single-row canary that proves the configured key ring matches this
-/// store. Payloads are written in the clear now, so a fresh store gets a plaintext canary that
-/// identifies the store format rather than authenticating a key. A store created before that
-/// change still carries a sealed canary, and it must open and match the expected plaintext
-/// before any record access is permitted.
+/// Verifies or creates the single-row canary that marks this directory as a SQL SimCity
+/// protected store. Payloads are written in the clear, so the canary authenticates no key:
+/// it proves the file is the store this build understands and not some other SQLite database
+/// that happens to sit at the configured path. It must be present and hold the expected
+/// value before any record access is permitted.
 /// </summary>
 internal static class CanaryVerifier
 {
@@ -21,7 +20,6 @@ internal static class CanaryVerifier
 
     public static async Task EnsureCanaryAsync(
         SqliteConnection connection,
-        KeyRing keyRing,
         TimeProvider timeProvider,
         CancellationToken cancellationToken,
         SqliteTransaction? transaction = null,
@@ -44,10 +42,10 @@ internal static class CanaryVerifier
             if (!createIfMissing)
             {
                 throw new CanaryVerificationException(
-                    "Protected storage canary is missing; an existing store cannot be authenticated.");
+                    "Protected storage canary is missing; an existing store cannot be identified.");
             }
 
-            var envelope = EnvelopeCodec.Seal(keyRing, CanaryRecordKind, CanaryRecordId, ExpectedPlaintext);
+            var envelope = EnvelopeCodec.Wrap(CanaryRecordKind, CanaryRecordId, ExpectedPlaintext);
             await using var insertCommand = connection.CreateCommand();
             insertCommand.Transaction = transaction;
             insertCommand.CommandText =
@@ -61,29 +59,17 @@ internal static class CanaryVerifier
         byte[] plaintext;
         try
         {
-            plaintext = EnvelopeCodec.Open(keyRing, CanaryRecordKind, CanaryRecordId, existingEnvelope);
+            plaintext = EnvelopeCodec.Unwrap(CanaryRecordKind, CanaryRecordId, existingEnvelope);
         }
         catch (EnvelopeIntegrityException ex)
         {
             throw new CanaryVerificationException(
-                "Protected storage canary failed authentication; the configured key does not match this store.", ex);
-        }
-        catch (KeyRingConfigurationException ex)
-        {
-            throw new CanaryVerificationException(
-                "Protected storage canary was sealed with a key version absent from the configured key ring.", ex);
+                "Protected storage canary could not be read; this is not a store this version can open.", ex);
         }
 
-        try
+        if (!plaintext.AsSpan().SequenceEqual(ExpectedPlaintext))
         {
-            if (!plaintext.AsSpan().SequenceEqual(ExpectedPlaintext))
-            {
-                throw new CanaryVerificationException("Protected storage canary held an unexpected value.");
-            }
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
+            throw new CanaryVerificationException("Protected storage canary held an unexpected value.");
         }
     }
 }

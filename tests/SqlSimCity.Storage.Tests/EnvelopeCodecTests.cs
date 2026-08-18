@@ -1,254 +1,140 @@
-using System.Buffers.Binary;
-using System.Security.Cryptography;
 using System.Text;
+using SqlSimCity.Storage;
 using SqlSimCity.Storage.Crypto;
 
 namespace SqlSimCity.Storage.Tests;
 
-using SqlSimCity.Storage;
-
 /// <summary>
-/// The envelope now writes payloads in the clear, because SQL SimCity exists to show captured
-/// plans and workload evidence rather than to hide them. The AES-256-GCM read path is retained so
-/// a store written before that change keeps opening, and these tests cover both halves: new
-/// envelopes are readable, and legacy sealed envelopes still authenticate or fail closed.
+/// The envelope carries a version byte and the payload, nothing else. These tests hold it to
+/// that: the payload must be recoverable byte for byte, must be readable in the file, and a
+/// record written by the encrypting builds must be reported by name rather than mistaken for
+/// payload bytes.
 /// </summary>
-public sealed class EnvelopeCodecTests
+public class EnvelopeCodecTests
 {
-    private static KeyRing SingleKeyRing(uint version = 1) =>
-        new(version, new Dictionary<uint, byte[]> { [version] = KeyRingTestHelpers.NewKeyBytes() });
+    private const string Kind = "query-family";
+    private const string Id = "family/0x1A";
+
+    private static byte[] Payload(string text) => Encoding.UTF8.GetBytes(text);
 
     [Fact]
-    public void SealThenOpenRoundTripsPlaintext()
+    public void WrapThenUnwrapRoundTripsThePayload()
     {
-        using var keyRing = SingleKeyRing();
-        var plaintext = Encoding.UTF8.GetBytes("query-store-sample-payload");
+        var payload = Payload("SELECT TOP (10) * FROM dbo.Orders;");
 
-        var envelope = EnvelopeCodec.Seal(keyRing, "query-store-sample", "record-1", plaintext);
-        var opened = EnvelopeCodec.Open(keyRing, "query-store-sample", "record-1", envelope);
+        var envelope = EnvelopeCodec.Wrap(Kind, Id, payload);
+        var recovered = EnvelopeCodec.Unwrap(Kind, Id, envelope);
 
-        Assert.Equal(plaintext, opened);
+        Assert.Equal(payload, recovered);
     }
 
     [Fact]
-    public void SealWritesThePayloadInTheClear()
+    public void WrapWritesThePayloadInTheClear()
     {
-        using var keyRing = SingleKeyRing();
-        const string marker = "SELECT * FROM dbo.Customer WHERE Email = @p0";
+        var payload = Payload("SELECT dbo.Orders.CustomerId FROM dbo.Orders;");
 
-        var envelope = EnvelopeCodec.Seal(keyRing, "kind", "id", Encoding.UTF8.GetBytes(marker));
+        var envelope = EnvelopeCodec.Wrap(Kind, Id, payload);
 
-        Assert.Contains(marker, Encoding.Latin1.GetString(envelope), StringComparison.Ordinal);
+        // The whole point of the format: an operator can read what was collected.
+        Assert.Contains("FROM dbo.Orders", Encoding.UTF8.GetString(envelope), StringComparison.Ordinal);
+        Assert.Equal(payload, envelope[1..]);
     }
 
     [Fact]
-    public void SealMarksTheEnvelopeWithThePlaintextFormatVersionAndNoKeyMaterial()
+    public void WrapMarksTheEnvelopeWithThePlaintextFormatVersionAndAddsNothingElse()
     {
-        using var keyRing = SingleKeyRing(version: 3);
-        var plaintext = Encoding.UTF8.GetBytes("payload");
+        var payload = Payload("plan xml");
 
-        var envelope = EnvelopeCodec.Seal(keyRing, "kind", "id", plaintext);
+        var envelope = EnvelopeCodec.Wrap(Kind, Id, payload);
 
         Assert.Equal(2, envelope[0]);
-        // No key version, nonce, or tag: the header is exactly the one format byte.
-        Assert.Equal(plaintext.Length + 1, envelope.Length);
-        Assert.Equal(plaintext, envelope[1..]);
+        // One header byte and not a byte more: no nonce, no tag, no key version.
+        Assert.Equal(payload.Length + 1, envelope.Length);
     }
 
     [Fact]
-    public void SealIsDeterministicBecauseNoNonceIsInvolved()
+    public void WrapIsDeterministic()
     {
-        using var keyRing = SingleKeyRing();
-        var plaintext = Encoding.UTF8.GetBytes("same-plaintext");
+        var payload = Payload("same input");
 
         Assert.Equal(
-            EnvelopeCodec.Seal(keyRing, "kind", "id", plaintext),
-            EnvelopeCodec.Seal(keyRing, "kind", "id", plaintext));
+            EnvelopeCodec.Wrap(Kind, Id, payload),
+            EnvelopeCodec.Wrap(Kind, Id, payload));
     }
 
     [Fact]
-    public void OpenRoundTripsAnEmptyPayload()
+    public void UnwrapRoundTripsAnEmptyPayload()
     {
-        using var keyRing = SingleKeyRing();
+        var envelope = EnvelopeCodec.Wrap(Kind, Id, []);
 
-        var envelope = EnvelopeCodec.Seal(keyRing, "kind", "id", ReadOnlySpan<byte>.Empty);
-
-        Assert.Empty(EnvelopeCodec.Open(keyRing, "kind", "id", envelope));
+        Assert.Empty(EnvelopeCodec.Unwrap(Kind, Id, envelope));
     }
 
     [Fact]
-    public void OpenReadsLegacySealedEnvelopesSoAnExistingStoreKeepsWorking()
+    public void RecordKindAndIdDoNotChangeTheBytesBecauseNothingIsAuthenticated()
     {
-        using var keyRing = SingleKeyRing();
-        var plaintext = Encoding.UTF8.GetBytes("payload-sealed-before-the-change");
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind", "id", plaintext);
+        var payload = Payload("unbound payload");
 
-        Assert.Equal(plaintext, EnvelopeCodec.Open(keyRing, "kind", "id", envelope));
+        var written = EnvelopeCodec.Wrap(Kind, Id, payload);
+
+        // Stated so the removal of authenticated associated data is deliberate and visible:
+        // a record read under a different kind or id still returns its payload.
+        Assert.Equal(payload, EnvelopeCodec.Unwrap("other-kind", "other-id", written));
     }
 
     [Fact]
-    public void OpenRejectsTamperedLegacyNonce()
+    public void UnwrapReportsAnEncryptedRecordFromAnEarlierBuildByName()
     {
-        using var keyRing = SingleKeyRing();
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind", "id", "payload"u8);
-        envelope[5] ^= 0xFF; // first nonce byte
+        // A version-1 envelope as the encrypting builds wrote it: version, key version, nonce,
+        // tag, ciphertext. Nothing here can open it, so it must say so rather than hand back
+        // the header and ciphertext as if they were a payload.
+        var legacy = new byte[1 + 4 + 12 + 16 + 8];
+        legacy[0] = 1;
 
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind", "id", envelope));
+        var error = Assert.Throws<EnvelopeIntegrityException>(
+            () => EnvelopeCodec.Unwrap(Kind, Id, legacy));
+
+        Assert.Contains("encrypted protected storage", error.Message, StringComparison.Ordinal);
+        Assert.Contains("Delete the store directory", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void OpenRejectsTamperedLegacyTag()
+    public void UnwrapRejectsUnsupportedFormatVersion()
     {
-        using var keyRing = SingleKeyRing();
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind", "id", "payload"u8);
-        envelope[17] ^= 0xFF; // first tag byte
+        var envelope = new byte[] { 9, 1, 2, 3 };
 
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind", "id", envelope));
+        var error = Assert.Throws<EnvelopeIntegrityException>(
+            () => EnvelopeCodec.Unwrap(Kind, Id, envelope));
+
+        Assert.Contains("format version 9", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void OpenRejectsTamperedLegacyCiphertext()
+    public void UnwrapRejectsAnEmptyEnvelope()
     {
-        using var keyRing = SingleKeyRing();
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind", "id", "payload-bytes"u8);
-        envelope[^1] ^= 0xFF; // last ciphertext byte
+        var error = Assert.Throws<EnvelopeIntegrityException>(
+            () => EnvelopeCodec.Unwrap(Kind, Id, []));
 
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind", "id", envelope));
+        Assert.Contains("shorter than", error.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void OpenZerosUnauthenticatedLegacyPlaintextBuffer()
+    [Theory]
+    [InlineData("", "id")]
+    [InlineData("kind", "")]
+    public void WrapRejectsEmptyRecordIdentity(string recordKind, string recordId)
     {
-        using var keyRing = SingleKeyRing();
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind", "id", "payload"u8);
-        envelope[^1] ^= 0xFF;
-        byte[]? failedPlaintext = null;
-
-        Assert.Throws<EnvelopeIntegrityException>(
-            () => EnvelopeCodec.Open(keyRing, "kind", "id", envelope, bytes => failedPlaintext = bytes.ToArray()));
-
-        Assert.NotNull(failedPlaintext);
-        Assert.All(failedPlaintext!, value => Assert.Equal(0, value));
+        Assert.Throws<ArgumentException>(
+            () => EnvelopeCodec.Wrap(recordKind, recordId, Payload("x")));
     }
 
-    [Fact]
-    public void OpenRejectsMismatchedRecordKindOnLegacyEnvelopes()
+    [Theory]
+    [InlineData("", "id")]
+    [InlineData("kind", "")]
+    public void UnwrapRejectsEmptyRecordIdentity(string recordKind, string recordId)
     {
-        using var keyRing = SingleKeyRing();
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind-a", "id", "payload"u8);
+        var envelope = EnvelopeCodec.Wrap(Kind, Id, Payload("x"));
 
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind-b", "id", envelope));
-    }
-
-    [Fact]
-    public void OpenRejectsLegacyCrossRecordSwap()
-    {
-        using var keyRing = SingleKeyRing();
-        var envelopeForRecordA = LegacyEnvelope.Seal(keyRing, 1, "kind", "record-a", "payload"u8);
-
-        // Simulate a bug copying record A's ciphertext onto record B's row.
-        Assert.Throws<EnvelopeIntegrityException>(
-            () => EnvelopeCodec.Open(keyRing, "kind", "record-b", envelopeForRecordA));
-    }
-
-    [Fact]
-    public void OpenRejectsUnsupportedFormatVersion()
-    {
-        using var keyRing = SingleKeyRing();
-        var envelope = EnvelopeCodec.Seal(keyRing, "kind", "id", "payload"u8);
-        envelope[0] = 99;
-
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind", "id", envelope));
-    }
-
-    [Fact]
-    public void OpenRejectsAnEmptyEnvelope()
-    {
-        using var keyRing = SingleKeyRing();
-
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind", "id", []));
-    }
-
-    [Fact]
-    public void OpenRejectsATruncatedLegacyEnvelope()
-    {
-        using var keyRing = SingleKeyRing();
-        var truncated = new byte[10];
-        truncated[0] = 1;
-
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRing, "kind", "id", truncated));
-    }
-
-    [Fact]
-    public void OpenRejectsMissingKeyVersionOnLegacyEnvelopes()
-    {
-        using var keyRing = SingleKeyRing(version: 1);
-        var envelope = LegacyEnvelope.Seal(keyRing, 1, "kind", "id", "payload"u8);
-        using var otherRing = new KeyRing(2, new Dictionary<uint, byte[]> { [2] = KeyRingTestHelpers.NewKeyBytes() });
-
-        Assert.Throws<KeyRingConfigurationException>(() => EnvelopeCodec.Open(otherRing, "kind", "id", envelope));
-    }
-
-    [Fact]
-    public void OpenLegacyEnvelopeWithWrongKeyOfSameVersionFailsAuthentication()
-    {
-        using var keyRingA = SingleKeyRing(version: 1);
-        using var keyRingB = SingleKeyRing(version: 1);
-        var envelope = LegacyEnvelope.Seal(keyRingA, 1, "kind", "id", "payload"u8);
-
-        Assert.Throws<EnvelopeIntegrityException>(() => EnvelopeCodec.Open(keyRingB, "kind", "id", envelope));
-    }
-}
-
-/// <summary>
-/// Builds the retired AES-256-GCM envelope so the compatibility read path stays covered.
-/// Production code no longer writes this format, which is why the writer lives in the test project.
-/// </summary>
-internal static class LegacyEnvelope
-{
-    public static byte[] Seal(
-        KeyRing keyRing,
-        uint keyVersion,
-        string recordKind,
-        string recordId,
-        ReadOnlySpan<byte> plaintext)
-    {
-        var key = keyRing.GetKey(keyVersion);
-        Span<byte> nonce = stackalloc byte[12];
-        RandomNumberGenerator.Fill(nonce);
-        Span<byte> tag = stackalloc byte[16];
-        var ciphertext = new byte[plaintext.Length];
-        var aad = AssociatedData(recordKind, recordId, keyVersion);
-
-        using (var aesGcm = new AesGcm(key, 16))
-            aesGcm.Encrypt(nonce, plaintext, ciphertext, tag, aad);
-
-        var envelope = new byte[33 + ciphertext.Length];
-        var span = envelope.AsSpan();
-        span[0] = 1;
-        BinaryPrimitives.WriteUInt32BigEndian(span.Slice(1, 4), keyVersion);
-        nonce.CopyTo(span.Slice(5, 12));
-        tag.CopyTo(span.Slice(17, 16));
-        ciphertext.CopyTo(span[33..]);
-        return envelope;
-    }
-
-    private static byte[] AssociatedData(string recordKind, string recordId, uint keyVersion)
-    {
-        var kindBytes = Encoding.UTF8.GetBytes(recordKind);
-        var idBytes = Encoding.UTF8.GetBytes(recordId);
-        var aad = new byte[4 + kindBytes.Length + 4 + idBytes.Length + 4];
-        var span = aad.AsSpan();
-
-        BinaryPrimitives.WriteInt32BigEndian(span, kindBytes.Length);
-        kindBytes.CopyTo(span[4..]);
-        var offset = 4 + kindBytes.Length;
-
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(offset, 4), idBytes.Length);
-        idBytes.CopyTo(span[(offset + 4)..]);
-        offset += 4 + idBytes.Length;
-
-        BinaryPrimitives.WriteUInt32BigEndian(span.Slice(offset, 4), keyVersion);
-        return aad;
+        Assert.Throws<ArgumentException>(
+            () => EnvelopeCodec.Unwrap(recordKind, recordId, envelope));
     }
 }
