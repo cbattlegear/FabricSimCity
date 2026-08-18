@@ -3,7 +3,11 @@
 -- Connection scope: database.
 -- Minimum platform: SQL Server 2022 (16.x).
 -- Permission: VIEW DATABASE PERFORMANCE STATE.
--- Parameters: @StartTime inclusive and @EndTime exclusive, both datetimeoffset(7).
+-- Parameters: @StartTime and @EndTime, both datetimeoffset(7). The window selects every
+--   runtime-stats interval that OVERLAPS [@StartTime, @EndTime) -- rsi.end_time > @StartTime AND
+--   rsi.start_time < @EndTime -- exactly like runtime_stats_summary and wait_stats_summary, so the
+--   atlas database-wide totals reconcile with the per-plan drill-down over the same window instead
+--   of silently dropping the interval that straddles the lower bound.
 -- Result contract: at most one row per execution_type. Active-interval duplicate rows are first
 -- combined per plan/interval/type/replica, then replica groups and the bounded window are aggregated.
 -- Durations and CPU are microseconds; logical reads are 8-KiB pages. No plan XML.
@@ -32,7 +36,7 @@ WITH per_plan_interval AS
     FROM sys.query_store_runtime_stats AS rs
     JOIN sys.query_store_runtime_stats_interval AS rsi
         ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
-    WHERE rsi.start_time >= @StartTime
+    WHERE rsi.end_time > @StartTime
       AND rsi.start_time < @EndTime
     GROUP BY
         rs.plan_id,

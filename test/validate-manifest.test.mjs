@@ -1126,6 +1126,39 @@ describe('regression: Query Store wait-stats CTEs are bounded by @StartTime/@End
   }
 });
 
+describe('regression: Query Store window summaries use overlap bounds, not start-only bounds', () => {
+  // runtime_stats_summary, wait_stats_summary, and database_workload_summary all aggregate the same
+  // sys.query_store_runtime_stats over a window. They must select every interval that OVERLAPS the
+  // window (rsi.end_time > @StartTime AND rsi.start_time < @EndTime) so the atlas database-wide
+  // workload totals reconcile with the per-plan drill-down. A start-only lower bound
+  // (rsi.start_time >= @StartTime) silently drops the interval straddling @StartTime and undercounts.
+  for (const id of [
+    'querystore.runtime_stats_summary_2016',
+    'querystore.runtime_stats_summary_2022',
+    'querystore.database_workload_summary_2016',
+    'querystore.database_workload_summary_2022',
+  ]) {
+    test(`${id}: bounds the interval join with end_time > @StartTime and start_time < @EndTime`, () => {
+      const stripped = stripSqlComments(readProbeSource(probeById(id)));
+      assert.match(
+        stripped,
+        /rsi\.end_time\s*>\s*@StartTime/i,
+        `${id}: lower bound must be rsi.end_time > @StartTime (overlap), not a start-only bound`,
+      );
+      assert.match(
+        stripped,
+        /rsi\.start_time\s*<\s*@EndTime/i,
+        `${id}: upper bound must be rsi.start_time < @EndTime`,
+      );
+      assert.doesNotMatch(
+        stripped,
+        /rsi\.start_time\s*>=?\s*@StartTime/i,
+        `${id}: must not use a start_time lower bound; that drops the interval straddling @StartTime`,
+      );
+    });
+  }
+});
+
 describe('regression: read-only guard rejects SELECT ... INTO across the whole probe catalog', () => {
   test('no probe file in sql/probes/ contains a SELECT ... INTO shape', () => {
     for (const probe of manifest.probes) {
