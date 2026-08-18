@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { directActivityWidth } from './databaseCity'
+import { directActivityWidth, shouldRenderRoute } from './databaseCity'
 import type { DatabaseCityObject, DatabaseCityRoute } from './databaseCityContracts'
 
 export type DatabaseCitySceneController = {
@@ -120,6 +120,7 @@ export function createDatabaseCityScene(
       object.objectId,
       new THREE.Vector3(object.layout.x, 1.2, object.layout.z),
     ]))
+    const visibleObjectIds = new Set(positions.keys())
 
     for (const object of objects) {
       const known = object.reservedPages8KiB !== null && object.usedPages8KiB !== null
@@ -160,6 +161,7 @@ export function createDatabaseCityScene(
       }
     }
     routes.forEach((route, routeOrdinal) => {
+      if (!shouldRenderRoute(route, visibleObjectIds)) return
       const from = positions.get(route.fromObjectId)
       if (!from) return
       const to = positions.get(route.toId) ?? new THREE.Vector3(

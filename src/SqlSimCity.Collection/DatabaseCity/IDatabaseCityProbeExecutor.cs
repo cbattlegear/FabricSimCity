@@ -9,11 +9,11 @@ public sealed record DatabaseCityInventoryRow(
     string SchemaName,
     string ObjectName,
     DatabaseObjectKind Kind,
-    string ReservedPages8KiB,
-    string UsedPages8KiB,
-    int IndexId,
+    string? ReservedPages8KiB,
+    string? UsedPages8KiB,
+    int? IndexId,
     string? IndexName,
-    DatabaseIndexKind IndexKind);
+    DatabaseIndexKind? IndexKind);
 
 public sealed record DatabaseCityIndexUsageRow(
     int ObjectId,

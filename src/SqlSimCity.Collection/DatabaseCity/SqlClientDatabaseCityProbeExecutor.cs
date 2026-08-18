@@ -50,13 +50,17 @@ public sealed class SqlClientDatabaseCityProbeExecutor(
                         Convert.ToString(reader["object_type"], CultureInfo.InvariantCulture) == "INDEXED_VIEW"
                             ? DatabaseObjectKind.IndexedView
                             : DatabaseObjectKind.Table,
-                        Unsigned(reader["reserved_pages"]),
-                        Unsigned(reader["used_pages"]),
-                        Convert.ToInt32(reader["index_id"], CultureInfo.InvariantCulture),
+                        NullableUnsigned(reader["reserved_pages"]),
+                        NullableUnsigned(reader["used_pages"]),
+                        reader["index_id"] is DBNull
+                            ? null
+                            : Convert.ToInt32(reader["index_id"], CultureInfo.InvariantCulture),
                         reader["index_name"] is DBNull
                             ? null
                             : Convert.ToString(reader["index_name"], CultureInfo.InvariantCulture),
-                        IndexKind(Convert.ToString(reader["index_type_desc"], CultureInfo.InvariantCulture))));
+                        reader["index_type_desc"] is DBNull
+                            ? null
+                            : IndexKind(Convert.ToString(reader["index_type_desc"], CultureInfo.InvariantCulture))));
                 }
                 return (IReadOnlyList<DatabaseCityInventoryRow>)rows;
             },
@@ -169,6 +173,9 @@ public sealed class SqlClientDatabaseCityProbeExecutor(
 
     private static string Unsigned(object value) =>
         UnsignedInteger(value).ToString(CultureInfo.InvariantCulture);
+
+    private static string? NullableUnsigned(object value) =>
+        value is DBNull ? null : Unsigned(value);
 
     private static BigInteger UnsignedInteger(object value)
     {

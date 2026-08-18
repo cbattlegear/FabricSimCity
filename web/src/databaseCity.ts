@@ -1,4 +1,4 @@
-import type { DatabaseCityObject } from './databaseCityContracts'
+import type { DatabaseCityObject, DatabaseCityRoute } from './databaseCityContracts'
 import type { EvidenceSource } from './contracts'
 
 export function accessibleObjectLabel(object: DatabaseCityObject): string {
@@ -26,6 +26,14 @@ export function shouldAnimateCurrentMarkers(
 export function directActivityWidth(totalOperations: string | null): number | null {
   if (totalOperations === null) return null
   return 3 + Math.log2(1 + Math.max(0, Number(BigInt(totalOperations)))) * 0.32
+}
+
+export function shouldRenderRoute(
+  route: DatabaseCityRoute,
+  visibleObjectIds: ReadonlySet<string>,
+): boolean {
+  return visibleObjectIds.has(route.fromObjectId) &&
+    (visibleObjectIds.has(route.toId) || route.kind === 'CrossDatabaseReference')
 }
 
 export function formatKiB(bytes: string): string {

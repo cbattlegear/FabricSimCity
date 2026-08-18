@@ -40,6 +40,21 @@ public sealed class ConnectedDatabaseCitySourceTests
     }
 
     [Fact]
+    public async Task IndexlessParentRemainsUnknownAndDoesNotEndPaging()
+    {
+        var source = new ConnectedDatabaseCitySource(new FakeAtlasSource(), new IndexlessCityProbeExecutor());
+
+        var page = await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 1, null, CancellationToken.None);
+
+        var item = Assert.Single(page!.Objects);
+        Assert.Equal("target/database/sales/object/10", item.ObjectId);
+        Assert.Equal(MeasurementStatus.Unknown, item.SizeStatus);
+        Assert.Empty(item.Indexes);
+        Assert.NotNull(page.NextPageToken);
+    }
+
+    [Fact]
     public async Task PropagatesCallerCancellationBeforeReading()
     {
         var source = new ConnectedDatabaseCitySource(new FakeAtlasSource(), new FakeCityProbeExecutor());
@@ -74,6 +89,28 @@ public sealed class ConnectedDatabaseCitySourceTests
                 "Direct cumulative index usage counters.",
                 new DateTimeOffset(2026, 8, 17, 17, 0, 0, TimeSpan.Zero)));
         }
+    }
+
+    private sealed class IndexlessCityProbeExecutor : IDatabaseCityProbeExecutor
+    {
+        public Task<DatabaseCityProbePage> CollectPageAsync(
+            string databaseName,
+            int afterObjectId,
+            int topN,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new DatabaseCityProbePage(
+                [
+                    new DatabaseCityInventoryRow(
+                        10, 1001, 2, "dbo", "ExternalCustomer", DatabaseObjectKind.Table,
+                        null, null, null, null, null),
+                    new DatabaseCityInventoryRow(
+                        20, 1001, 2, "dbo", "OrderHeader", DatabaseObjectKind.Table,
+                        "20", "10", 1, "PK_OrderHeader", DatabaseIndexKind.Clustered),
+                ],
+                [],
+                DataStatus.Available,
+                "Direct cumulative index usage counters.",
+                new DateTimeOffset(2026, 8, 17, 17, 0, 0, TimeSpan.Zero)));
     }
 
     private sealed class FakeAtlasSource : IAtlasSnapshotSource

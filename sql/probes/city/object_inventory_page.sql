@@ -6,10 +6,12 @@
 -- Azure SQL Database: supported and current-database scoped.
 -- Permission: ordinary catalog visibility plus VIEW DATABASE STATE (SQL Server 2016-2019) or
 --   VIEW DATABASE PERFORMANCE STATE (SQL Server 2022+) for sys.dm_db_partition_stats.
--- Result contract: zero or more rows, one per selected object/index. The object keyset is bounded
+-- Result contract: one or more rows per selected object, including an indexless object row. The
+--   object keyset is bounded
 --   by TOP (@TopN) and object_id > @AfterObjectId before index expansion. reserved_pages and
 --   used_pages are exact bigint totals over all partitions and remain object totals on each
---   attached-index row. Tables with a heap retain index_id 0; only indexed views are included.
+--   attached-index row. Missing partition counters remain NULL rather than measured zero. Tables
+--   with a heap retain index_id 0; only indexed views are included.
 -- Relative cost: low; keyset bounded by @TopN.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
@@ -61,15 +63,15 @@ SELECT
     schemas.name AS schema_name,
     selected.object_name,
     CASE selected.type WHEN 'V' THEN 'INDEXED_VIEW' ELSE 'TABLE' END AS object_type,
-    COALESCE(space.reserved_pages, CONVERT(bigint, 0)) AS reserved_pages,
-    COALESCE(space.used_pages, CONVERT(bigint, 0)) AS used_pages,
+    space.reserved_pages,
+    space.used_pages,
     indexes.index_id,
     indexes.name AS index_name,
     indexes.type_desc AS index_type_desc
 FROM selected_objects AS selected
 JOIN sys.schemas AS schemas
   ON schemas.schema_id = selected.schema_id
-JOIN sys.indexes AS indexes
+LEFT JOIN sys.indexes AS indexes
   ON indexes.object_id = selected.object_id
 LEFT JOIN object_space AS space
   ON space.object_id = selected.object_id

@@ -109,16 +109,21 @@ public sealed class ConnectedDatabaseCitySource(
             var first = group.First();
             var objectId = ObjectId(databaseId, first.ObjectId);
             var indexes = group
+                .Where(row => row.IndexId is not null)
                 .OrderBy(row => row.IndexId)
                 .Select(row =>
                 {
+                    var indexId = row.IndexId ??
+                        throw new InvalidOperationException("An attached index row must have an index ID.");
+                    var indexKind = row.IndexKind ??
+                        throw new InvalidOperationException("An attached index row must have an index kind.");
                     var operations = probe.UsageStatus == DataStatus.Available
-                        ? usageByIndex.GetValueOrDefault((row.ObjectId, row.IndexId), "0")
+                        ? usageByIndex.GetValueOrDefault((row.ObjectId, indexId), "0")
                         : null;
                     return new DatabaseCityIndexV1(
-                        $"{objectId}/index/{row.IndexId.ToString(CultureInfo.InvariantCulture)}",
+                        $"{objectId}/index/{indexId.ToString(CultureInfo.InvariantCulture)}",
                         row.IndexName ?? "HEAP",
-                        row.IndexKind,
+                        indexKind,
                         new DatabaseCityDirectActivityV1(
                             operations,
                             null,
@@ -141,6 +146,9 @@ public sealed class ConnectedDatabaseCitySource(
                 indexes,
                 [])
             {
+                SizeReason = first.ReservedPages8KiB is null || first.UsedPages8KiB is null
+                    ? "Current catalog partition page counts are unavailable; geometry is nonquantitative."
+                    : null,
                 LayoutOrdinal = cursor.LayoutOffset + pageOrdinal,
                 DirectActivity = new DatabaseCityDirectActivityV1(
                     totalOperations,

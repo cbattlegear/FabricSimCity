@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { fetchPlan, fetchPlanComparison, fetchQueryFamilies, fetchQueryFamily, fetchQueryStoreStatus } from './api'
 import type { NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilySummary, QueryStoreCollectorStatus } from './contracts'
+import { takeInitialFamilyId } from './queryStoreSelection'
 
 const metrics = ['execution', 'cpu', 'duration', 'reads', 'waits'] as const
 
@@ -18,6 +19,7 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
   const [error, setError] = useState<string | null>(null)
   const requests = useRef(new Set<AbortController>())
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const pendingInitialFamilyId = useRef(initialFamilyId)
 
   function tracked<T>(request: (signal: AbortSignal) => Promise<T>, accept: (value: T) => void) {
     const controller = new AbortController()
@@ -48,7 +50,7 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
         setFamilies(page.items)
         setNextPageToken(page.nextPageToken)
         setPageEvidence(page.evidence)
-        const familyId = initialFamilyId ?? page.items[0]?.familyId
+        const familyId = takeInitialFamilyId(pendingInitialFamilyId, page.items[0]?.familyId)
         if (familyId) return fetchQueryFamily(familyId, controller.signal)
         return null
       })
@@ -59,11 +61,11 @@ export function QueryStoreView({ initialFamilyId = null }: { initialFamilyId?: s
       .then(setStatus)
       .catch(reason => { if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason)) })
     return () => controller.abort()
-  }, [initialFamilyId, metric])
+  }, [metric])
 
   useEffect(() => {
     if (initialFamilyId) headingRef.current?.focus()
-  }, [initialFamilyId])
+  }, [])
 
   useEffect(() => {
     if (!detail?.plans[0]) { setPlan(null); return }

@@ -1,6 +1,8 @@
+/// <reference types="node" />
 import { describe, expect, it } from 'vitest'
-import { accessibleObjectLabel, directActivityWidth, shouldAnimateCurrentMarkers } from './databaseCity'
-import type { DatabaseCityObject } from './databaseCityContracts'
+import { readFileSync } from 'node:fs'
+import { accessibleObjectLabel, directActivityWidth, shouldAnimateCurrentMarkers, shouldRenderRoute } from './databaseCity'
+import type { DatabaseCityObject, DatabaseCityRoute } from './databaseCityContracts'
 
 const object: DatabaseCityObject = {
   objectId: 'object:customer',
@@ -81,5 +83,26 @@ describe('database city accessibility and motion', () => {
     expect(directActivityWidth(null)).toBeNull()
     expect(directActivityWidth('0')).toBe(3)
     expect(directActivityWidth('9')).toBeGreaterThan(3)
+  })
+
+  it('does not invent endpoints for filtered or unpaged local objects', () => {
+    const route = {
+      kind: 'ObjectReference',
+      fromObjectId: 'object:customer',
+      toId: 'object:orders',
+    } as DatabaseCityRoute
+    const visibleIds = new Set(['object:customer'])
+
+    expect(shouldRenderRoute(route, visibleIds)).toBe(false)
+    expect(shouldRenderRoute({ ...route, kind: 'CrossDatabaseReference' }, visibleIds)).toBe(true)
+  })
+
+  it('keeps the evidence qualification wrapped and visible on mobile', () => {
+    const css = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
+    const mobile = css.slice(css.indexOf('@media (max-width: 620px)'))
+
+    expect(mobile).toMatch(/\.database-city\s*\{\s*width:\s*calc\(100vw - 24px\)/)
+    expect(mobile).toMatch(/\.city-disclosure strong\s*\{[^}]*display:\s*block/)
+    expect(mobile).not.toMatch(/\.city-disclosure[^}]*display:\s*none/)
   })
 })
