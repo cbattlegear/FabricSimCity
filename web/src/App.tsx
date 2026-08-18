@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchAtlas } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
-import { AtlasViewport } from './AtlasViewport'
-import LiveIncidents from './LiveIncidentsPanel'
-import { QueryStoreView } from './QueryStoreView'
-import FindingsPanel from './FindingsPanel'
-import { DatabaseCityView } from './DatabaseCityView'
 import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
+
+const AtlasViewport = lazy(() => import('./AtlasViewport').then(m => ({ default: m.AtlasViewport })))
+const DatabaseCityView = lazy(() => import('./DatabaseCityView').then(m => ({ default: m.DatabaseCityView })))
+const QueryStoreView = lazy(() => import('./QueryStoreView').then(m => ({ default: m.QueryStoreView })))
+const LiveIncidents = lazy(() => import('./LiveIncidentsPanel'))
+const FindingsPanel = lazy(() => import('./FindingsPanel'))
 
 type Tab = 'atlas' | 'queries' | 'live' | 'findings'
 
@@ -134,25 +135,27 @@ export default function App() {
       </div>
 
       <div id="panel-findings" role="tabpanel" aria-labelledby="tab-findings" hidden={tab !== 'findings'}>
-        {tab === 'findings' && <FindingsPanel />}
+        {tab === 'findings' && <Suspense fallback={<PanelFallback label="Loading findings…" />}><FindingsPanel /></Suspense>}
       </div>
 
       <div id="panel-queries" role="tabpanel" aria-labelledby="tab-queries" hidden={tab !== 'queries'}>
-        {tab === 'queries' && <QueryStoreView initialFamilyId={queryFamilyId} />}
+        {tab === 'queries' && <Suspense fallback={<PanelFallback label="Loading Query Store history…" />}><QueryStoreView initialFamilyId={queryFamilyId} /></Suspense>}
       </div>
 
       <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>
-        {tab === 'live' && <LiveIncidents />}
+        {tab === 'live' && <Suspense fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents /></Suspense>}
       </div>
 
       <div id="panel-atlas" role="tabpanel" aria-labelledby="tab-atlas" hidden={tab !== 'atlas'}>
       {cityDatabase ? (
-        <DatabaseCityView
-          databaseId={cityDatabase.databaseId}
-          databaseName={cityDatabase.name}
-          onBack={leaveDatabase}
-          onOpenQuery={openQuery}
-        />
+        <Suspense fallback={<PanelFallback label="Loading database city…" />}>
+          <DatabaseCityView
+            databaseId={cityDatabase.databaseId}
+            databaseName={cityDatabase.name}
+            onBack={leaveDatabase}
+            onOpenQuery={openQuery}
+          />
+        </Suspense>
       ) : error ? (
         <section className="error" role="alert">
           <h2>Atlas unavailable</h2>
@@ -190,12 +193,14 @@ export default function App() {
               </div>
             </div>
             <div className="viewport-wrap">
-              <AtlasViewport
-                snapshot={snapshot}
-                selectedId={selectedId}
-                onHover={hoverDatabase}
-                onSelect={selectDatabase}
-              />
+              <Suspense fallback={<div className="atlas-viewport"><div className="viewport-fallback" role="status"><strong>Loading 3D atlas…</strong><span>The database evidence table below is available now.</span></div></div>}>
+                <AtlasViewport
+                  snapshot={snapshot}
+                  selectedId={selectedId}
+                  onHover={hoverDatabase}
+                  onSelect={selectDatabase}
+                />
+              </Suspense>
               <p className="hover-readout" aria-live="polite">
                 {hovered ? `${hovered.name} — select to inspect exact evidence` : 'Move across a block or use the table below'}
               </p>
@@ -324,4 +329,12 @@ function DetailPanel({ database, onEnterDatabase }: {
 
 function nameFor(snapshot: AtlasSnapshot, id: string): string {
   return snapshot.databases.find(database => database.databaseId === id)?.name ?? id
+}
+
+function PanelFallback({ label }: { label: string }) {
+  return (
+    <section className="loading" aria-live="polite">
+      <span className="loading-mark" aria-hidden="true" /> {label}
+    </section>
+  )
 }
