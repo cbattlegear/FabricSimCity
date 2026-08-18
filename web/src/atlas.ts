@@ -55,6 +55,7 @@ export function evidenceText(evidence: Evidence): string {
     LiveDmvCumulative: 'Cumulative file I/O DMV sample',
     CatalogSnapshot: 'Catalog snapshot',
     NotProbed: 'Not probed',
+    ImportedArchive: 'ImportedArchive',
   }
   const observed = evidence.observedAt ? ` Observed ${new Date(evidence.observedAt).toLocaleString()}.` : ''
   return `${source[evidence.source]} — ${splitPascal(evidence.status)}.${observed} ${evidence.reason}`

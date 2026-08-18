@@ -16,7 +16,7 @@ namespace SqlSimCity.Api;
 /// same snapshot is available synchronously via <see cref="GetCurrentResponse"/>, which
 /// <c>/api/v1/live</c> and <see cref="CurrentSnapshotHub.GetCurrentLiveSnapshot"/> both read.
 /// </summary>
-public sealed class LiveIncidentSamplerService : IHostedService, IAsyncDisposable
+public sealed class LiveIncidentSamplerService : IHostedService, IAsyncDisposable, ILiveIncidentResponseSource
 {
     private const string LiveIncidentUpdatedMethod = "liveIncidentUpdated";
 

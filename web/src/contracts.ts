@@ -1,5 +1,5 @@
 export type MeasurementStatus = 'Known' | 'Unknown'
-export type EvidenceSource = 'Fixture' | 'LiveDmvSample' | 'QueryStoreAggregate' | 'InferredTopology' | 'LiveDmvCumulative' | 'CatalogSnapshot' | 'NotProbed'
+export type EvidenceSource = 'Fixture' | 'LiveDmvSample' | 'QueryStoreAggregate' | 'InferredTopology' | 'LiveDmvCumulative' | 'CatalogSnapshot' | 'NotProbed' | 'ImportedArchive'
 export type DataStatus = 'Available' | 'Stale' | 'Disconnected' | 'PermissionDenied' | 'Disabled' | 'Unsupported' | 'Unknown'
 export type QueryStoreCapability = 'Available' | 'Disabled' | 'PermissionDenied' | 'Unsupported' | 'Unknown'
 export type QueryStoreHealth = 'Healthy' | 'ReadOnly' | 'ReadableSecondary' | 'Error' | 'Stale' | 'Unavailable' | 'Unknown'
@@ -89,7 +89,7 @@ export interface AtlasSnapshot {
   databases: DatabaseAtlasItem[]
   edges: AtlasEdge[]
   collection?: {
-    mode: 'Fixture' | 'Connected'
+    mode: 'Fixture' | 'Connected' | 'Archive'
     state: 'Ready' | 'Collecting' | 'Paused' | 'BackingOff' | 'Degraded' | 'Disconnected'
     sequence: number
     collectedAt: string | null
@@ -109,7 +109,7 @@ export type QueryTextAvailability = 'Available' | 'Restricted' | 'Encrypted' | '
 export type QueryStoreExecutionType = 'Regular' | 'Aborted' | 'Exception'
 
 export interface QueryStoreEvidence {
-  source: 'Fixture' | 'QueryStore'
+  source: 'Fixture' | 'QueryStore' | 'ImportedArchive'
   status: DataStatus
   observedAt: string | null
   freshUntil: string | null
@@ -204,6 +204,31 @@ export interface PlanComparison {
   changes: Array<{ path: string; changeKind: string; before: string | null; after: string | null }>
   source: string
   caveat: string
+}
+
+export interface ArchiveInfo {
+  source: 'ImportedArchive'
+  schemaVersion: string
+  producerVersion: string
+  createdAt: string
+  target: { opaqueIdentity: string; displayAlias: string }
+  includedSections: string[]
+  redaction: {
+    policyVersion: string
+    protectedIdentifiersIncluded: boolean
+    rawSqlIncluded: boolean
+    rawShowplanXmlIncluded: boolean
+    excludedFields: string[]
+  }
+  features: string[]
+  capabilities: string[]
+  archiveBytes: number
+  entryCount: number
+  archivedFindings?: {
+    mode: string
+    engineVersion: string
+    ruleVersions: Record<string, string>
+  } | null
 }
 
 export interface QueryStoreCollectorStatus {

@@ -1,5 +1,5 @@
 import * as signalR from '@microsoft/signalr'
-import type { AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
+import type { ArchiveInfo, AtlasSnapshot, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import type { DatabaseCityPage, DatabaseCitySummarySnapshot } from './databaseCityContracts'
 import { assertAtlasSnapshot } from './atlas'
@@ -15,6 +15,17 @@ export async function fetchAtlas(signal?: AbortSignal): Promise<AtlasSnapshot> {
   })
   if (!response.ok) throw new Error(`Atlas request failed with status ${response.status}`)
   return assertAtlasSnapshot(await response.json())
+}
+
+export async function fetchArchiveInfo(signal?: AbortSignal): Promise<ArchiveInfo | null> {
+  const response = await fetch('/api/v1/archive', {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    signal,
+  })
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`Archive info request failed with status ${response.status}`)
+  return response.json() as Promise<ArchiveInfo>
 }
 
 export async function fetchLiveIncidents(signal?: AbortSignal): Promise<LiveIncidentResponse> {

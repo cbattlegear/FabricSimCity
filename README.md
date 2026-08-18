@@ -33,6 +33,8 @@ src/SqlSimCity.Storage    optional AES-256-GCM encrypted embedded record store
 src/SqlSimCity.SqlServer  source-neutral SQL Server connection/authentication library
 src/SqlSimCity.Collection SQL probe catalog, negotiation, atlas collector, live-incident sampler, and refresh coordination
 src/SqlSimCity.Findings   pure deterministic findings rule engine, rules, and bounded evidence provider
+src/SqlSimCity.Archive    hostile-input archive format, validator, and source-neutral offline adapters
+src/SqlSimCity.Archive.Tool deterministic local preview/export/validation CLI
 src/SqlSimCity.Api        same-origin HTTP API, SignalR seam, static hosting
 sql/                      versioned probe catalog (manifest.json + probes/*.sql)
 fixtures/                 deterministic JSON fixtures for the atlas, capabilities, and live-incident APIs
@@ -66,6 +68,29 @@ Connected atlas mode never substitutes fixture Query Store history. Set `QuerySt
 - requires `Atlas:KnownDatabases` for Azure SQL Database, where sibling databases cannot be inferred from one database connection;
 - records exact data/log allocation and use, bounded Query Store totals, cumulative file I/O plus reset epoch, and per-database partial failures;
 - limits database concurrency to 4 by default (hard maximum 16), uses the profile command timeout, never overlaps refresh cycles, and backs off after target-level connection failures.
+
+## Offline observation archives
+
+SQLSimCity can export a redacted, versioned observation archive and serve it with no SQL Server or
+identity connectivity. Archives are **not backups** of protected storage: they are bounded,
+point-in-time evidence exports whose default policy removes credentials, authentication metadata,
+raw SQL, raw Showplan XML, endpoint/user/client fields, secret paths, and database/object names.
+
+```powershell
+dotnet run --project src\SqlSimCity.Archive.Tool -- preview-fixture
+dotnet run --project src\SqlSimCity.Archive.Tool -- export-fixture --output C:\archives\sqlsimcity.ssca
+dotnet run --project src\SqlSimCity.Archive.Tool -- validate C:\archives\sqlsimcity.ssca
+dotnet run --project src\SqlSimCity.Archive.Tool -- smoke-import C:\archives\sqlsimcity.ssca
+dotnet run --project src\SqlSimCity.Api -- `
+  --Acquisition:Mode=Archive `
+  --Acquisition:Archive:AllowedDirectory=C:\archives `
+  --Acquisition:Archive:FileName=sqlsimcity.ssca
+```
+
+Mount the configured archive file read-only in containers. Archive mode validates the complete file
+before the host is built, registers no SQL connection factory or live sampler, disables the live
+SignalR hub, and labels the one imported live sample static/stale. See
+[the archive format and operator guide](docs/archive-format.md).
 
 Example non-secret settings are in `compose.yaml`. Authentication supports the explicit strategies in `SqlSimCity.SqlServer`. Passwords, certificates, and client secrets are file references under `Atlas:SecretsDirectory` (`/run/secrets` by default), never configuration values. For SQL Server 2016–2019 grant the collector login `VIEW SERVER STATE` and `VIEW DATABASE STATE` in each collected database; SQL Server 2022+ uses `VIEW SERVER PERFORMANCE STATE` and `VIEW DATABASE PERFORMANCE STATE`. Also grant `CONNECT` to each database and preserve the default `VIEW ANY DATABASE` only when server discovery is desired. Azure SQL Database should use the smallest documented database-scoped permission/role that exposes the required DMVs for its service tier. SQLSimCity never executes grants.
 

@@ -19,7 +19,7 @@ import type { LiveFeedConnectionState, RequestAvailabilityGroups } from './liveI
 import type { LiveIncidentResponse, LiveIncidentSnapshot, LiveRequest } from './liveContracts'
 import './LiveIncidentsPanel.css'
 
-export default function LiveIncidents() {
+export default function LiveIncidents({ importedArchive = false }: { importedArchive?: boolean }) {
   const [response, setResponse] = useState<LiveIncidentResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => new Date().toISOString())
@@ -33,7 +33,7 @@ export default function LiveIncidents() {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
         setError(reason instanceof Error ? reason.message : 'The live incident feed could not be loaded')
       })
-    const unsubscribe = subscribeToLiveIncidents(
+    const unsubscribe = importedArchive ? () => {} : subscribeToLiveIncidents(
       update => {
         setResponse(update)
         setError(null)
@@ -44,17 +44,21 @@ export default function LiveIncidents() {
       controller.abort()
       unsubscribe()
     }
-  }, [])
+  }, [importedArchive])
 
   useEffect(() => {
     // A one-second clock is purely for the staleness label text below; it never drives motion or
     // animation, and it is not what makes the reduced-motion contract true or false.
+    if (importedArchive) return
     const interval = window.setInterval(() => setNow(new Date().toISOString()), 1000)
     return () => window.clearInterval(interval)
-  }, [])
+  }, [importedArchive])
 
   const snapshot = response?.snapshot ?? null
-  const fresh = useMemo(() => (snapshot ? isSnapshotFresh(snapshot, now) : false), [snapshot, now])
+  const fresh = useMemo(
+    () => (!importedArchive && snapshot ? isSnapshotFresh(snapshot, now) : false),
+    [importedArchive, snapshot, now],
+  )
 
   if (error) {
     return (
@@ -69,7 +73,9 @@ export default function LiveIncidents() {
     return (
       <section className="live-incidents loading" aria-live="polite">
         <span className="loading-mark" aria-hidden="true" /> Loading live incident sample…
-        <FeedConnectionNotice state={feedState} />
+        {importedArchive
+          ? <p className="stale-banner" role="status">Imported point-in-time sample. Static, stale, and offline; no SignalR connection or polling is active.</p>
+          : <FeedConnectionNotice state={feedState} />}
       </section>
     )
   }
@@ -79,12 +85,16 @@ export default function LiveIncidents() {
       <header className="live-header">
         <div>
           <h2 id="live-incidents-title">Live incidents</h2>
-          <p>{POLLING_DISCLOSURE}</p>
+          <p>{importedArchive
+            ? 'ImportedArchive point-in-time evidence. This sample is static, stale, and never refreshed.'
+            : POLLING_DISCLOSURE}</p>
         </div>
         <StatusBadge fresh={fresh} snapshot={snapshot} />
       </header>
 
-      <FeedConnectionNotice state={feedState} />
+      {importedArchive
+        ? <p className="stale-banner" role="status">ImportedArchive · no SignalR connection, REST polling, sampler, or SQL Server connection is active.</p>
+        : <FeedConnectionNotice state={feedState} />}
 
       <p className="collector-status" aria-live="polite">{collectorStatusLabel(response.collector)}</p>
 

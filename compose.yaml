@@ -19,7 +19,15 @@ services:
       - no-new-privileges:true
     environment:
       ASPNETCORE_ENVIRONMENT: Production
+      Acquisition__Mode: Fixture
       Atlas__Mode: Fixture
+      # Offline archive mode is an explicit local startup action:
+      # set Acquisition__Mode=Archive, set the two Archive values below, and
+      # mount exactly one archive file read-only under /archives.
+      # Acquisition__Archive__AllowedDirectory: /archives
+      # Acquisition__Archive__FileName: sqlsimcity.ssca
+      # volumes:
+      #   - ./artifacts/sqlsimcity.ssca:/archives/sqlsimcity.ssca:ro
       # Connected mode is opt-in. Supply only non-secret profile values here;
       # mount passwords/certificates/client secrets under /run/secrets.
       # Replace Atlas__Mode above with Connected, then configure:

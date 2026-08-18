@@ -13,6 +13,8 @@ WORKDIR /source
 COPY SqlSimCity.slnx Directory.Build.props Directory.Packages.props ./
 COPY src/SqlSimCity.Api/SqlSimCity.Api.csproj src/SqlSimCity.Api/
 COPY src/SqlSimCity.Api/packages.lock.json src/SqlSimCity.Api/
+COPY src/SqlSimCity.Archive/SqlSimCity.Archive.csproj src/SqlSimCity.Archive/
+COPY src/SqlSimCity.Archive/packages.lock.json src/SqlSimCity.Archive/
 COPY src/SqlSimCity.Domain/SqlSimCity.Domain.csproj src/SqlSimCity.Domain/
 COPY src/SqlSimCity.Domain/packages.lock.json src/SqlSimCity.Domain/
 COPY src/SqlSimCity.Contracts/SqlSimCity.Contracts.csproj src/SqlSimCity.Contracts/

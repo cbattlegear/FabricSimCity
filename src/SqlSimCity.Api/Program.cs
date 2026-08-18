@@ -17,31 +17,49 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 });
 
 var probeCatalog = ApplicationInitialization.LoadProbeCatalog();
-var capabilitiesSource = await FixtureCapabilitiesSource.CreateAsync(
-    cancellationToken: CancellationToken.None);
+var archiveMode = ArchiveServices.IsArchiveMode(builder.Configuration);
 
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton(probeCatalog);
-builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
 builder.Services.AddProtectedStorage(builder.Configuration);
 var queryStoreConnected = QueryStoreHistoryConfiguration.IsConnected(builder.Configuration);
+if (archiveMode && (
+        queryStoreConnected ||
+        AtlasConfiguration.IsConnected(builder.Configuration) ||
+        string.Equals(builder.Configuration["LiveIncidents:Mode"], "Connected", StringComparison.OrdinalIgnoreCase) ||
+        builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled")))
+    throw new InvalidOperationException(
+        "Acquisition:Mode=Archive cannot be combined with connected Atlas, Query Store, live incidents, or protected storage.");
 if (queryStoreConnected && !AtlasConfiguration.IsConnected(builder.Configuration))
     throw new InvalidOperationException("Connected Query Store history requires Atlas:Mode=Connected so both share one validated profile and authentication strategy.");
 if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStorage:Enabled"))
     throw new InvalidOperationException("Connected Query Store history requires ProtectedStorage:Enabled=true; plaintext fallback is forbidden.");
 
-// LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
-// SqlConnectionFactory-backed collector in and fails closed before the host serves traffic.
-builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
-builder.Services.AddSingleton<LiveIncidentSamplerService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveIncidentSamplerService>());
-builder.Services.AddFindings();
 builder.Services.AddSqlSimCityHttpSecurity(builder.Configuration);
 
-if (AtlasConfiguration.IsConnected(builder.Configuration))
+if (archiveMode)
+{
+    builder.Services.AddArchiveSource(builder.Configuration);
+}
+else
+{
+    var capabilitiesSource = await FixtureCapabilitiesSource.CreateAsync(
+        cancellationToken: CancellationToken.None);
+    builder.Services.AddSingleton<ICapabilitiesSource>(capabilitiesSource);
+    // LiveIncidents:Mode defaults to Fixture (no credentials); Connected opts a real
+    // SqlConnectionFactory-backed collector in and fails closed before the host serves traffic.
+    builder.Services.AddLiveIncidents(builder.Configuration, probeCatalog);
+    builder.Services.AddSingleton<LiveIncidentSamplerService>();
+    builder.Services.AddSingleton<ILiveIncidentResponseSource>(
+        services => services.GetRequiredService<LiveIncidentSamplerService>());
+    builder.Services.AddHostedService(services => services.GetRequiredService<LiveIncidentSamplerService>());
+}
+builder.Services.AddFindings();
+
+if (!archiveMode && AtlasConfiguration.IsConnected(builder.Configuration))
 {
     var atlasOptions = AtlasConfiguration.BuildCollectionOptions(builder.Configuration);
     var connectionProfile = AtlasConfiguration.BuildProfile(builder.Configuration);
@@ -91,7 +109,7 @@ if (AtlasConfiguration.IsConnected(builder.Configuration))
         builder.Services.AddSingleton<IQueryStoreHistorySource, UnavailableQueryStoreHistorySource>();
     }
 }
-else
+else if (!archiveMode)
 {
     builder.Services.AddSingleton<FixtureAtlasSnapshotSource>();
     builder.Services.AddSingleton<IAtlasSnapshotSource>(services => services.GetRequiredService<FixtureAtlasSnapshotSource>());
@@ -146,10 +164,10 @@ app.MapGet("/api/v1/capabilities", (ICapabilitiesSource source, HttpContext cont
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(source.GetCurrent());
 });
-app.MapGet("/api/v1/live", (LiveIncidentSamplerService sampler, HttpContext context) =>
+app.MapGet("/api/v1/live", (ILiveIncidentResponseSource source, HttpContext context) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    return Results.Ok(sampler.GetCurrentResponse());
+    return Results.Ok(source.GetCurrentResponse());
 });
 
 var queryStore = app.MapGroup("/api/v1/query-store");
@@ -250,7 +268,17 @@ queryStore.MapGet("/status", async (
     return Results.Ok(await source.GetStatusAsync(cancellationToken));
 });
 app.MapDatabaseCity();
-app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
+if (archiveMode)
+{
+    app.MapArchiveInfo();
+    app.MapMethods("/hubs/current-snapshot", ["GET", "POST"], () => Results.NotFound());
+    app.MapMethods("/hubs/current-snapshot/{**rest}", ["GET", "POST"], () => Results.NotFound());
+}
+else
+{
+    app.MapGet("/api/v1/archive", () => Results.NotFound());
+    app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
+}
 app.MapFindings();
 app.MapFallbackToFile("index.html");
 

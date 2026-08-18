@@ -12,6 +12,25 @@ Security headers enforce a same-origin baseline: no permissive CORS, no remote s
 
 The `/data` mount hosts an optional encrypted protected storage layer. It is **disabled by default**, and atlas collection does not persist snapshots there. Nothing writes to `/data` unless an operator explicitly enables protected storage and provides a key. A standard Docker named volume is not application-level encryption by itself; protected storage's AES-256-GCM envelope is what makes retained bytes unreadable without the key, and the volume must still be backed up and access-controlled like any other data at rest.
 
+### Offline archive trust boundary
+
+Observation archives are untrusted input even when copied from another SQLSimCity installation.
+Archive mode resolves one simple filename under an operator-controlled allowed directory and rejects
+traversal, symbolic links/reparse points, directories, unsupported major versions, noncanonical
+manifests, duplicate/undeclared names, unknown required features, corrupt digests, truncation,
+trailing bytes, oversized files/entries/strings/numbers/arrays, excessive JSON depth, non-UTC or
+out-of-range timestamps, and inconsistent indexes before registering any source. The format is
+uncompressed and has no extraction step, so archive-controlled paths, decompression bombs, ratio
+attacks, XXE, executable/plugin content, filesystem writes, and network fetches do not exist in the
+reader. Payload strings reach React only as ordinary text under the existing CSP; they are never
+treated as HTML.
+
+The archive file must be mounted read-only. Do not place credentials or protected-storage database
+files in the archive directory. Archive mode performs no SQL Server or identity operation and fails
+startup on any integrity or compatibility error rather than publishing a partial state. An archive is
+not encrypted storage or a backup; protect it in transit and at rest according to the evidence it
+contains.
+
 ### Enabling protected storage
 
 Set `ProtectedStorage:Enabled` to `true` and provide two mandatory settings:

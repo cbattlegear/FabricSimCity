@@ -19,3 +19,12 @@ public interface ILiveIncidentCollector
     /// </summary>
     Task<LiveIncidentSnapshotV1> CollectAsync(long sequence, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// Source-neutral view of the latest live response. Archive mode implements this directly so it
+/// never starts a cadence sampler or manufactures a newer observation.
+/// </summary>
+public interface ILiveIncidentResponseSource
+{
+    LiveIncidentResponseV1 GetCurrentResponse();
+}

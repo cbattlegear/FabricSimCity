@@ -1,8 +1,8 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { fetchAtlas } from './api'
+import { fetchArchiveInfo, fetchAtlas } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { ChunkErrorBoundary } from './ChunkErrorBoundary'
-import type { AtlasSnapshot, DatabaseAtlasItem } from './contracts'
+import type { ArchiveInfo, AtlasSnapshot, DatabaseAtlasItem } from './contracts'
 import './App.css'
 
 const AtlasViewport = lazy(() => import('./AtlasViewport').then(m => ({ default: m.AtlasViewport })))
@@ -25,14 +25,18 @@ export default function App() {
     return params.get('view') === 'city' ? params.get('database') : null
   })
   const [queryFamilyId, setQueryFamilyId] = useState<string | null>(null)
+  const [archiveInfo, setArchiveInfo] = useState<ArchiveInfo | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
     let refreshTimer: number | undefined
     let loaded = false
-    const load = () => fetchAtlas(controller.signal)
-      .then(atlas => {
+    let archiveDetected = false
+    const load = () => Promise.all([fetchAtlas(controller.signal), fetchArchiveInfo(controller.signal)])
+      .then(([atlas, archive]) => {
         setSnapshot(atlas)
+        setArchiveInfo(archive)
+        archiveDetected = archive !== null
         loaded = true
         setSelectedId(current => current && atlas.databases.some(database => database.databaseId === current)
           ? current
@@ -47,7 +51,7 @@ export default function App() {
         else setRefreshError(message)
       })
       .finally(() => {
-        if (!controller.signal.aborted) refreshTimer = window.setTimeout(load, 30_000)
+        if (!controller.signal.aborted && !archiveDetected) refreshTimer = window.setTimeout(load, 30_000)
       })
     void load()
     return () => {
@@ -108,6 +112,7 @@ export default function App() {
           authenticating reverse proxy, and set <code>AllowedHosts</code> to the exact host(s) it is served on.
         </p>
       </aside>
+      {archiveInfo && <ArchiveInfoPanel info={archiveInfo} />}
       <div className="tabs" role="tablist" aria-label="Analysis views">
         <button
           type="button"
@@ -152,7 +157,7 @@ export default function App() {
       </div>
 
       <div id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden={tab !== 'live'}>
-        {tab === 'live' && <LazySurface label="Live incidents" fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents /></LazySurface>}
+        {tab === 'live' && <LazySurface label="Live incidents" fallback={<PanelFallback label="Loading live incidents…" />}><LiveIncidents importedArchive={archiveInfo !== null} /></LazySurface>}
       </div>
 
       <div id="panel-atlas" role="tabpanel" aria-labelledby="tab-atlas" hidden={tab !== 'atlas'}>
@@ -281,6 +286,35 @@ export default function App() {
       )}
       </div>
     </main>
+  )
+}
+
+function ArchiveInfoPanel({ info }: { info: ArchiveInfo }) {
+  return (
+    <details className="collector-status is-degraded" open>
+      <summary><strong>ImportedArchive · static offline evidence</strong></summary>
+      <p>
+        Created {new Date(info.createdAt).toLocaleString()} by producer {info.producerVersion}.
+        Original target alias: {info.target.displayAlias}. This installation makes no SQL Server connection.
+      </p>
+      <p>
+        Sections: {info.includedSections.join(', ')}. {info.entryCount} bounded entries,{' '}
+        {new Intl.NumberFormat().format(info.archiveBytes)} bytes. Policy {info.redaction.policyVersion};
+        protected identifiers {info.redaction.protectedIdentifiersIncluded ? 'included by explicit operator opt-in' : 'excluded'}.
+      </p>
+      <p>
+        Schema {info.schemaVersion}. Features: {info.features.join(', ') || 'none'}.
+        Capabilities: {info.capabilities.join(', ') || 'none'}.
+      </p>
+      <p>Excluded by export policy: {info.redaction.excludedFields.join(', ') || 'none declared'}.</p>
+      {info.archivedFindings && (
+        <p>
+          Archived findings: engine {info.archivedFindings.engineVersion},{' '}
+          {Object.keys(info.archivedFindings.ruleVersions).length} versioned rules.
+          Current findings are reevaluated by this installation ({info.archivedFindings.mode}).
+        </p>
+      )}
+    </details>
   )
 }
 

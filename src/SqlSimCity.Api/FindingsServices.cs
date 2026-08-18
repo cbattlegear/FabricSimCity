@@ -23,7 +23,7 @@ public static class FindingsServices
             sp.GetRequiredService<IAtlasSnapshotSource>(),
             sp.GetRequiredService<IQueryStoreHistorySource>(),
             sp.GetRequiredService<ICapabilitiesSource>(),
-            () => sp.GetRequiredService<LiveIncidentSamplerService>().GetCurrentResponse().Snapshot,
+            () => sp.GetRequiredService<ILiveIncidentResponseSource>().GetCurrentResponse().Snapshot,
             TimeProvider.System));
         services.AddSingleton<FindingsService>();
         return services;
