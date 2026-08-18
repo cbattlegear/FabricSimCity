@@ -25,6 +25,47 @@ export interface BlockingReference {
   sentinel: BlockingSentinelKind
 }
 
+/// Every documented `wait_resource` form. `Page` and `Rid` name a page, not an object; resolving
+/// them needs `sys.dm_db_page_info` or an allocation scan, which is too costly for a realtime
+/// probe, so they are reported unresolved with a reason rather than guessed.
+export type LockResourceKind =
+  | 'None'
+  | 'Key'
+  | 'Object'
+  | 'Page'
+  | 'Rid'
+  | 'HoBt'
+  | 'Table'
+  | 'Extent'
+  | 'File'
+  | 'Application'
+  | 'Metadata'
+  | 'Database'
+  | 'AllocationUnit'
+  | 'Unrecognized'
+
+export type LockResolutionStatus =
+  | 'Resolved'
+  | 'RequiresLookup'
+  | 'NotObjectScoped'
+  | 'Unresolvable'
+  | 'Unrecognized'
+
+/// Optional throughout: emitted only once the lock-resource probe has run, so the UI must treat
+/// its absence as "not claimed" rather than "no lock".
+export interface LockResource {
+  rawResource: string
+  kind: LockResourceKind
+  databaseId: number | null
+  objectId: number | null
+  indexId: number | null
+  schemaName: string | null
+  objectName: string | null
+  indexName: string | null
+  status: LockResolutionStatus
+  reason: string
+}
+
 export interface LiveRequest {
   requestId: string
   sessionId: number
@@ -37,6 +78,7 @@ export interface LiveRequest {
   waitType: string | null
   waitTimeMs: number | null
   waitResource: string | null
+  lockResource?: LockResource | null
   blocking: BlockingReference
   requestStartTime: string | null
   totalElapsedMs: number | null
@@ -63,6 +105,7 @@ export interface WaitingTask {
   waitType: string | null
   waitDurationMs: string
   resourceDescription: string | null
+  lockResource?: LockResource | null
   blocking: BlockingReference
 }
 

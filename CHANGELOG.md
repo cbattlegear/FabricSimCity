@@ -15,6 +15,53 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **The database city is now a city.** The 3D view was rebuilt from unlabelled boxes on a rigid grid
+  into a navigable street-grid town, with every encoded dimension documented and everything else
+  declared as decoration:
+  - **Real buildings.** Objects are placed on lots along block frontages by `web/src/cityPlan.ts` and
+    given procedural per-archetype geometry by `web/src/cityBuildings.ts` — houses with pitched roofs
+    and doors, rowhouses, setback midrises, and towers/skyscrapers with window grids and crowns.
+    The archetype is chosen from exact reserved-page thresholds compared as `BigInt`, so a small table
+    is a house and a multi-gigabyte table is a skyscraper for a measured reason. Archetype selects
+    style only; measured footprint (log₂ reserved pages) and height (log₂ used pages) are unchanged.
+    Unknown size stays a fenced wireframe parcel that claims no quantity.
+  - **Orbit, pan, and zoom.** The camera is a full `OrbitControls` rig (left-drag orbit, right-drag
+    pan, wheel zoom, damped, clamped above ground) with keyboard equivalents — arrows pan, `+`/`-`
+    zoom, `[`/`]` rotate, `Home` resets — on a focusable, described canvas. Rendering is on-demand and
+    respects `prefers-reduced-motion`. Fit-to-bounds now runs on first load and explicit reset only,
+    so filtering or a live tick no longer yanks the viewpoint.
+  - **Roads with GPS-style congestion.** Co-references render as flat road ribbons along the street
+    graph instead of 1px diagonals through buildings. Road width maps the executions of query families
+    naming both endpoints; road colour maps captured wait share graded green/amber/red, upgraded to red
+    only where a resolved live lock names that object. Confidence moved to line pattern so colour and
+    confidence stay independently readable, and unknown grades stay grey and claim nothing.
+  - **Query plan routes.** A plan finder searches query families and plans; picking one draws a
+    numbered route through the city (`web/src/cityRoute.ts`) with a turn-by-turn panel. Operators walk
+    the tree in post-order and stop at their object's building, the Memory Grant Office, tempdb Works,
+    the Storage Depot, or the CPU Scheduler Yard. An object outside the loaded page becomes an explicit
+    off-map stop with a reason rather than being dropped, and the panel reports "N of M stops placed on
+    this map". The plan's `runtimeOverlayCaveat` is carried verbatim — it is a compiled plan shape,
+    never actual operator progress.
+  - **CPU, memory, and storage as places.** Six civic facilities (`web/src/cityInfrastructure.ts`,
+    `web/src/cityFacilityShells.ts`) render live evidence as architecture: a Scheduler Yard, Memory
+    Grant Office, Storage & I/O Depot, tempdb Works, Log Yard, and Lock Authority. Facility shells are
+    fixed decoration so a location stays learnable with no evidence; only measured unit heights vary.
+    An unsampled subsystem renders as a wireframe with its reason.
+  - **Full-bleed map with a floating HUD** — object/plan finders, layer toggles, an encoded-vs-decoration
+    legend, compass and camera controls, live-feed pill, and a slide-over for the selected building or
+    route. The existing evidence tables are preserved verbatim in a collapsible section below the map as
+    the text-first, non-WebGL equivalent.
+- **Lock resource resolution.** `LockResourceParser` parses the engine's verbatim `wait_resource` /
+  `resource_description` text into a new optional `LockResourceV1` on `LiveRequestV1` and
+  `WaitingTaskV1`. `OBJECT:`/`TAB:` resolve with no lookup; `KEY:`/`HOBT:`/`ALLOCUNIT:` carry only a
+  `hobt_id` and are reported `RequiresLookup` until the new bounded `sessions.lock_resource_objects`
+  probe resolves them through `sys.partitions` in the owning database; `PAGE:`/`RID:` are reported
+  `Unresolvable` because mapping a physical location to an object needs `sys.dm_db_page_info` or an
+  allocation scan, and are never guessed; `DATABASE`/`FILE`/`EXTENT`/`APPLICATION`/`METADATA` are
+  reported `NotObjectScoped`; an unrecognised prefix stays `Unrecognized`. The field is optional
+  throughout, so its absence means the probe did not run, not that no lock is held. The live-cases
+  fixture declares a sanitized resolution table so the resolved path is demonstrable offline.
+
 - **Single connection string configuration** for every connected surface. One ordinary ADO.NET
   connection string can now stand in for the ~15 individual connection settings plus a mounted
   password file: `ConnectionStrings:SqlSimCity` (settable as `ConnectionStrings__SqlSimCity`),

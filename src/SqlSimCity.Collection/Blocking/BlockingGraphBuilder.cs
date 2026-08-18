@@ -392,7 +392,12 @@ public static class BlockingGraphBuilder
             WaitType: t.WaitType,
             WaitDurationMs: t.WaitDurationMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
             ResourceDescription: t.ResourceDescription,
-            Blocking: BlockingReferenceV1.FromRaw(t.BlockingSessionId)))
+            Blocking: BlockingReferenceV1.FromRaw(t.BlockingSessionId))
+        {
+            // Parsing is pure and free: it reports what the resource text already states and marks
+            // hobt-scoped locks RequiresLookup rather than guessing an object.
+            LockResource = LockResourceParser.Parse(t.ResourceDescription),
+        })
         .ToList();
 
     private static void EnsureSessionNode(

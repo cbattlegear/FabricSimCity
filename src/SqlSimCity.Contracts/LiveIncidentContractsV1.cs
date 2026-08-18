@@ -51,6 +51,75 @@ public enum CounterEpochState { FirstSample, Delta, EpochReset }
 /// <summary>Run state of the background <c>LiveIncidentSampler</c> loop.</summary>
 public enum SamplerRunState { Running, Paused, Stopped, Reconnecting }
 
+/// <summary>
+/// The lock-resource form named by <c>wait_resource</c> / <c>resource_description</c>. Parsed from
+/// the verbatim text only -- an unrecognised prefix stays <see cref="Unrecognized"/> rather than
+/// being coerced into a plausible-looking kind.
+/// </summary>
+public enum LockResourceKind
+{
+    None,
+    Key,
+
+    // CA1720: 'Object' is SQL Server's own name for this lock resource type (OBJECT: db:objectid),
+    // and the wire value is consumed as the literal string "Object". Renaming it would misreport
+    // the engine's vocabulary, so the rule is suppressed here rather than the name changed.
+#pragma warning disable CA1720
+    Object,
+#pragma warning restore CA1720
+    Page,
+    Rid,
+    HoBt,
+    Table,
+    Extent,
+    File,
+    Application,
+    Metadata,
+    Database,
+    AllocationUnit,
+    Unrecognized,
+}
+
+/// <summary>
+/// How far a lock resource could be traced to a user object.
+/// <see cref="Resolved"/> means an object id is known (either stated directly in the resource text
+/// or looked up from a <c>hobt_id</c>); <see cref="RequiresLookup"/> means the resource names a
+/// hobt/allocation unit that the bounded lookup did not cover; <see cref="NotObjectScoped"/> means
+/// the lock is genuinely not on a user object (a database, file, or application lock);
+/// <see cref="Unresolvable"/> means resolution would need a cost we refuse to pay in a realtime
+/// probe (a page or row id needs an allocation scan). None of these are ever guessed.
+/// </summary>
+public enum LockResolutionStatus
+{
+    Resolved,
+    RequiresLookup,
+    NotObjectScoped,
+    Unresolvable,
+    Unrecognized,
+}
+
+/// <summary>
+/// A parsed (and, where cheap and safe, resolved) lock resource. Optional throughout the live
+/// contracts: it is emitted only once the lock-resource probe has run, so a consumer must treat its
+/// absence as "not claimed" rather than "no lock". <see cref="RawResource"/> always preserves the
+/// engine's own text so the parse can be audited.
+/// </summary>
+public sealed record LockResourceV1(
+    string RawResource,
+    LockResourceKind Kind,
+    int? DatabaseId,
+    int? ObjectId,
+    int? IndexId,
+    string? SchemaName,
+    string? ObjectName,
+    string? IndexName,
+    LockResolutionStatus Status,
+    string Reason)
+{
+    /// <summary>The <c>hobt_id</c> named by a KEY/HOBT/PAGE-style resource, when the text carries one.</summary>
+    public long? HobtId { get; init; }
+}
+
 /// <summary>One waiting task, or one blocked/blocking request, preserving <c>blocking_session_id</c> verbatim plus its decoded sentinel meaning.</summary>
 public sealed record BlockingReferenceV1(long? BlockingSessionId, BlockingSentinelKind Sentinel)
 {
@@ -99,7 +168,14 @@ public sealed record LiveRequestV1(
     SampleAvailability Availability,
     string? AvailabilityReason,
     PlanCollectionState PlanState,
-    string? PlanReason);
+    string? PlanReason)
+{
+    /// <summary>
+    /// The parsed/resolved form of <see cref="WaitResource"/>. Null when the lock-resource probe did
+    /// not run, so consumers must not read null as "this request holds no lock".
+    /// </summary>
+    public LockResourceV1? LockResource { get; init; }
+}
 
 /// <summary>
 /// One row of the current wait queue from <c>sessions.waiting_tasks</c>, preserving
@@ -114,7 +190,14 @@ public sealed record WaitingTaskV1(
     string? WaitType,
     string WaitDurationMs,
     string? ResourceDescription,
-    BlockingReferenceV1 Blocking);
+    BlockingReferenceV1 Blocking)
+{
+    /// <summary>
+    /// The parsed/resolved form of <see cref="ResourceDescription"/>. Null when the lock-resource
+    /// probe did not run.
+    /// </summary>
+    public LockResourceV1? LockResource { get; init; }
+}
 
 /// <summary>One node in the reconstructed blocking graph: a real session, or an external/indeterminate sentinel "owner".</summary>
 public sealed record BlockingNodeV1(

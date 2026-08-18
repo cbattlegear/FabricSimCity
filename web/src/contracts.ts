@@ -181,22 +181,44 @@ export interface QueryFamilyPage {
   evidence: QueryStoreEvidence | null
 }
 
+export interface ShowplanWarning {
+  kind: string
+  detail: string | null
+}
+
+export interface ShowplanObjectReference {
+  database: string | null
+  schema: string | null
+  table: string | null
+  index: string | null
+}
+
+export interface ShowplanNode {
+  nodeId: number
+  parentNodeId: number | null
+  logicalOperation: string
+  physicalOperation: string
+  estimatedRows: number | null
+  estimatedCpuCost: number | null
+  estimatedIoCost: number | null
+  estimatedTotalSubtreeCost: number | null
+  parallel: boolean
+  objectReference: ShowplanObjectReference | null
+  predicate: string | null
+  warnings: ShowplanWarning[]
+}
+
 export interface NormalizedShowplan {
   planId: string
+  showplanVersion: string
+  cardinalityEstimatorVersion: string | null
+  serialDesiredMemoryKiB: number | null
+  serialRequiredMemoryKiB: number | null
   optimization: 'None' | 'ParameterSensitivePlan' | 'OptionalParameterPlanOptimization'
   dispatcherExpression: string | null
   structuralFingerprint: string
   runtimeOverlayCaveat: string
-  nodes: Array<{
-    nodeId: number
-    parentNodeId: number | null
-    logicalOperation: string
-    physicalOperation: string
-    estimatedRows: number | null
-    parallel: boolean
-    objectReference: { database: string | null; schema: string | null; table: string | null; index: string | null } | null
-    predicate: string | null
-  }>
+  nodes: ShowplanNode[]
 }
 
 export interface PlanComparison {

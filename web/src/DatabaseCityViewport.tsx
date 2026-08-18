@@ -1,44 +1,237 @@
-import { useEffect, useRef, useState } from 'react'
-import type { DatabaseCityObject, DatabaseCityRoute } from './databaseCityContracts'
-import { createDatabaseCityScene, type DatabaseCitySceneController } from './DatabaseCityScene'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import type {
+  DatabaseCityObject,
+  DatabaseCityQueryFamily,
+  DatabaseCityRoute,
+} from './databaseCityContracts'
+import {
+  createDatabaseCityScene,
+  type CameraNudge,
+  type CityLayerToggles,
+  type DatabaseCitySceneController,
+} from './DatabaseCityScene'
+import { CONGESTION_COLORS, CONGESTION_LABELS, type LiveBlockingEdge } from './cityTraffic'
+import type { Facility } from './cityInfrastructure'
+import type { CityRoute } from './cityRoute'
 
 type Props = {
   objects: readonly DatabaseCityObject[]
   routes: readonly DatabaseCityRoute[]
+  families: readonly DatabaseCityQueryFamily[]
+  facilities: readonly Facility[]
+  liveBlocking: readonly LiveBlockingEdge[]
+  route: CityRoute | null
   selectedId: string | null
   onSelect: (objectId: string) => void
+  /** Rendered into the top-left HUD slot: the object and plan finder. */
+  finder?: ReactNode
+  /** Rendered into the right HUD slot: object detail or turn-by-turn directions. */
+  panel?: ReactNode
+  liveStatus?: ReactNode
 }
 
-export function DatabaseCityViewport({ objects, routes, selectedId, onSelect }: Props) {
+const KEY_ACTIONS: Record<string, CameraNudge> = {
+  ArrowLeft: 'panLeft',
+  ArrowRight: 'panRight',
+  ArrowUp: 'panUp',
+  ArrowDown: 'panDown',
+  '+': 'zoomIn',
+  '=': 'zoomIn',
+  '-': 'zoomOut',
+  _: 'zoomOut',
+  '[': 'rotateLeft',
+  ']': 'rotateRight',
+}
+
+const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string]> = [
+  ['traffic', 'Traffic'],
+  ['infrastructure', 'Infrastructure'],
+  ['route', 'Query route'],
+  ['districts', 'Districts'],
+]
+
+function swatch(color: number): string {
+  return `#${color.toString(16).padStart(6, '0')}`
+}
+
+export function DatabaseCityViewport({
+  objects,
+  routes,
+  families,
+  facilities,
+  liveBlocking,
+  route,
+  selectedId,
+  onSelect,
+  finder,
+  panel,
+  liveStatus,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<DatabaseCitySceneController | null>(null)
   const [unavailable, setUnavailable] = useState(false)
+  const [heading, setHeading] = useState(0)
+  const [layers, setLayers] = useState<CityLayerToggles>({
+    traffic: true,
+    infrastructure: true,
+    route: true,
+    districts: true,
+  })
 
   useEffect(() => {
     if (!canvasRef.current) return
+    let controller: DatabaseCitySceneController
     try {
-      sceneRef.current = createDatabaseCityScene(canvasRef.current, { onSelect })
-      sceneRef.current.setData(objects, routes)
-      sceneRef.current.setSelected(selectedId)
+      controller = createDatabaseCityScene(canvasRef.current, {
+        onSelect,
+        onCameraChange: () => setHeading(sceneRef.current?.heading() ?? 0),
+      })
     } catch {
       setUnavailable(true)
+      return
     }
+    sceneRef.current = controller
     return () => {
-      sceneRef.current?.dispose()
+      controller.dispose()
       sceneRef.current = null
     }
   }, [onSelect])
 
-  useEffect(() => sceneRef.current?.setData(objects, routes), [objects, routes])
+  useEffect(() => {
+    sceneRef.current?.setData(objects, routes, families, liveBlocking)
+  }, [objects, routes, families, liveBlocking])
+  useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
+  useEffect(() => sceneRef.current?.setRoute(route), [route])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
+  useEffect(() => sceneRef.current?.setLayers(layers), [layers])
+
+  const nudge = useCallback((action: CameraNudge) => {
+    sceneRef.current?.nudge(action)
+    setHeading(sceneRef.current?.heading() ?? 0)
+  }, [])
+
+  const onKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+      if (event.key === 'Home') {
+        event.preventDefault()
+        sceneRef.current?.resetView()
+        setHeading(sceneRef.current?.heading() ?? 0)
+        return
+      }
+      const action = KEY_ACTIONS[event.key]
+      if (!action) return
+      event.preventDefault()
+      nudge(action)
+    },
+    [nudge],
+  )
+
+  const toggle = (key: keyof CityLayerToggles) =>
+    setLayers(current => ({ ...current, [key]: !current[key] }))
+
+  if (unavailable) {
+    return (
+      <div className="city-viewport is-unavailable">
+        <div className="viewport-fallback" role="status">
+          <strong>Database city viewport unavailable</strong>
+          <span>
+            WebGL could not start. The complete object, route, and evidence tables remain available
+            below and carry exactly the same facts as the map.
+          </span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="city-viewport">
-      <canvas ref={canvasRef} className="city-canvas" aria-hidden="true" hidden={unavailable} />
-      {unavailable && <div className="viewport-fallback" role="status">
-        <strong>Database city viewport unavailable</strong>
-        <span>The complete object and evidence table remains available below.</span>
-      </div>}
+      <canvas
+        ref={canvasRef}
+        className="city-canvas"
+        tabIndex={0}
+        role="application"
+        aria-label="Database city map. Drag to orbit, right-drag to pan, scroll to zoom."
+        aria-describedby="city-map-help"
+        onKeyDown={onKeyDown}
+      />
+      <p id="city-map-help" className="visually-hidden">
+        Interactive three-dimensional map. Arrow keys pan, plus and minus zoom, left and right square
+        brackets rotate, Home resets the view. Every fact drawn here is also listed in the evidence
+        tables below this map.
+      </p>
+
+      {finder && <div className="hud hud-top-left">{finder}</div>}
+
+      <div className="hud hud-top-right">
+        <fieldset className="hud-layers">
+          <legend>Layers</legend>
+          {LAYER_LABELS.map(([key, label]) => (
+            <label key={key}>
+              <input type="checkbox" checked={layers[key]} onChange={() => toggle(key)} />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+        {liveStatus}
+      </div>
+
+      <div className="hud hud-bottom-left">
+        <details className="hud-legend">
+          <summary>Legend · what encodes evidence</summary>
+          <ul className="legend-encoded">
+            <li>
+              <i className="legend-swatch legend-footprint" /> Footprint — log₂ of exact reserved 8-KiB pages
+            </li>
+            <li>
+              <i className="legend-swatch legend-height" /> Height — log₂ of exact used 8-KiB pages
+            </li>
+            <li>
+              <i className="legend-swatch legend-attributed" /> Amber roof cap — attributed Query Store CPU
+            </li>
+            <li>
+              <i className="legend-swatch legend-direct" /> Index annex width — direct DMV operations
+            </li>
+            <li>
+              <i className="legend-swatch legend-route" /> Road width — captured executions naming both endpoints
+            </li>
+            {(['low', 'medium', 'high', 'unknown'] as const).map(grade => (
+              <li key={grade}>
+                <i className="legend-swatch" style={{ background: swatch(CONGESTION_COLORS[grade]) }} />
+                Road colour — {CONGESTION_LABELS[grade].toLowerCase()}
+              </li>
+            ))}
+            <li>
+              <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
+            </li>
+          </ul>
+          <p className="legend-decoration">
+            Roofs, windows, doors, chimneys, setbacks, crowns, sidewalks, and district tints are
+            decoration. They are seeded from each object&apos;s stable id and encode nothing.
+          </p>
+        </details>
+      </div>
+
+      <div className="hud hud-bottom-right">
+        <div className="hud-compass">
+          <span className="compass-needle" style={{ transform: `rotate(${-heading}deg)` }} aria-hidden="true">
+            ▲
+          </span>
+          <span>
+            {COMPASS_POINTS[Math.round(heading / 45) % 8]} · {Math.round(heading)}°
+          </span>
+        </div>
+        <div className="hud-camera" role="group" aria-label="Camera controls">
+          <button type="button" onClick={() => nudge('rotateLeft')} aria-label="Rotate left">⟲</button>
+          <button type="button" onClick={() => nudge('zoomIn')} aria-label="Zoom in">＋</button>
+          <button type="button" onClick={() => nudge('zoomOut')} aria-label="Zoom out">－</button>
+          <button type="button" onClick={() => nudge('rotateRight')} aria-label="Rotate right">⟳</button>
+          <button type="button" onClick={() => sceneRef.current?.resetView()}>Reset view</button>
+          {route && <button type="button" onClick={() => sceneRef.current?.frameRoute()}>Frame route</button>}
+        </div>
+      </div>
+
+      {panel && <div className="hud hud-panel">{panel}</div>}
     </div>
   )
 }

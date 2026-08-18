@@ -55,11 +55,67 @@ Schemas are stable neighborhoods. Tables and indexed views are buildings sized b
 counts. Indexes are attached structures on their parent object. Direct index DMV activity and
 Query Store-attributed exposure use different evidence and visual styles.
 
+The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` packs each
+schema district into blocks of lots on a uniform lattice, derived strictly from the backend's stable
+`neighborhoodOrdinal` / `objectOrdinal`, so layout is deterministic and independent of source row
+order. The plan also emits the intersections and streets that roads are drawn on and that query
+routes walk, so nothing is drawn diagonally through a building. A civic district is always allocated
+last, which keeps schema districts from shifting when infrastructure appears.
+
+Exactly seven properties encode evidence. Everything else in the scene is decoration seeded from an
+object's stable id and carries no data claim; the in-app legend states this split verbatim.
+
+| Encoded property | Evidence |
+| --- | --- |
+| Building footprint | log₂ of exact reserved 8-KiB pages |
+| Building height | log₂ of exact used 8-KiB pages (zero used pages is zero height) |
+| Amber roof-cap height | attributed Query Store CPU |
+| Index annex width | direct DMV operations on that index |
+| Road width | executions of query families naming both endpoints |
+| Road colour | captured wait share, graded low/medium/high, upgraded only by a resolved live lock |
+| Route line pattern | co-reference confidence (confirmed / probable / unknown) |
+
+Building *archetype* (house, rowhouse, midrise, tower, skyscraper, civic hall, vacant parcel) is
+chosen from exact reserved-page thresholds compared as `BigInt`, because page counts are lossless
+base-10 strings that can exceed `Number.MAX_SAFE_INTEGER`. The archetype selects style only; the
+measured footprint and height are unchanged by it. Unknown size yields a fenced wireframe parcel.
+
+Colour and confidence deliberately occupy independent channels: once colour carries congestion,
+confidence moves to line pattern, so neither dimension can be mistaken for the other.
+
+CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
+facilities in the civic district (`web/src/cityInfrastructure.ts`). Each facility's architecture is
+fixed decoration so its location stays learnable with no evidence at all; only the *height* of the
+measured units inside it varies, interpolated between a documented floor and ceiling. A subsystem
+that could not be sampled renders as a wireframe with its reason and claims nothing.
+
 The backend returns bounded object pages, a fixed top-query-family set, and an exact `other workload`
 aggregate. The browser never receives all 100,000 query families.
 
 Routes indicate co-reference or cross-database evidence. Solid, dashed, and dotted styles mean
 confirmed, probable, and unknown; they do not imply row direction or row flow.
+
+#### Query plan routes
+
+Selecting a Query Store plan draws a GPS-style route through the city (`web/src/cityRoute.ts`). The
+normalized showplan's operator tree is walked in post-order, and each operator becomes a stop:
+
+1. a resolvable object reference becomes that building;
+2. otherwise a memory-consuming operator stops at the Memory Grant Office;
+3. otherwise a tempdb-spilling operator stops at tempdb Works;
+4. otherwise a non-zero `EstimatedIoCost` stops at the Storage Depot;
+5. otherwise the operator stops at the CPU Scheduler Yard.
+
+Consecutive stops are joined by a shortest path over the street graph, so the route follows roads.
+An object reference that names something outside the loaded bounded page becomes an explicit off-map
+stop with a reason; it is never silently dropped, and the panel reports "N of M stops placed on this
+map". The route is a compiled plan shape and carries the plan's `runtimeOverlayCaveat` verbatim: it
+is never actual operator progress.
+
+The camera is a full orbit/pan/zoom control with keyboard equivalents (arrows pan, `+`/`-` zoom,
+`[`/`]` rotate, `Home` resets). Fit-to-bounds runs on first load and on an explicit reset only, so
+filtering or a live tick never yanks the viewpoint. The full evidence tables remain below the map as
+the text-first, non-WebGL equivalent.
 
 ### Query Store history
 
@@ -80,6 +136,23 @@ missed/skipped-cycle counts.
 
 The `-2`, `-3`, `-4`, and `-5` blocking-session sentinels remain explicit. `-5` is diagnostic and is
 not counted as a blocker incident by itself.
+
+Lock resources are parsed from the engine's verbatim `wait_resource` / `resource_description` text by
+`LockResourceParser`, which resolves only what the text actually states. `OBJECT:` and `TAB:` carry an
+object id outright. `KEY:`, `HOBT:`, and `ALLOCUNIT:` carry only a `hobt_id` and are reported
+`RequiresLookup` until the bounded `sessions.lock_resource_objects` probe resolves them through
+`sys.partitions` in the owning database. `PAGE:` and `RID:` name a physical location whose object
+would need `sys.dm_db_page_info` or an allocation scan, so they are reported `Unresolvable` with that
+reason and are never guessed. `DATABASE`, `FILE`, `EXTENT`, `APPLICATION`, and `METADATA` locks are
+reported `NotObjectScoped`. An unrecognised prefix stays `Unrecognized` rather than being coerced.
+
+`LockResource` is optional throughout the live contracts, so its absence means the probe did not run,
+not that a request holds no lock. Parsing runs on every sampled request and waiting task in both
+connected and fixture mode, because it is pure and costs nothing. The hobt-resolving lookup step is a
+separate, bounded call: the fixture declares a sanitized resolution table so the resolved path is
+demonstrable offline, and a connected collector that has not yet issued the probe simply reports
+`RequiresLookup` and names the probe that would resolve it. The city consumes the result to upgrade a
+road to red congestion, and only where a resolved lock names one of the loaded objects.
 
 ### Findings
 
