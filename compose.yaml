@@ -27,6 +27,16 @@ services:
       # appears, and this process still logs its security warnings at warning
       # level, which is where the record lives once the screen no longer shows it.
       # Deployment__AcknowledgeSecurityWarnings: "true"
+      # Behind a reverse proxy, every request otherwise arrives from the proxy's
+      # own address, so the API rate limit is shared by all clients rather than
+      # applied to each. Naming the proxy restores per-client partitioning.
+      # List the peer address this container actually sees (the Docker gateway or
+      # the proxy container), not the browser's -- and note that turning this on
+      # without naming a peer stops startup, because an unrestricted allowlist
+      # would let any caller claim an address and take a bucket of its own.
+      # ReverseProxy__Enabled: "true"
+      # ReverseProxy__KnownProxies: "172.18.0.9"
+      # ReverseProxy__KnownNetworks: "172.18.0.0/16"
       # Offline archive mode is an explicit local startup action:
       # set Acquisition__Mode=Archive, set the two Archive values below, and
       # mount exactly one archive file read-only under /archives.

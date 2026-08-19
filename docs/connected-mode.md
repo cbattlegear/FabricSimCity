@@ -258,7 +258,8 @@ or unsupported states.
   `TrustServerCertificate` opt-in.
 - `Strict` uses strict TLS and rejects `TrustServerCertificate=true`.
 - Behind an authenticating reverse proxy, configure `AllowedHosts` to the exact externally accepted
-  host names. SQLSimCity does not trust forwarded headers by default.
+  host names. Forwarded headers are ignored unless you name the trusted proxy under `ReverseProxy`;
+  see [`docs/operations.md`](operations.md#forwarded-client-addresses).
 - Keep the backend network path private even when the proxy provides TLS and authentication.
 
 See [`docs/operations.md`](operations.md) for complete deployment, upgrade, rollback, and recovery

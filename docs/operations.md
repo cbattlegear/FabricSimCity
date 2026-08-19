@@ -11,9 +11,47 @@ this is a `Host` header check, not an exposure control, and loopback binding
 remains the actual network boundary. When using a reverse proxy, terminate
 TLS and enforce authentication there, restrict the backend network path, and set
 `AllowedHosts` to the externally accepted host names (semicolon-separated in
-ASP.NET Core configuration). SQLSimCity does not enable forwarded-header
-processing, so a proxy must not depend on the app to interpret forwarded scheme
-or client-address headers.
+ASP.NET Core configuration). Keep a loopback entry in that list if you also run
+`tools/container-smoke.sh`, which connects over loopback. A proxy must forward
+WebSocket upgrades for `/hubs/current-snapshot`, or the UI silently falls back to
+polling for live incidents.
+
+## Forwarded client addresses
+
+By default SQLSimCity ignores `X-Forwarded-For` and `X-Forwarded-Proto`, so every
+request behind a proxy is attributed to the proxy's own address. The API rate
+limit (`HttpSecurity:ApiPermitLimit`, 600 requests per 60 seconds) then applies to
+all clients together rather than to each one, and one noisy client can exhaust it
+for everybody.
+
+To restore per-client partitioning, name the peers whose forwarded headers may be
+believed:
+
+```yaml
+ReverseProxy__Enabled: "true"
+ReverseProxy__KnownProxies: "172.18.0.9"
+# or, for a whole bridge network:
+# ReverseProxy__KnownNetworks: "172.18.0.0/16"
+```
+
+Both accept semicolon- or comma-separated values. The address to list is the peer
+address SQLSimCity actually sees, which behind Docker is the gateway or the proxy
+container's address, not the browser's. `ReverseProxy__ForwardLimit` (default 1)
+is how many trusted hops the request passes through.
+
+Enabling this without naming a peer stops startup rather than trusting everyone.
+`X-Forwarded-For` is client-supplied text, so an unrestricted allowlist would let
+anyone who can reach the port name their own address and take a private rate-limit
+bucket per request — worse than the shared bucket the setting exists to fix. When
+a request arrives with `X-Forwarded-For` from a peer that is not listed, the header
+is ignored and the process logs `ForwardedHeadersFromUntrustedPeer` once, naming
+the address it saw, so a misconfigured allowlist cannot pass for a working one.
+
+`X-Forwarded-Host` is never honoured: `AllowedHosts` filters on the request host,
+and letting a header rewrite the value that check reads would weaken a control
+configured separately. Pass the real `Host` from the proxy instead. Note that once
+this is enabled, recorded client addresses are asserted by the proxy rather than
+observed by this process.
 
 ## Health and readiness
 
