@@ -8,6 +8,27 @@ export function sizeToSide(allocatedKiB: number): number {
   return Math.sqrt(144 + 9072 * t)
 }
 
+/**
+ * Height of a database city's tallest tower, in world units, from used KiB.
+ *
+ * `log₂(1 + U) * 2.6` — every doubling of used bytes adds 2.6 units, and a database with zero used
+ * bytes has no skyline at all. This is the atlas's counterpart to the database city's
+ * `buildingHeight`, and it is deliberately uncapped for the same reason: the mapping has to stay
+ * strictly monotonic in the measured value, so two databases can never read as equally tall unless
+ * their used bytes actually are equal.
+ *
+ * Footprint and height are kept on separate measurements — allocated against used — so the pair says
+ * what the database city's pair says: how much ground was reserved, and how much of it is built on.
+ */
+export const HEIGHT_UNITS_PER_DOUBLING = 2.6
+
+export function usedToHeight(usedKiB: number): number {
+  if (!Number.isFinite(usedKiB) || usedKiB < 0) {
+    throw new RangeError('Used KiB must be a finite, non-negative number')
+  }
+  return Math.log2(1 + usedKiB) * HEIGHT_UNITS_PER_DOUBLING
+}
+
 export function parseExactBytes(measurement: ByteMeasurement): bigint | null {
   if (measurement.status !== 'Known' || measurement.bytes === null || !/^\d+$/.test(measurement.bytes)) return null
   return BigInt(measurement.bytes)
@@ -18,6 +39,14 @@ export function databaseSide(database: DatabaseAtlasItem): number | null {
   if (exactBytes === null) return null
   const allocatedKiB = Number(exactBytes) / 1024
   return Number.isFinite(allocatedKiB) ? sizeToSide(allocatedKiB) : 96
+}
+
+/** Tallest-tower height for a database, or null when used size is unknown and no height is claimed. */
+export function databaseHeight(database: DatabaseAtlasItem): number | null {
+  const exactBytes = parseExactBytes(database.used)
+  if (exactBytes === null) return null
+  const usedKiB = Number(exactBytes) / 1024
+  return Number.isFinite(usedKiB) ? usedToHeight(usedKiB) : usedToHeight(Number.MAX_SAFE_INTEGER)
 }
 
 export function formatBytes(measurement: ByteMeasurement): string {

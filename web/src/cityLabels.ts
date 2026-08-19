@@ -50,6 +50,20 @@ export function buildingLabelText(schemaName: string, name: string): string {
 }
 
 /**
+ * Longest database label drawn on the server atlas before elision.
+ *
+ * Shorter than {@link LABEL_MAX_CHARS} because atlas labels are drawn larger, and a city's plot and
+ * its neighbours' plots sit on a fixed grid pitch: a name wide enough to cross into the next city
+ * would say the wrong thing about which city it names.
+ */
+export const ATLAS_LABEL_MAX_CHARS = 18
+
+/** Names a database city on the server atlas. Database names are not qualified by anything. */
+export function databaseLabelText(name: string): string {
+  return elideMiddle(name, ATLAS_LABEL_MAX_CHARS)
+}
+
+/**
  * Shortens from the middle rather than the end. A name's tail is often what distinguishes it
  * (`orders_2024_archive` against `orders_2024_current`), so a trailing elision would merge labels
  * that name different buildings.
@@ -113,8 +127,13 @@ type RasterizedLabel = {
  * and on every appended page, and rasterizing a fresh canvas per building per tick would churn GPU
  * textures for text that never changed. Sprites are cheap wrappers over the shared material, so
  * only {@link CityLabels.dispose} frees GPU memory.
+ *
+ * `worldHeight` sets how large a sprite is in the scene that asked for it. The database city and the
+ * server atlas are drawn at very different world scales -- a city block against a hundred cities on
+ * one grid -- so a single fixed height would leave one of them unreadable. The rasterization is
+ * identical either way; only the sprite scale differs.
  */
-export function createCityLabels(): CityLabels {
+export function createCityLabels(worldHeight: number = LABEL_WORLD_HEIGHT): CityLabels {
   const cache = new Map<string, RasterizedLabel | null>()
 
   function rasterize(text: string): RasterizedLabel | null {
@@ -180,7 +199,7 @@ export function createCityLabels(): CityLabels {
       const entry = rasterize(text)
       if (!entry) return null
       const sprite = new THREE.Sprite(entry.material)
-      sprite.scale.set(labelWorldWidth(entry.pixelWidth, entry.pixelHeight), LABEL_WORLD_HEIGHT, 1)
+      sprite.scale.set(labelWorldWidth(entry.pixelWidth, entry.pixelHeight, worldHeight), worldHeight, 1)
       // Above every other render order in the scene, so labels resolve last and against each other
       // by camera distance rather than by the order buildings happened to be added.
       sprite.renderOrder = 10

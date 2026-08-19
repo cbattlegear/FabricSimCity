@@ -45,9 +45,47 @@ only for exact formatting and converts to bounded numeric scales solely for visu
 
 ### Server atlas
 
-The atlas shows up to 100 databases. Known allocated size controls footprint through a documented
-logarithmic mapping; unknown size uses nonquantitative geometry. Live concurrency, historical Query
-Store load, capacity, and data quality remain separate dimensions.
+The atlas shows up to 100 databases, and each one is drawn as a small city on a shared grid, not as a
+single block. A database is therefore a city at both altitudes: the atlas and the database city read
+as two heights over one place rather than as two unrelated diagrams.
+
+Exactly two properties are measured, and they are the pair the database city measures one level down.
+Everything else is either a consequence of them or decoration.
+
+| Encoded property | Evidence |
+| --- | --- |
+| City plot side | known allocated bytes, through the documented logarithmic mapping `t = min(1, log₂(1 + A) / 50)`, `area = 144 + 9072t` |
+| Tallest tower height | known used bytes, `log₂(1 + U) × 2.6`, so zero used bytes is zero height |
+
+Block count follows from the plot rather than claiming anything of its own: `web/src/atlasCity.ts`
+divides every city at one constant block pitch, so a larger database is a larger city with more
+blocks in it and block *size* never varies. Skyline shape, setbacks, masts, and the small per-lot
+width variation are decoration seeded from the database's stable id, so a city's shape never changes
+between renders and never moves when its measurements do.
+
+Unknown never degrades into a small number, in either direction. Unknown allocated size draws the
+nonquantitative × parcel and no city at all; known allocated size with unknown used size draws the
+real plot and its real block grid with every lot fenced and empty, because the ground was measured
+and the skyline was not.
+
+Every city is named on the ground, with the label vocabulary shared with the database city
+(`web/src/cityLabels.ts`). Live concurrency, historical Query Store load, capacity, and data quality
+remain separate dimensions, reported in the evidence table rather than in the geometry. A fresh live
+sample adds a pulsing beacon over the city, and inferred topology edges keep their own line styles.
+
+Placement and framing are presentation, not evidence, and both exist so the encodings above can
+actually be compared by eye. `web/src/atlasLayout.ts` reserves one of a hundred grid slots per
+database and hands out the slots nearest the centre first, so a server with eight databases is a
+compact cluster rather than eight specks scattered over a thousand units of empty ground; a database
+never moves once it holds a slot, and which database claims the centre is decided by its stable id
+rather than by arrival order. `web/src/atlasFraming.ts` then solves the camera distance that fits the
+cities that exist, against the real viewport shape, by fitting the corners of their bounding box
+rather than its bounding sphere — the atlas is a wide, nearly flat subject, and sphere fitting would
+stand the camera off as though it were a cube. Distance and direction change what is legible, never
+what is claimed.
+
+Cities are merged into one geometry per database and cached by the measurements that shape them, so
+the thirty-second atlas refresh rebuilds nothing that did not move.
 
 ### Database city
 

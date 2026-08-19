@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { BuildingArchetype, CityLot } from './cityPlan'
+import { mergeAndDispose } from './mergeGeometry'
 
 /**
  * Procedural building geometry, one merged {@link THREE.BufferGeometry} per building.
@@ -79,41 +80,7 @@ function box(
   return geometry
 }
 
-function merge(parts: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
-  if (parts.length === 0) return null
-  if (parts.length === 1) return parts[0]
-  const merged = mergeBufferGeometries(parts)
-  for (const part of parts) part.dispose()
-  return merged
-}
-
-/**
- * Minimal position/normal/uv merge. three's BufferGeometryUtils is an examples module; this keeps the
- * scene dependent only on the core package and on geometries we build ourselves, which are always
- * non-indexed-compatible BoxGeometry/CylinderGeometry with the same attribute set.
- */
-function mergeBufferGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  const nonIndexed = parts.map(part => (part.index ? part.toNonIndexed() : part.clone()))
-  const names = ['position', 'normal', 'uv'] as const
-  const result = new THREE.BufferGeometry()
-  for (const name of names) {
-    if (!nonIndexed.every(part => part.getAttribute(name))) continue
-    const itemSize = nonIndexed[0].getAttribute(name).itemSize
-    let total = 0
-    for (const part of nonIndexed) total += part.getAttribute(name).count * itemSize
-    const array = new Float32Array(total)
-    let offset = 0
-    for (const part of nonIndexed) {
-      const attribute = part.getAttribute(name)
-      array.set(attribute.array as Float32Array, offset)
-      offset += attribute.count * itemSize
-    }
-    result.setAttribute(name, new THREE.BufferAttribute(array, itemSize))
-  }
-  for (const part of nonIndexed) part.dispose()
-  result.computeBoundingSphere()
-  return result
-}
+const merge = mergeAndDispose
 
 /** Small detached house: base, pitched roof, door, and a chimney. */
 function house(footprint: number, height: number, random: Random): BuildingGeometrySet {

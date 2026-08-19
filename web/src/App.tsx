@@ -220,6 +220,8 @@ export default function App() {
                 <p>{snapshot.target.platform} · {snapshot.databases.length} databases</p>
               </div>
               <div className="legend" aria-label="Atlas legend">
+                <span><i className="legend-plot" /> city plot = allocated</span>
+                <span><i className="legend-tower" /> tallest tower = used</span>
                 <span><i className="legend-live" /> fresh live sample</span>
                 <span><i className="legend-unknown">×</i> unknown size</span>
               </div>
@@ -236,11 +238,15 @@ export default function App() {
                 </Suspense>
               </ChunkErrorBoundary>
               <p className="hover-readout" aria-live="polite">
-                {hovered ? `${hovered.name} — select to inspect exact evidence` : 'Move across a block or use the table below'}
+                {hovered ? `${hovered.name} — select to inspect exact evidence` : 'Move across a city or use the table below'}
               </p>
             </div>
             <p className="mapping-note">
-              Footprint uses allocated KiB: t = min(1, log₂(1 + A) / 50), area = 144 + 9072t. An × block has unknown size and carries no quantity.
+              Each database is a city. Plot side uses allocated KiB: t = min(1, log₂(1 + A) / 50), area = 144 + 9072t.
+              The tallest tower uses used KiB: log₂(1 + U) × 2.6, so zero used bytes is zero height. Blocks follow the
+              plot at one fixed block size; skyline shape, setbacks and masts are decoration seeded from the database id.
+              An × parcel has unknown allocated size and carries no quantity; a fenced city has unknown used size and
+              claims no height.
             </p>
           </section>
 

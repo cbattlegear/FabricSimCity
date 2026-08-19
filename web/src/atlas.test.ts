@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, databaseSide, evidenceText, formatBytes, formatDecimalCount, formatFill, isFreshLive, sizeToSide } from './atlas'
+import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, databaseHeight, databaseSide, evidenceText, formatBytes, formatDecimalCount, formatFill, isFreshLive, sizeToSide, usedToHeight } from './atlas'
 import type { DatabaseAtlasItem, Evidence } from './contracts'
 
 const observed = '2026-08-17T16:59:52Z'
@@ -82,6 +82,28 @@ describe('allocated size mapping', () => {
     const allocated = database('18014398509481986')
     allocated.used.bytes = '9007199254740993'
     expect(formatFill(allocated.used, allocated.allocated)).toBe('50.0%')
+  })
+})
+
+describe('used size mapping', () => {
+  it('adds a fixed height per doubling and stays strictly monotonic, with no cap', () => {
+    expect(usedToHeight(0)).toBe(0)
+    expect(usedToHeight(2 ** 20 - 1) - usedToHeight(2 ** 10 - 1)).toBeCloseTo(usedToHeight(2 ** 10 - 1))
+    expect(usedToHeight(2 ** 40)).toBeGreaterThan(usedToHeight(2 ** 30))
+    expect(() => usedToHeight(-1)).toThrow(RangeError)
+  })
+
+  it('keeps unknown used size separate from a measured zero', () => {
+    expect(databaseHeight(database(null, 'Unknown'))).toBeNull()
+    expect(databaseHeight(database('0'))).toBe(0)
+  })
+
+  it('reads used bytes, not allocated, so footprint and height stay independent dimensions', () => {
+    const item = database('1073741824')
+    item.used.bytes = '1048576'
+
+    expect(databaseHeight(item)).toBe(usedToHeight(1024))
+    expect(databaseSide(item)).toBe(sizeToSide(1024 * 1024))
   })
 })
 

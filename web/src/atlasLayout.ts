@@ -4,6 +4,33 @@ const columns = 10
 const slots = columns * columns
 const spacing = 112
 
+/**
+ * Squared distance of a slot from the centre of the grid. Squared is enough because it is only ever
+ * compared, and it keeps the ordering in exact integer-and-quarter arithmetic.
+ */
+const distanceFromCenter = (slot: number): number => {
+  const offsetX = (slot % columns) - (columns - 1) / 2
+  const offsetZ = Math.floor(slot / columns) - (columns - 1) / 2
+  return offsetX * offsetX + offsetZ * offsetZ
+}
+
+/**
+ * Slot indices ordered by distance from the centre of the grid.
+ *
+ * A database keeps whichever slot it is first given, but which slots get handed out first is a choice,
+ * and scattering them over the full hundred is the wrong one: a server with eight databases would spread
+ * them across a thousand units of mostly empty ground, and the camera would have to stand far enough
+ * back that no city could be told from any other and no name could be read. Handing out the central
+ * slots first keeps a small server compact and a large one no worse off, without any database ever
+ * moving once it is placed.
+ *
+ * Ties are broken by slot index so the order is fully determined.
+ */
+const slotsByDistance = Array.from({ length: slots }, (_, slot) => slot).sort((left, right) => {
+  const difference = distanceFromCenter(left) - distanceFromCenter(right)
+  return difference || left - right
+})
+
 export class AtlasLayoutReservations {
   private readonly slotsById = new Map<string, number>()
   private readonly occupied = new Set<number>()
@@ -19,8 +46,8 @@ export class AtlasLayoutReservations {
     }
 
     for (const id of unseenIds) {
-      let slot = stableHash(id) % slots
-      while (this.occupied.has(slot)) slot = (slot + 1) % slots
+      const slot = slotsByDistance.find(candidate => !this.occupied.has(candidate))
+      if (slot === undefined) throw new RangeError(`Atlas layout supports at most ${slots} reserved database IDs`)
       this.slotsById.set(id, slot)
       this.occupied.add(slot)
     }
