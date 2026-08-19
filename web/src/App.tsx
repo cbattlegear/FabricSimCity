@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { fetchArchiveInfo, fetchAtlas, fetchEdgeSourceInfo } from './api'
+import { fetchArchiveInfo, fetchAtlas, fetchDeploymentNotice, fetchEdgeSourceInfo } from './api'
 import { accessibleDatabaseLabel, collectorDisplayState, collectorSummary, evidenceText, formatBytes, formatDecimalCount, formatFill, metric } from './atlas'
 import { ChunkErrorBoundary } from './ChunkErrorBoundary'
 import type { ArchiveInfo, AtlasSnapshot, DatabaseAtlasItem, EdgeSourceInfo } from './contracts'
@@ -27,6 +27,15 @@ export default function App() {
   const [queryFamilyId, setQueryFamilyId] = useState<string | null>(null)
   const [archiveInfo, setArchiveInfo] = useState<ArchiveInfo | null>(null)
   const [edgeInfo, setEdgeInfo] = useState<EdgeSourceInfo | null>(null)
+  // Starts false so the notice draws until the server actually says it was
+  // acknowledged. A slow or failed read shows the warning; it never hides it.
+  const [noticeAcknowledged, setNoticeAcknowledged] = useState(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetchDeploymentNotice(controller.signal).then(setNoticeAcknowledged)
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -110,14 +119,16 @@ export default function App() {
           </div>
         )}
       </header>
-      <aside className="deploy-warning" role="note" aria-label="Deployment security notice">
-        <span className="deploy-warning-badge" aria-hidden="true">⚠</span>
-        <p>
-          <strong>Deployment notice:</strong> SQLSimCity has <strong>no built-in login or authentication</strong>.
-          Anyone who can reach this page sees all evidence. Serve it only on a trusted network or behind an
-          authenticating reverse proxy, and set <code>AllowedHosts</code> to the exact host(s) it is served on.
-        </p>
-      </aside>
+      {!noticeAcknowledged && (
+        <aside className="deploy-warning" role="note" aria-label="Deployment security notice">
+          <span className="deploy-warning-badge" aria-hidden="true">⚠</span>
+          <p>
+            <strong>Deployment notice:</strong> SQLSimCity has <strong>no built-in login or authentication</strong>.
+            Anyone who can reach this page sees all evidence. Serve it only on a trusted network or behind an
+            authenticating reverse proxy, and set <code>AllowedHosts</code> to the exact host(s) it is served on.
+          </p>
+        </aside>
+      )}
       {archiveInfo && <ArchiveInfoPanel info={archiveInfo} />}
       {edgeInfo && <EdgeSourcePanel info={edgeInfo} />}
       <div className="tabs" role="tablist" aria-label="Analysis views">

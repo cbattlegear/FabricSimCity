@@ -15,7 +15,9 @@ evidence, live DMVs are point-in-time samples, and inferred relationships are al
 their confidence.
 
 > **Security:** SQLSimCity has no built-in login. Keep it on loopback or a trusted network, or place
-> it behind an authenticating reverse proxy. The UI repeats this warning on every view.
+> it behind an authenticating reverse proxy. The UI repeats this warning on every view until you
+> acknowledge it with `Deployment__AcknowledgeSecurityWarnings=true`, which hides the banner and
+> nothing else — the API still logs its security warnings at warning level either way.
 
 ## Quick start with Docker
 

@@ -21,6 +21,12 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       Acquisition__Mode: Fixture
       Atlas__Mode: Fixture
+      # The browser shows a banner saying SQLSimCity has no login of its own.
+      # Uncomment to acknowledge and hide it -- useful for a demo or a screen
+      # recording. It hides the banner and nothing else: no authentication
+      # appears, and this process still logs its security warnings at warning
+      # level, which is where the record lives once the screen no longer shows it.
+      # Deployment__AcknowledgeSecurityWarnings: "true"
       # Offline archive mode is an explicit local startup action:
       # set Acquisition__Mode=Archive, set the two Archive values below, and
       # mount exactly one archive file read-only under /archives.

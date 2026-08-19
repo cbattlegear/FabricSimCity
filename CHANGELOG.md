@@ -15,6 +15,19 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **`Deployment__AcknowledgeSecurityWarnings` hides the browser security banner.** The UI states on
+  every page that SQLSimCity has no login of its own, which is worth saying once but dominates a demo
+  or a screen recording. Setting `Deployment__AcknowledgeSecurityWarnings=true`, or the unprefixed
+  `SQLSIMCITY_ACKNOWLEDGE_SECURITY_WARNINGS=true`, hides that banner. It is a display decision and
+  nothing more: no authentication appears, no host binding relaxes, and the startup warnings the API
+  writes to its own log — an inline connection string, or query text and plan XML retained in the
+  clear — are deliberately left at warning level and are **not** suppressed, so the log becomes the
+  durable record once the screen stops carrying it. Served from a new `GET /api/v1/deployment`, so it
+  takes effect on container restart with no image rebuild. It fails toward disclosure at every step:
+  the default shows the banner, an unreachable or malformed response shows the banner, and a value
+  that is neither affirmative nor negative stops startup with a named error rather than being guessed
+  at — a typo can never quietly suppress a security fact.
+
 - **The database city is now a city.** The 3D view was rebuilt from unlabelled boxes on a rigid grid
   into a navigable street-grid town, with every encoded dimension documented and everything else
   declared as decoration:

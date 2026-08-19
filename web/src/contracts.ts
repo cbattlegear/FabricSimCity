@@ -267,6 +267,19 @@ export interface EdgeSourceInfo {
   qualification: string
 }
 
+/**
+ * Whether the operator has acknowledged the deployment security notice.
+ *
+ * Acknowledging hides the browser banner and nothing else: no authentication
+ * appears, and the server still writes its security warnings to its own log at
+ * warning level. Absent or unreadable configuration leaves this false, so the
+ * notice shows -- the safe direction is always to state the risk.
+ */
+export interface DeploymentNotice {
+  schemaVersion: string
+  securityNoticeAcknowledged: boolean
+}
+
 export interface QueryStoreCollectorStatus {
   schemaVersion: string
   state: 'Disabled' | 'Starting' | 'Collecting' | 'Ready' | 'Partial' | 'Stale' | 'BackingOff' | 'Failed'

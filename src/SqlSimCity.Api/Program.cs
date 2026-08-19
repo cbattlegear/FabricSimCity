@@ -71,6 +71,10 @@ if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStora
 builder.Services.AddSqlSimCityHttpSecurity(builder.Configuration);
 builder.Services.AddEdgeIngestion(builder.Configuration);
 
+// Read now rather than per request, so an unparseable value stops startup instead of
+// surfacing as a 500 long after the operator has stopped watching.
+var securityNoticeAcknowledged = DeploymentNotice.IsAcknowledged(builder.Configuration);
+
 if (archiveMode)
 {
     builder.Services.AddArchiveSource(builder.Configuration);
@@ -217,6 +221,17 @@ app.MapGet("/api/v1/capabilities", (ICapabilitiesSource source, HttpContext cont
 {
     context.Response.Headers.CacheControl = "no-store";
     return Results.Ok(source.GetCurrent());
+});
+// Whether the browser draws the "no login of its own" notice. Acknowledging it is a
+// display decision only: the startup warnings in this process's log are untouched.
+app.MapGet("/api/v1/deployment", (HttpContext context) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(new
+    {
+        schemaVersion = "1.0",
+        securityNoticeAcknowledged,
+    });
 });
 app.MapGet("/api/v1/live", (ILiveIncidentResponseSource source, HttpContext context) =>
 {
