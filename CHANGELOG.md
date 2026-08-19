@@ -192,6 +192,21 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **System databases are excluded from Query Store evidence.** `master`, `tempdb`, `model`, and
+  `msdb` were collected like user databases, which produced noise in three places at once: a Query
+  Store options probe that failed or reported `OFF`, an atlas cycle counted as **degraded** because
+  of that failed component, and a `query-store-health` finding announcing an evidence gap in a
+  database that is not a workload evidence source to begin with. Query Store cannot be enabled on
+  `master` or `tempdb` at all, and the engine's own maintenance workload in `msdb` or the `model`
+  template is not application evidence. Those four names are now excluded at every stage: the
+  incremental collector drops them from both discovery and an explicit `Atlas__KnownDatabases` list
+  (an explicit list naming only system databases now collects nothing rather than silently falling
+  back to discovery), the connected atlas records their Query Store as `Unsupported` with the
+  exclusion as its stated reason instead of probing it, that record counts as neither a failure nor
+  a skip so it can never degrade a cycle, and `query-store-health` skips them by name. They remain
+  in the atlas with their capacity, live activity, and file-I/O evidence — only the Query Store
+  surface is withdrawn, and it says so rather than reading as a missing measurement.
+
 - **Building labels are larger and are never hidden by the city.** At the default framing most table
   labels were unreadable: they rasterized small and, being depth-tested, were drawn behind the very
   buildings they named. Labels now ignore the depth buffer entirely (`depthTest: false`, render order

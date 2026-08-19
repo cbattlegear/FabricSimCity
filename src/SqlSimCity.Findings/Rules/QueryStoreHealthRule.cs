@@ -1,4 +1,5 @@
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
 using SqlSimCity.Findings.Engine;
 
 namespace SqlSimCity.Findings.Rules;
@@ -7,7 +8,8 @@ namespace SqlSimCity.Findings.Rules;
 /// Reports databases whose Query Store cannot currently provide trustworthy historical evidence:
 /// disabled, read-only, in error, nearly full, or permission-denied/stale. This is an evidence-gap
 /// finding, not a performance diagnosis -- it exists so a reader never mistakes "no history" for
-/// "no problem". System databases where Query Store is legitimately unsupported are excluded.
+/// "no problem". System databases are excluded outright, as are databases where Query Store is
+/// reported unsupported.
 /// </summary>
 public sealed class QueryStoreHealthRule : IFindingRule
 {
@@ -26,6 +28,9 @@ public sealed class QueryStoreHealthRule : IFindingRule
         var findings = new List<FindingV1>();
         foreach (var database in atlas.Databases)
         {
+            if (SystemDatabases.IsSystemDatabase(database.Name))
+                continue;
+
             var condition = Classify(database.QueryStore);
             if (condition is null)
                 continue;
@@ -60,7 +65,7 @@ public sealed class QueryStoreHealthRule : IFindingRule
         }
 
         return findings.Count == 0
-            ? RuleResult.NotEvaluated("Every database with an atlas record has readable, healthy Query Store.")
+            ? RuleResult.NotEvaluated("Every non-system database with an atlas record has readable, healthy Query Store.")
             : RuleResult.Firing($"{findings.Count} database(s) cannot currently provide Query Store evidence.", findings);
     }
 

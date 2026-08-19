@@ -24,6 +24,23 @@ public sealed class QueryStoreAndWorkloadRuleTests
     }
 
     [Fact]
+    public void QueryStoreHealth_never_flags_a_system_database()
+    {
+        var rule = new QueryStoreHealthRule();
+        var atlas = FindingsTestData.Atlas(
+            FindingsTestData.AtlasDb("master", "master", QueryStoreCapability.Disabled, QueryStoreHealth.Unavailable, DataStatus.Disabled),
+            FindingsTestData.AtlasDb("tempdb", "tempdb", QueryStoreCapability.Unknown, QueryStoreHealth.Unknown, DataStatus.Unknown),
+            FindingsTestData.AtlasDb("msdb", "msdb", QueryStoreCapability.Disabled, QueryStoreHealth.Unavailable, DataStatus.Disabled),
+            FindingsTestData.AtlasDb("model", "model", QueryStoreCapability.Available, QueryStoreHealth.ReadOnly, DataStatus.Available),
+            FindingsTestData.AtlasDb("sales", "sales", QueryStoreCapability.Available, QueryStoreHealth.Healthy, DataStatus.Available));
+
+        var result = rule.Evaluate(FindingsTestData.Bundle(atlas: atlas));
+
+        Assert.Equal(FindingStatus.NotEvaluated, result.Outcome);
+        Assert.Empty(result.Findings);
+    }
+
+    [Fact]
     public void QueryStoreHealth_detects_nearly_full()
     {
         var rule = new QueryStoreHealthRule();

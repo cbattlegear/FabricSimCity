@@ -4,6 +4,7 @@ using System.Numerics;
 using SqlSimCity.Collection.Negotiation;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
 
 namespace SqlSimCity.Collection.Atlas;
 
@@ -189,7 +190,9 @@ public sealed class AtlasCollector
         var used = result.Space.Value is { } usedSpace
             ? KnownBytes(usedSpace.DataUsedBytes, spaceEvidence)
             : unknownSpace;
-        var queryStore = ProjectQueryStore(result.QueryStoreOptions, result.QueryStoreWorkload, collectedAt, source);
+        var queryStore = SystemDatabases.IsSystemDatabase(result.Identity.Name)
+            ? ExcludedQueryStore(result.Identity.Name, collectedAt, source)
+            : ProjectQueryStore(result.QueryStoreOptions, result.QueryStoreWorkload, collectedAt, source);
         return new DatabaseAtlasItemV1(
             databaseId,
             result.Identity.Name,
@@ -210,6 +213,20 @@ public sealed class AtlasCollector
                 ? ProjectIo(databaseId, io, target.SqlServerResetEpochToken, source, collectedAt)
                 : UnavailableIo(result.FileIo, source, collectedAt),
         };
+    }
+
+    private QueryStoreHistoryV1 ExcludedQueryStore(
+        string databaseName,
+        DateTimeOffset collectedAt,
+        DateTimeOffset source)
+    {
+        var reason = SystemDatabases.QueryStoreExclusionReason(databaseName);
+        return new QueryStoreHistoryV1(
+            null, null, null, null, null,
+            QueryStoreCapability.Unsupported, QueryStoreHealth.Unavailable, reason,
+            new EvidenceV1(
+                EvidenceSource.NotProbed, DataStatus.Unsupported, source,
+                collectedAt + _options.StaleAfter, reason));
     }
 
     private QueryStoreHistoryV1 ProjectQueryStore(

@@ -239,8 +239,15 @@ Raw SQL and Showplan XML are fetched only on demand and stored as 7-day detail. 
 facts and hourly history are retained for 90 days by default.
 
 Collection needs Query Store to be enabled on the databases themselves (`ALTER DATABASE ... SET
-QUERY_STORE = ON`); databases with it off are discovered and skipped. It cannot be enabled on
-`master`, so a connection string pointing only at `master` collects nothing.
+QUERY_STORE = ON`); databases with it off are discovered and skipped.
+
+The system databases `master`, `tempdb`, `model`, and `msdb` are excluded from Query Store
+entirely. Query Store cannot be enabled on `master` or `tempdb` at all, and the engine's own
+maintenance workload in `msdb` or the `model` template is not application evidence. They are never
+collected (naming one in `Atlas__KnownDatabases` collects nothing from it), their atlas record
+reports Query Store as `Unsupported` rather than as a failed component, so they never make a
+collection cycle report as degraded, and the `query-store-health` finding is never raised against
+them. They still appear in the atlas with their capacity, live activity, and file-I/O evidence.
 
 ### Live incidents
 
