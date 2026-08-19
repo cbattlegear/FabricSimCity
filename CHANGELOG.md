@@ -15,6 +15,22 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **`ReverseProxy` restores per-client API rate limiting behind a proxy.** The rate limiter partitions
+  on the connection's remote address, so behind a reverse proxy every caller previously collapsed into
+  one shared 600-per-60s bucket and one noisy client could exhaust it for everyone. Setting
+  `ReverseProxy__Enabled=true` together with `ReverseProxy__KnownProxies` (exact peers) or
+  `ReverseProxy__KnownNetworks` (CIDR blocks) honours `X-Forwarded-For` and `X-Forwarded-Proto` from
+  those peers only, giving each client its own bucket again; both accept semicolon- or
+  comma-separated values. Off by default, so the shipped pipeline is unchanged. Enabling it without
+  naming a peer **stops startup**: `X-Forwarded-For` is client-supplied text, and an unrestricted
+  allowlist would let anyone reaching the port claim an address and take a private bucket per request,
+  which is worse than the shared bucket the setting fixes. A request carrying `X-Forwarded-For` from an
+  unlisted peer has the header ignored and logs `ForwardedHeadersFromUntrustedPeer` once naming the
+  address seen, because an ignored header otherwise looks exactly like a working deployment.
+  `X-Forwarded-Host` is never honoured — `AllowedHosts` filters on the request host, and a header must
+  not rewrite the value that check reads. Once enabled, recorded client addresses are asserted by the
+  proxy rather than observed by this process. See
+  [`docs/operations.md`](docs/operations.md#forwarded-client-addresses).
 - **`Deployment__AcknowledgeSecurityWarnings` hides the browser security banner.** The UI states on
   every page that SQLSimCity has no login of its own, which is worth saying once but dominates a demo
   or a screen recording. Setting `Deployment__AcknowledgeSecurityWarnings=true`, or the unprefixed

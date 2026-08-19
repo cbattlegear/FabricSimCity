@@ -68,6 +68,7 @@ if (queryStoreConnected && !builder.Configuration.GetValue<bool>("ProtectedStora
         "SECURITY.md for what lands there), or drive the connection from a connection string, " +
         "which enables it automatically.");
 
+builder.Services.AddSqlSimCityReverseProxy(builder.Configuration);
 builder.Services.AddSqlSimCityHttpSecurity(builder.Configuration);
 builder.Services.AddEdgeIngestion(builder.Configuration);
 
@@ -186,6 +187,11 @@ if (protectedStorageInitializer is not null)
 {
     await protectedStorageInitializer.EnsureReadyAsync(app.Lifetime.ApplicationStopping);
 }
+
+// Ahead of everything else: the rate limiter below partitions on the connection's
+// remote address, so a forwarded client address has to be in place before it runs.
+// Disabled by default, in which case this adds no middleware at all.
+app.UseSqlSimCityReverseProxy();
 
 app.Use(async (context, next) =>
 {
