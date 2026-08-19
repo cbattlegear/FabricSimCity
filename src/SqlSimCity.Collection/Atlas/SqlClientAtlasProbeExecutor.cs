@@ -6,6 +6,7 @@ using Microsoft.Data.SqlClient;
 using SqlSimCity.Collection.Catalog;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
 using SqlSimCity.SqlServer;
 using SqlSimCity.SqlServer.Secrets;
 
@@ -79,32 +80,44 @@ public sealed class SqlClientAtlasProbeExecutor : IAtlasProbeExecutor
         var space = await CaptureComponentAsync(
             () => ReadSpaceAsync(databaseName, cancellationToken),
             cancellationToken).ConfigureAwait(false);
-        var options = await CaptureComponentAsync(
-            () => ReadQueryStoreOptionsAsync(databaseName, selection.QueryStoreOptionsProbeId, cancellationToken),
-            cancellationToken).ConfigureAwait(false);
+        AtlasComponentOutcome<AtlasQueryStoreOptionsResult> options;
         AtlasComponentOutcome<AtlasQueryStoreWorkloadResult> workload;
-        if (options.Value is not { } queryStoreOptions)
+        if (SystemDatabases.IsSystemDatabase(databaseName))
         {
+            var excluded = SystemDatabases.QueryStoreExclusionReason(databaseName);
+            options = AtlasComponentOutcome.Skipped<AtlasQueryStoreOptionsResult>(
+                DataStatus.Unsupported, excluded);
             workload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
-                options.Status, "Query Store workload was not probed because options were unavailable.");
-        }
-        else if (!IsQueryStoreReadable(queryStoreOptions.ActualState))
-        {
-            workload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
-                DataStatus.Disabled, $"Query Store workload was not probed while state was {queryStoreOptions.ActualState}.");
+                DataStatus.Unsupported, excluded);
         }
         else
         {
-            workload = await CaptureComponentAsync(async () =>
+            options = await CaptureComponentAsync(
+                () => ReadQueryStoreOptionsAsync(databaseName, selection.QueryStoreOptionsProbeId, cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+            if (options.Value is not { } queryStoreOptions)
             {
-                var resolved = await ResolveWorkloadProbeAsync(
-                    databaseName, selection.QueryStoreWorkloadProbeId, cancellationToken).ConfigureAwait(false);
-                var summary = await ReadQueryStoreWorkloadAsync(
-                    databaseName, resolved.ProbeId, queryStoreWindowStart, queryStoreWindowEnd, cancellationToken)
-                    .ConfigureAwait(false);
-                return new ComponentValue<AtlasQueryStoreWorkloadResult>(
-                    summary.Value, summary.Rows + resolved.Rows);
-            }, cancellationToken).ConfigureAwait(false);
+                workload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
+                    options.Status, "Query Store workload was not probed because options were unavailable.");
+            }
+            else if (!IsQueryStoreReadable(queryStoreOptions.ActualState))
+            {
+                workload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
+                    DataStatus.Disabled, $"Query Store workload was not probed while state was {queryStoreOptions.ActualState}.");
+            }
+            else
+            {
+                workload = await CaptureComponentAsync(async () =>
+                {
+                    var resolved = await ResolveWorkloadProbeAsync(
+                        databaseName, selection.QueryStoreWorkloadProbeId, cancellationToken).ConfigureAwait(false);
+                    var summary = await ReadQueryStoreWorkloadAsync(
+                        databaseName, resolved.ProbeId, queryStoreWindowStart, queryStoreWindowEnd, cancellationToken)
+                        .ConfigureAwait(false);
+                    return new ComponentValue<AtlasQueryStoreWorkloadResult>(
+                        summary.Value, summary.Rows + resolved.Rows);
+                }, cancellationToken).ConfigureAwait(false);
+            }
         }
         var io = await CaptureComponentAsync(
             () => ReadIoAsync(databaseName, selection.FileIoProbeId, cancellationToken),

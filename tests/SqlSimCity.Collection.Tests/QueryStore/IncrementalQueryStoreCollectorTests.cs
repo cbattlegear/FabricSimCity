@@ -170,6 +170,51 @@ public sealed class IncrementalQueryStoreCollectorTests
         Assert.Equal(0, unknownResult.Databases[0].PageCount);
     }
 
+    [Fact]
+    public async Task SystemDatabasesAreExcludedFromAnExplicitCollectionList()
+    {
+        var source = new FakeSource();
+        var sink = new FakeSink();
+        using var collector = new IncrementalQueryStoreCollector(
+            source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+
+        var result = await collector.CollectAsync(
+            ["master", "sales", "tempdb", "msdb", "model"], Through);
+
+        Assert.Equal(["sales"], result.RequestedDatabaseIds);
+        Assert.Equal(["sales"], result.Databases.Select(database => database.DatabaseId));
+        Assert.Equal(["sales"], source.StateRequests);
+    }
+
+    [Fact]
+    public async Task SystemDatabasesAreExcludedFromDiscovery()
+    {
+        var source = new FakeSource { DiscoveredDatabases = ["MSDB", " master ", "sales"] };
+        var sink = new FakeSink();
+        using var collector = new IncrementalQueryStoreCollector(
+            source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+
+        var result = await collector.CollectAsync(null, Through);
+
+        Assert.Equal(["sales"], result.Databases.Select(database => database.DatabaseId));
+    }
+
+    [Fact]
+    public async Task AnExplicitSystemOnlyListCollectsNothingRatherThanFallingBackToDiscovery()
+    {
+        var source = new FakeSource();
+        var sink = new FakeSink();
+        using var collector = new IncrementalQueryStoreCollector(
+            source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+
+        var result = await collector.CollectAsync(["master", "tempdb"], Through);
+
+        Assert.Empty(result.RequestedDatabaseIds!);
+        Assert.Empty(result.Databases);
+        Assert.Empty(source.StateRequests);
+        Assert.True(sink.Published);
+    }
+
     private static QueryStoreFactPage Page(QueryStoreFactKind kind, string? next) =>
         new(kind, [], next, false);
 
@@ -186,6 +231,8 @@ public sealed class IncrementalQueryStoreCollectorTests
     {
         public Dictionary<(QueryStoreFactKind, string?), QueryStoreFactPage> Pages { get; } = [];
         public List<DateTimeOffset> Starts { get; } = [];
+        public List<string> StateRequests { get; } = [];
+        public IReadOnlyList<string> DiscoveredDatabases { get; init; } = ["db"];
         public QueryStoreFactKind? FailKind { get; init; }
         public QueryStoreDatabaseState State { get; set; } = IncrementalQueryStoreCollectorTests.State();
         public bool BlockState { get; init; }
@@ -195,11 +242,12 @@ public sealed class IncrementalQueryStoreCollectorTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task<IReadOnlyList<string>> DiscoverDatabasesAsync(CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<string>>(["db"]);
+            Task.FromResult(DiscoveredDatabases);
 
         public async Task<QueryStoreDatabaseState> GetStateAsync(
             string databaseId, CancellationToken cancellationToken)
         {
+            lock (StateRequests) StateRequests.Add(databaseId);
             StateEntered.TrySetResult();
             if (BlockState) await ReleaseState.Task.WaitAsync(cancellationToken);
             return State;

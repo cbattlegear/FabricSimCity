@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
 
 namespace SqlSimCity.Collection.QueryStore;
 
@@ -200,6 +201,9 @@ public sealed class IncrementalQueryStoreCollector : IDisposable
             var databases = databaseIds?.Distinct(StringComparer.Ordinal).ToArray();
             if (databases is null || databases.Length == 0)
                 databases = [.. await _source.DiscoverDatabasesAsync(cancellationToken).ConfigureAwait(false)];
+            // Applied after resolution so an explicit list of only system databases collects nothing
+            // instead of silently falling back to discovery.
+            databases = [.. databases.Where(name => !SystemDatabases.IsSystemDatabase(name))];
             var results = new ConcurrentBag<QueryStoreDatabaseCollectionResult>();
             await Parallel.ForEachAsync(
                 databases,

@@ -1,4 +1,5 @@
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain;
 
 namespace SqlSimCity.Collection.Atlas;
 
@@ -104,12 +105,22 @@ public sealed record AtlasDatabaseProbeResult(
     DateTimeOffset SourceTimestamp,
     int IdentityRowCount)
 {
+    /// <summary>
+    /// Query Store is not a collected component of a system database, so its outcome is neither a
+    /// failure nor a skip there and can never make a collection cycle report as degraded.
+    /// </summary>
+    private bool QueryStoreCollected => !SystemDatabases.IsSystemDatabase(Identity.Name);
+
     public int RowCount => IdentityRowCount + Space.RowCount + QueryStoreOptions.RowCount +
                            QueryStoreWorkload.RowCount + FileIo.RowCount;
-    public int FailureCount => (Space.IsFailure ? 1 : 0) + (QueryStoreOptions.IsFailure ? 1 : 0) +
-                               (QueryStoreWorkload.IsFailure ? 1 : 0) + (FileIo.IsFailure ? 1 : 0);
-    public int SkipCount => (Space.IsSkipped ? 1 : 0) + (QueryStoreOptions.IsSkipped ? 1 : 0) +
-                            (QueryStoreWorkload.IsSkipped ? 1 : 0) + (FileIo.IsSkipped ? 1 : 0);
+    public int FailureCount => (Space.IsFailure ? 1 : 0) + (FileIo.IsFailure ? 1 : 0) +
+                               (QueryStoreCollected
+                                   ? (QueryStoreOptions.IsFailure ? 1 : 0) + (QueryStoreWorkload.IsFailure ? 1 : 0)
+                                   : 0);
+    public int SkipCount => (Space.IsSkipped ? 1 : 0) + (FileIo.IsSkipped ? 1 : 0) +
+                            (QueryStoreCollected
+                                ? (QueryStoreOptions.IsSkipped ? 1 : 0) + (QueryStoreWorkload.IsSkipped ? 1 : 0)
+                                : 0);
 }
 
 public sealed record AtlasComponentOutcome<T>(

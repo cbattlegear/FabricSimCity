@@ -145,6 +145,45 @@ public sealed class AtlasCollectorTests
     }
 
     [Fact]
+    public async Task SystemDatabaseQueryStoreIsExcludedInsteadOfCollectedOrDegraded()
+    {
+        var executor = new FakeExecutor
+        {
+            Databases =
+            [
+                new AtlasDatabaseIdentity("master", "ONLINE", 160, false),
+                new AtlasDatabaseIdentity("sales", "ONLINE", 160, true),
+            ],
+            Result = name => name switch
+            {
+                "master" => DatabaseResult(name) with
+                {
+                    QueryStoreOptions = AtlasComponentOutcome.Failure<AtlasQueryStoreOptionsResult>(
+                        DataStatus.Unknown, "The Query Store options probe returned no row."),
+                    QueryStoreWorkload = AtlasComponentOutcome.Skipped<AtlasQueryStoreWorkloadResult>(
+                        DataStatus.Unknown, "Workload depends on options."),
+                },
+                _ => DatabaseResult(name),
+            },
+        };
+
+        var result = await Collector(executor).CollectAsync(1, CancellationToken.None);
+        var master = result.Snapshot.Databases.Single(database => database.Name == "master");
+
+        Assert.Equal(QueryStoreCapability.Unsupported, master.QueryStore.Capability);
+        Assert.Equal(QueryStoreHealth.Unavailable, master.QueryStore.Health);
+        Assert.Equal(EvidenceSource.NotProbed, master.QueryStore.Evidence.Source);
+        Assert.Equal(DataStatus.Unsupported, master.QueryStore.Evidence.Status);
+        Assert.Null(master.QueryStore.ExecutionCount);
+        Assert.Contains("system database", master.QueryStore.Reason, StringComparison.Ordinal);
+        Assert.Equal("9007199254740993", master.Allocated.Bytes);
+        Assert.Equal(QueryStoreCapability.Available,
+            result.Snapshot.Databases.Single(database => database.Name == "sales").QueryStore.Capability);
+        Assert.Equal(0, result.Status.FailureCount);
+        Assert.Equal(AtlasCollectorState.Ready, result.Status.State);
+    }
+
+    [Fact]
     public async Task PreservesStorageAndIoWhenQueryStoreOptionsAreDenied()
     {
         var executor = new FakeExecutor
