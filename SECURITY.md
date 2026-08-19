@@ -6,6 +6,8 @@ The application defaults to deterministic fixture mode, which creates no SQL con
 
 The application exposes operational-shaped evidence to every client that can reach it. **There is no authentication or authorization.** Run the default Compose configuration on loopback or another explicitly trusted network only. Do not publish port 8080 on all interfaces or place the service on the public internet.
 
+The browser states that in a banner on every page. An operator who has read it and does not want it in a demo or a screen recording can set `Deployment__AcknowledgeSecurityWarnings=true` (or the unprefixed `SQLSIMCITY_ACKNOWLEDGE_SECURITY_WARNINGS=true`) to hide it. That setting governs the banner and nothing else: no authentication appears, no host binding relaxes, and the startup warnings this process writes to its own log — an inline connection string, or query text and plan XML retained in the clear — are deliberately left at warning level and are never suppressed by it. The log is the durable record precisely because the screen no longer carries the notice. The default is to show the banner, and only an explicit affirmative hides it; a value that is neither affirmative nor negative stops startup rather than being guessed at, so a typo can never quietly suppress a security fact.
+
 Security headers enforce a same-origin baseline: no permissive CORS, no remote scripts, no `unsafe-eval`, and locked-down object, base, and frame-ancestor policies. SignalR uses same-origin `connect-src 'self'`. Health probes return only generic status and no target identity.
 
 ### Connected edge connector

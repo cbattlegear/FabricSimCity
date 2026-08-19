@@ -15,6 +15,19 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **`Deployment__AcknowledgeSecurityWarnings` hides the browser security banner.** The UI states on
+  every page that SQLSimCity has no login of its own, which is worth saying once but dominates a demo
+  or a screen recording. Setting `Deployment__AcknowledgeSecurityWarnings=true`, or the unprefixed
+  `SQLSIMCITY_ACKNOWLEDGE_SECURITY_WARNINGS=true`, hides that banner. It is a display decision and
+  nothing more: no authentication appears, no host binding relaxes, and the startup warnings the API
+  writes to its own log — an inline connection string, or query text and plan XML retained in the
+  clear — are deliberately left at warning level and are **not** suppressed, so the log becomes the
+  durable record once the screen stops carrying it. Served from a new `GET /api/v1/deployment`, so it
+  takes effect on container restart with no image rebuild. It fails toward disclosure at every step:
+  the default shows the banner, an unreachable or malformed response shows the banner, and a value
+  that is neither affirmative nor negative stops startup with a named error rather than being guessed
+  at — a typo can never quietly suppress a security fact.
+
 - **The database city is now a city.** The 3D view was rebuilt from unlabelled boxes on a rigid grid
   into a navigable street-grid town, with every encoded dimension documented and everything else
   declared as decoration:
@@ -162,6 +175,18 @@ First MVP release candidate. There is no tagged release yet.
   backup/restore tooling with operations documentation.
 
 ### Changed
+
+- **Building labels are larger and are never hidden by the city.** At the default framing most table
+  labels were unreadable: they rasterized small and, being depth-tested, were drawn behind the very
+  buildings they named. Labels now ignore the depth buffer entirely (`depthTest: false`, render order
+  above every other pass in the scene) and `LABEL_WORLD_HEIGHT` rises from `3.6` to `6.2`. Measured
+  on the sales fixture at the reset view: all 10 labels resolve as distinct on-screen boxes with
+  **zero overlapping pairs**, and glyph bands grow from roughly 9-12px to 15-20px. `LABEL_MAX_CHARS`
+  drops from `32` to `24` to hold plate width in check, since width scales with the new height and a
+  long name would otherwise span several lots; the elision is still from the middle, so both ends of
+  a name survive, and the full name remains in the evidence tables and detail panel. The tradeoff is
+  disclosed rather than hidden: a label drawn in front can overlap geometry it does not name, so the
+  "what encodes evidence" note now states that a label names only the building at its own anchor.
 
 - **Multi-object query plans are drawn instead of footnoted.** A query family naming more than one
   object used to be dropped from the wait layer entirely: its milliseconds went into a text-only

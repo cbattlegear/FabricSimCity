@@ -1,5 +1,5 @@
 import * as signalR from '@microsoft/signalr'
-import type { ArchiveInfo, AtlasSnapshot, EdgeSourceInfo, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
+import type { ArchiveInfo, AtlasSnapshot, DeploymentNotice, EdgeSourceInfo, NormalizedShowplan, PlanComparison, QueryFamilyDetail, QueryFamilyPage, QueryStoreCollectorStatus } from './contracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import type { DatabaseCityPage, DatabaseCitySummarySnapshot } from './databaseCityContracts'
 import { assertAtlasSnapshot } from './atlas'
@@ -37,6 +37,26 @@ export async function fetchEdgeSourceInfo(signal?: AbortSignal): Promise<EdgeSou
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`Edge source request failed with status ${response.status}`)
   return response.json() as Promise<EdgeSourceInfo>
+}
+
+/**
+ * Reads the deployment notice setting. This never rejects: if the endpoint is
+ * unreachable or malformed we report "not acknowledged", so a transport problem
+ * can only ever make the security notice appear, never make it disappear.
+ */
+export async function fetchDeploymentNotice(signal?: AbortSignal): Promise<boolean> {
+  try {
+    const response = await fetch('/api/v1/deployment', {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) return false
+    const body = await response.json() as Partial<DeploymentNotice>
+    return body.securityNoticeAcknowledged === true
+  } catch {
+    return false
+  }
 }
 
 export async function fetchLiveIncidents(signal?: AbortSignal): Promise<LiveIncidentResponse> {
