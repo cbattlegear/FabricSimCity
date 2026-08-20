@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ATLAS_LABEL_MAX_CHARS,
   buildingLabelText,
   createCityLabels,
+  databaseLabelText,
   elideMiddle,
   labelAnchor,
   labelWorldWidth,
@@ -22,6 +24,22 @@ describe('buildingLabelText', () => {
     const label = buildingLabelText('WarehouseStaging', 'FactInventorySnapshotDailyRollup')
     expect([...label]).toHaveLength(LABEL_MAX_CHARS)
     expect(label).toContain('…')
+  })
+})
+
+describe('databaseLabelText', () => {
+  it('names a database city without qualifying it, because nothing qualifies a database', () => {
+    expect(databaseLabelText('sales')).toBe('sales')
+  })
+
+  it('elides a name that would spill across the grid pitch into a neighbouring city', () => {
+    const label = databaseLabelText('WarehouseStagingArchive2024')
+    expect([...label]).toHaveLength(ATLAS_LABEL_MAX_CHARS)
+    expect(label).toContain('…')
+  })
+
+  it('stays narrower than a database-city label, since atlas labels are drawn larger', () => {
+    expect(ATLAS_LABEL_MAX_CHARS).toBeLessThan(LABEL_MAX_CHARS)
   })
 })
 
@@ -139,6 +157,19 @@ describe('createCityLabels', () => {
       const sprite = labels.make('dbo.Customer')!
       expect(sprite.scale.y).toBeCloseTo(LABEL_WORLD_HEIGHT)
       expect(sprite.scale.x).toBeGreaterThan(0)
+      labels.dispose()
+    } finally {
+      restore()
+    }
+  })
+
+  it('sizes to the height the asking scene needs, so the atlas is readable at its own scale', () => {
+    const restore = stubCanvas()
+    try {
+      const labels = createCityLabels(11)
+      const sprite = labels.make('sales')!
+      expect(sprite.scale.y).toBeCloseTo(11)
+      expect(sprite.scale.x).toBeCloseTo(labelWorldWidth(190, 80, 11))
       labels.dispose()
     } finally {
       restore()

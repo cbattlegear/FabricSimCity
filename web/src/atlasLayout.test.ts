@@ -37,8 +37,22 @@ describe('stable atlas layout reservations', () => {
     expect(layout.place(ids).get(ids[0]!)).toEqual(original)
   })
 
-  it('does not move an existing ID when an earlier colliding ID arrives', () => {
-    const existingId = 'target/database/existing'
+  it('keeps a small server compact instead of scattering it over the reservation grid', () => {
+    const positions = [...new AtlasLayoutReservations().place(ids).values()]
+    const spread = Math.max(
+      ...positions.map(position => Math.max(Math.abs(position.x), Math.abs(position.z))),
+    )
+    // Eight databases must not need more than a couple of grid steps of ground, or nothing is legible.
+    expect(spread).toBeLessThanOrEqual(112 * 1.5)
+  })
+
+  it('gives an existing ID the same position whether or not later databases exist', () => {
+    const layout = new AtlasLayoutReservations()
+    const alone = layout.place([ids[0]!]).get(ids[0]!)
+    expect(layout.place(ids).get(ids[0]!)).toEqual(alone)
+  })
+
+  it('does not move an existing ID when an earlier colliding ID arrives', () => {    const existingId = 'target/database/existing'
     const initialSlot = stableHash(existingId) % 100
     const existingHash = stableHash(existingId)
     let earlierCollision: string | undefined
