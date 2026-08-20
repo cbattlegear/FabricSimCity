@@ -15,7 +15,8 @@ drawn as a wireframe rather than a guess.
 
 ## What it does
 
-- **Server atlas** — every database on the instance, footprint sized by allocated storage.
+- **Server atlas** — every database on the instance as its own city, plot sized by allocated storage
+  and tallest tower by used storage.
 - **Database city** — tables and indexes as buildings, query families as roads, Query Store waits as
   lanes into tempdb, log, lock, memory-grant, CPU, and I/O facilities.
 - **Query Store history** — ranked query families with runtime timelines and compiled-plan comparison.
@@ -65,7 +66,7 @@ permissions, Azure SQL, Query Store, and live sampling.
 
 | Server atlas | Query Store history |
 | --- | --- |
-| ![Server atlas showing every database on the instance as a block sized by allocated storage](docs/images/atlas.png) | ![Query Store history ranking query families by CPU, with a runtime timeline for the selected family](docs/images/querystore.png) |
+| ![Server atlas showing every database on the instance as its own city, with the plot sized by allocated storage and the tallest tower by used storage](docs/images/atlas.png) | ![Query Store history ranking query families by CPU, with a runtime timeline for the selected family](docs/images/querystore.png) |
 | **Live incidents** | **Findings** |
 | ![Live incidents panel showing active requests, waiting tasks, a blocking graph, tempdb, and scheduler pressure](docs/images/live.png) | ![Findings panel showing a serious plan-regression finding with its measured impact, observed window, source, and evidence](docs/images/findings.png) |
 
