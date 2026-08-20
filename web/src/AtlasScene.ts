@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { isFreshLive } from './atlas'
+import { CityActivation } from './atlasActivation'
 import { cityGeometrySignature, planAtlasCity, type AtlasCityPlan } from './atlasCity'
 import { buildAtlasCityGeometry, PAD_HEIGHT, type AtlasCityGeometry } from './atlasCityBuildings'
 import { fitDistance, MIN_FRAME_EXTENT, VIEW_DIRECTION } from './atlasFraming'
@@ -34,6 +35,7 @@ const LABEL_KERB = 7
 type AtlasSceneCallbacks = {
   onHover: (databaseId: string | null) => void
   onSelect: (databaseId: string) => void
+  onOpen: (databaseId: string) => void
 }
 
 type Beacon = { mesh: THREE.Mesh; phase: number }
@@ -47,6 +49,7 @@ export class AtlasScene {
   private readonly interactive: THREE.Object3D[] = []
   private readonly beacons: Beacon[] = []
   private readonly layout = new AtlasLayoutReservations()
+  private readonly activation = new CityActivation()
   private readonly resizeObserver: ResizeObserver
   private readonly reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
   private frame: number | null = null
@@ -92,6 +95,7 @@ export class AtlasScene {
     canvas.addEventListener('pointermove', this.handlePointerMove)
     canvas.addEventListener('pointerleave', this.handlePointerLeave)
     canvas.addEventListener('click', this.handleClick)
+    canvas.addEventListener('dblclick', this.handleDoubleClick)
     this.reducedMotion.addEventListener('change', this.handleMotionPreference)
     this.resize()
   }
@@ -141,6 +145,7 @@ export class AtlasScene {
     this.canvas.removeEventListener('pointermove', this.handlePointerMove)
     this.canvas.removeEventListener('pointerleave', this.handlePointerLeave)
     this.canvas.removeEventListener('click', this.handleClick)
+    this.canvas.removeEventListener('dblclick', this.handleDoubleClick)
     this.reducedMotion.removeEventListener('change', this.handleMotionPreference)
     this.clearAtlasObjects()
     for (const geometry of this.geometryCache.values()) disposeCityGeometry(geometry)
@@ -334,7 +339,18 @@ export class AtlasScene {
   }
 
   private readonly handleClick = (): void => {
+    this.activation.click(this.hoveredId)
     if (this.hoveredId) this.callbacks.onSelect(this.hoveredId)
+  }
+
+  /**
+   * Enters the double-clicked database's city. The click handler has already selected it, so the
+   * detail panel and the city view name the same database, and the panel's own button stays the
+   * keyboard-reachable way to do this.
+   */
+  private readonly handleDoubleClick = (): void => {
+    const databaseId = this.activation.activate()
+    if (databaseId) this.callbacks.onOpen(databaseId)
   }
 
   private readonly handleMotionPreference = (): void => this.syncAnimation()

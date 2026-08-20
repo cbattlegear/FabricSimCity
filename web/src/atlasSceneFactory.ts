@@ -4,6 +4,7 @@ import { AtlasScene } from './AtlasScene'
 type AtlasSceneCallbacks = {
   onHover: (databaseId: string | null) => void
   onSelect: (databaseId: string) => void
+  onOpen: (databaseId: string) => void
 }
 
 export interface AtlasSceneController {

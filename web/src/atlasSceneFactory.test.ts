@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { tryCreateAtlasScene, type AtlasSceneFactory } from './atlasSceneFactory'
 
 const canvas = {} as HTMLCanvasElement
-const callbacks = { onHover: vi.fn(), onSelect: vi.fn() }
+const callbacks = { onHover: vi.fn(), onSelect: vi.fn(), onOpen: vi.fn() }
 
 describe('3D scene initialization fallback', () => {
   it('returns null instead of throwing when WebGL initialization fails', () => {
