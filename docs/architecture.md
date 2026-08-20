@@ -73,6 +73,14 @@ Every city is named on the ground, with the label vocabulary shared with the dat
 remain separate dimensions, reported in the evidence table rather than in the geometry. A fresh live
 sample adds a pulsing beacon over the city, and inferred topology edges keep their own line styles.
 
+Hovering a city reports its name, a click selects it and fills the evidence panel, and a double-click
+enters that database's city, so the atlas descends to the next altitude by the same gesture a map
+uses. A double-click only opens the city that both of its clicks landed on
+(`web/src/atlasActivation.ts`): the browser pairs any two clicks that fall close together in time,
+and clicking one database and then its neighbour to compare them must not throw the reader into
+either of them. The detail panel's "Enter database city" button stays the keyboard-reachable way to
+do the same thing, and the evidence table below stays the non-WebGL one.
+
 Placement and framing are presentation, not evidence, and both exist so the encodings above can
 actually be compared by eye. `web/src/atlasLayout.ts` reserves one of a hundred grid slots per
 database and hands out the slots nearest the centre first, so a server with eight databases is a

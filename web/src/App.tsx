@@ -84,11 +84,11 @@ export default function App() {
   const hovered = snapshot?.databases.find(database => database.databaseId === hoveredId) ?? null
   const sourceState = collectorDisplayState(snapshot?.collection, refreshError !== null)
   const cityDatabase = snapshot?.databases.find(database => database.databaseId === cityDatabaseId) ?? null
-  const enterDatabase = useCallback((database: DatabaseAtlasItem) => {
-    setCityDatabaseId(database.databaseId)
+  const enterDatabase = useCallback((databaseId: string) => {
+    setCityDatabaseId(databaseId)
     const url = new URL(window.location.href)
     url.searchParams.set('view', 'city')
-    url.searchParams.set('database', database.databaseId)
+    url.searchParams.set('database', databaseId)
     url.searchParams.delete('object')
     window.history.replaceState(null, '', url)
   }, [])
@@ -234,11 +234,12 @@ export default function App() {
                     selectedId={selectedId}
                     onHover={hoverDatabase}
                     onSelect={selectDatabase}
+                    onOpen={enterDatabase}
                   />
                 </Suspense>
               </ChunkErrorBoundary>
               <p className="hover-readout" aria-live="polite">
-                {hovered ? `${hovered.name} — select to inspect exact evidence` : 'Move across a city or use the table below'}
+                {hovered ? `${hovered.name} — click to inspect exact evidence, double-click to enter its city` : 'Move across a city or use the table below'}
               </p>
             </div>
             <p className="mapping-note">
@@ -378,13 +379,13 @@ function StatusCell({ database, kind }: { database: DatabaseAtlasItem; kind: 'li
 
 function DetailPanel({ database, onEnterDatabase }: {
   database: DatabaseAtlasItem | null
-  onEnterDatabase: (database: DatabaseAtlasItem) => void
+  onEnterDatabase: (databaseId: string) => void
 }) {
   if (!database) return <aside className="detail"><p>Select a database to inspect exact evidence.</p></aside>
   return (
     <aside className="detail" aria-labelledby="detail-title">
       <div className="detail-title"><h2 id="detail-title">{database.name}</h2><span>exact record</span></div>
-      <button className="enter-database" type="button" onClick={() => onEnterDatabase(database)}>
+      <button className="enter-database" type="button" onClick={() => onEnterDatabase(database.databaseId)}>
         Enter database city
       </button>
       <dl>

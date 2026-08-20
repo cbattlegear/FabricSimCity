@@ -7,16 +7,17 @@ type AtlasViewportProps = {
   selectedId: string | null
   onHover: (databaseId: string | null) => void
   onSelect: (databaseId: string) => void
+  onOpen: (databaseId: string) => void
 }
 
-export function AtlasViewport({ snapshot, selectedId, onHover, onSelect }: AtlasViewportProps) {
+export function AtlasViewport({ snapshot, selectedId, onHover, onSelect, onOpen }: AtlasViewportProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<AtlasSceneController | null>(null)
   const [unavailable, setUnavailable] = useState(false)
 
   useEffect(() => {
     if (!canvasRef.current) return
-    const scene = tryCreateAtlasScene(createAtlasScene, canvasRef.current, { onHover, onSelect })
+    const scene = tryCreateAtlasScene(createAtlasScene, canvasRef.current, { onHover, onSelect, onOpen })
     if (!scene) {
       setUnavailable(true)
       return
@@ -28,7 +29,7 @@ export function AtlasViewport({ snapshot, selectedId, onHover, onSelect }: Atlas
       scene.dispose()
       sceneRef.current = null
     }
-  }, [onHover, onSelect])
+  }, [onHover, onSelect, onOpen])
 
   useEffect(() => sceneRef.current?.setSnapshot(snapshot), [snapshot])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
