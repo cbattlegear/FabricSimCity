@@ -399,10 +399,19 @@ export function planCity(
   }
 }
 
+/**
+ * Spacing of the street corridors: the grain every road in the city runs on.
+ *
+ * Exposed because a curved road can only be identified with the leg it belongs to by quantising to
+ * this, not by rounding its coordinates.
+ */
+export function streetPitch(plan: Pick<CityPlan, 'cell'>): { x: number; z: number } {
+  return { x: BLOCK_COLS * plan.cell + STREET_WIDTH, z: BLOCK_ROWS * plan.cell + STREET_WIDTH }
+}
+
 /** Grid id of the intersection nearest a world point, for entering the street graph. */
 export function nearestIntersectionId(plan: CityPlan, x: number, z: number): string {
-  const pitchX = BLOCK_COLS * plan.cell + STREET_WIDTH
-  const pitchZ = BLOCK_ROWS * plan.cell + STREET_WIDTH
+  const { x: pitchX, z: pitchZ } = streetPitch(plan)
   const col = clamp(Math.round(x / pitchX), 0, plan.blockCols)
   const row = clamp(Math.round(z / pitchZ), 0, plan.blockRows)
   return intersectionId(col, row)

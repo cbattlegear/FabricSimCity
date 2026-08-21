@@ -31,15 +31,25 @@ export function laneOffset(lane: number): number {
 
 /**
  * Identifies the street leg each segment runs along, so two roads sharing that leg can be told
- * apart. Every polyline the city plan produces is axis-aligned.
+ * apart.
+ *
+ * `pitch` is the spacing of the street corridors, and passing it is what makes this work on a curved
+ * road. Keyed on the raw coordinate — which is what a default pitch of 1 still does — two roads
+ * sharing one bowed street get different keys at every point along the bend, both claim lane 0, and
+ * they draw straight through each other. Quantising to the corridor grain instead maps every point
+ * on a leg to the same key, because a street's centre line is never allowed to wander more than half
+ * a pitch from the lattice line it belongs to.
  */
-export function corridorKeys(points: readonly Point[]): string[] {
+export function corridorKeys(
+  points: readonly Point[],
+  pitch: { readonly x: number; readonly z: number } = { x: 1, z: 1 },
+): string[] {
   const keys: string[] = []
   for (let i = 1; i < points.length; i += 1) {
     const a = points[i - 1]
     const b = points[i]
-    if (Math.abs(a.x - b.x) < Math.abs(a.z - b.z)) keys.push(`x${Math.round(a.x)}`)
-    else keys.push(`z${Math.round(a.z)}`)
+    if (Math.abs(a.x - b.x) < Math.abs(a.z - b.z)) keys.push(`x${Math.round(a.x / pitch.x)}`)
+    else keys.push(`z${Math.round(a.z / pitch.z)}`)
   }
   return keys
 }

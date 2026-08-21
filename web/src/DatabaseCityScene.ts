@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { ARTERIAL_WIDTH, planCity, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
+import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
 import { buildBuildingGeometry, buildingColor } from './cityBuildings'
 import { type RoadTraffic } from './cityTraffic'
 import {
@@ -1387,6 +1387,7 @@ export function createDatabaseCityScene(
     // Widest first, so the heaviest traffic keeps the centre line and the light roads move aside.
     const ordered = [...roads].sort((left, right) => right.width - left.width || left.routeId.localeCompare(right.routeId))
     const corridorLanes = new Map<string, Set<number>>()
+    const pitch = streetPitch(cityPlan)
 
     for (const road of ordered) {
       const from = cityPlan.lots.get(road.fromObjectId)
@@ -1395,7 +1396,7 @@ export function createDatabaseCityScene(
       // A cross-database reference leaves the city on a ramp through the nearest boundary.
       const target = to ? { x: to.accessX, z: to.accessZ } : rampPoint(cityPlan, from)
       const points = streetPolyline(cityPlan, { x: from.accessX, z: from.accessZ }, target)
-      const corridors = corridorKeys(points)
+      const corridors = corridorKeys(points, pitch)
       const lane = claimLane(corridorLanes, corridors)
       const offset = laneOffset(lane)
       const centreline = offsetPolyline(points, offset)
