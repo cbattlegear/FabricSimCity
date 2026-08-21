@@ -322,9 +322,11 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 .city-disclosure.status-disconnected, .city-disclosure.status-unknown { border-color: #765b33; background: #241d12; }
 .city-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; padding: 14px 18px; border-inline: 1px solid #293847; background: #0c141d; color: #a9bbc9; font-size: .72rem; }
 .city-legend span { display: inline-flex; align-items: center; gap: 8px; }
-.legend-direct, .legend-attributed, .legend-route { display: inline-block; width: 18px; height: 8px; }
+.legend-direct, .legend-attributed, .legend-shared, .legend-route { display: inline-block; width: 18px; height: 8px; }
 .legend-direct { border: 2px solid #68d6c1; }
 .legend-attributed { background: #e2a957; }
+/* Outlined, like the wireframe cap it stands for: an amount that was never measured for one object. */
+.legend-shared { border: 2px solid #e2a957; }
 .legend-route { height: 2px; background: repeating-linear-gradient(90deg, #bdc8d0 0 5px, transparent 5px 8px); }
 .city-schema-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); border: 1px solid #293847; background: #0b121a; }
 .city-schema-strip div { padding: 12px 16px; border-right: 1px solid #293847; }
@@ -708,12 +710,20 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   position: sticky;
   top: 0;
   z-index: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
   padding: 9px 16px 6px;
   background: #0b121a;
   color: #7d94a8;
   font: .64rem ui-monospace, "SFMono-Regular", Consolas, monospace;
   letter-spacing: .1em;
   text-transform: uppercase;
+}
+.address-group-heading span {
+  color: #5d7387;
+  letter-spacing: .04em;
 }
 .address-list { list-style: none; margin: 0; padding: 0 8px 8px; display: grid; gap: 2px; }
 .address-entry {

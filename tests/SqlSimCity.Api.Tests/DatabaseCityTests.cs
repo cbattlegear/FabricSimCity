@@ -96,6 +96,41 @@ public sealed class DatabaseCityTests : IClassFixture<WebApplicationFactory<ApiA
     }
 
     [Fact]
+    public async Task JoinOnlyFixtureObjectReportsSharedTotalsWithoutInventingItsOwn()
+    {
+        // The shape issue #40 reported: a child table every ranked plan reaches through a join. It
+        // must reach the wire with null attributed totals -- no number was measured for it alone --
+        // while the query-level totals it participates in are carried whole. Serving it any other way
+        // either invents a per-object figure or hides the workload entirely.
+        using var response = await _client.GetAsync(
+            "/api/v1/database-city/fixture-target-primary%2Fdatabase%2Fsales?metric=cpu&pageSize=10");
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var detail = document.RootElement.GetProperty("objects").EnumerateArray()
+            .Single(o => o.GetProperty("name").GetString() == "OrderDetail");
+        var exposure = detail.GetProperty("attributedExposure");
+        var shared = exposure.GetProperty("shared");
+
+        Assert.Equal(JsonValueKind.Null, exposure.GetProperty("totalCpuMicroseconds").ValueKind);
+        Assert.Equal("Unknown", exposure.GetProperty("confidence").GetString());
+        Assert.Equal("10000030", shared.GetProperty("totalCpuMicroseconds").GetString());
+        Assert.Equal("1", shared.GetProperty("familyCount").GetString());
+        Assert.Contains("must not be summed", shared.GetProperty("rationale").GetString());
+
+        // The same query totals appear whole on every object that query named, so the shared figure
+        // repeats rather than dividing. A reader who adds them up is double-counting, which is
+        // exactly what the rationale warns against.
+        var customer = document.RootElement.GetProperty("objects").EnumerateArray()
+            .Single(o => o.GetProperty("name").GetString() == "Customer");
+        Assert.Equal("10000030",
+            customer.GetProperty("attributedExposure").GetProperty("shared")
+                .GetProperty("totalCpuMicroseconds").GetString());
+        // Customer keeps its own measured attribution alongside the shared figure; one never
+        // overwrites the other.
+        Assert.Equal("14089536",
+            customer.GetProperty("attributedExposure").GetProperty("totalCpuMicroseconds").GetString());
+    }
+
+    [Fact]
     public void ProjectorIsSourceOrderInvariantAndPreservesUnknownAndZero()
     {
         var schema = new DatabaseCitySchemaEvidence("schema:dbo", "dbo");

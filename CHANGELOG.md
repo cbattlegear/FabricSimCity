@@ -15,6 +15,29 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **Shared Query Store exposure** ([#40]). The strict attribution rule is unchanged — an object is
+  credited with totals only when a ranked family names it and nothing else — but on a normalized
+  schema that condition is close to unreachable, so a join-heavy database rendered with no exposure
+  anywhere and every building `Unavailable`. Families that name an object *alongside others* now
+  contribute a separate `DatabaseCitySharedExposureV1`, carrying the query-level totals **whole** on
+  every object the query named, with a rationale in the payload stating they must not be summed
+  across buildings.
+
+  Totals are deliberately **not** divided between the named objects. Query Store measures one figure
+  per query and says nothing about which table caused what, so any per-object share would be
+  invented. The map draws shared exposure as an *outlined* roof cap against the solid one used for
+  attributed exposure, matching the wireframe-means-not-measured convention already used for unknown
+  index annexes and unsampled facilities.
+
+  `BuildExposure` now emits an entry for every on-page object any ranked family named, which fixes a
+  third bug by construction: an object named only by multi-object families previously fell through
+  both the sole and shared buckets and hit the connected source's "no ranked family names this object"
+  fallback, which was false. That fallback now fires only when it is literally true.
+
+- The offline fixture gained `dbo.OrderDetail`, a child table every ranked plan reaches through a
+  join. It has null attributed totals and non-null shared totals, so the shape that motivated the
+  change above is visible in the shipped demo rather than only asserted in a test.
+
 - **The map is the product now.** SQLSimCity opened as a document: the 3D city was one box in a
   scrolling page, below a masthead and four tabs, between status banners, evidence tables, and prose.
   The UI is now a full-bleed map with a sidebar over it, and every control floats on the canvas.
@@ -384,6 +407,28 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Fixed
 
+- **A connected instance reported no object total at all** ([#41]). `DatabaseCityPageV1.TotalObjects`
+  was only ever populated on the archive path; the connected source hard-coded `null` because its
+  inventory probe used keyset pagination and never counted past the current page. The probe now
+  derives its eligibility predicate once in an `eligible_objects` CTE, counts it unbounded in
+  `eligible_total`, and cross-joins that single value onto the page. The distinction between "not
+  measured" and "measured zero" is preserved exactly: zero rows on the first page is `"0"`, zero rows
+  on a later page stays `null` (objects can only vanish mid-walk), and a probe that could not run
+  stays `null`. Verified against SQL Server 2025, including the heap, indexed-view, and empty-database
+  cases.
+
+  This was more than a missing number. The city grid is sized from `totalObjects`, so with `null` it
+  was sized from whatever happened to be loaded — meaning appending a bounded page reshuffled every
+  building already on screen, breaking the guarantee the map is built on.
+
+- **A ranked query could claim to name exactly one object while being refused as that object's
+  attribution, in the same payload** ([#40]). `ExposureEligible` required `local.Count == 1` *and* no
+  off-page, cross-database, or unresolved references, but the rationale sentence tested only the
+  cross-database half. A family naming one on-page table plus one off-page table therefore said
+  "names exactly one local object" and was simultaneously rejected. Both now read the same predicate,
+  and a family in that position says what is actually true: it names one object on this page
+  *alongside N further references below*, so the totals stay query-level.
+
 - `tools/container-smoke.sh` asserted a fail-closed startup message that no longer exists, so the
   `container` CI job failed on the commit that reworded it. The connected Query Store requirement
   message dropped its "plaintext fallback is forbidden" clause when payload sealing was removed —
@@ -578,3 +623,6 @@ First MVP release candidate. There is no tagged release yet.
 - Behind a reverse proxy, forwarded-header processing is intentionally disabled,
   so API rate-limit partitioning collapses all clients into one bucket. This is
   correct for the documented loopback/trusted-network model.
+
+[#40]: https://github.com/cbattlegear/SQLSimCity/issues/40
+[#41]: https://github.com/cbattlegear/SQLSimCity/issues/41

@@ -212,7 +212,7 @@ public sealed class ConnectedDatabaseCitySource(
             metric,
             pageSize,
             nextToken,
-            null,
+            probe.TotalObjects,
             schemaContracts,
             projected,
             [.. (joined?.Families ?? []).Select(family => ToContract(family, joined!.Evidence))],
@@ -238,6 +238,11 @@ public sealed class ConnectedDatabaseCitySource(
         family.Rationale,
         evidence);
 
+    /// <summary>
+    /// The attribution join publishes an entry for every on-page object a ranked family named, so
+    /// this fallback fires only when none did. Saying so is then accurate, rather than a guess about
+    /// which of two very different silences the reader is looking at.
+    /// </summary>
     private static DatabaseCityAttributedExposureV1 Exposure(
         CityAttributionResult? joined,
         string objectId,
@@ -255,7 +260,7 @@ public sealed class ConnectedDatabaseCitySource(
             return exposure;
         return new DatabaseCityAttributedExposureV1(
             null, null, null, null, QueryAttributionConfidence.Unknown,
-            "No ranked Query Store family names this object on its own, so no query totals are attributed to it; this is absent evidence, not measured zero.",
+            "No ranked Query Store family names this object at all, alone or alongside others, so no query totals are attributed to it; this is absent evidence, not measured zero.",
             joined.Evidence);
     }
 

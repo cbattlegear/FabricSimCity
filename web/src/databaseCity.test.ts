@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { accessibleObjectLabel, directActivityWidth, shouldAnimateCurrentMarkers, shouldRenderRoute } from './databaseCity'
+import { accessibleObjectLabel, attributedAbsenceLabel, databaseCitySharedMetricValue, directActivityWidth, shouldAnimateCurrentMarkers, shouldRenderRoute } from './databaseCity'
 import type { DatabaseCityObject, DatabaseCityRoute } from './databaseCityContracts'
 
 const object: DatabaseCityObject = {
@@ -95,6 +95,65 @@ describe('database city accessibility and motion', () => {
 
     expect(shouldRenderRoute(route, visibleIds)).toBe(false)
     expect(shouldRenderRoute({ ...route, kind: 'CrossDatabaseReference' }, visibleIds)).toBe(true)
+  })
+
+  it('reports shared query totals separately and never as this object\'s own measurement', () => {
+    // Absent shared exposure must stay absent. A missing figure is not a zero.
+    expect(databaseCitySharedMetricValue(object, 'cpu')).toBeNull()
+
+    const joined: DatabaseCityObject = {
+      ...object,
+      attributedExposure: {
+        ...object.attributedExposure,
+        executionCount: null,
+        totalCpuMicroseconds: null,
+        totalDurationMicroseconds: null,
+        totalLogicalReads8KiBPages: null,
+        confidence: 'Unknown',
+        rationale: 'No ranked family names this object on its own.',
+        shared: {
+          familyCount: '2',
+          executionCount: '9',
+          totalCpuMicroseconds: '900',
+          totalDurationMicroseconds: '1200',
+          totalLogicalReads8KiBPages: '300',
+          rationale: 'Totals belong to queries naming several objects and must not be summed across buildings.',
+        },
+      },
+    }
+
+    expect(databaseCitySharedMetricValue(joined, 'cpu')).toBe('900')
+    // The attributed figure stays unavailable: shared totals must never be promoted into it.
+    expect(joined.attributedExposure.totalCpuMicroseconds).toBeNull()
+
+    const label = accessibleObjectLabel(joined)
+    // A probe that ran fine but attributed nothing is "not attributed", not "unavailable": the
+    // Query Store data was there, it simply never named this object on its own.
+    expect(label).toContain('attributed Query Store exposure not attributed')
+    expect(attributedAbsenceLabel(joined)).toBe('Not attributed')
+    // The other absence must keep its own word: a probe that could not run still reports why.
+    expect(attributedAbsenceLabel({
+      ...joined,
+      attributedExposure: {
+        ...joined.attributedExposure,
+        evidence: { ...joined.attributedExposure.evidence, status: 'PermissionDenied' },
+      },
+    })).toBe('PermissionDenied')
+    expect(label).toContain('Shared with other objects: 900 CPU microseconds across 2 joined query families')
+    expect(label).toContain('not additive across buildings')
+  })
+
+  it('shows shared exposure in the panel, the table, and the legend', () => {
+    const view = readFileSync(new URL('./DatabaseCityView.tsx', import.meta.url), 'utf8')
+    const viewport = readFileSync(new URL('./DatabaseCityViewport.tsx', import.meta.url), 'utf8')
+
+    // The shared rationale is the sentence that stops the figure being read as this object's own.
+    expect(view).toContain('object.attributedExposure.shared.rationale')
+    expect(view).toContain('databaseCitySharedMetricValue')
+    // The legend must distinguish the outlined cap from the solid one, or the map asserts a total it
+    // never measured for one building.
+    expect(viewport).toContain('Outlined amber cap')
+    expect(viewport).toContain('not additive across buildings')
   })
 
   it('keeps the evidence qualification wrapped and visible on mobile', () => {

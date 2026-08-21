@@ -6,7 +6,7 @@ import {
   fetchQueryFamily,
   subscribeToLiveIncidents,
 } from './api'
-import { accessibleObjectLabel, databaseCityMetricValue, formatKiB, shouldRenderRoute } from './databaseCity'
+import { accessibleObjectLabel, attributedAbsenceLabel, databaseCityMetricValue, databaseCitySharedMetricValue, formatKiB, shouldRenderRoute } from './databaseCity'
 import type { DatabaseCityObject, DatabaseCityPage, DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { LiveIncidentResponse } from './liveContracts'
 import type { LiveFeedConnectionState } from './liveIncidents'
@@ -709,8 +709,11 @@ function LegendDrawer({
                   <><strong>{formatKiB(object.reservedBytes)} reserved</strong><small>{formatKiB(object.usedBytes!)} used</small></>}</td>
                 <td><strong>{object.directActivity.totalOperations ?? object.directActivity.evidence.status}</strong>
                   <small>{object.directActivity.evidence.source} · {object.directActivity.evidence.reason}</small></td>
-                <td><strong>{databaseCityMetricValue(object, metric) ?? object.attributedExposure.evidence.status}</strong>
-                  <small>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}</small></td>
+                <td><strong>{databaseCityMetricValue(object, metric) ?? attributedAbsenceLabel(object)}</strong>
+                  {object.attributedExposure.shared &&
+                    <span>shared {databaseCitySharedMetricValue(object, metric)} across {object.attributedExposure.shared.familyCount} joined quer{object.attributedExposure.shared.familyCount === '1' ? 'y' : 'ies'}</span>}
+                  <small>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}
+                    {object.attributedExposure.shared ? ` ${object.attributedExposure.shared.rationale}` : ''}</small></td>
               </tr>)}</tbody>
             </table>
           </div>
@@ -1051,6 +1054,9 @@ function BuildingPanel({
   metric: Metric
   facilityCount: number
 }) {
+  // Shared totals are query-level and repeat on every object the query named, so they are shown on
+  // their own row and never substituted for the attributed figure above them.
+  const shared = databaseCitySharedMetricValue(object, metric)
   return (
     <aside className="hud-slideover" aria-labelledby="city-building-title">
       <div className="detail-title">
@@ -1061,13 +1067,18 @@ function BuildingPanel({
         <div><dt>Reserved pages</dt><dd>{object.reservedPages8KiB ?? object.sizeReason}</dd></div>
         <div><dt>Used pages</dt><dd>{object.usedPages8KiB ?? object.sizeReason}</dd></div>
         <div><dt>Direct operations</dt><dd>{object.directActivity.totalOperations ?? object.directActivity.evidence.status}</dd></div>
-        <div><dt>{metric} attributed</dt><dd>{databaseCityMetricValue(object, metric) ?? 'Unavailable'}</dd></div>
+        <div><dt>{metric} attributed</dt><dd>{databaseCityMetricValue(object, metric) ?? attributedAbsenceLabel(object)}</dd></div>
+        {shared && <div className="is-shared">
+          <dt>{metric} shared</dt>
+          <dd>{shared} <small>across {object.attributedExposure.shared!.familyCount} joined quer{object.attributedExposure.shared!.familyCount === '1' ? 'y' : 'ies'}</small></dd>
+        </div>}
         <div><dt>Attached indexes</dt><dd>{object.indexes.length}</dd></div>
       </dl>
       <p className="hud-note">{facilityCount} infrastructure facilities are scattered across the block grid.</p>
       <div className="source-note">
         <strong>Attributed evidence</strong>
         <p>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}</p>
+        {object.attributedExposure.shared && <p>{object.attributedExposure.shared.rationale}</p>}
       </div>
     </aside>
   )
@@ -1084,6 +1095,10 @@ function ObjectDetail({ object, metric }: { object: DatabaseCityObject | null; m
       <div><dt>Direct operations</dt><dd>{object.directActivity.totalOperations ?? object.directActivity.evidence.status}</dd></div>
       <div><dt>Reset epoch</dt><dd>{object.directActivity.resetEpochToken ?? 'Unavailable'}</dd></div>
       <div><dt>{metric} attributed</dt><dd>{databaseCityMetricValue(object, metric) ?? 'Unavailable'}</dd></div>
+      {object.attributedExposure.shared && <div className="is-shared">
+        <dt>{metric} shared</dt>
+        <dd>{databaseCitySharedMetricValue(object, metric)} across {object.attributedExposure.shared.familyCount} joined quer{object.attributedExposure.shared.familyCount === '1' ? 'y' : 'ies'}</dd>
+      </div>}
     </dl>
     <h3>Attached indexes</h3>
     {object.indexes.length === 0 ? <p>None reported.</p> : <ul className="attached-indexes">
@@ -1096,6 +1111,8 @@ function ObjectDetail({ object, metric }: { object: DatabaseCityObject | null; m
     </p></div>
     <div className="source-note"><strong>Attributed evidence</strong><p>
       {object.attributedExposure.evidence.source} · {object.attributedExposure.confidence} · {object.attributedExposure.rationale}
-    </p></div>
+    </p>
+    {object.attributedExposure.shared && <p>{object.attributedExposure.shared.rationale}</p>}
+    </div>
   </aside>
 }

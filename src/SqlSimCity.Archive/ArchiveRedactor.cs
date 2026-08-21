@@ -214,6 +214,11 @@ public sealed class ArchiveRedactor(bool includeProtectedIdentifiers)
                 AttributedExposure = value.AttributedExposure with
                 {
                     Rationale = Scrub(value.AttributedExposure.Rationale),
+                    // The shared rationale names the object it belongs to, so it carries the same
+                    // schema-qualified identifiers the scrubber exists to remove.
+                    Shared = value.AttributedExposure.Shared is { } shared
+                        ? shared with { Rationale = Scrub(shared.Rationale) }
+                        : null,
                     Evidence = value.AttributedExposure.Evidence with
                     {
                         Reason = Scrub(value.AttributedExposure.Evidence.Reason),

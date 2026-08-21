@@ -20,12 +20,18 @@ public sealed record DatabaseCityIndexUsageRow(
     int IndexId,
     string TotalOperations);
 
+/// <param name="TotalObjects">
+/// Every object the inventory probe would return across all pages, unbounded by the keyset, or
+/// <see langword="null"/> when the count could not be established. It is not the number of rows on
+/// this page.
+/// </param>
 public sealed record DatabaseCityProbePage(
     IReadOnlyList<DatabaseCityInventoryRow> Inventory,
     IReadOnlyList<DatabaseCityIndexUsageRow> Usage,
     DataStatus UsageStatus,
     string UsageReason,
-    DateTimeOffset ObservedAt);
+    DateTimeOffset ObservedAt,
+    string? TotalObjects = null);
 
 public interface IDatabaseCityProbeExecutor
 {

@@ -216,7 +216,8 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         var objectIds = local.Concat(crossDatabase).ToArray();
         var namedElsewhere = offPage.Count + crossDatabase.Count + unresolved.Count;
         var confidence = Confidence(local, namedElsewhere, index);
-        var rationale = Rationale(local, offPage, crossDatabase, unresolved, index, hydrated, skipped, unreadable);
+        var rationale = Rationale(
+            local, offPage, crossDatabase, unresolved, namedElsewhere, index, hydrated, skipped, unreadable);
         return new ResolvedFamily(
             new DatabaseCityQueryEvidence(
                 counters.FamilyId,
@@ -286,11 +287,17 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             : QueryAttributionConfidence.Confirmed;
     }
 
+    /// <summary>
+    /// Explains, in the family's own words, exactly what its plans named. The leading clause is
+    /// bound to the same test <c>ExposureEligible</c> uses, so a family can never claim to name one
+    /// object while being refused as an attribution for naming something else as well.
+    /// </summary>
     private static string Rationale(
         SortedSet<string> local,
         SortedSet<string> offPage,
         SortedSet<string> crossDatabase,
         SortedSet<string> unresolved,
+        int namedElsewhere,
         PageObjectIndex index,
         int hydrated,
         int skipped,
@@ -303,11 +310,16 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
                 ? "No compiled plan could be read for this family, so no object reference was available."
                 : $"{Plans(hydrated)} named no object on this page; workload remains unattributed.");
         }
-        else if (local.Count == 1 && crossDatabase.Count == 0)
+        else if (local.Count == 1 && namedElsewhere == 0)
         {
             parts.Add(index.KindOf(local.Min!) == DatabaseObjectKind.IndexedView
                 ? $"A normalized compiled plan names exactly one local object, the indexed view {index.NameOf(local.Min!)}; optimizer expansion remains a caveat, so the reference is probable rather than confirmed."
                 : $"A normalized compiled plan names exactly one local object, {index.NameOf(local.Min!)}.");
+        }
+        else if (local.Count == 1)
+        {
+            parts.Add(
+                $"Normalized plans name one object on this page, {index.NameOf(local.Min!)}, alongside {namedElsewhere.ToString(CultureInfo.InvariantCulture)} further reference(s) below; totals therefore remain query-level and are not assigned to it.");
         }
         else
         {
@@ -345,11 +357,17 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
     /// else at all. Families that also named an off-page object, another database, or an
     /// unresolvable reference are excluded rather than split by an invented ratio.
     /// <para>
-    /// Excluded is not the same as hidden. A multi-object family still reaches the map as a route
-    /// between the objects it named and as a shared wait lane threaded through them, both carrying
-    /// its figures whole. Only this scalar per-object total refuses it, because folding it in here
-    /// would require a per-object share that Query Store never measured. The rationale therefore
-    /// says how many such families named the object, so the reader knows where to look for them.
+    /// Excluded is not the same as hidden, and it is not the same as absent. Every on-page object a
+    /// ranked family named gets an entry here: either sole attribution, or a
+    /// <see cref="DatabaseCitySharedExposureV1"/> carrying those families' figures whole and marked
+    /// non-additive. Only an object no ranked family named at all is left out, so the caller's
+    /// "no family named this object" fallback is true whenever it fires.
+    /// </para>
+    /// <para>
+    /// This matters because <c>local.Count == 1</c> is close to unreachable for a normalized schema
+    /// driven by joins: widen the page and joined tables come on-page, shrink it and they fall off
+    /// it. Without the shared bucket a real workload attributes nothing anywhere, and the map reads
+    /// as though collection failed.
     /// </para>
     /// </summary>
     private static ReadOnlyDictionary<string, DatabaseCityAttributedExposureV1> BuildExposure(
@@ -358,37 +376,50 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         PageObjectIndex index,
         EvidenceV1 evidence)
     {
-        var sharedCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var eligibleIds = new HashSet<string>(
+            families.Select(family => family.FamilyId), StringComparer.Ordinal);
+        var sole = new Dictionary<string, ExposureTotals>(StringComparer.Ordinal);
+        var shared = new Dictionary<string, ExposureTotals>(StringComparer.Ordinal);
+
         foreach (var family in allFamilies)
         {
-            if (family.ObjectIds.Count <= 1) continue;
+            // An eligible family names exactly one object by construction, so anything else it
+            // reached is shared exposure for whichever objects it did name.
+            var soleTarget = eligibleIds.Contains(family.FamilyId) && family.ObjectIds.Count == 1
+                ? family.ObjectIds[0]
+                : null;
             foreach (var objectId in family.ObjectIds)
             {
                 if (!index.IsOnPage(objectId)) continue;
-                sharedCounts[objectId] = sharedCounts.GetValueOrDefault(objectId) + 1;
+                var bucket = string.Equals(objectId, soleTarget, StringComparison.Ordinal) ? sole : shared;
+                if (!bucket.TryGetValue(objectId, out var accumulated))
+                {
+                    accumulated = new ExposureTotals();
+                    bucket.Add(objectId, accumulated);
+                }
+                accumulated.Add(family);
             }
         }
 
-        var totals = new Dictionary<string, ExposureTotals>(StringComparer.Ordinal);
-        foreach (var family in families)
+        var exposure = new Dictionary<string, DatabaseCityAttributedExposureV1>(StringComparer.Ordinal);
+        foreach (var objectId in sole.Keys.Concat(shared.Keys).Distinct(StringComparer.Ordinal))
         {
-            if (family.ObjectIds.Count != 1) continue;
-            var objectId = family.ObjectIds[0];
-            if (!index.IsOnPage(objectId)) continue;
-            if (!totals.TryGetValue(objectId, out var accumulated))
-            {
-                accumulated = new ExposureTotals();
-                totals.Add(objectId, accumulated);
-            }
-            accumulated.Add(family);
+            var name = index.NameOf(objectId);
+            var sharedTotals = shared.TryGetValue(objectId, out var sharedBucket)
+                ? sharedBucket.ToShared(name)
+                : null;
+            exposure[objectId] = sole.TryGetValue(objectId, out var soleBucket)
+                ? soleBucket.ToContract(name, sharedTotals, evidence)
+                : new DatabaseCityAttributedExposureV1(
+                    null, null, null, null, QueryAttributionConfidence.Unknown,
+                    $"No ranked Query Store family names {name} on its own, so no total belongs to it alone; this is absent evidence, not measured zero. Shared exposure below reports what the families that did name it measured.",
+                    evidence)
+                {
+                    Shared = sharedTotals,
+                };
         }
 
-        return new ReadOnlyDictionary<string, DatabaseCityAttributedExposureV1>(
-            totals.ToDictionary(
-                entry => entry.Key,
-                entry => entry.Value.ToContract(
-                    index.NameOf(entry.Key), sharedCounts.GetValueOrDefault(entry.Key), evidence),
-                StringComparer.Ordinal));
+        return new ReadOnlyDictionary<string, DatabaseCityAttributedExposureV1>(exposure);
     }
 
     /// <summary>
@@ -481,7 +512,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
 
         public DatabaseCityAttributedExposureV1 ToContract(
             string name,
-            int sharedFamilies,
+            DatabaseCitySharedExposureV1? shared,
             EvidenceV1 evidence) => new(
             _executions.ToString(CultureInfo.InvariantCulture),
             _cpu.ToString(CultureInfo.InvariantCulture),
@@ -489,10 +520,26 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             _reads.ToString(CultureInfo.InvariantCulture),
             _confidence,
             $"Counts the {_families.ToString(CultureInfo.InvariantCulture)} ranked Query Store family or families whose normalized plans name {name} and no other object, because only those measured this object on its own." +
-            (sharedFamilies > 0
-                ? $" A further {sharedFamilies.ToString(CultureInfo.InvariantCulture)} ranked family or families name {name} alongside other objects. Query Store measures one total per query, not per object, so their figures are not added here; they are shown whole as routes between the objects they name and as shared wait lanes threaded through them."
-                : string.Empty),
-            evidence);
+            (shared is null
+                ? string.Empty
+                : $" A further {shared.FamilyCount} ranked family or families name {name} alongside other objects; their figures are reported separately as shared exposure and are not added here."),
+            evidence)
+        {
+            Shared = shared,
+        };
+
+        /// <summary>
+        /// Projects the same accumulation as query-level totals that belong to several objects at
+        /// once. Nothing is divided: the caller is told plainly that these figures repeat on every
+        /// object the same queries named and must not be summed across the city.
+        /// </summary>
+        public DatabaseCitySharedExposureV1 ToShared(string name) => new(
+            _families.ToString(CultureInfo.InvariantCulture),
+            _executions.ToString(CultureInfo.InvariantCulture),
+            _cpu.ToString(CultureInfo.InvariantCulture),
+            _duration.ToString(CultureInfo.InvariantCulture),
+            _reads.ToString(CultureInfo.InvariantCulture),
+            $"{_families.ToString(CultureInfo.InvariantCulture)} ranked Query Store family or families name {name} alongside other objects, so Query Store measured one total per query and never a per-object share. These totals are those queries' own figures, reported whole and undivided, and the same figures also appear on every other object those queries named: they must not be summed across buildings.");
 
         private static BigInteger Parse(string value) =>
             BigInteger.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)

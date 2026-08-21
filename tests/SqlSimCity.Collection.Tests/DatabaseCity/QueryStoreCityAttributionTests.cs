@@ -55,6 +55,38 @@ public sealed class QueryStoreCityAttributionTests
         Assert.Equal(QueryAttributionConfidence.Confirmed, exposure.Confidence);
     }
 
+    /// <summary>
+    /// The reported workload's real shape: a normalized schema where ranked queries join several
+    /// tables. Sole attribution and shared exposure have to coexist on one building without the
+    /// shared figures being folded into the measured total.
+    /// </summary>
+    [Fact]
+    public async Task SoleAndSharedExposureCoexistWithoutTheSharedTotalsBeingAddedIn()
+    {
+        var store = new FakeQueryStore();
+        store.AddFamily("family-sole", cpu: "900", executions: "30", plans:
+            [Plan("plan-1", Reference(table: "Customer"))]);
+        store.AddFamily("family-join", cpu: "5000", executions: "40", plans:
+            [Plan("plan-2", Reference(table: "Customer"), Reference(table: "OrderHeader"))]);
+
+        var result = await AttributeAsync(store);
+
+        var customer = result.ExposureByObjectId[CustomerId];
+        Assert.Equal("900", customer.TotalCpuMicroseconds);
+        Assert.Equal("5000", customer.Shared!.TotalCpuMicroseconds);
+        Assert.Equal("1", customer.Shared.FamilyCount);
+        Assert.Contains("are not added here", customer.Rationale, StringComparison.Ordinal);
+
+        // The joined partner has no total of its own but is not blank either.
+        var orderHeader = result.ExposureByObjectId[OrderId];
+        Assert.Null(orderHeader.TotalCpuMicroseconds);
+        Assert.Equal("5000", orderHeader.Shared!.TotalCpuMicroseconds);
+
+        // 5000 appears on both buildings because one query touched both. Summing the city would
+        // report 10000 microseconds of CPU that was never spent.
+        Assert.Equal(customer.Shared.TotalCpuMicroseconds, orderHeader.Shared.TotalCpuMicroseconds);
+    }
+
     [Fact]
     public async Task MultiObjectPlanStaysProbableAndIsNeverSplitAcrossItsObjects()
     {
@@ -69,8 +101,21 @@ public sealed class QueryStoreCityAttributionTests
         Assert.Equal(QueryAttributionConfidence.Probable, family.Confidence);
         Assert.Equal("1000", family.TotalCpuMicroseconds);
 
-        // Neither building may claim a share of a total the plan never attributed to it.
-        Assert.Empty(result.ExposureByObjectId);
+        // Neither building may claim a share of a total the plan never attributed to it, so the
+        // scalar stays unavailable on both. The query's own figure is still reported on each, whole
+        // and explicitly non-additive, so a join-heavy workload is not silently blank.
+        foreach (var objectId in new[] { CustomerId, OrderId })
+        {
+            var exposure = result.ExposureByObjectId[objectId];
+            Assert.Null(exposure.TotalCpuMicroseconds);
+            Assert.Equal(QueryAttributionConfidence.Unknown, exposure.Confidence);
+            Assert.Equal("1000", exposure.Shared!.TotalCpuMicroseconds);
+            Assert.Equal("1", exposure.Shared.FamilyCount);
+            Assert.Contains(
+                "must not be summed across buildings",
+                exposure.Shared.Rationale,
+                StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -159,7 +204,29 @@ public sealed class QueryStoreCityAttributionTests
         var family = Assert.Single(result.Families);
         Assert.Contains("elsewhere.dbo.FactSale", family.Rationale, StringComparison.Ordinal);
         Assert.Equal(QueryAttributionConfidence.Probable, family.Confidence);
-        Assert.Empty(result.ExposureByObjectId);
+        Assert.Null(result.ExposureByObjectId[CustomerId].TotalCpuMicroseconds);
+    }
+
+    /// <summary>
+    /// The predicate that decides exposure and the sentence that explains the family must be the
+    /// same predicate. A family naming one on-page object plus one off-page object used to claim it
+    /// "names exactly one local object" while being refused as that object's attribution, so a
+    /// single response contradicted itself.
+    /// </summary>
+    [Fact]
+    public async Task AFamilyNeverClaimsToNameOneObjectWhileBeingRefusedAsItsAttribution()
+    {
+        var store = new FakeQueryStore();
+        store.AddFamily("family-1", cpu: "800", executions: "8", plans:
+            [Plan("plan-1", Reference(table: "Customer"), Reference(table: "Invoice"))]);
+
+        var result = await AttributeAsync(store);
+
+        var family = Assert.Single(result.Families);
+        Assert.DoesNotContain("exactly one local object", family.Rationale, StringComparison.Ordinal);
+        Assert.Contains("one object on this page", family.Rationale, StringComparison.Ordinal);
+        Assert.Contains("remain query-level", family.Rationale, StringComparison.Ordinal);
+        Assert.Null(result.ExposureByObjectId[CustomerId].TotalCpuMicroseconds);
     }
 
     [Fact]
@@ -177,8 +244,34 @@ public sealed class QueryStoreCityAttributionTests
         Assert.Contains("dbo.Invoice", family.Rationale, StringComparison.Ordinal);
 
         // The plan touched something this page cannot show, so the Customer building must not be
-        // credited with the whole family.
-        Assert.Empty(result.ExposureByObjectId);
+        // credited with the whole family as its own measured total.
+        var exposure = result.ExposureByObjectId[CustomerId];
+        Assert.Null(exposure.TotalCpuMicroseconds);
+        Assert.Null(exposure.ExecutionCount);
+        Assert.Equal(QueryAttributionConfidence.Unknown, exposure.Confidence);
+
+        // It is still shared exposure: the family did name this object, and saying nothing at all
+        // would be indistinguishable from never having measured it.
+        Assert.Equal("800", exposure.Shared!.TotalCpuMicroseconds);
+        Assert.Equal("8", exposure.Shared.ExecutionCount);
+    }
+
+    /// <summary>
+    /// An object no ranked family named anywhere is left out of the join entirely, so the page can
+    /// tell "nothing named it" apart from "something named it alongside others".
+    /// </summary>
+    [Fact]
+    public async Task AnObjectNoFamilyNamedIsAbsentRatherThanReportedAsSharedZero()
+    {
+        var store = new FakeQueryStore();
+        store.AddFamily("family-1", cpu: "900", executions: "30", plans:
+            [Plan("plan-1", Reference(table: "Customer"))]);
+
+        var result = await AttributeAsync(store);
+
+        Assert.True(result.ExposureByObjectId.ContainsKey(CustomerId));
+        Assert.False(result.ExposureByObjectId.ContainsKey(OrderId));
+        Assert.Null(result.ExposureByObjectId[CustomerId].Shared);
     }
 
     [Fact]

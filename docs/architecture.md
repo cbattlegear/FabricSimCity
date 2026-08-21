@@ -119,6 +119,28 @@ Schemas are stable neighborhoods. Tables and indexed views are buildings sized b
 counts. Indexes are attached structures on their parent object. Direct index DMV activity and
 Query Store-attributed exposure use different evidence and visual styles.
 
+#### Attributed and shared exposure
+
+Query Store measures one set of totals per query, not per object. A query that joins four tables has
+one CPU figure, and nothing in Query Store says how much of it each table caused. SQLSimCity
+therefore reports exposure in two separate shapes and never mixes them:
+
+- **Attributed exposure** is assigned to an object only when a ranked query family names that object
+  and nothing else — no second local object, no cross-database target, no reference the collector
+  could not resolve. Anything less and the totals are not that object's to claim.
+- **Shared exposure** carries the query-level totals of families that named the object *alongside
+  others*. The figures appear **whole** on every object those families named, because a per-object
+  share would have to be invented. `DatabaseCitySharedExposureV1.Rationale` says so in the payload
+  itself, and the map draws it as an outlined roof cap rather than a solid one.
+
+Summing shared exposure across buildings double-counts by construction. That is the point: a total
+that cannot be divided honestly is better shown repeated, and labelled, than split or hidden.
+
+Without shared exposure a normalized schema renders almost entirely blank, because on such a schema
+`local.Count == 1` is close to unreachable — shrink the page and joined tables fall off it, widen it
+and they come on-page. The strict attribution rule is deliberately unchanged; shared exposure is what
+makes that strictness survivable on a real workload.
+
 The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` builds a
 uniform block lattice and scatters lots across it using a seeded generator (`web/src/citySeed.ts`),
 so a city looks like a city instead of a packed rectangle while remaining completely deterministic:
@@ -144,14 +166,15 @@ so nothing is drawn diagonally through a building. Schema districts are now the 
 scattered members and are used only for the optional tint layer, which draws per-lot pads rather than
 one contiguous rectangle.
 
-Exactly seven properties encode evidence. Everything else in the scene is decoration seeded from an
-object's stable id and carries no data claim; the in-app legend states this split verbatim.
+Every property in the table below encodes evidence. Everything else in the scene is decoration seeded
+from an object's stable id and carries no data claim; the in-app legend states this split verbatim.
 
 | Encoded property | Evidence |
 | --- | --- |
 | Building footprint | log₂ of exact reserved 8-KiB pages |
 | Building height | log₂ of exact used 8-KiB pages (zero used pages is zero height) |
-| Amber roof-cap height | attributed Query Store CPU |
+| Solid amber roof-cap height | Query Store CPU measured for that object alone |
+| Outlined amber roof-cap height | Query Store CPU of queries that also named other objects |
 | Index annex width | direct DMV operations on that index |
 | Road width | executions of query families naming both endpoints |
 | Road colour | captured wait share, graded low/medium/high, upgraded only by a resolved live lock |

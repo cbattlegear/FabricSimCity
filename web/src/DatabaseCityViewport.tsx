@@ -299,7 +299,10 @@ export function DatabaseCityViewport({
               <i className="legend-swatch legend-height" /> Height — log₂ of exact used 8-KiB pages
             </li>
             <li>
-              <i className="legend-swatch legend-attributed" /> Amber roof cap — attributed Query Store CPU
+              <i className="legend-swatch legend-attributed" /> Solid amber roof cap — Query Store CPU measured for this object alone
+            </li>
+            <li>
+              <i className="legend-swatch legend-shared" /> Outlined amber cap — CPU of queries that also named other tables; not additive across buildings
             </li>
             <li>
               <i className="legend-swatch legend-direct" /> Index annex width — direct DMV operations

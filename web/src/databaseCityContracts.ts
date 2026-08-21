@@ -12,6 +12,21 @@ export interface DatabaseCityDirectActivity {
   evidence: Evidence
 }
 
+/**
+ * Query Store totals from ranked families that named this object *alongside others*, carried whole
+ * and never divided: Query Store measures one total per query, never a per-object share. The same
+ * figures repeat on every other object those queries named, so these values are **not additive
+ * across buildings** — summing them over a city counts one query once per table it touched.
+ */
+export interface DatabaseCitySharedExposure {
+  familyCount: string
+  executionCount: string
+  totalCpuMicroseconds: string
+  totalDurationMicroseconds: string
+  totalLogicalReads8KiBPages: string
+  rationale: string
+}
+
 export interface DatabaseCityAttributedExposure {
   executionCount: string | null
   totalCpuMicroseconds: string | null
@@ -20,6 +35,12 @@ export interface DatabaseCityAttributedExposure {
   confidence: QueryAttributionConfidence
   rationale: string
   evidence: Evidence
+  /**
+   * Non-additive query-level totals from families that named this object alongside others, or null
+   * when no ranked family did. Present even when the scalars above are null, which is the normal
+   * case for a normalized schema where every ranked query joins several tables.
+   */
+  shared?: DatabaseCitySharedExposure | null
 }
 
 export interface DatabaseCityIndex {

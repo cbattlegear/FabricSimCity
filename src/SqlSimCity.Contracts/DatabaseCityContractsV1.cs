@@ -17,6 +17,28 @@ public sealed record DatabaseCityDirectActivityV1(
     string? ResetEpochToken,
     EvidenceV1 Evidence);
 
+/// <summary>
+/// Query Store totals from ranked families that named this object <b>alongside others</b>, carried
+/// whole and never divided, because Query Store measures one total per query and never a per-object
+/// share. The same figures are reported again on every other object those queries named, so these
+/// values are <b>not additive across buildings</b>: summing them over a city counts one query once
+/// per object it touched. They are the honest answer for a normalized schema, where almost every
+/// ranked query joins several tables and so can never be credited to one of them.
+/// </summary>
+public sealed record DatabaseCitySharedExposureV1(
+    string FamilyCount,
+    string ExecutionCount,
+    string TotalCpuMicroseconds,
+    string TotalDurationMicroseconds,
+    string TotalLogicalReads8KiBPages,
+    string Rationale);
+
+/// <summary>
+/// What a bounded page can say about one object's Query Store exposure. The scalar totals are
+/// populated only when ranked families named this object and nothing else at all; when they are
+/// <see langword="null"/>, <see cref="Shared"/> may still carry the query-level totals of families
+/// that named it together with other objects.
+/// </summary>
 public sealed record DatabaseCityAttributedExposureV1(
     string? ExecutionCount,
     string? TotalCpuMicroseconds,
@@ -24,7 +46,14 @@ public sealed record DatabaseCityAttributedExposureV1(
     string? TotalLogicalReads8KiBPages,
     QueryAttributionConfidence Confidence,
     string Rationale,
-    EvidenceV1 Evidence);
+    EvidenceV1 Evidence)
+{
+    /// <summary>
+    /// Non-additive query-level totals from families that named this object alongside others, or
+    /// <see langword="null"/> when no ranked family did.
+    /// </summary>
+    public DatabaseCitySharedExposureV1? Shared { get; init; }
+}
 
 public sealed record DatabaseCityIndexV1(
     string IndexId,

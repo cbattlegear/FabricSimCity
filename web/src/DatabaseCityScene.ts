@@ -167,6 +167,10 @@ export function createDatabaseCityScene(
     index: new THREE.MeshStandardMaterial({ color: 0x68d6c1, roughness: 0.5 }),
     unknownIndex: new THREE.MeshBasicMaterial({ color: 0x82919d, wireframe: true }),
     exposure: new THREE.MeshStandardMaterial({ color: 0xe2a957, emissive: 0x3a2400, roughness: 0.55 }),
+    // Wireframe carries the same meaning here as on unknownIndex and facilityUnknown: the figure it
+    // draws was never measured for this building. Shared exposure belongs to the queries that named
+    // it alongside other tables, so it is outlined rather than solid.
+    sharedExposure: new THREE.MeshBasicMaterial({ color: 0xe2a957, wireframe: true }),
     ground: new THREE.MeshStandardMaterial({ color: 0x11181f, roughness: 0.98 }),
     asphalt: new THREE.MeshStandardMaterial({ color: 0x252c37, roughness: 0.95 }),
     laneMark: new THREE.MeshStandardMaterial({ color: 0x5f6b7a, roughness: 0.85 }),
@@ -216,6 +220,7 @@ export function createDatabaseCityScene(
   const CITY_COLORS: Record<string, number> = {
     unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
     exposure: 0xe2a957, ground: 0x11181f, asphalt: 0x252c37, laneMark: 0x5f6b7a, sidewalk: 0x38414d,
+    sharedExposure: 0xe2a957,
     district: 0x2b4a63, facility: 0x53707f, facilityUnknown: 0x7d8b96, facilityFill: 0x63d8ff,
     facilityAlert: 0xe4483c, route: 0x2fe0ff, routePin: 0x2fe0ff, roadHighlight: 0xf4f9ff,
     roadPin: 0xf4f9ff, roadPinOffMap: 0xb0bcc7, selection: 0xffd479, selectionPin: 0xffd479,
@@ -223,6 +228,7 @@ export function createDatabaseCityScene(
   const MAP_COLORS: Record<string, number> = {
     unknown: 0x9aa4ac, window: 0xdfe6ec, trim: 0xb9bdc2, index: 0x63b9a6, unknownIndex: 0xa8b0b6,
     exposure: 0xd99a3f, ground: MAP_PALETTE.ground, asphalt: MAP_PALETTE.roadFill,
+    sharedExposure: 0xd99a3f,
     laneMark: 0xdcd9d2, sidewalk: MAP_PALETTE.roadCasing, district: MAP_PALETTE.park,
     facility: MAP_PALETTE.facility, facilityUnknown: 0x9fb0c0, facilityFill: 0x4a90d9,
     facilityAlert: MAP_PALETTE.pinIncident, route: 0x1a73e8, routePin: 0x1a73e8,
@@ -687,13 +693,18 @@ export function createDatabaseCityScene(
         pickable.push(annex)
       })
 
-      // Amber roof cap: attributed Query Store CPU.
-      if (known && object.attributedExposure.totalCpuMicroseconds !== null) {
-        const cpu = Number(BigInt(object.attributedExposure.totalCpuMicroseconds))
+      // Amber roof cap: attributed Query Store CPU. A solid cap is a total measured for this object
+      // alone; an outlined one is a query total shared with the other tables the same query named,
+      // which is the only figure a join-heavy workload can honestly produce.
+      const attributedCpu = object.attributedExposure.totalCpuMicroseconds
+      const sharedCpu = object.attributedExposure.shared?.totalCpuMicroseconds ?? null
+      const capCpu = attributedCpu ?? sharedCpu
+      if (known && capCpu !== null) {
+        const cpu = Number(BigInt(capCpu))
         const capHeight = 0.5 + Math.log2(1 + Math.max(0, cpu)) * 0.05
         const cap = new THREE.Mesh(
           track(new THREE.BoxGeometry(footprint * 0.55, capHeight, footprint * 0.55)),
-          materials.exposure,
+          attributedCpu === null ? materials.sharedExposure : materials.exposure,
         )
         cap.position.set(0, geometry.height + capHeight / 2 + 0.4, 0)
         cap.userData.objectId = object.objectId
