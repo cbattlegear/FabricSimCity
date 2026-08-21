@@ -175,6 +175,19 @@ export function DatabaseCityViewport({
       setOpenIncidentId(null)
     }
   }, [incidents, openIncidentId])
+
+  /**
+   * Opening an incident from the summary list, rather than by clicking its pin.
+   *
+   * The popup is anchored by projecting the marker to screen, and a marker behind the camera or
+   * outside the frustum projects to nothing — so a list entry that only set the id would open a
+   * popup the user never sees. Centring the building first is what makes the keyboard route real.
+   */
+  const openIncidentFromList = useCallback((markerId: string) => {
+    const marker = incidents?.markers.find(entry => entry.id === markerId) ?? null
+    if (marker) sceneRef.current?.focusObject(marker.objectId)
+    setOpenIncidentId(markerId)
+  }, [incidents])
   useEffect(() => onLayersChange?.(layers), [layers, onLayersChange])
 
   const nudge = useCallback((action: CameraNudge) => {
@@ -257,7 +270,13 @@ export function DatabaseCityViewport({
           ))}
         </fieldset>
         {liveStatus}
-        {incidents && <IncidentSummary projection={incidents} />}
+        {incidents && (
+          <IncidentSummary
+            projection={incidents}
+            openId={openIncidentId}
+            onOpen={openIncidentFromList}
+          />
+        )}
       </div>
 
       {openIncident && popupAt && (

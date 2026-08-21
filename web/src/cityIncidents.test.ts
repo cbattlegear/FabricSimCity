@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { SEVERITY_LABELS, projectIncidents } from './cityIncidents'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import type { LiveIncidentSnapshot, LockResource } from './liveContracts'
@@ -348,5 +349,35 @@ describe('projectIncidents · provenance', () => {
 
   it('labels every severity it can emit', () => {
     expect(Object.keys(SEVERITY_LABELS).sort()).toEqual(['blocked', 'deadlock', 'waiting'])
+  })
+})
+
+
+/**
+ * An incident pin is a sphere in a 3D scene, so pointer-picking is the only way a mouse reaches it.
+ * Without a text route, a keyboard or screen-reader user could not read an incident at all -- the
+ * evidence would exist but be unreachable. These guard the route rather than the styling.
+ */
+describe('incident popups are reachable without a pointer', () => {
+  const popup = readFileSync(new URL('./IncidentPopup.tsx', import.meta.url), 'utf8')
+  const viewport = readFileSync(new URL('./DatabaseCityViewport.tsx', import.meta.url), 'utf8')
+
+  it('lists every marker in the summary as a real button', () => {
+    expect(popup).toContain('{markers.map(marker => (')
+    expect(popup).toMatch(/<button\s+type="button"\s+className={`incident-jump/)
+    expect(popup).toContain('onClick={() => onOpen(marker.id)}')
+    // Not a div with a click handler: it has to be focusable and announce its state.
+    expect(popup).toContain("aria-expanded={openId === marker.id}")
+  })
+
+  it('centres the building before opening, so the popup cannot anchor off screen', () => {
+    expect(viewport).toContain('const openIncidentFromList = useCallback((markerId: string) => {')
+    expect(viewport).toContain('sceneRef.current?.focusObject(marker.objectId)')
+    expect(viewport).toContain('onOpen={openIncidentFromList}')
+  })
+
+  it('keeps the qualification text even when markers are listed', () => {
+    expect(popup).toContain('<small>{reason}</small>')
+    expect(popup).toContain("<span className=\"is-unknown\">Blocking not observed</span>")
   })
 })

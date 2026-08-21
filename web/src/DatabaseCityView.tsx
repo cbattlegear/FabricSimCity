@@ -1064,7 +1064,7 @@ function BuildingPanel({
         <div><dt>{metric} attributed</dt><dd>{databaseCityMetricValue(object, metric) ?? 'Unavailable'}</dd></div>
         <div><dt>Attached indexes</dt><dd>{object.indexes.length}</dd></div>
       </dl>
-      <p className="hud-note">{facilityCount} civic facilities are scattered across the block grid.</p>
+      <p className="hud-note">{facilityCount} infrastructure facilities are scattered across the block grid.</p>
       <div className="source-note">
         <strong>Attributed evidence</strong>
         <p>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}</p>

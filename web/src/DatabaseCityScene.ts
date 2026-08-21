@@ -572,6 +572,21 @@ export function createDatabaseCityScene(
         addQuad(groundGroup, 0.5, length * 0.94, cx, cz, -0.2, materials.laneMark)
       }
     }
+
+    /*
+     * Close the four outer corners.
+     *
+     * Every street is drawn between two intersection *centres*, which tiles perfectly along a run
+     * and lets each crossing street cover the junction it passes through. At the four corners of
+     * the city there is no crossing street to pass through: both boundary arterials stop dead at
+     * the centre, leaving a quarter-junction of bare ground. It reads as a torn plate on the flat
+     * basemap, where the road is white against paper.
+     */
+    for (const cornerX of [cityPlan.bounds.minX, cityPlan.bounds.maxX]) {
+      for (const cornerZ of [cityPlan.bounds.minZ, cityPlan.bounds.maxZ]) {
+        addQuad(groundGroup, ARTERIAL_WIDTH, ARTERIAL_WIDTH, cornerX, cornerZ, -0.25, materials.asphalt)
+      }
+    }
   }
 
   function addQuad(

@@ -45,8 +45,20 @@ export function IncidentPopup({
  *
  * This exists so the map can never imply "all clear". When the probe did not report, it says so;
  * when waits resolved off this page or to no object at all, it says how many and why.
+ *
+ * The marker list is also the keyboard route to the popups. A pin is a sphere in a 3D scene, so
+ * pointer-picking it is the only way in for a mouse; that would leave keyboard and screen-reader
+ * users with no way to read an incident at all. Every marker is therefore a real button here.
  */
-export function IncidentSummary({ projection }: { projection: IncidentProjection }) {
+export function IncidentSummary({
+  projection,
+  openId,
+  onOpen,
+}: {
+  projection: IncidentProjection
+  openId?: string | null
+  onOpen?: (markerId: string) => void
+}) {
   const { markers, offPageCount, unresolved, probeReported, reason } = projection
   return (
     <div className="incident-summary" role="status">
@@ -54,6 +66,23 @@ export function IncidentSummary({ projection }: { projection: IncidentProjection
       {probeReported && markers.length === 0 && <span>No blocked waiter named a loaded object</span>}
       {probeReported && markers.length > 0 && (
         <span className="is-alert">{markers.length} object(s) with a blocked waiter</span>
+      )}
+      {onOpen && markers.length > 0 && (
+        <ul className="incident-list">
+          {markers.map(marker => (
+            <li key={marker.id}>
+              <button
+                type="button"
+                className={`incident-jump is-${marker.severity}`}
+                aria-expanded={openId === marker.id}
+                onClick={() => onOpen(marker.id)}
+              >
+                <i className="incident-jump-dot" aria-hidden="true" />
+                <span>{marker.headline}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
       <small>{reason}</small>
       {offPageCount > 0 && (

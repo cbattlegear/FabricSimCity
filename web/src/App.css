@@ -343,7 +343,10 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 .hud > *, .hud button, .hud input, .hud label, .hud summary { pointer-events: auto; }
 .hud-top-left { top: 12px; left: 12px; }
 .hud-top-right { top: 12px; right: 12px; justify-items: end; }
-.hud-bottom-left { bottom: 12px; left: 12px; }
+.hud-bottom-left {
+  /* Clears the 74px view-mode tile pinned at left: 14px, so the legend never sits on top of it. */
+  bottom: 12px; left: 100px;
+}
 .hud-bottom-right { bottom: 12px; right: 12px; justify-items: end; }
 .hud-panel { top: 12px; right: 12px; bottom: 12px; width: min(360px, 40%); max-width: none; align-content: start; overflow: auto; }
 .hud-road-readout {
@@ -868,3 +871,23 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .incident-summary .is-unknown { color: #a8bac9; }
 /* Qualifications wrap in full. They are the reason an empty map is not an all-clear. */
 .incident-summary small { color: #93a8ba; font-size: .64rem; line-height: 1.45; }
+
+/*
+ * The keyboard route into the incident popups. A pin is scene geometry, so without these buttons a
+ * keyboard user could never reach an incident at all.
+ */
+.incident-list { list-style: none; margin: 2px 0 0; padding: 0; display: grid; gap: 2px; }
+.incident-jump {
+  width: 100%; display: flex; align-items: center; gap: 6px; text-align: left;
+  padding: 4px 6px; border: 1px solid transparent; border-radius: 3px;
+  background: rgba(255, 255, 255, .04); color: #dbe7f0;
+  font: inherit; font-size: .66rem; cursor: pointer;
+}
+.incident-jump:hover { background: rgba(255, 255, 255, .1); }
+.incident-jump:focus-visible { outline: 2px solid #7fd1ff; outline-offset: 1px; }
+.incident-jump[aria-expanded='true'] { border-color: #7fd1ff; background: rgba(127, 209, 255, .12); }
+.incident-jump span { font-weight: 400; }
+.incident-jump-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.incident-jump.is-blocked .incident-jump-dot { background: #e4483c; }
+.incident-jump.is-waiting .incident-jump-dot { background: #e2a957; }
+.incident-jump.is-deadlock .incident-jump-dot { background: #b02a8f; }

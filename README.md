@@ -11,7 +11,7 @@ drawn as a wireframe rather than a guess.
 **[Try the live demo →](https://sqlsimcity.battagler.me/)** · Heavily inspired by
 [PGSimCity](https://github.com/NikolayS/PGSimCity).
 
-![The database city view: tables drawn as buildings, query traffic as roads, and waits as lanes into infrastructure facilities](docs/images/city.png)
+![The database city: a full-screen 3D map with tables drawn as buildings, query traffic as roads, and waits as lanes into scattered infrastructure facilities, beside the Query Store address book sidebar](docs/images/city.png)
 
 ## What it does
 
@@ -71,13 +71,12 @@ permissions, Azure SQL, Query Store, and live sampling.
 
 ## Screenshots
 
-| Server atlas | Database city |
+| Flat map view | Server atlas |
 | --- | --- |
-| ![Server atlas showing every database on the instance as its own city, with the plot sized by allocated storage and the tallest tower by used storage](docs/images/atlas.png) | ![Database city showing tables as buildings sized by page counts, query families as roads, and waits as lanes into infrastructure facilities](docs/images/city.png) |
+| ![The same city in flat map mode: a north-up paper basemap with white carriageways over grey casings, infrastructure facilities scattered across the block grid as POIs, and a red pin on the table with a blocked waiter](docs/images/map.png) | ![Server atlas showing every database on the instance as its own city, with the plot sized by allocated storage and the tallest tower by used storage, beside the searchable sidebar](docs/images/atlas.png) |
 
-> [!NOTE]
-> These shots predate the map-shell redesign and still show the old page chrome. The geometry and
-> its evidence meaning are unchanged; the surrounding layout is not.
+Both surfaces are the same map shell: a full-screen map, a searchable sidebar, and one toggle
+between the flat map and the 3D city. The tile at the bottom-left of the map switches between them.
 
 ## Documentation
 
