@@ -191,6 +191,36 @@ measured footprint and height are unchanged by it. Unknown size yields a fenced 
 Colour and confidence deliberately occupy independent channels: once colour carries congestion,
 confidence moves to line pattern, so neither dimension can be mistaken for the other.
 
+#### The landscape around the evidence
+
+The city stands in a landscape, and none of that landscape is measured. `web/src/cityTerrain.ts`
+plans a river, a gentle relief field, and a land use for every block that holds no building — park,
+woodland, orchard, greenway, plaza, parking, yard, or open water. Land use is chosen a whole arterial
+cell at a time rather than a block at a time, with a minority of blocks breaking ranks along the
+boundary, so open ground reads as a region with a ragged edge instead of confetti.
+
+The street network is deliberately not a lattice. `buildStreetNetwork` lays a coarse arterial grid
+every `ARTERIAL_EVERY` blocks and then gives each cell between them one of five interior patterns:
+`downtown` keeps the full fine grid and barely bows, `ladder` keeps every through street and thins the
+cross streets to long blocks, `crescent` bows strongly around a single central spine, `estate` keeps
+one lane each way, and `open` has no interior streets at all so the cell becomes one parcel. Only
+cells that hold no building may take the patterns that drop through streets, because `placeLot`
+fronts every building on the street along its block's north edge and that street has to exist. Nodes
+left with no incident street are deleted rather than kept as unreachable islands in the routing
+graph.
+
+Streets carry a sampled `path` rather than two endpoints, bowed by a seeded field and clipped so a
+wandering centre line can never reach a building; roads that run with the river become embankments
+and roads that cross it become bridge decks. Trees, hedges, street furniture, parked cars, rooftop
+clutter, the architecture of the six facility shells, and the golden-hour sky, fog and shadows are
+all generated from the same database-id seed. The generator scripts for the Blender-authored kits
+live in `blender/` so every `.glb` in `web/src/assets/` is reproducible and auditable; regenerate
+them by running `blender --background --python blender/simcity_kit.py`.
+
+None of this is derived from a measurement, so none of it can be read as one — a park is not idle
+space, a curving street is not a slow query, and a district with few streets is not a sparse schema.
+The in-app legend says so in as many words under "The scenery is not evidence".
+
 CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
 facilities scattered across the grid (`web/src/cityInfrastructure.ts`). Each facility's architecture
 is fixed decoration so its location stays learnable with no evidence at all; only the *height* of the

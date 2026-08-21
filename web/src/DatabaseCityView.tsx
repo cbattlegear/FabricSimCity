@@ -686,6 +686,20 @@ function LegendDrawer({
           windows, setbacks, crowns and sidewalks are decoration and encode nothing.
         </p>
 
+        <p className="mapping-note">
+          <strong>The scenery is not evidence.</strong> The landscape this city sits in is drawn, not
+          measured. The river and its banks, the ground relief, every land-use area — parks,
+          woodland, orchards, plazas, parking, yards and open water — the trees, hedges, streetlights,
+          benches, parked cars and other street furniture, the architecture of the six infrastructure
+          facilities, the road <em>shape</em> including curves, the ring boulevard, diagonal avenues
+          and which pattern of streets fills each district, and the whole golden-hour palette, sky and
+          shadows are all generated from the same database-id seed as the block layout. None of them
+          is derived from any measurement, so none of them can be read as one: a park is not idle
+          space, a curving street is not a slow query, a wooded edge is not a cold table, and a
+          district with few streets is not a sparse schema. Everything that does carry a quantity is
+          listed above.
+        </p>
+
         {showNeighborhoods && <div className="city-schema-strip" aria-label="Schema neighborhoods">
           {displayedSchemas.map(schema => <div key={schema.schemaId}>
             <strong>{schema.name}</strong>

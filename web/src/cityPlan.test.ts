@@ -17,6 +17,7 @@ import {
   type CityPlanOptions,
 } from './cityPlan'
 import { FACILITY_ORDER } from './cityInfrastructure'
+import { distanceToStreetNetwork } from './cityPlan.testkit'
 import type { DatabaseCityObject, DatabaseCitySchema } from './databaseCityContracts'
 import type { Evidence } from './contracts'
 
@@ -351,17 +352,22 @@ describe('street graph', () => {
     }
   })
 
-  it('produces a continuous path along lattice edges only', () => {
+  it('produces a continuous path where every step is a real street', () => {
     const plan = planCity(sampleCity())
     const ids = [...plan.intersections.keys()].sort()
     const path = streetPath(plan, ids[0]!, ids[ids.length - 1]!)
     expect(path[0]).toBe(ids[0])
     expect(path[path.length - 1]).toBe(ids[ids.length - 1])
+
+    // Steps used to be asserted as one block of Manhattan distance, which quietly assumed the network
+    // was nothing but the lattice. Diagonal avenues are real edges now, so the invariant that actually
+    // matters is that consecutive nodes are joined by a street that exists.
+    const edges = new Set(plan.streets.flatMap(street => [
+      `${street.fromId}>${street.toId}`,
+      `${street.toId}>${street.fromId}`,
+    ]))
     for (let index = 1; index < path.length; index += 1) {
-      const previous = plan.intersections.get(path[index - 1]!)!
-      const current = plan.intersections.get(path[index]!)!
-      const step = Math.abs(previous.col - current.col) + Math.abs(previous.row - current.row)
-      expect(step).toBe(1)
+      expect(edges.has(`${path[index - 1]}>${path[index]}`)).toBe(true)
     }
   })
 
@@ -381,18 +387,15 @@ describe('street graph', () => {
   it('walks streets between two buildings instead of cutting across blocks', () => {
     const plan = planCity(sampleCity())
     const lots = [...plan.lots.values()]
-    const line = streetPolyline(
-      plan,
-      { x: lots[0]!.accessX, z: lots[0]!.accessZ },
-      { x: lots[lots.length - 1]!.accessX, z: lots[lots.length - 1]!.accessZ },
-    )
+    const from = { x: lots[0]!.accessX, z: lots[0]!.accessZ }
+    const to = { x: lots[lots.length - 1]!.accessX, z: lots[lots.length - 1]!.accessZ }
+    const line = streetPolyline(plan, from, to)
     expect(line.length).toBeGreaterThan(2)
-    for (let index = 1; index < line.length; index += 1) {
-      const previous = line[index - 1]!
-      const current = line[index]!
-      const axisAligned =
-        Math.abs(previous.x - current.x) < 0.001 || Math.abs(previous.z - current.z) < 0.001
-      expect(axisAligned).toBe(true)
+
+    // Every vertex between the two kerbs sits on a carriageway. The endpoints are excused because a
+    // lot's access point is deliberately half a street off the centre line, at the kerb.
+    for (let index = 1; index < line.length - 1; index += 1) {
+      expect(distanceToStreetNetwork(plan, line[index]!)).toBeLessThanOrEqual(STREET_WIDTH)
     }
   })
 
@@ -414,12 +417,8 @@ describe('street graph', () => {
       threaded.findIndex(point => point.x === stop.x && point.z === stop.z))
     expect(visits).toEqual([...visits].sort((left, right) => left - right))
     // Still drives on streets rather than cutting the corner between legs.
-    for (let index = 1; index < threaded.length; index += 1) {
-      const previous = threaded[index - 1]!
-      const current = threaded[index]!
-      expect(
-        Math.abs(previous.x - current.x) < 0.001 || Math.abs(previous.z - current.z) < 0.001,
-      ).toBe(true)
+    for (let index = 1; index < threaded.length - 1; index += 1) {
+      expect(distanceToStreetNetwork(plan, threaded[index]!)).toBeLessThanOrEqual(STREET_WIDTH)
     }
     // No duplicated vertex where one leg hands over to the next.
     for (let index = 1; index < threaded.length; index += 1) {
@@ -446,5 +445,141 @@ describe('street graph', () => {
     for (const street of plan.streets) {
       expect(street.width).toBeGreaterThan(0)
     }
+  })
+})
+
+/** A city big enough to earn a ring boulevard, diagonals and a river. */
+function largeCity(count = 220): DatabaseCityObject[] {
+  const objects: DatabaseCityObject[] = []
+  const perSchema = Math.ceil(count / 3)
+  for (let index = 0; index < count; index += 1) {
+    const ordinal = Math.floor(index / perSchema)
+    objects.push(
+      object(
+        `object:${index}`,
+        `schema:s${ordinal}`,
+        ordinal,
+        index % perSchema,
+        String(1024 * (1 + (index % 40))),
+        String(512 * (1 + (index % 40))),
+      ),
+    )
+  }
+  return objects
+}
+
+function largeOptions(seed = 'db:sales'): CityPlanOptions {
+  return {
+    seed,
+    totalObjects: '220',
+    schemas: [0, 1, 2].map(ordinal => ({
+      schemaId: `schema:s${ordinal}`,
+      name: `s${ordinal}`,
+      neighborhoodOrdinal: ordinal,
+      objectCount: '74',
+      evidence,
+    })),
+  }
+}
+
+describe('street network', () => {
+  it('draws every street between the intersections it connects', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    for (const street of plan.streets) {
+      const first = street.path[0]!
+      const last = street.path[street.path.length - 1]!
+      expect(street.path.length).toBeGreaterThan(1)
+      // Curvature is decoration: it moves the middle of a road, never its ends, so the graph the
+      // route finder walks is exactly the graph the map draws.
+      expect(first.x).toBeCloseTo(street.fromX, 9)
+      expect(first.z).toBeCloseTo(street.fromZ, 9)
+      expect(last.x).toBeCloseTo(street.toX, 9)
+      expect(last.z).toBeCloseTo(street.toZ, 9)
+      expect(plan.intersections.has(street.fromId)).toBe(true)
+      expect(plan.intersections.has(street.toId)).toBe(true)
+    }
+  })
+
+  it('never runs a carriageway through a measured building', () => {
+    // The single invariant that lets roads curve at all: a bowed street, an embankment shifted onto
+    // the far bank and a diagonal avenue must all still miss every footprint the catalogue measured.
+    const violations: string[] = []
+    for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops']) {
+      const plan = planCity(largeCity(), largeOptions(seed))
+      const lots = [...plan.lots.values()].filter(lot => lot.footprint !== null)
+      for (const street of plan.streets) {
+        const reach = street.width / 2
+        for (const point of street.path) {
+          for (const lot of lots) {
+            const half = lot.footprint! / 2 + reach
+            if (Math.abs(point.x - lot.x) < half && Math.abs(point.z - lot.z) < half) {
+              violations.push(`${seed}: ${street.id} (${street.streetClass}) hits ${lot.objectId}`)
+            }
+          }
+        }
+      }
+    }
+    expect(violations.slice(0, 5)).toEqual([])
+  })
+
+  it('bends most of its streets without turning any of them into a detour', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    const curved = plan.streets.filter(street => street.path.length > 2)
+    expect(curved.length).toBeGreaterThan(plan.streets.length * 0.5)
+    for (const street of plan.streets) {
+      const straight = Math.hypot(street.toX - street.fromX, street.toZ - street.fromZ)
+      let drawn = 0
+      for (let index = 1; index < street.path.length; index += 1) {
+        drawn += Math.hypot(
+          street.path[index]!.x - street.path[index - 1]!.x,
+          street.path[index]!.z - street.path[index - 1]!.z,
+        )
+      }
+      // A curve costs a little length. More than half again would read as a detour, not a bend.
+      expect(drawn).toBeLessThan(straight * 1.5)
+    }
+  })
+
+  it('adds a road hierarchy the lattice alone could not express', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    const classes = new Set(plan.streets.map(street => street.streetClass))
+    expect(classes.has('collector')).toBe(true)
+    expect(classes.has('arterial')).toBe(true)
+    expect(classes.has('boulevard')).toBe(true)
+    expect(classes.has('avenue')).toBe(true)
+  })
+
+  it('runs its diagonal avenues between real intersections it did not invent', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    const avenues = plan.streets.filter(street => street.axis === 'd')
+    expect(avenues.length).toBeGreaterThan(0)
+    for (const avenue of avenues) {
+      const from = plan.intersections.get(avenue.fromId)!
+      const to = plan.intersections.get(avenue.toId)!
+      expect(from).toBeDefined()
+      expect(to).toBeDefined()
+      // One block diagonally: a genuine short cut across the lattice, not a new junction.
+      expect(Math.abs(from.col - to.col)).toBe(1)
+      expect(Math.abs(from.row - to.row)).toBe(1)
+    }
+  })
+
+  it('carries its crossings on bridges and its riverside roads on the bank', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    expect(plan.terrain.river.length).toBeGreaterThan(2)
+    expect(plan.streets.some(street => street.bridge)).toBe(true)
+    expect(plan.streets.some(street => street.streetClass === 'riverside')).toBe(true)
+    for (const street of plan.streets) {
+      // A deck is a structure, so it is drawn straight; and nothing is both a bank and a crossing.
+      if (street.bridge) expect(street.path).toHaveLength(2)
+      if (street.streetClass === 'riverside') expect(street.bridge).toBe(false)
+    }
+  })
+
+  it('draws the same city twice for the same database', () => {
+    const first = planCity(largeCity(), largeOptions())
+    const second = planCity(largeCity(), largeOptions())
+    expect(second.streets).toEqual(first.streets)
+    expect([...second.lots.entries()]).toEqual([...first.lots.entries()])
   })
 })

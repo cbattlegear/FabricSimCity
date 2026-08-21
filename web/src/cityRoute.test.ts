@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { Evidence } from './contracts'
 import type { NormalizedShowplan, ShowplanNode } from './contracts'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { planCity } from './cityPlan'
+import { STREET_WIDTH, planCity } from './cityPlan'
+import { distanceToStreetNetwork } from './cityPlan.testkit'
 import {
   buildCityRoute,
   facilityForOperator,
@@ -307,7 +308,7 @@ describe('planStops', () => {
 })
 
 describe('routeThroughStreets', () => {
-  it('produces a continuous axis-aligned polyline between placed stops', () => {
+  it('produces a continuous polyline that stays on the street network', () => {
     const ctx = context()
     const stops = planStops(
       showplan([
@@ -327,11 +328,15 @@ describe('routeThroughStreets', () => {
     )
     const line = routeThroughStreets(stops, ctx.plan)
     expect(line.length).toBeGreaterThan(1)
+    // No zero-length segment: every vertex advances the journey.
     for (let i = 1; i < line.length; i += 1) {
-      const sameX = Math.abs(line[i].x - line[i - 1].x) < 1e-9
-      const sameZ = Math.abs(line[i].z - line[i - 1].z) < 1e-9
-      expect(sameX || sameZ).toBe(true)
-      expect(sameX && sameZ).toBe(false)
+      expect(Math.hypot(line[i].x - line[i - 1].x, line[i].z - line[i - 1].z)).toBeGreaterThan(1e-9)
+    }
+    // The route drives on roads rather than across the blocks. This used to be asserted as
+    // "axis-aligned", which only held while every road was. Endpoints are excused because a stop sits
+    // at its building's kerb, deliberately half a street width off the centre line.
+    for (let i = 1; i < line.length - 1; i += 1) {
+      expect(distanceToStreetNetwork(ctx.plan, line[i])).toBeLessThanOrEqual(STREET_WIDTH)
     }
   })
 
