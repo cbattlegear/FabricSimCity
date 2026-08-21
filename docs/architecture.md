@@ -142,17 +142,27 @@ and they come on-page. The strict attribution rule is deliberately unchanged; sh
 makes that strictness survivable on a real workload.
 
 The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` builds a
-uniform block lattice and scatters lots across it using a seeded generator (`web/src/citySeed.ts`),
-so a city looks like a city instead of a packed rectangle while remaining completely deterministic:
-the seed is a stable hash of the database's own id, and every draw comes from that one stream. The
-same database therefore lays out identically on every load, in every browser, on every machine.
+uniform block lattice and hands blocks out using a seeded generator (`web/src/citySeed.ts`), so a
+city looks like a city instead of a packed rectangle while remaining completely deterministic: the
+seed is a stable hash of the database's own id, and every draw comes from that one stream. The same
+database therefore lays out identically on every load, in every browser, on every machine.
 
-Two rules make that scatter safe to build on:
+Blocks are not handed out from one city-wide shuffle. `planNeighborhoods` first partitions the
+buildable grid into one **contiguous territory per schema**, so a schema is a quarter of the city
+rather than a colour sprinkled across it. Each schema gets a seed block chosen by farthest-point
+sampling, and the territories then grow outward a block at a time in rounds, each schema taking
+ground until it meets a quota proportional to its full object count. Every block carries a fixed
+seeded handicap on its cost, so regions grow as ragged blobs rather than discs and the borders land
+wherever two regions happen to meet. A territory that gets walled in falls back to the nearest free
+ground, so every object is housed even on a cramped grid.
+
+Two rules make that layout safe to build on:
 
 - **Appending a page never moves a building.** The grid is sized from `page.totalObjects` (plus the
-  facilities and slack), not from how many objects happen to be loaded, and each object's slot is
-  `Σ(objectCount of schemas with a lower neighborhoodOrdinal) + objectOrdinal`. Because every page
-  carries the complete schema list with full per-schema counts, that slot is page-independent.
+  facilities and slack), not from how many objects happen to be loaded. The partition is a function
+  of the seed, the grid, and the *full* per-schema counts carried on every page — never of which
+  objects have loaded — and an object's block is `objectOrdinal % territory.length`, an index local
+  to its own schema. Appending a page therefore fills a neighbourhood in; it never redraws one.
   Filtering the address book does not rearrange the city either.
 - **Facilities are spread out.** The six civic facilities are placed first, each drawn from the seeded
   stream and accepted only when its Chebyshev distance to every already-placed facility is at least
@@ -162,9 +172,35 @@ Two rules make that scatter safe to build on:
   and still fully determined by the seed.
 
 The plan also emits the intersections and streets that roads are drawn on and that query routes walk,
-so nothing is drawn diagonally through a building. Schema districts are now the bounding box of their
-scattered members and are used only for the optional tint layer, which draws per-lot pads rather than
-one contiguous rectangle.
+so nothing is drawn diagonally through a building. Each `CityDistrict` carries the blocks its schema
+claimed, a bounding box, and a label anchor averaged over *owned* ground — an L-shaped territory's
+bounding-box centre can be a block the schema does not own, so the neighbourhood name is placed on
+the centroid of what it actually holds.
+
+#### What a neighbourhood does and does not say
+
+Grouping is evidence: two buildings in the same quarter really are in the same schema, and that is a
+catalogue fact you can verify. Everything downstream of the grouping is not:
+
+- **Which block inside the quarter** a building gets is seeded, so adjacent buildings are not related
+  by being adjacent.
+- **How far apart two neighbourhoods sit**, and which two share a border, is an accident of seeding.
+- **The hue** comes from `neighborhoodHue(ordinal)` in `cityPlan.ts` — golden-angle steps over the
+  schema's place in the catalogue listing. It is a set of names, not a scale: no hue is larger,
+  hotter or busier than another. The hue lives in `cityPlan.ts` rather than in the renderer because
+  the sidebar swatch must not load `three`, and a second copy of the formula would be a colour key
+  that quietly lies. `neighborhoodTint` (3D) and `neighborhoodSwatch` (CSS) both read it.
+- **The tint weight** is 0.26, deliberately low: a skyscraper in the green neighbourhood still has to
+  look like a skyscraper. Vacant parcels are never tinted, because unmeasured ground must not be made
+  to look like a building.
+- **The amount of ground a schema claims** follows its object count, because its growth quota is
+  proportional to it — a schema with ten times the tables gets roughly ten times the territory. But
+  only roughly: quotas are approximate, borders land wherever two growing regions happen to meet, and
+  a walled-in region takes whatever free ground is nearest. Area is a rough impression of how much a
+  schema holds, never a figure to read off the map. The exact counts are in the sidebar strip.
+
+Building labels carry the bare object name; the schema name is drawn once across the neighbourhood
+instead, set in tracked capitals the way a basemap names an area rather than a thing standing in it.
 
 Every property in the table below encodes evidence. Everything else in the scene is decoration seeded
 from an object's stable id and carries no data claim; the in-app legend states this split verbatim.
@@ -218,8 +254,8 @@ live in `blender/` so every `.glb` in `web/src/assets/` is reproducible and audi
 them by running `blender --background --python blender/simcity_kit.py`.
 
 None of this is derived from a measurement, so none of it can be read as one — a park is not idle
-space, a curving street is not a slow query, and a district with few streets is not a sparse schema.
-The in-app legend says so in as many words under "The scenery is not evidence".
+space, a curving street is not a slow query, and a neighbourhood with a sparser street pattern is not
+a sparser schema. The in-app legend says so in as many words under "The scenery is not evidence".
 
 CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
 facilities scattered across the grid (`web/src/cityInfrastructure.ts`). Each facility's architecture

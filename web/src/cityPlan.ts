@@ -119,12 +119,22 @@ export interface CityDistrict {
   readonly neighborhoodOrdinal: number
   readonly kind: 'schema' | 'civic'
   readonly objectCount: number
+  /**
+   * The blocks this schema's neighbourhood claims, whether or not a loaded object stands on one.
+   *
+   * Claimed from the schema's full object count, so the shape of a neighbourhood is settled before
+   * its tables arrive and does not shift underneath them as pages load.
+   */
+  readonly blocks: readonly BlockRef[]
   readonly minX: number
   readonly maxX: number
   readonly minZ: number
   readonly maxZ: number
   readonly centerX: number
   readonly centerZ: number
+  /** Where the neighbourhood's name is written: the middle of the ground it owns. */
+  readonly labelX: number
+  readonly labelZ: number
 }
 
 export interface CityBounds {
@@ -192,11 +202,10 @@ export interface CityPlanOptions {
 /**
  * Lots per block. One building stands alone on its own block, ringed by street on every side.
  *
- * Blocks used to hold eight buildings in two back-to-back rows, and schema neighborhood tints were
- * what visually separated one group of buildings from the next. Those tints are off by default now,
- * which left a packed block reading as an undifferentiated mass of geometry. Giving every building
- * its own block moves that separation into the street lattice itself, where it does not depend on a
- * layer being switched on.
+ * Blocks used to hold eight buildings in two back-to-back rows, which read as an undifferentiated
+ * mass of geometry: the only thing separating one building from the next was the gap between two
+ * boxes. Giving every building its own block moves that separation into the street lattice itself.
+ * Neighbourhood tints then do a different job — they group buildings rather than divide them.
  *
  * This costs roughly 1.7x the ground area per building -- a lot plus its share of the surrounding
  * street, rather than a lot plus a shared eighth of one. That is the price of the separation and it
@@ -323,7 +332,8 @@ export function planCity(
   const pitchZ = BLOCK_ROWS * cell + STREET_WIDTH
 
   const ordered = orderObjects(objects)
-  const slots = globalSlots(ordered, options.schemas)
+  const sizes = schemaSizes(ordered, options.schemas)
+  const slots = globalSlots(ordered, sizes)
   const capacity = Math.max(
     parseCount(options.totalObjects) ?? 0,
     ordered.length,
@@ -349,16 +359,24 @@ export function planCity(
   )
   const shuffled = seededShuffle(freeBlocks, rng)
 
+  // Territories grow in reading order and are then shuffled, so a schema's tables spread through
+  // their own neighbourhood instead of packing against its seed and leaving the outskirts bare.
+  const territories = planNeighborhoods(freeBlocks, sizes, rng, options.seed ?? 'sqlsimcity')
+  const addresses = new Map<string, BlockRef[]>()
+  for (const [schemaId, blocks] of territories) addresses.set(schemaId, seededShuffle(blocks, rng))
+
   const lots = new Map<string, CityLot>()
   const occupied = new Set<string>()
   for (const object of ordered) {
-    const slot = slots.get(object.objectId) ?? 0
-    const block = shuffled[slot % shuffled.length]
+    const territory = addresses.get(object.schemaId)
+    const block = territory && territory.length > 0
+      ? territory[objectOrdinal(object) % territory.length]
+      : shuffled[(slots.get(object.objectId) ?? 0) % shuffled.length]
     lots.set(object.objectId, placeLot(object, block, cell, pitchX, pitchZ))
     occupied.add(terrainBlockKey(block.col, block.row))
   }
 
-  const districts = describeDistricts(ordered, lots, cell)
+  const districts = describeDistricts(ordered, lots, territories, cell, pitchX, pitchZ)
   const terrain = planTerrain({
     blockCols,
     blockRows,
@@ -570,7 +588,7 @@ function pushElbow(
 const AXIS_EPSILON = 1e-9
 
 /** A block on the grid. Blocks hold exactly one lot, so a block address is a building address. */
-interface BlockRef {
+export interface BlockRef {
   readonly col: number
   readonly row: number
 }
@@ -618,13 +636,52 @@ function parseCount(value: string | number | null | undefined): number | null {
  * page one as it is on page nine. This is what actually delivers the promise that appending a page
  * moves nothing: an object's block is a function of its own identity, not of who else is loaded.
  *
- * Without schema counts the offsets are derived from the loaded objects instead, which is correct
- * once everything is loaded and drifts while it is not.
+ * Only used now for the blockless fallback and for sizing the grid; a located object takes its block
+ * from its own schema's neighbourhood instead.
  */
 function globalSlots(
   ordered: readonly DatabaseCityObject[],
-  schemas: readonly DatabaseCitySchema[] | undefined,
+  counts: readonly SchemaSize[],
 ): Map<string, number> {
+  const offsets = new Map<string, number>()
+  let running = 0
+  for (const entry of counts) {
+    offsets.set(entry.schemaId, running)
+    running += entry.count
+  }
+
+  const slots = new Map<string, number>()
+  for (const object of ordered) {
+    slots.set(object.objectId, (offsets.get(object.schemaId) ?? 0) + objectOrdinal(object))
+  }
+  return slots
+}
+
+/** How many objects a schema holds in total, and where it sits in neighbourhood order. */
+interface SchemaSize {
+  readonly schemaId: string
+  readonly ordinal: number
+  readonly count: number
+}
+
+/** An object's index within its own schema, floored and clamped so it can only address a real block. */
+function objectOrdinal(object: DatabaseCityObject): number {
+  const ordinal = Math.floor(object.layout.objectOrdinal)
+  return Number.isFinite(ordinal) && ordinal > 0 ? ordinal : 0
+}
+
+/**
+ * Every schema's full object count, in neighbourhood order.
+ *
+ * Taken from the page's complete schema list when there is one, because that count is the same on
+ * every page and is therefore what a neighbourhood can be sized from without moving as pages load.
+ * A schema the list did not mention, or one whose count is short of what actually arrived, is
+ * widened to fit rather than allowed to overlap the next schema.
+ */
+function schemaSizes(
+  ordered: readonly DatabaseCityObject[],
+  schemas: readonly DatabaseCitySchema[] | undefined,
+): SchemaSize[] {
   const counts = new Map<string, { ordinal: number; count: number }>()
 
   if (schemas && schemas.length > 0) {
@@ -637,9 +694,7 @@ function globalSlots(
   }
   for (const object of ordered) {
     const existing = counts.get(object.schemaId)
-    // A schema the list did not mention, or one whose count is short of what actually arrived,
-    // still has to fit; widen it rather than overlap the next schema's slots.
-    const observed = object.layout.objectOrdinal + 1
+    const observed = objectOrdinal(object) + 1
     if (!existing) {
       counts.set(object.schemaId, { ordinal: object.layout.neighborhoodOrdinal, count: observed })
     } else if (observed > existing.count) {
@@ -647,21 +702,217 @@ function globalSlots(
     }
   }
 
-  const offsets = new Map<string, number>()
-  let running = 0
-  const orderedSchemas = [...counts.entries()].sort(
-    (left, right) => left[1].ordinal - right[1].ordinal || compareOrdinal(left[0], right[0]),
-  )
-  for (const [schemaId, entry] of orderedSchemas) {
-    offsets.set(schemaId, running)
-    running += entry.count
+  return [...counts.entries()]
+    .map(([schemaId, entry]) => ({ schemaId, ordinal: entry.ordinal, count: entry.count }))
+    .sort((left, right) => left.ordinal - right.ordinal || compareOrdinal(left.schemaId, right.schemaId))
+}
+
+/**
+ * Ground a neighbourhood claims per object it holds.
+ *
+ * Above 1 so a neighbourhood has gaps in it — front gardens, corner parks, the odd empty plot — which
+ * is what stops a schema reading as a solid slab of buildings. Below {@link GRID_SLACK}, which is the
+ * airiness of the grid as a whole, because the difference between the two is the open country that
+ * separates one neighbourhood from the next. That separation is the whole point: a schema you can see
+ * the edge of is a schema you can navigate by.
+ */
+const NEIGHBORHOOD_SLACK = 1.5
+
+/**
+ * How far a block's cost may wander when a neighbourhood decides whether to claim it.
+ *
+ * Growth without this is a distance field, and a distance field grows discs. Real neighbourhoods have
+ * ragged edges, so every block gets a fixed seeded handicap that makes some of them cheap to reach and
+ * others expensive. Big enough to bend a boundary by a block or two, small enough that a region stays
+ * one connected place rather than breaking into islands.
+ */
+const NEIGHBORHOOD_WOBBLE = 1.7
+
+/**
+ * The hue a neighbourhood is drawn in, as a 0–1 turn around the wheel.
+ *
+ * Lives here, three-free, because two very different renderers have to agree on it: the 3D scene
+ * bakes it into building materials and ground washes, and the sidebar paints the same swatch beside
+ * the schema name. A second copy of this formula would be a colour legend that quietly lies.
+ *
+ * Hues step by the golden angle, so consecutive schemas land far apart on the wheel and the tenth
+ * schema is still distinguishable from the first. That also makes the sequence ordinal-only: it is a
+ * set of names, not a scale, and no hue is higher, hotter or busier than another.
+ */
+export function neighborhoodHue(ordinal: number): number {
+  return (((ordinal * 0.6180339887498949) % 1) + 1) % 1
+}
+
+/** The neighbourhood swatch as a CSS colour, for chrome that never loads the 3D renderer. */
+export function neighborhoodSwatch(ordinal: number): string {
+  return `hsl(${(neighborhoodHue(ordinal) * 360).toFixed(1)} 52% 55%)`
+}
+
+/**
+ * Divides the buildable grid into one contiguous territory per schema.
+ *
+ * This is the answer to "where does a table stand". Blocks used to be handed out from a single
+ * city-wide shuffle, which put a schema's tables everywhere and nowhere: the map had no districts you
+ * could point at, so the only way to see that two tables were related was to read both their labels.
+ *
+ * Each schema is given a seed block, spread as far from the other seeds as the grid allows, and the
+ * territories then grow outward a block at a time in rounds. A schema still growing after its
+ * neighbours have met their quota keeps taking ground, so a schema with ten times the tables gets
+ * roughly ten times the territory, and the borders land wherever two regions happen to meet.
+ *
+ * Crucially the whole partition is a function of the seed, the grid and the *full* schema counts —
+ * never of which objects have loaded. Appending a page therefore fills a neighbourhood in; it never
+ * redraws one.
+ */
+function planNeighborhoods(
+  freeBlocks: readonly BlockRef[],
+  schemas: readonly SchemaSize[],
+  rng: () => number,
+  seed: string,
+): Map<string, BlockRef[]> {
+  const territories = new Map<string, BlockRef[]>()
+  if (schemas.length === 0 || freeBlocks.length === 0) return territories
+  for (const schema of schemas) territories.set(schema.schemaId, [])
+
+  const quotas = neighborhoodQuotas(schemas, freeBlocks.length)
+  const seeds = spreadSeeds(freeBlocks, schemas.length, rng)
+
+  const unclaimed = new Map<string, BlockRef>()
+  const wobble = new Map<string, number>()
+  for (const block of freeBlocks) {
+    const key = blockKey(block.col, block.row)
+    unclaimed.set(key, block)
+    wobble.set(key, (stableHash(`${seed}::hood::${key}`) % 1024) / 1024 * NEIGHBORHOOD_WOBBLE)
   }
 
-  const slots = new Map<string, number>()
-  for (const object of ordered) {
-    slots.set(object.objectId, (offsets.get(object.schemaId) ?? 0) + object.layout.objectOrdinal)
+  const cost = (block: BlockRef, from: BlockRef) =>
+    Math.hypot(block.col - from.col, block.row - from.row) + (wobble.get(blockKey(block.col, block.row)) ?? 0)
+
+  const frontiers = schemas.map(() => new Set<string>())
+  const claim = (index: number, block: BlockRef) => {
+    const key = blockKey(block.col, block.row)
+    unclaimed.delete(key)
+    territories.get(schemas[index].schemaId)!.push(block)
+    frontiers[index].delete(key)
+    for (const neighbour of orthogonalNeighbours(block)) {
+      const neighbourKey = blockKey(neighbour.col, neighbour.row)
+      if (unclaimed.has(neighbourKey)) frontiers[index].add(neighbourKey)
+    }
   }
-  return slots
+
+  seeds.forEach((block, index) => {
+    if (unclaimed.has(blockKey(block.col, block.row))) claim(index, block)
+  })
+
+  // Rounds rather than one schema at a time: growing a schema to its full quota before the next one
+  // starts would let the first schema surround every other seed and leave them nowhere to go.
+  let growing = true
+  while (growing) {
+    growing = false
+    for (let index = 0; index < schemas.length; index += 1) {
+      if (territories.get(schemas[index].schemaId)!.length >= quotas[index]) continue
+      const next =
+        cheapest(frontiers[index], unclaimed, seeds[index], cost) ??
+        // A region can be walled in by its neighbours before it is full. Jumping to the nearest free
+        // ground keeps every object housed; the alternative is two tables sharing one block.
+        cheapest(unclaimed.keys(), unclaimed, seeds[index], cost)
+      if (!next) continue
+      claim(index, next)
+      growing = true
+    }
+  }
+
+  return territories
+}
+
+/**
+ * How many blocks each neighbourhood may claim.
+ *
+ * Proportional to the schema's share of the database, floored at the number of objects it actually
+ * holds so every table has somewhere to stand, and capped so the quotas together never promise more
+ * ground than the grid has.
+ */
+function neighborhoodQuotas(schemas: readonly SchemaSize[], available: number): number[] {
+  const floors = schemas.map(schema => Math.min(schema.count, available))
+  const committed = floors.reduce((sum, value) => sum + value, 0)
+  const spare = Math.max(0, available - committed)
+  const total = schemas.reduce((sum, schema) => sum + schema.count, 0)
+  if (total === 0) return schemas.map(() => Math.floor(available / schemas.length))
+
+  return schemas.map((schema, index) => {
+    const wanted = Math.round(schema.count * NEIGHBORHOOD_SLACK) - floors[index]
+    const share = Math.floor(spare * (schema.count / total))
+    return floors[index] + Math.max(0, Math.min(wanted, share))
+  })
+}
+
+/**
+ * Picks one starting block per schema, each as far as possible from the ones already picked.
+ *
+ * Farthest-point sampling rather than random blocks: two seeds that land next to each other produce
+ * two neighbourhoods that spend the whole growth fighting over the same ground and end up
+ * interleaved, which is exactly the scattering this replaced.
+ */
+function spreadSeeds(freeBlocks: readonly BlockRef[], count: number, rng: () => number): BlockRef[] {
+  const seeds: BlockRef[] = []
+  if (freeBlocks.length === 0) return seeds
+  seeds.push(freeBlocks[Math.min(freeBlocks.length - 1, Math.floor(rng() * freeBlocks.length))])
+
+  while (seeds.length < count && seeds.length < freeBlocks.length) {
+    let best: BlockRef | null = null
+    let bestDistance = -1
+    for (const block of freeBlocks) {
+      let nearest = Infinity
+      for (const seed of seeds) {
+        nearest = Math.min(nearest, Math.hypot(block.col - seed.col, block.row - seed.row))
+        if (nearest === 0) break
+      }
+      if (nearest > bestDistance) {
+        bestDistance = nearest
+        best = block
+      }
+    }
+    if (!best || bestDistance <= 0) break
+    seeds.push(best)
+  }
+
+  // More schemas than blocks is degenerate but must not throw; the extras share a seed and fall back
+  // to the city-wide block list when they find no ground of their own.
+  while (seeds.length < count) seeds.push(freeBlocks[seeds.length % freeBlocks.length])
+  return seeds
+}
+
+/** The cheapest still-unclaimed block among `candidates`, or null when none is left. */
+function cheapest(
+  candidates: Iterable<string>,
+  unclaimed: ReadonlyMap<string, BlockRef>,
+  from: BlockRef,
+  cost: (block: BlockRef, from: BlockRef) => number,
+): BlockRef | null {
+  let best: BlockRef | null = null
+  let bestCost = Infinity
+  let bestKey = ''
+  for (const key of candidates) {
+    const block = unclaimed.get(key)
+    if (!block) continue
+    const value = cost(block, from)
+    // Ties broken by key so the partition never depends on Set iteration order.
+    if (value < bestCost || (value === bestCost && key < bestKey)) {
+      best = block
+      bestCost = value
+      bestKey = key
+    }
+  }
+  return best
+}
+
+function orthogonalNeighbours(block: BlockRef): BlockRef[] {
+  return [
+    { col: block.col - 1, row: block.row },
+    { col: block.col + 1, row: block.row },
+    { col: block.col, row: block.row - 1 },
+    { col: block.col, row: block.row + 1 },
+  ]
 }
 
 /**
@@ -746,16 +997,20 @@ function facilitySites(
 }
 
 /**
- * Districts are now the bounding box of their scattered members rather than a packed rectangle.
+ * Describes each schema's neighbourhood: the ground it claimed and the buildings standing on it.
  *
- * Because members are spread across the grid these boxes overlap, so the neighbourhood layer draws
- * per-lot pads instead of one filled rectangle. The box survives only as a framing target for
- * "show me this schema".
+ * The box is the territory rather than the bounding box of whatever has loaded, so framing "show me
+ * this schema" holds still as pages arrive and always frames the same place. Only schemas with a
+ * building on the map get a district, because a district is what the map labels and there is nothing
+ * to point at otherwise.
  */
 function describeDistricts(
   ordered: readonly DatabaseCityObject[],
   lots: ReadonlyMap<string, CityLot>,
+  territories: ReadonlyMap<string, BlockRef[]>,
   cell: number,
+  pitchX: number,
+  pitchZ: number,
 ): CityDistrict[] {
   const groups = new Map<string, { name: string; ordinal: number; lots: CityLot[] }>()
   for (const object of ordered) {
@@ -778,24 +1033,45 @@ function describeDistricts(
   return [...groups.entries()]
     .sort((left, right) => left[1].ordinal - right[1].ordinal || compareOrdinal(left[0], right[0]))
     .map(([districtId, group]) => {
-      const minX = Math.min(...group.lots.map(lot => lot.x)) - half
-      const maxX = Math.max(...group.lots.map(lot => lot.x)) + half
-      const minZ = Math.min(...group.lots.map(lot => lot.z)) - half
-      const maxZ = Math.max(...group.lots.map(lot => lot.z)) + half
+      const blocks = territories.get(districtId) ?? []
+      const box = blocks.length > 0
+        ? {
+            minX: Math.min(...blocks.map(block => block.col)) * pitchX,
+            maxX: (Math.max(...blocks.map(block => block.col)) + 1) * pitchX,
+            minZ: Math.min(...blocks.map(block => block.row)) * pitchZ,
+            maxZ: (Math.max(...blocks.map(block => block.row)) + 1) * pitchZ,
+          }
+        : {
+            minX: Math.min(...group.lots.map(lot => lot.x)) - half,
+            maxX: Math.max(...group.lots.map(lot => lot.x)) + half,
+            minZ: Math.min(...group.lots.map(lot => lot.z)) - half,
+            maxZ: Math.max(...group.lots.map(lot => lot.z)) + half,
+          }
       return {
         districtId,
         name: group.name,
         neighborhoodOrdinal: group.ordinal,
         kind: 'schema' as const,
         objectCount: group.lots.length,
-        minX,
-        maxX,
-        minZ,
-        maxZ,
-        centerX: (minX + maxX) / 2,
-        centerZ: (minZ + maxZ) / 2,
+        blocks,
+        ...box,
+        centerX: (box.minX + box.maxX) / 2,
+        centerZ: (box.minZ + box.maxZ) / 2,
+        // The name goes over the middle of the claimed ground, not the middle of the box: an L-shaped
+        // territory's box centre can easily be a block the schema does not own.
+        labelX: blocks.length > 0
+          ? average(blocks.map(block => block.col * pitchX + STREET_WIDTH / 2 + cell / 2))
+          : average(group.lots.map(lot => lot.x)),
+        labelZ: blocks.length > 0
+          ? average(blocks.map(block => block.row * pitchZ + STREET_WIDTH / 2 + cell / 2))
+          : average(group.lots.map(lot => lot.z)),
       }
     })
+}
+
+function average(values: readonly number[]): number {
+  if (values.length === 0) return 0
+  return values.reduce((sum, value) => sum + value, 0) / values.length
 }
 
 /**

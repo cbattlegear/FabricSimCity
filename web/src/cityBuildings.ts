@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { BuildingArchetype, CityLot } from './cityPlan'
+import { neighborhoodHue, type BuildingArchetype, type CityLot } from './cityPlan'
 import type { DistrictCharacter } from './cityTerrain'
 import { mergeAndDispose } from './mergeGeometry'
 
@@ -701,11 +701,111 @@ const CHARACTER_TINTS: Readonly<Record<DistrictCharacter, Readonly<Record<Buildi
   },
 }
 
+/**
+ * How much of a neighbourhood's hue reaches a building it stands in.
+ *
+ * Pushed hard because {@link tintPreservingLuma} spends it entirely on hue: brightness is restored
+ * afterwards, so a large weight buys colour without costing the massing read. A gentler mix looked
+ * principled and did nothing — under a warm low sun, a 26% blend of a mid-light hue into an
+ * already-pale facade is invisible from any distance you would actually read a neighbourhood at.
+ */
+const NEIGHBORHOOD_TINT_WEIGHT = 0.44
+
+/**
+ * The same, for the flattened plates of the basemap.
+ *
+ * Map mode draws every building as one grey plate, because height is a 3D claim. That leaves the
+ * plates free to carry the neighbourhood instead, which is the clearest possible answer to *which
+ * schema is this* on a printed-looking map: a whole quarter of pale green, next to a quarter of pale
+ * rose. Lower than the 3D weight only because paper wants less colour than a lit facade does.
+ */
+const MAP_NEIGHBORHOOD_TINT_WEIGHT = 0.36
+
+/**
+ * The hue that identifies one neighbourhood, as a packed sRGB colour.
+ *
+ * The hue itself comes from {@link neighborhoodHue} so the sidebar swatch and the map agree. Strongly
+ * saturated and mid-light: this colour is never drawn directly, only ever mixed at a fraction of its
+ * strength and then rebalanced back to the base's brightness, so a timid source colour arrives as no
+ * colour at all. It says *these buildings are the same schema* and nothing else — the ordinal it comes
+ * from is the schema's place in the catalogue's own listing, not a rank, a size or a score.
+ */
+export function neighborhoodTint(ordinal: number): number {
+  return new THREE.Color().setHSL(neighborhoodHue(ordinal), 0.7, 0.5).getHex()
+}
+
+/** Blends two packed sRGB colours. `weight` is how much of `tint` survives. */
+export function mixColor(base: number, tint: number, weight: number): number {
+  const amount = Math.min(1, Math.max(0, weight))
+  let mixed = 0
+  for (let shift = 16; shift >= 0; shift -= 8) {
+    const from = (base >> shift) & 0xff
+    const to = (tint >> shift) & 0xff
+    mixed |= Math.round(from + (to - from) * amount) << shift
+  }
+  return mixed
+}
+
+/** Rec. 709 relative luminance of a packed sRGB colour, on the same 0-255 scale as its channels. */
+function luma(color: number): number {
+  return 0.2126 * ((color >> 16) & 0xff) + 0.7152 * ((color >> 8) & 0xff) + 0.0722 * (color & 0xff)
+}
+
+/**
+ * Mixes `tint` into `base`, then puts the brightness back.
+ *
+ * The archetype palette encodes nothing measured, but its *values* are what make a city read: pale
+ * towers against dark warehouses, a bright civic block against its street. An ordinary blend drags
+ * every facade toward the tint's own lightness, so a strong enough neighbourhood cue also flattens
+ * the city into one tone — and a weak enough one to preserve the tone is not a cue.
+ *
+ * Rescaling the blend back to the original luminance breaks that trade. Hue and saturation come from
+ * the mix; brightness comes from the building. A neighbourhood can then be pushed until it is
+ * genuinely obvious while every facade keeps exactly the value it started with.
+ *
+ * A near-white facade cannot be scaled all the way back up — a channel hits 255 first — so whatever
+ * brightness the scaling could not recover is made up by fading toward white. The tint gets paler on
+ * the palest buildings, which is the right way to lose the argument: the value structure is what the
+ * eye reads the city by, and the hue is only a name.
+ */
+export function tintPreservingLuma(base: number, tint: number, weight: number): number {
+  const mixed = mixColor(base, tint, weight)
+  const target = luma(base)
+  const actual = luma(mixed)
+  // A black source has no brightness to preserve and no ratio to scale by.
+  if (actual <= 0.5) return mixed
+  const peak = Math.max((mixed >> 16) & 0xff, (mixed >> 8) & 0xff, mixed & 0xff)
+  const scale = Math.min(target / actual, peak > 0 ? 255 / peak : 1)
+
+  const channels = [16, 8, 0].map(shift => ((mixed >> shift) & 0xff) * scale)
+  const scaled = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+  // Whatever the ceiling stole, white gives back.
+  const toWhite = scaled >= target || scaled >= 255 ? 0 : (target - scaled) / (255 - scaled)
+
+  let out = 0
+  channels.forEach((value, index) => {
+    const lifted = value + (255 - value) * toWhite
+    out |= Math.min(255, Math.max(0, Math.round(lifted))) << (16 - index * 8)
+  })
+  return out
+}
+
 /** The drawn colour of one building. Styling only: nothing about it can be looked up as a fact. */
 export function buildingColor(
   archetype: BuildingArchetype,
   character: DistrictCharacter | undefined,
+  tint?: number,
 ): number {
-  if (!character) return ARCHETYPE_COLORS[archetype]
-  return CHARACTER_TINTS[character][archetype]
+  const base = character ? CHARACTER_TINTS[character][archetype] : ARCHETYPE_COLORS[archetype]
+  if (tint === undefined) return base
+  // A parcel with no measured size is left alone. Its wireframe grey is how the map says "unknown",
+  // and a neighbourhood hue washed over it would make it look like an ordinary building.
+  if (archetype === 'vacant') return base
+  return tintPreservingLuma(base, tint, NEIGHBORHOOD_TINT_WEIGHT)
+}
+
+/** The same building's flattened plate on the basemap. */
+export function mapBuildingColor(archetype: BuildingArchetype, plate: number, tint?: number): number {
+  if (tint === undefined || archetype === 'vacant') return plate
+  return tintPreservingLuma(plate, tint, MAP_NEIGHBORHOOD_TINT_WEIGHT)
 }

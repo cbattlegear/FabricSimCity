@@ -304,6 +304,96 @@ describe('planCity placement', () => {
   })
 })
 
+describe('schema neighborhoods', () => {
+  /** Mean distance in blocks between every pair of lots drawn from `lots`. */
+  function spread(plan: CityPlan, lots: readonly { x: number; z: number }[]): number {
+    let total = 0
+    let pairs = 0
+    for (let i = 0; i < lots.length; i += 1) {
+      for (let j = i + 1; j < lots.length; j += 1) {
+        const left = blockIndex(plan, lots[i].x, lots[i].z)
+        const right = blockIndex(plan, lots[j].x, lots[j].z)
+        total += Math.hypot(left.col - right.col, left.row - right.row)
+        pairs += 1
+      }
+    }
+    return pairs === 0 ? 0 : total / pairs
+  }
+
+  it('stands a schema\u2019s tables together instead of spreading them over the whole map', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    const all = [...plan.lots.values()]
+    for (const district of plan.districts) {
+      const mine = all.filter(lot => lot.districtId === district.districtId)
+      expect(mine.length).toBeGreaterThan(1)
+      // A neighbourhood has to be tighter than the city it sits in, or it is not a neighbourhood.
+      expect(spread(plan, mine)).toBeLessThan(spread(plan, all) * 0.75)
+    }
+  })
+
+  it('never lets two neighborhoods claim the same ground', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    const owner = new Map<string, string>()
+    for (const district of plan.districts) {
+      for (const block of district.blocks) {
+        const key = `${block.col}-${block.row}`
+        expect(owner.get(key)).toBeUndefined()
+        owner.set(key, district.districtId)
+      }
+    }
+    expect(owner.size).toBeGreaterThan(0)
+  })
+
+  it('keeps a neighborhood in one piece rather than in scattered islands', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    for (const district of plan.districts) {
+      const remaining = new Set(district.blocks.map(block => `${block.col}-${block.row}`))
+      const queue = [district.blocks[0]!]
+      remaining.delete(`${queue[0].col}-${queue[0].row}`)
+      while (queue.length > 0) {
+        const block = queue.pop()!
+        for (const step of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+          const key = `${block.col + step[0]}-${block.row + step[1]}`
+          if (!remaining.delete(key)) continue
+          queue.push({ col: block.col + step[0], row: block.row + step[1] })
+        }
+      }
+      // A walled-in region may have to jump to free ground, so a few strays are allowed; a region
+      // that fell apart into islands is not.
+      expect(remaining.size).toBeLessThan(district.blocks.length * 0.1)
+    }
+  })
+
+  it('gives a schema ground in proportion to how many tables it holds', () => {
+    const plan = planCity(sampleCity(), options())
+    const size = (id: string) => plan.districts.find(district => district.districtId === id)!.blocks.length
+    expect(size('schema:dbo')).toBeGreaterThan(size('schema:reporting'))
+    expect(size('schema:reporting')).toBeGreaterThan(size('schema:archive'))
+    // Every table needs somewhere to stand, however small its schema.
+    expect(size('schema:archive')).toBeGreaterThanOrEqual(1)
+  })
+
+  it('settles a neighborhood\u2019s shape before its tables arrive, so a later page fills it in', () => {
+    const full = planCity(sampleCity(), options())
+    // The same database, one page in: fewer objects, but every page carries the whole schema list.
+    const firstPage = planCity(sampleCity().slice(0, 4), options())
+    for (const district of firstPage.districts) {
+      const same = full.districts.find(item => item.districtId === district.districtId)!
+      expect(district.blocks.map(block => `${block.col}-${block.row}`))
+        .toEqual(same.blocks.map(block => `${block.col}-${block.row}`))
+    }
+  })
+
+  it('writes a neighborhood\u2019s name over ground that neighborhood actually owns', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    for (const district of plan.districts) {
+      const owned = new Set(district.blocks.map(block => `${block.col}-${block.row}`))
+      const { col, row } = blockIndex(plan, district.labelX, district.labelZ)
+      expect(owned.has(`${col}-${row}`)).toBe(true)
+    }
+  })
+})
+
 describe('facility scatter', () => {
   it('places every facility at least two blocks from every other', () => {
     for (const seed of ['db:sales', 'db:archive', 'db:1', 'db:2', 'db:3']) {

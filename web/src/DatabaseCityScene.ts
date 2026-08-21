@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
-import { buildBuildingGeometry, buildingColor } from './cityBuildings'
+import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
 import { type RoadTraffic } from './cityTraffic'
 import {
   claimLane,
@@ -23,6 +23,8 @@ import {
   createCityLabels,
   elideMiddle,
   labelAnchor,
+  neighborhoodLabelHeight,
+  neighborhoodLabelText,
   LABEL_MAX_CHARS,
   LABEL_WORLD_HEIGHT,
 } from './cityLabels'
@@ -44,11 +46,20 @@ export type CityLayerToggles = {
   waitLanes: boolean
   infrastructure: boolean
   route: boolean
-  /** Schema neighborhood tints. Off by default: the tint crowds the map and names nothing on its own. */
-  districts: boolean
-  /** Ground labels naming each building and facility. */
+  /** Ground labels naming each building, facility and neighbourhood. */
   labels: boolean
 }
+
+/**
+ * How strongly a neighbourhood's hue stains the ground it claims.
+ *
+ * The 3D city keeps it to a whisper: the buildings are already tinted, and land use — parks, water,
+ * woodland — is drawn underneath and has to survive. The basemap can afford much more, because it
+ * flattens every building to one grey and the wash is then the only thing dividing the map into
+ * places.
+ */
+const CITY_DISTRICT_OPACITY = 0.16
+const MAP_DISTRICT_OPACITY = 0.26
 
 export type CameraNudge =
   | 'panLeft'
@@ -292,7 +303,7 @@ export function createDatabaseCityScene(
     asphalt: new THREE.MeshStandardMaterial({ color: 0x6a6a71, roughness: 0.95 }),
     laneMark: new THREE.MeshStandardMaterial({ color: 0xc4c0b3, roughness: 0.85 }),
     sidewalk: new THREE.MeshStandardMaterial({ color: 0x8d8a81, roughness: 0.9 }),
-    district: new THREE.MeshBasicMaterial({ color: 0x2b4a63, transparent: true, opacity: 0.15 }),
+    civicPad: new THREE.MeshBasicMaterial({ color: 0x2b4a63, transparent: true, opacity: 0.15 }),
     facility: new THREE.MeshStandardMaterial({ color: 0x53707f, roughness: 0.62 }),
     facilityUnknown: new THREE.MeshBasicMaterial({ color: 0x7d8b96, wireframe: true }),
     facilityFill: new THREE.MeshStandardMaterial({ color: 0x63d8ff, emissive: 0x11455c, roughness: 0.35 }),
@@ -401,11 +412,24 @@ export function createDatabaseCityScene(
     STREET_CLASSES.map(klass => [klass, new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].casing, roughness: 0.92 })]),
   ) as Record<StreetClass, THREE.MeshStandardMaterial>
 
+  /**
+   * One material per drawn body colour, carrying both looks.
+   *
+   * The city colour is the cache key; the basemap colour rides along in `userData` because it cannot
+   * be recovered from the city colour once the neighbourhood hue has been mixed in. Materials are
+   * created in whichever mode is current, so buildings that arrive after a mode switch are not left
+   * painted for the mode the scene is no longer in.
+   */
   const archetypeMaterials = new Map<number, THREE.MeshStandardMaterial>()
-  const bodyMaterial = (color: number) => {
+  const bodyMaterial = (color: number, mapColor: number) => {
     let material = archetypeMaterials.get(color)
     if (!material) {
-      material = new THREE.MeshStandardMaterial({ color, roughness: 0.78, metalness: 0.06 })
+      material = new THREE.MeshStandardMaterial({
+        color: viewMode === 'map' ? mapColor : color,
+        roughness: 0.78,
+        metalness: 0.06,
+      })
+      material.userData.mapColor = mapColor
       archetypeMaterials.set(color, material)
     }
     return material
@@ -420,6 +444,26 @@ export function createDatabaseCityScene(
     }
     return material
   }
+  /**
+   * One wash material per neighbourhood hue.
+   *
+   * Basic rather than standard: this is a stain on the ground, and a stain that took the sun would
+   * turn into a slab lit differently from the land it sits on.
+   */
+  const districtMaterials = new Map<number, THREE.MeshBasicMaterial>()
+  const districtMaterial = (color: number) => {
+    let material = districtMaterials.get(color)
+    if (!material) {
+      material = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: viewMode === 'map' ? MAP_DISTRICT_OPACITY : CITY_DISTRICT_OPACITY,
+        depthWrite: false,
+      })
+      districtMaterials.set(color, material)
+    }
+    return material
+  }
 
   /**
    * The two looks.
@@ -430,11 +474,10 @@ export function createDatabaseCityScene(
    * road widths, congestion colours, and wait-lane widths are computed once, outside this file, and
    * both modes draw exactly those numbers.
    */
-  const CITY_COLORS: Record<string, number> = {
-    unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
+  const CITY_COLORS: Record<string, number> = {    unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
     exposure: 0xe2a957, ground: 0x7e7c58, asphalt: 0x6a6a71, laneMark: 0xc4c0b3, sidewalk: 0x8d8a81,
     sharedExposure: 0xe2a957,
-    district: 0x2b4a63, facility: 0x53707f, facilityUnknown: 0x7d8b96, facilityFill: 0x63d8ff,
+    civicPad: 0x2b4a63, facility: 0x53707f, facilityUnknown: 0x7d8b96, facilityFill: 0x63d8ff,
     facilityAlert: 0xe4483c, route: 0x2fe0ff, routePin: 0x2fe0ff, roadHighlight: 0xf4f9ff,
     roadPin: 0xf4f9ff, roadPinOffMap: 0xb0bcc7, selection: 0xffd479, selectionPin: 0xffd479,
     kitBody: 0x5b7a8c, kitTrim: 0x93a1ae, kitGlass: 0xd8e8f4, kitMetal: 0x8b98a4,
@@ -444,7 +487,7 @@ export function createDatabaseCityScene(
     unknown: 0x9aa4ac, window: 0xdfe6ec, trim: 0xb9bdc2, index: 0x63b9a6, unknownIndex: 0xa8b0b6,
     exposure: 0xd99a3f, ground: MAP_PALETTE.ground, asphalt: MAP_PALETTE.roadFill,
     sharedExposure: 0xd99a3f,
-    laneMark: 0xdcd9d2, sidewalk: MAP_PALETTE.roadCasing, district: MAP_PALETTE.park,
+    laneMark: 0xdcd9d2, sidewalk: MAP_PALETTE.roadCasing, civicPad: MAP_PALETTE.park,
     facility: MAP_PALETTE.facility, facilityUnknown: 0x9fb0c0, facilityFill: 0x4a90d9,
     facilityAlert: MAP_PALETTE.pinIncident, route: 0x1a73e8, routePin: 0x1a73e8,
     roadHighlight: 0x202124, roadPin: 0x202124, roadPinOffMap: 0x8a8f94,
@@ -567,11 +610,22 @@ export function createDatabaseCityScene(
       streetFill[klass].color.setHex(flat ? MAP_STREET[klass].fill : CITY_STREET[klass].fill)
       streetCasing[klass].color.setHex(flat ? MAP_STREET[klass].casing : CITY_STREET[klass].casing)
     }
-    // Archetype colours are the cache key, so restoring them needs no separate table.
+    // Archetype colours are the cache key, so restoring them needs no separate table. The basemap
+    // colour is the one that carries the neighbourhood on paper, so it is remembered per material.
     for (const [color, material] of archetypeMaterials) {
-      material.color.setHex(flat ? MAP_PALETTE.building : color)
+      material.color.setHex(flat ? (material.userData.mapColor as number) : color)
     }
-    materials.district.opacity = flat ? 0.34 : 0.15
+    /*
+     * The neighbourhood wash carries more weight on the basemap.
+     *
+     * In the 3D city the buildings themselves are tinted, so the ground only has to agree with them.
+     * Map mode already tints the plates too, but it also draws far more competing land cover per
+     * block, so the wash has to push harder to hold a quarter together underneath it.
+     */
+    for (const material of districtMaterials.values()) {
+      material.opacity = flat ? MAP_DISTRICT_OPACITY : CITY_DISTRICT_OPACITY
+    }
+    materials.civicPad.opacity = flat ? 0.34 : 0.15
 
     // Under ambient light alone a standard material renders as its flat base colour, which is the
     // unlit look a basemap needs — without swapping every material's class.
@@ -661,7 +715,8 @@ export function createDatabaseCityScene(
   const labelGroup = new THREE.Group()
   const buildingLabelGroup = new THREE.Group()
   const facilityLabelGroup = new THREE.Group()
-  labelGroup.add(buildingLabelGroup, facilityLabelGroup)
+  const neighborhoodLabelGroup = new THREE.Group()
+  labelGroup.add(buildingLabelGroup, facilityLabelGroup, neighborhoodLabelGroup)
   const labelFactory = createCityLabels()
   scene.add(
     groundGroup,
@@ -706,7 +761,6 @@ export function createDatabaseCityScene(
     waitLanes: true,
     infrastructure: true,
     route: true,
-    districts: false,
     labels: true,
   }
 
@@ -740,7 +794,6 @@ export function createDatabaseCityScene(
     roadHighlightGroup.visible = layers.traffic
     infrastructureGroup.visible = layers.infrastructure
     routeGroup.visible = layers.route
-    districtGroup.visible = layers.districts
     labelGroup.visible = layers.labels
     facilityLabelGroup.visible = layers.infrastructure
   }
@@ -1254,29 +1307,61 @@ export function createDatabaseCityScene(
   }
 
   /**
-   * Draws one tint per schema neighborhood. Facilities are deliberately not tinted here: this layer
-   * is named for schema neighborhoods, and the facilities are drawn with their own layer so the
-   * toggle stays literally true. Since placement scatters a schema's objects across the grid, a
-   * district is the bounding box of its members and boxes may overlap.
+   * Washes each schema's neighbourhood over the ground it claimed.
+   *
+   * One quad per claimed block rather than one bounding rectangle: territories are grown, so their
+   * real shape is ragged, and a bounding box would paint over the neighbours either side of an
+   * L-shaped one. Drawn at low opacity under the roads, so it tints the land without hiding what is
+   * on it — the same way a basemap shades a district behind its streets rather than in front of them.
+   *
+   * Facilities are not washed. They belong to the whole city rather than to any schema, and a tinted
+   * plate under one would say it belonged to the neighbourhood that happens to surround it.
    */
   function buildDistricts(cityPlan: CityPlan) {
     clearGroup(districtGroup)
+    const pitch = streetPitch(cityPlan)
     for (const district of cityPlan.districts) {
-      addQuad(
-        districtGroup,
-        district.maxX - district.minX,
-        district.maxZ - district.minZ,
-        district.centerX,
-        district.centerZ,
-        -0.5,
-        materials.district,
-      )
+      if (district.blocks.length === 0) continue
+      const material = districtMaterial(neighborhoodTint(district.neighborhoodOrdinal))
+      const positions: number[] = []
+      for (const block of district.blocks) {
+        pushQuad(
+          positions,
+          block.col * pitch.x + pitch.x / 2,
+          block.row * pitch.z + pitch.z / 2,
+          pitch.x / 2,
+          pitch.z / 2,
+          -0.5,
+        )
+      }
+      addMerged(districtGroup, positions, material)
+    }
+  }
+
+  /** Places a neighbourhood's name over the middle of the ground it owns. */
+  function buildNeighborhoodLabels(cityPlan: CityPlan) {
+    clearGroup(neighborhoodLabelGroup)
+    const pitch = streetPitch(cityPlan)
+    for (const district of cityPlan.districts) {
+      const text = neighborhoodLabelText(district.name)
+      if (text.length === 0 || district.blocks.length === 0) continue
+      const worldHeight = neighborhoodLabelHeight(district.blocks.length, (pitch.x + pitch.z) / 2)
+      const sprite = labelFactory.make(text, {
+        variant: 'neighborhood',
+        tint: neighborhoodTint(district.neighborhoodOrdinal),
+        worldHeight,
+      })
+      if (!sprite) continue
+      // Above the rooftops of an ordinary street, and above its own type size, so the name floats
+      // over its neighbourhood instead of being lost among the buildings it names.
+      sprite.position.set(district.labelX, worldHeight / 2 + 34, district.labelZ)
+      neighborhoodLabelGroup.add(sprite)
     }
   }
 
   /** Places a label on the pavement in front of a building, in world space so it never rotates with the lot. */
   function addBuildingLabel(object: DatabaseCityObject, lot: CityLot) {
-    const sprite = labelFactory.make(buildingLabelText(object.schemaName, object.name))
+    const sprite = labelFactory.make(buildingLabelText(object.name))
     if (!sprite) return
     const anchor = labelAnchor(lot.x, lot.z, lot.accessX, lot.accessZ, (lot.footprint ?? 11) / 2 + 3)
     sprite.position.set(anchor.x, LABEL_WORLD_HEIGHT / 2 + 0.7, anchor.z)
@@ -1287,6 +1372,11 @@ export function createDatabaseCityScene(
     clearGroup(buildingGroup)
     clearGroup(buildingLabelGroup)
     pickable.length = 0
+    // Every building in a schema takes the same hue, which is what makes a neighbourhood read as one
+    // place from the air rather than as a run of unrelated blocks that happen to be adjacent.
+    const tints = new Map<string, number>(
+      cityPlan.districts.map(district => [district.districtId, neighborhoodTint(district.neighborhoodOrdinal)]),
+    )
     /*
      * Shadow casting is capped rather than universal.
      *
@@ -1312,9 +1402,15 @@ export function createDatabaseCityScene(
 
       const character = cityPlan.terrain.characters.get(lot.districtId)
       const geometry = buildBuildingGeometry(lot, character)
+      const tint = tints.get(lot.districtId)
       const body = new THREE.Mesh(
         track(geometry.body),
-        known ? bodyMaterial(buildingColor(lot.archetype, character)) : materials.unknown,
+        known
+          ? bodyMaterial(
+              buildingColor(lot.archetype, character, tint),
+              mapBuildingColor(lot.archetype, MAP_PALETTE.building, tint),
+            )
+          : materials.unknown,
       )
       body.userData.objectId = object.objectId
       body.castShadow = casts
@@ -1535,8 +1631,8 @@ export function createDatabaseCityScene(
       )
 
       // Facilities are scattered across the grid now, so there is no civic rectangle to tint. Each
-      // one carries its own pad instead, which keeps it legible as a place with the schema
-      // neighborhood layer switched off.
+      // one carries its own pad instead, which keeps it legible as a place of its own rather than
+      // part of whichever schema's neighbourhood happens to surround it.
       addQuad(
         infrastructureGroup,
         site.radius * 2,
@@ -1544,7 +1640,7 @@ export function createDatabaseCityScene(
         site.x,
         site.z,
         -0.5,
-        materials.district,
+        materials.civicPad,
       )
 
       addFacilityLabel(facility, site)
@@ -1847,6 +1943,7 @@ export function createDatabaseCityScene(
       facilitySites = plan.facilities
       buildGround(plan)
       buildDistricts(plan)
+      buildNeighborhoodLabels(plan)
       buildBuildings(objects, plan)
       buildRoads(currentRoads, plan)
       buildFacilityLanes(currentLanes, currentSharedLanes)

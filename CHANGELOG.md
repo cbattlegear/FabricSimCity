@@ -133,11 +133,10 @@ First MVP release candidate. There is no tagged release yet.
     the text-first, non-WebGL equivalent.
   - **Every building and facility is named on the map.** A ground label sits on the pavement at the
     frontage each building is entered from — the same kerb point the GPS route stops at, so the label
-    and the route agree about where a building's front is (`web/src/cityLabels.ts`). Building labels
-    are schema-qualified, which is what a neighborhood tint used to convey. A label carries identity
-    and nothing else: it never restates or qualifies a measurement, so footprint, height, roof cap,
-    road, and lane keep their documented meanings unchanged. Long names elide from the middle rather
-    than the end, because a name's tail is often the only thing separating `orders_2024_q3_archive`
+    and the route agree about where a building's front is (`web/src/cityLabels.ts`). A label carries
+    identity and nothing else: it never restates or qualifies a measurement, so footprint, height, roof
+    cap, road, and lane keep their documented meanings unchanged. Long names elide from the middle
+    rather than the end, because a name's tail is often the only thing separating `orders_2024_q3_archive`
     from `orders_2024_q3_current`. One texture is rasterized per distinct string and reused, so a
     live tick or an appended page redraws labels without churning GPU memory.
 - **Waits as traffic to infrastructure.** Query Store wait categories, which were already collected
@@ -255,8 +254,7 @@ First MVP release candidate. There is no tagged release yet.
   facilities are placed first, each accepted only when it is at least two blocks (Chebyshev) from
   every already-placed facility. On a grid too small to satisfy that, a deterministic
   maximise-minimum-distance sweep takes over, so a four-table database still lays out — tighter, and
-  still fully determined by the seed. Schema districts are now the bounding box of their scattered
-  members and drive only the optional tint layer, which draws per-lot pads rather than one rectangle.
+  still fully determined by the seed.
 
 - **System databases are excluded from Query Store evidence.** `master`, `tempdb`, `model`, and
   `msdb` were collected like user databases, which produced noise in three places at once: a Query
@@ -308,34 +306,48 @@ First MVP release candidate. There is no tagged release yet.
   the object and nothing else, still never divided by an invented ratio.
 
 - **Every building stands alone on its own block.** A block used to hold eight buildings in two
-  back-to-back rows, and the schema neighborhood tint was what visually separated one cluster from
-  the next. Once that tint went off by default the packed blocks read as an undifferentiated mass of
-  geometry, so the separation moved into the street lattice itself: `BLOCK_COLS`/`BLOCK_ROWS` in
-  `web/src/cityPlan.ts` are now `1`, giving each object a lot ringed by street on every side. Block
-  position is still derived purely from the backend's stable layout ordinals and encodes nothing —
-  neighbouring buildings are not related by being neighbours, and the map's own prose now says so.
+  back-to-back rows, which read as an undifferentiated mass of geometry, so the separation moved into
+  the street lattice itself: `BLOCK_COLS`/`BLOCK_ROWS` in `web/src/cityPlan.ts` are now `1`, giving
+  each object a lot ringed by street on every side. Which lot inside a neighbourhood a building takes
+  is still derived purely from the backend's stable layout ordinals and encodes nothing — adjacent
+  buildings within a schema are not related by being adjacent, and the map's own prose says so.
   The change costs roughly 1.7x the ground area per building, paid deliberately for separation that
   does not depend on a layer being switched on. Because the reserved civic rectangle is measured in
   blocks, it was resized from 3x2 to 5x3 so the six infrastructure facilities keep the footprint they
   had before rather than shrinking to the size of the tables they serve. Routing cost was measured
   rather than assumed: 30 street paths across a 500-object city (672 intersections) take ~8.5 ms.
 
-- **The schema-neighborhood count and strip follow the layer that draws them.** The city heading
-  advertised "N schema neighborhoods loaded" and the legend showed a per-neighborhood strip even
-  when the neighborhoods layer was switched off, describing a grouping the map was not drawing. Both
-  now track the toggle, so with the layer off the heading reads plainly as "N objects". No evidence
-  is lost when they are hidden: every object stays listed, schema-qualified, in the objects table
-  that is the text-first equivalent of the map.
-
-- **Schema neighborhoods are off by default and the layer that draws them is now named for what it
-  draws.** The toggle was called "Districts" and started switched on, tinting a translucent plate
-  under every schema so the map met you pre-coloured by a grouping that encodes nothing measured.
-  Now that each building label carries its schema name, the tint is redundant as well as busy, so it
-  starts off and is labelled **Schema neighborhoods**. Nothing about layout changed: buildings sit on
-  the same lots, in the same neighborhoods, in the same order. The civic district's own tint moved to
-  the infrastructure layer, so it is drawn with the facilities it holds — which both keeps the
-  infrastructure district legible when schema neighborhoods are off, and keeps the toggle's name
-  literally true rather than quietly also hiding a district that is not a schema.
+- **Schemas are neighbourhoods again, and this time the map means it.** The three earlier attempts at
+  this — a translucent district plate, then a schema-qualified label, then a toggle that started off —
+  all tried to state schema membership *on top of* a layout that scattered a schema's tables across the
+  whole grid. `planNeighborhoods` in `web/src/cityPlan.ts` replaces the global shuffle with a seeded
+  multi-source region-growing partition: farthest-point-sampled seeds, round-robin growth so no schema
+  is walled in by a neighbour that grew first, and a per-block seeded wobble so edges come out ragged
+  rather than rectangular. A schema's tables now stand on contiguous ground, so you can find one by
+  walking to it. Territory shape is a function of the seed, the grid, and the **full** schema counts
+  every page carries — never of which objects have loaded — so appending a page still never moves a
+  building that is already on screen.
+  - **The cue is colour that survives the light.** `tintPreservingLuma` in `web/src/cityBuildings.ts`
+    mixes a per-schema hue into a facade and then rescales the result back to the facade's original
+    luminance. A plain blend strong enough to see under golden-hour light also drags every building
+    toward one lightness and flattens the massing that makes the city readable; taking hue from the
+    mix and brightness from the building removes that trade, so the tint can be pushed to a weight
+    that actually reads. Map mode carries the same hue through `mapBuildingColor` rather than
+    flattening every plate to one grey. `vacant` lots are never tinted — an unmeasured parcel does
+    not belong to a schema.
+  - **The label moved up a level.** Building labels are now the bare object name; the schema is
+    written once, large, across the middle of its own territory, sized to the ground it covers. What
+    used to be repeated on every rooftop is now said once by the map itself.
+  - **The toggle is gone**, along with the heading and legend strip that used to track it. There is
+    no longer a state in which the map draws a grouping it does not explain, or explains one it does
+    not draw. The schema strip in the legend is always shown, each name beside its own colour swatch.
+  - **What this costs in honesty, stated plainly.** Position now *does* encode something: which
+    schema an object belongs to, a catalogue fact you can verify with a query. The legend and
+    `docs/architecture.md` were rewritten to say so, replacing the older claim that "where things
+    stand encodes nothing". Territory *area* is proportional to object count, so it weakly encodes a
+    count too — both documents now direct you to read the counts beside each name rather than
+    estimate from the area. Which lot inside a neighbourhood, and which neighbourhood sits next to
+    which, remain arbitrary.
 
 - **Query Store is now wired into the connected map.** `ConnectedDatabaseCitySource` used to emit
   `topQueryFamilies: []` and `routes: []` against a live server, so on a real connection the city had

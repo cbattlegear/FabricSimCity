@@ -41,11 +41,6 @@ type Props = {
   liveStatus?: ReactNode
   /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
-  /**
-   * Called with the live layer state on mount and on every toggle, so surrounding chrome can stay
-   * consistent with what the map is actually drawing.
-   */
-  onLayersChange?: (layers: CityLayerToggles) => void
 }
 
 const KEY_ACTIONS: Record<string, CameraNudge> = {
@@ -68,7 +63,6 @@ const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string]> = [
   ['infrastructure', 'Infrastructure'],
   ['route', 'Query route'],
   ['labels', 'Labels'],
-  ['districts', 'Schema neighborhoods'],
 ]
 
 function swatch(color: number): string {
@@ -92,7 +86,6 @@ export function DatabaseCityViewport({
   panel,
   liveStatus,
   incidents,
-  onLayersChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<DatabaseCitySceneController | null>(null)
@@ -106,9 +99,6 @@ export function DatabaseCityViewport({
     waitLanes: true,
     infrastructure: true,
     route: true,
-    // Schema neighborhood tints are off until asked for: the building labels now carry the schema
-    // name, so the tint adds colour without adding a fact.
-    districts: false,
     labels: true,
   })
 
@@ -188,7 +178,6 @@ export function DatabaseCityViewport({
     if (marker) sceneRef.current?.focusObject(marker.objectId)
     setOpenIncidentId(markerId)
   }, [incidents])
-  useEffect(() => onLayersChange?.(layers), [layers, onLayersChange])
 
   const nudge = useCallback((action: CameraNudge) => {
     sceneRef.current?.nudge(action)
@@ -350,8 +339,10 @@ export function DatabaseCityViewport({
               ' on this map and are listed in the evidence tables rather than folded into one.'}
           </p>
           <p className="legend-decoration">
-            Roofs, windows, doors, chimneys, setbacks, crowns, sidewalks, and district tints are
-            decoration. They are seeded from each object&apos;s stable id and encode nothing.
+            Roofs, windows, doors, chimneys, setbacks, crowns, and sidewalks are decoration. They are
+            seeded from each object&apos;s stable id and encode nothing. A neighbourhood&apos;s hue
+            says which schema owns it and nothing more: hues are handed out in catalogue order, so
+            one is never warmer, larger or busier than another.
           </p>
         </details>
       </div>
