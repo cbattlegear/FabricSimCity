@@ -1,6 +1,7 @@
 import { stableHash } from './atlasLayout'
 import { FACILITY_LABELS, FACILITY_ORDER, type FacilityKind, type FacilitySite } from './cityInfrastructure'
 import { mulberry32, seededShuffle } from './citySeed'
+import { planWarp, WARP_HEADROOM, type CityWarp, type WarpPlaza } from './cityWarp'
 import {
   blockKey as terrainBlockKey,
   planTerrain,
@@ -93,6 +94,9 @@ export interface CityLot {
   readonly objectId: string
   readonly districtId: string
   readonly blockId: string
+  /** Lattice coordinates of the block this lot sits on, so its frontage can be rebound to a street. */
+  readonly blockCol: number
+  readonly blockRow: number
   /** Building centre in world units. */
   readonly x: number
   readonly z: number
@@ -173,6 +177,17 @@ export interface CityPlan {
    * become landmarks you navigate by — and a route to a table genuinely passes them.
    */
   readonly facilities: ReadonlyMap<FacilityKind, FacilitySite>
+  /**
+   * Where every junction in this city actually stands.
+   *
+   * Carried on the plan because the mapping from lattice coordinates to world coordinates is no
+   * longer a multiplication anyone downstream can repeat for themselves. See `cityWarp`.
+   */
+  readonly warp: CityWarp
+  /** Which lattice lines carry the heavy roads. Irregular on purpose. */
+  readonly arterials: ArterialRhythm
+  /** The public squares, in world coordinates. */
+  readonly plazas: readonly WarpPlaza[]
 }
 
 /** Options that make a plan reproducible and stable as bounded pages arrive. */
@@ -323,13 +338,115 @@ export function buildingArchetype(object: DatabaseCityObject): BuildingArchetype
   return 'skyscraper'
 }
 
+/**
+ * Where the heavy roads run.
+ *
+ * `col % ARTERIAL_EVERY === 0` gave the map a major-road structure and, at the same time, a second
+ * grid at four times the pitch — so the coarse reading of the city was every bit as regular as the
+ * fine one, and no amount of curving the streets between arterials could hide it. Real arterials are
+ * the roads that were already there: a turnpike, a river crossing, a ridge track. They arrive at
+ * irregular intervals because nothing ever surveyed them together.
+ *
+ * The city edges are always arterials, so the outer boundary is continuous and the routing graph
+ * cannot be cut off. Everything between them is drawn from a seeded gap.
+ */
+export interface ArterialRhythm {
+  readonly cols: readonly number[]
+  readonly rows: readonly number[]
+  readonly colSet: ReadonlySet<number>
+  readonly rowSet: ReadonlySet<number>
+}
+
+/** Narrowest and widest run of blocks between two arterials. */
+const ARTERIAL_GAP_MIN = 3
+const ARTERIAL_GAP_MAX = 7
+
+function arterialLines(extent: number, rng: () => number): number[] {
+  if (extent <= ARTERIAL_GAP_MIN) return [0, extent]
+  const lines = [0]
+  let at = 0
+  while (at < extent) {
+    const gap = ARTERIAL_GAP_MIN + Math.floor(rng() * (ARTERIAL_GAP_MAX - ARTERIAL_GAP_MIN + 1))
+    at += gap
+    // A final sliver of one or two blocks is not a district, so the last gap absorbs it.
+    if (at >= extent - 1) break
+    lines.push(at)
+  }
+  lines.push(extent)
+  return lines
+}
+
+export function planArterials(blockCols: number, blockRows: number, seed: string): ArterialRhythm {
+  const cols = arterialLines(blockCols, mulberry32(stableHash(`${seed}::arterial:x`)))
+  const rows = arterialLines(blockRows, mulberry32(stableHash(`${seed}::arterial:z`)))
+  return { cols, rows, colSet: new Set(cols), rowSet: new Set(rows) }
+}
+
+/** Index of the arterial cell a block falls in, on one axis. */
+export function arterialCellIndex(lines: readonly number[], at: number): number {
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    if (at >= lines[index]) return index
+  }
+  return 0
+}
+
+/**
+ * The squares.
+ *
+ * A lattice junction is the crossing of two lines and nothing else, which is why a grid is so hard to
+ * navigate from memory: every corner is the same corner. A city is remembered by the handful of
+ * places where several streets arrive together and the ground opens out. Those are put here, on
+ * arterial crossings so that what converges on them is already the heavy road network, and spaced far
+ * enough apart that each one is a destination rather than a texture.
+ */
+const PLAZA_MIN_SEPARATION = 4
+
+function planPlazas(
+  blockCols: number,
+  blockRows: number,
+  arterials: ArterialRhythm,
+  seed: string,
+): BlockRef[] {
+  const rng = mulberry32(stableHash(`${seed}::plaza`))
+  const candidates: BlockRef[] = []
+  for (const row of arterials.rows) {
+    for (const col of arterials.cols) {
+      // Never on the boundary: a square on the edge of the map is a junction with half its streets
+      // missing, which reads as an unfinished road rather than as a place.
+      if (col === 0 || row === 0 || col === blockCols || row === blockRows) continue
+      candidates.push({ col, row })
+    }
+  }
+  if (candidates.length === 0) return []
+
+  const wanted = clamp(Math.round(Math.sqrt(candidates.length) * 0.9), 1, 6)
+  const chosen: BlockRef[] = []
+  for (const candidate of seededShuffle(candidates, rng)) {
+    if (chosen.length >= wanted) break
+    const clear = chosen.every(
+      taken => Math.hypot(taken.col - candidate.col, taken.row - candidate.row) >= PLAZA_MIN_SEPARATION,
+    )
+    if (clear) chosen.push(candidate)
+  }
+  return sortForReading(chosen)
+}
+
 export function planCity(
   objects: readonly DatabaseCityObject[],
   options: CityPlanOptions = {},
 ): CityPlan {
   const cell = chooseCell(objects)
-  const pitchX = BLOCK_COLS * cell + STREET_WIDTH
-  const pitchZ = BLOCK_ROWS * cell + STREET_WIDTH
+  /*
+   * The pitch is deliberately larger than the block needs.
+   *
+   * `cell + STREET_WIDTH` is the tightest a block can be and still hold its building with a
+   * carriageway around it — which means it is also a block with no room to be anything but a
+   * rectangle. {@link WARP_HEADROOM} is the ground every curve, twist and square on this map is
+   * bought with.
+   */
+  const pitchX = (BLOCK_COLS * cell + STREET_WIDTH) * WARP_HEADROOM
+  const pitchZ = (BLOCK_ROWS * cell + STREET_WIDTH) * WARP_HEADROOM
+  const seed = options.seed ?? 'sqlsimcity'
 
   const ordered = orderObjects(objects)
   const sizes = schemaSizes(ordered, options.schemas)
@@ -348,20 +465,45 @@ export function planCity(
   const blockCols = side
   const blockRows = side
 
+  /*
+   * Geometry is settled before anything is placed on it.
+   *
+   * The arterial rhythm, the squares and the warp depend only on the seed and the grid size, so they
+   * are fixed before a single building is assigned — which is what keeps an appended page from
+   * reshaping the streets under a city that is already on screen.
+   */
+  const arterials = planArterials(blockCols, blockRows, seed)
+  const plazas = planPlazas(blockCols, blockRows, arterials, seed)
+  const warp = planWarp({
+    blockCols,
+    blockRows,
+    pitchX,
+    pitchZ,
+    cell,
+    streetWidth: STREET_WIDTH,
+    arterialCols: arterials.cols,
+    arterialRows: arterials.rows,
+    seed,
+    plazas,
+  })
+
   // One generator for the whole plan: facilities draw first, buildings take what is left. Both read
   // from the same stream, so the seed alone determines the entire city.
-  const rng = mulberry32(stableHash(options.seed ?? 'sqlsimcity'))
+  const rng = mulberry32(stableHash(seed))
   const facilityBlocks = placeFacilities(blockCols, blockRows, rng)
   const facilityKeys = new Set(facilityBlocks.map(block => blockKey(block.col, block.row)))
 
+  const plazaKeys = new Set(plazaBlocks(plazas, blockCols, blockRows).map(
+    block => blockKey(block.col, block.row)))
   const freeBlocks = allBlocks(blockCols, blockRows).filter(
-    block => !facilityKeys.has(blockKey(block.col, block.row)),
+    block => !facilityKeys.has(blockKey(block.col, block.row)) &&
+      !plazaKeys.has(blockKey(block.col, block.row)),
   )
   const shuffled = seededShuffle(freeBlocks, rng)
 
   // Territories grow in reading order and are then shuffled, so a schema's tables spread through
   // their own neighbourhood instead of packing against its seed and leaving the outskirts bare.
-  const territories = planNeighborhoods(freeBlocks, sizes, rng, options.seed ?? 'sqlsimcity')
+  const territories = planNeighborhoods(freeBlocks, sizes, rng, seed)
   const addresses = new Map<string, BlockRef[]>()
   for (const [schemaId, blocks] of territories) addresses.set(schemaId, seededShuffle(blocks, rng))
 
@@ -372,11 +514,11 @@ export function planCity(
     const block = territory && territory.length > 0
       ? territory[objectOrdinal(object) % territory.length]
       : shuffled[(slots.get(object.objectId) ?? 0) % shuffled.length]
-    lots.set(object.objectId, placeLot(object, block, cell, pitchX, pitchZ))
+    lots.set(object.objectId, placeLot(object, block, cell, warp))
     occupied.add(terrainBlockKey(block.col, block.row))
   }
 
-  const districts = describeDistricts(ordered, lots, territories, cell, pitchX, pitchZ)
+  const districts = describeDistricts(ordered, lots, territories, warp)
   const terrain = planTerrain({
     blockCols,
     blockRows,
@@ -387,20 +529,28 @@ export function planCity(
     lotMargin: LOT_MARGIN,
     occupied,
     facilities: new Set(facilityBlocks.map(block => terrainBlockKey(block.col, block.row))),
+    plazas: plazaKeys,
     districtIds: districts.map(district => district.districtId),
-    superblock: ARTERIAL_EVERY,
-    seed: options.seed ?? 'sqlsimcity',
+    arterialCols: arterials.cols,
+    arterialRows: arterials.rows,
+    seed,
+    warp,
   })
 
   const { intersections, streets } = buildStreetNetwork(
     blockCols,
     blockRows,
-    pitchX,
-    pitchZ,
     cell,
     terrain,
-    options.seed ?? 'sqlsimcity',
+    warp,
+    arterials,
+    plazas,
+    seed,
   )
+
+  // Doors are hung last, because until the network settles there is no telling which of a block's
+  // four streets is still there to be entered from.
+  rebindFrontages(lots, streets)
 
   return {
     cell,
@@ -411,28 +561,77 @@ export function planCity(
     lots,
     intersections,
     streets,
-    bounds: cityBounds(blockCols, blockRows, pitchX, pitchZ),
+    bounds: cityBounds(warp),
     terrain,
-    facilities: facilitySites(facilityBlocks, cell, pitchX, pitchZ),
+    facilities: facilitySites(facilityBlocks, cell, warp),
+    warp,
+    arterials,
+    plazas: warp.plazas,
   }
+}
+
+/**
+ * The blocks a square occupies.
+ *
+ * A plaza node has the four blocks around it drawn in toward it, so those blocks are ground rather
+ * than sites: putting a building on one would stand it in the middle of the open space the square
+ * exists to be.
+ */
+function plazaBlocks(
+  plazas: readonly BlockRef[],
+  blockCols: number,
+  blockRows: number,
+): BlockRef[] {
+  const blocks: BlockRef[] = []
+  for (const plaza of plazas) {
+    for (const [col, row] of [
+      [plaza.col - 1, plaza.row - 1],
+      [plaza.col, plaza.row - 1],
+      [plaza.col - 1, plaza.row],
+      [plaza.col, plaza.row],
+    ]) {
+      if (col < 0 || row < 0 || col >= blockCols || row >= blockRows) continue
+      blocks.push({ col, row })
+    }
+  }
+  return blocks
 }
 
 /**
  * Spacing of the street corridors: the grain every road in the city runs on.
  *
  * Exposed because a curved road can only be identified with the leg it belongs to by quantising to
- * this, not by rounding its coordinates.
+ * this, not by rounding its coordinates. Since the warp, this is the *average* grain rather than an
+ * exact pitch — which is all corridor bucketing ever needed it to be.
  */
 export function streetPitch(plan: Pick<CityPlan, 'cell'>): { x: number; z: number } {
-  return { x: BLOCK_COLS * plan.cell + STREET_WIDTH, z: BLOCK_ROWS * plan.cell + STREET_WIDTH }
+  return {
+    x: (BLOCK_COLS * plan.cell + STREET_WIDTH) * WARP_HEADROOM,
+    z: (BLOCK_ROWS * plan.cell + STREET_WIDTH) * WARP_HEADROOM,
+  }
 }
 
 /** Grid id of the intersection nearest a world point, for entering the street graph. */
 export function nearestIntersectionId(plan: CityPlan, x: number, z: number): string {
-  const { x: pitchX, z: pitchZ } = streetPitch(plan)
-  const col = clamp(Math.round(x / pitchX), 0, plan.blockCols)
-  const row = clamp(Math.round(z / pitchZ), 0, plan.blockRows)
-  return intersectionId(col, row)
+  const { col, row } = plan.warp.nearestNode(x, z)
+  const exact = intersectionId(col, row)
+  if (plan.intersections.has(exact)) return exact
+
+  /*
+   * Thinning the interior deletes junctions nothing meets at any more, and the nearest *node* to a
+   * point can easily be one of them. Falling back to the nearest surviving junction keeps every
+   * entry into the routing graph on a real street corner.
+   */
+  let bestId = exact
+  let bestDistance = Infinity
+  for (const intersection of plan.intersections.values()) {
+    const distance = (intersection.x - x) ** 2 + (intersection.z - z) ** 2
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestId = intersection.id
+    }
+  }
+  return bestId
 }
 
 /**
@@ -976,18 +1175,18 @@ function sortForReading(blocks: readonly BlockRef[]): BlockRef[] {
 function facilitySites(
   blocks: readonly BlockRef[],
   cell: number,
-  pitchX: number,
-  pitchZ: number,
+  warp: CityWarp,
 ): Map<FacilityKind, FacilitySite> {
   const sites = new Map<FacilityKind, FacilitySite>()
   FACILITY_ORDER.forEach((kind, index) => {
     const block = blocks[index]
     if (!block) return
+    const centre = warp.blockCenter(block.col, block.row)
     sites.set(kind, {
       kind,
       label: FACILITY_LABELS[kind],
-      x: block.col * pitchX + STREET_WIDTH / 2 + cell / 2,
-      z: block.row * pitchZ + STREET_WIDTH / 2 + cell / 2,
+      x: centre.x,
+      z: centre.z,
       // Facilities fill their block. They are civic landmarks and must stay legible next to a
       // skyscraper, so their size is fixed by the block, never by a measurement.
       radius: cell / 2,
@@ -1008,9 +1207,7 @@ function describeDistricts(
   ordered: readonly DatabaseCityObject[],
   lots: ReadonlyMap<string, CityLot>,
   territories: ReadonlyMap<string, BlockRef[]>,
-  cell: number,
-  pitchX: number,
-  pitchZ: number,
+  warp: CityWarp,
 ): CityDistrict[] {
   const groups = new Map<string, { name: string; ordinal: number; lots: CityLot[] }>()
   for (const object of ordered) {
@@ -1029,24 +1226,27 @@ function describeDistricts(
     }
   }
 
-  const half = cell / 2
   return [...groups.entries()]
     .sort((left, right) => left[1].ordinal - right[1].ordinal || compareOrdinal(left[0], right[0]))
     .map(([districtId, group]) => {
       const blocks = territories.get(districtId) ?? []
-      const box = blocks.length > 0
+      // A warped block is a quadrilateral, so a territory's extent is the extent of its corners
+      // rather than a multiple of a pitch.
+      const corners = blocks.flatMap(block => warp.blockCorners(block.col, block.row))
+      const box = corners.length > 0
         ? {
-            minX: Math.min(...blocks.map(block => block.col)) * pitchX,
-            maxX: (Math.max(...blocks.map(block => block.col)) + 1) * pitchX,
-            minZ: Math.min(...blocks.map(block => block.row)) * pitchZ,
-            maxZ: (Math.max(...blocks.map(block => block.row)) + 1) * pitchZ,
+            minX: Math.min(...corners.map(point => point.x)),
+            maxX: Math.max(...corners.map(point => point.x)),
+            minZ: Math.min(...corners.map(point => point.z)),
+            maxZ: Math.max(...corners.map(point => point.z)),
           }
         : {
-            minX: Math.min(...group.lots.map(lot => lot.x)) - half,
-            maxX: Math.max(...group.lots.map(lot => lot.x)) + half,
-            minZ: Math.min(...group.lots.map(lot => lot.z)) - half,
-            maxZ: Math.max(...group.lots.map(lot => lot.z)) + half,
+            minX: Math.min(...group.lots.map(lot => lot.x)),
+            maxX: Math.max(...group.lots.map(lot => lot.x)),
+            minZ: Math.min(...group.lots.map(lot => lot.z)),
+            maxZ: Math.max(...group.lots.map(lot => lot.z)),
           }
+      const centres = blocks.map(block => warp.blockCenter(block.col, block.row))
       return {
         districtId,
         name: group.name,
@@ -1059,11 +1259,11 @@ function describeDistricts(
         centerZ: (box.minZ + box.maxZ) / 2,
         // The name goes over the middle of the claimed ground, not the middle of the box: an L-shaped
         // territory's box centre can easily be a block the schema does not own.
-        labelX: blocks.length > 0
-          ? average(blocks.map(block => block.col * pitchX + STREET_WIDTH / 2 + cell / 2))
+        labelX: centres.length > 0
+          ? average(centres.map(point => point.x))
           : average(group.lots.map(lot => lot.x)),
-        labelZ: blocks.length > 0
-          ? average(blocks.map(block => block.row * pitchZ + STREET_WIDTH / 2 + cell / 2))
+        labelZ: centres.length > 0
+          ? average(centres.map(point => point.z))
           : average(group.lots.map(lot => lot.z)),
       }
     })
@@ -1092,27 +1292,34 @@ function placeLot(
   object: DatabaseCityObject,
   block: BlockRef,
   cell: number,
-  pitchX: number,
-  pitchZ: number,
+  warp: CityWarp,
 ): CityLot {
-  const x = block.col * pitchX + STREET_WIDTH / 2 + cell / 2
-  const z = block.row * pitchZ + STREET_WIDTH / 2 + cell / 2
+  const centre = warp.blockCenter(block.col, block.row)
+  const kerb = warp.blockFrontage(block.col, block.row)
 
-  // One lot per block, so the building fronts the street along its block's north edge and the other
-  // three sides are open street too. There is no back row to face the other way.
+  /*
+   * One lot per block, so the building fronts the street along its block's north edge and the other
+   * three sides are open street too. There is no back row to face the other way.
+   *
+   * "North" is now the *lattice* north rather than world north, because a warped block is a
+   * quadrilateral that may sit at any angle. The building turns to face its own kerb, which is what
+   * makes a twisted quarter read as a quarter that was laid out on its own alignment.
+   */
   const facing: Facing = 'north'
-  const kerbZ = block.row * pitchZ
+  const heading = Math.atan2(kerb.x - centre.x, kerb.z - centre.z)
 
   return {
     objectId: object.objectId,
     districtId: object.schemaId,
     blockId: `block/${block.col}-${block.row}`,
-    x,
-    z,
-    rotationY: Math.PI,
+    blockCol: block.col,
+    blockRow: block.row,
+    x: centre.x,
+    z: centre.z,
+    rotationY: heading,
     facing,
-    accessX: x,
-    accessZ: kerbZ,
+    accessX: kerb.x,
+    accessZ: kerb.z,
     frontageStreetId: streetIdFor('x', block.col, block.row),
     lotSize: cell,
     footprint: buildingFootprint(object.reservedPages8KiB),
@@ -1122,40 +1329,41 @@ function placeLot(
   }
 }
 
-function cityBounds(
-  blockCols: number,
-  blockRows: number,
-  pitchX: number,
-  pitchZ: number,
-): CityBounds {
-  const maxX = blockCols * pitchX
-  const maxZ = blockRows * pitchZ
+function cityBounds(warp: CityWarp): CityBounds {
   return {
-    minX: 0,
-    maxX,
-    minZ: 0,
-    maxZ,
-    centerX: maxX / 2,
-    centerZ: maxZ / 2,
-    width: maxX,
-    depth: maxZ,
+    minX: warp.minX,
+    maxX: warp.maxX,
+    minZ: warp.minZ,
+    maxZ: warp.maxZ,
+    centerX: (warp.minX + warp.maxX) / 2,
+    centerZ: (warp.minZ + warp.maxZ) / 2,
+    width: warp.maxX - warp.minX,
+    depth: warp.maxZ - warp.minZ,
   }
 }
 
 /**
- * The street network: the block lattice, plus the roads that stop it reading as graph paper.
+ * The street network: an irregular skeleton of heavy roads, and a different kind of town inside each
+ * piece it cuts.
  *
- * Four things happen here, in this order, and only the first one existed before:
+ * Six things happen here, in this order:
  *
- * 1. **The lattice.** A road on every block boundary, so each building is still ringed by street.
- *    Arterials fall on a fixed rhythm — every {@link ARTERIAL_EVERY} lines, plus the city boundary —
- *    which gives the map a major-road structure without pretending road hierarchy is measured.
- * 2. **A ring boulevard**, reclassified from the lattice edges on an inset rectangle, drawn wider and
- *    rounded at the corners.
- * 3. **Diagonal avenues**, which are genuinely new edges between existing lattice nodes. Because they
- *    are shorter than the two lattice legs they replace, `streetPath` really does route over them —
- *    the diagonals are a road network, not a drawing.
- * 4. **Embankment roads and bridges**, decided by whether a street runs with the river or across it.
+ * 1. **The junctions.** Positions come from {@link CityWarp}, not from `col * pitch`. That is the
+ *    whole point: bending the road *between* two lattice points still leaves two lattice points, and
+ *    the eye reads a street network by where its junctions are. The warp moves the junctions.
+ * 2. **The arterial rhythm.** Heavy roads fall on an irregular set of lines chosen by
+ *    {@link planArterials} — 3 to 7 blocks apart, never the same twice — so the map has a major-road
+ *    structure with no drumbeat. Road hierarchy is still decoration, not a measurement.
+ * 3. **A pattern per cell.** {@link planSuperblocks} gives each piece of ground between the arterials
+ *    its own street vocabulary: downtown grid, ladder, crescent, radial, organic, estate, open park.
+ *    The grid is one option among seven and is confined to the middle of town.
+ * 4. **Radial avenues**, genuinely new edges between existing junctions, converging on the plazas.
+ *    Because they are shorter than the lattice legs they replace, `streetPath` really does route over
+ *    them — the avenues are a road network, not a drawing.
+ * 5. **The junction-degree pass.** {@link pruneJunctions} converts four-way junctions into T-junctions
+ *    and cul-de-sacs until the degree distribution matches a measured city rather than a lattice.
+ *    This is the single largest change in how the map reads.
+ * 6. **Embankment roads and bridges**, decided by whether a street runs with the river or across it.
  *
  * Every street then gets a bowed centre line. Curvature is decoration: it moves no endpoint, changes
  * no connectivity, and alters nothing a road carries.
@@ -1181,6 +1389,10 @@ type SuperblockPattern =
   | 'ladder'
   /** Through streets kept and strongly bowed, one central cross spine. Curvilinear residential. */
   | 'crescent'
+  /** Rings and spokes about the cell's own centre. Reads as a market town grown around a square. */
+  | 'radial'
+  /** Streets dropped on an irregular rhythm, heavily bowed. Reads as a quarter that predates surveying. */
+  | 'organic'
   /** One lane in each direction through the middle of an otherwise undivided parcel. */
   | 'estate'
   /** No interior streets whatsoever. The whole cell is one parcel: park, water, or a big-box site. */
@@ -1191,6 +1403,9 @@ interface Superblock {
   /** The interior line that carries the cell's spine, for the patterns that have one. */
   readonly midCol: number
   readonly midRow: number
+  /** The cell's first interior line, so a pattern can phase itself against its own edge. */
+  readonly fromCol: number
+  readonly fromRow: number
   /** Which alternate interior column keeps its cross street under `ladder`. */
   readonly parity: number
   /** Multiplier on how far this cell's streets are allowed to wander. */
@@ -1206,24 +1421,28 @@ function superblockKey(col: number, row: number): string {
 /**
  * Decide what happens inside every cell of the arterial grid.
  *
- * The one rule that is not aesthetic: a cell holding a building may never be given a pattern that
- * drops through streets, because {@link placeLot} fronts every building on the street along its
- * block's north edge and that street has to exist. So the empty cells — and on a typical instance
- * that is nearly half of them — are the ones free to become parkland and undivided parcels, which is
- * exactly where a real town puts them too.
+ * Cells are the irregular ones {@link planArterials} cut, so a pattern applies to a piece of city of
+ * an unpredictable size — which is half of why the result stops looking machine-made.
+ *
+ * The one rule that is not aesthetic: every block must end up with at least one bounding street, or
+ * a building has no frontage to be entered from. That is enforced downstream by
+ * {@link rebindFrontages} rather than by refusing patterns here, so an occupied cell is free to be
+ * something other than a grid.
  */
 function planSuperblocks(
-  blockCols: number,
-  blockRows: number,
+  arterials: ArterialRhythm,
   terrain: CityTerrain,
   seed: string,
 ): Map<string, Superblock> {
-  const cols = Math.max(1, Math.ceil(blockCols / ARTERIAL_EVERY))
-  const rows = Math.max(1, Math.ceil(blockRows / ARTERIAL_EVERY))
+  const cols = arterials.cols.length - 1
+  const rows = arterials.rows.length - 1
   const occupied = new Set<string>()
   for (const block of terrain.blocks.values()) {
     if (block.use !== 'built' && block.use !== 'facility') continue
-    occupied.add(superblockKey(Math.floor(block.col / ARTERIAL_EVERY), Math.floor(block.row / ARTERIAL_EVERY)))
+    occupied.add(superblockKey(
+      arterialCellIndex(arterials.cols, block.col),
+      arterialCellIndex(arterials.rows, block.row),
+    ))
   }
 
   const centreCol = (cols - 1) / 2
@@ -1241,21 +1460,39 @@ function planSuperblocks(
       let pattern: SuperblockPattern
       if (!occupied.has(key)) {
         pattern = draw < 0.62 ? 'open' : 'estate'
-      } else if (radius < 0.34) {
-        // The middle of a city is where the small-block grid actually belongs.
-        pattern = draw < 0.72 ? 'downtown' : 'ladder'
+      } else if (radius < 0.3) {
+        /*
+         * The middle. A small-block grid belongs *here* and only here — this is the one part of a
+         * real city that was ever surveyed as a grid — and even here it shares the ground with the
+         * old town it grew out of.
+         */
+        pattern = draw < 0.4 ? 'downtown' : draw < 0.72 ? 'organic' : 'radial'
+      } else if (radius < 0.66) {
+        pattern = draw < 0.22 ? 'downtown' : draw < 0.46 ? 'ladder' : draw < 0.74 ? 'organic' : 'crescent'
       } else {
-        pattern = draw < 0.3 ? 'downtown' : draw < 0.66 ? 'ladder' : 'crescent'
+        // The edge of town: curving residential and loop estates, never a downtown grid.
+        pattern = draw < 0.34 ? 'crescent' : draw < 0.62 ? 'organic' : draw < 0.84 ? 'ladder' : 'estate'
       }
+
+      const fromCol = arterials.cols[col]
+      const fromRow = arterials.rows[row]
+      const toCol = arterials.cols[col + 1]
+      const toRow = arterials.rows[row + 1]
 
       superblocks.set(key, {
         pattern,
-        midCol: col * ARTERIAL_EVERY + Math.max(1, Math.round(ARTERIAL_EVERY / 2)),
-        midRow: row * ARTERIAL_EVERY + Math.max(1, Math.round(ARTERIAL_EVERY / 2)),
+        midCol: Math.round((fromCol + toCol) / 2),
+        midRow: Math.round((fromRow + toRow) / 2),
+        fromCol,
+        fromRow,
         parity: rng() < 0.5 ? 0 : 1,
         // Downtown streets are surveyed; the further out and the looser the pattern, the more they
         // are allowed to follow the ground instead.
-        bow: pattern === 'downtown' ? 0.25 : pattern === 'ladder' ? 0.8 : 1.6,
+        bow: pattern === 'downtown' ? 0.25
+          : pattern === 'ladder' ? 0.8
+          : pattern === 'organic' ? 2.1
+          : pattern === 'radial' ? 1.8
+          : 1.6,
         room: occupied.has(key) ? 1 : 2.6,
       })
     }
@@ -1266,49 +1503,66 @@ function planSuperblocks(
 function buildStreetNetwork(
   blockCols: number,
   blockRows: number,
-  pitchX: number,
-  pitchZ: number,
   cell: number,
   terrain: CityTerrain,
+  warp: CityWarp,
+  arterials: ArterialRhythm,
+  plazas: readonly BlockRef[],
   seed: string,
 ) {
   const intersections = new Map<string, CityIntersection>()
   for (let row = 0; row <= blockRows; row += 1) {
     for (let col = 0; col <= blockCols; col += 1) {
+      const point = warp.node(col, row)
       intersections.set(intersectionId(col, row), {
         id: intersectionId(col, row),
         col,
         row,
-        x: col * pitchX,
-        z: row * pitchZ,
+        x: point.x,
+        z: point.z,
       })
     }
   }
 
-  const context: StreetContext = { pitchX, pitchZ, cell, terrain, bow: bowField(seed) }
+  const context: StreetContext = { warp, cell, terrain, bow: bowField(seed) }
   const ring = ringBoulevard(blockCols, blockRows)
-  const isArterialCol = (col: number) => col === 0 || col === blockCols || col % ARTERIAL_EVERY === 0
-  const isArterialRow = (row: number) => row === 0 || row === blockRows || row % ARTERIAL_EVERY === 0
+  const isArterialCol = (col: number) => arterials.colSet.has(col)
+  const isArterialRow = (row: number) => arterials.rowSet.has(row)
 
-  const superblocks = planSuperblocks(blockCols, blockRows, terrain, seed)
+  const superblocks = planSuperblocks(arterials, terrain, seed)
   const superblockAt = (col: number, row: number) =>
-    superblocks.get(superblockKey(Math.floor(col / ARTERIAL_EVERY), Math.floor(row / ARTERIAL_EVERY)))
+    superblocks.get(superblockKey(
+      arterialCellIndex(arterials.cols, col),
+      arterialCellIndex(arterials.rows, row),
+    ))
 
   /*
    * Which interior streets survive.
    *
    * An arterial is never touched — it is the skeleton the whole map hangs off, and it is also what
    * guarantees the graph stays connected once the interior thins out. Everything else answers to its
-   * cell's pattern. Note that a cell holding buildings always keeps every through street, so no
-   * building is ever left without the frontage {@link placeLot} promised it.
+   * cell's pattern.
    */
   const keepsThrough = (col: number, row: number) => {
     if (isArterialRow(row)) return true
     const superblock = superblockAt(col, row)
     if (!superblock) return true
-    if (superblock.pattern === 'open') return false
-    if (superblock.pattern === 'estate') return row === superblock.midRow
-    return true
+    switch (superblock.pattern) {
+      case 'open':
+        return false
+      case 'estate':
+        return row === superblock.midRow
+      case 'radial':
+        // Concentric arcs about the cell's own centre: every other ring, plus the spine.
+        return row === superblock.midRow || (row - superblock.fromRow) % 2 === superblock.parity
+      case 'organic':
+        // The multiplier has to be coprime with 3, or the row term vanishes under the modulus and
+        // every row drops the same columns — a straight machine seam through the one pattern whose
+        // whole job is to look unsurveyed.
+        return (col + row * 2 + superblock.parity) % 3 !== 0
+      default:
+        return true
+    }
   }
   const keepsCross = (col: number, row: number) => {
     if (isArterialCol(col)) return true
@@ -1319,6 +1573,11 @@ function buildStreetNetwork(
         return true
       case 'ladder':
         return col % 2 === superblock.parity
+      case 'radial':
+        // Spokes out of the cell centre: keep every cross line, so what thins is the rings.
+        return true
+      case 'organic':
+        return (col * 2 + row + superblock.parity) % 3 !== 0
       case 'crescent':
       case 'estate':
         return col === superblock.midCol
@@ -1339,10 +1598,72 @@ function buildStreetNetwork(
     return arterial ? 'arterial' : 'collector'
   }
 
+  /*
+   * Which legs the patterns want, before anything is built.
+   *
+   * Decided as a set first rather than street-by-street, because a pattern can happily strip all four
+   * edges off a block and only a view of the whole set can see that it has.
+   */
+  const through = new Set<string>()
+  const cross = new Set<string>()
+  for (let row = 0; row <= blockRows; row += 1) {
+    for (let col = 0; col < blockCols; col += 1) {
+      if (keepsThrough(col, row)) through.add(`${col}:${row}`)
+    }
+  }
+  for (let col = 0; col <= blockCols; col += 1) {
+    for (let row = 0; row < blockRows; row += 1) {
+      if (keepsCross(col, row)) cross.add(`${col}:${row}`)
+    }
+  }
+
+  /*
+   * Give back any block the patterns stranded, and give it something it can be reached *by*.
+   *
+   * A block with no bounding street is a building with no door. Restoring a single edge is not
+   * enough: in a sparse pattern that edge can touch nothing at either end, which leaves a two-node
+   * island in the routing graph, and a lot snapped onto an island has no path to anywhere — the map
+   * then falls back to drawing a straight dogleg across the city, through whatever is in the way.
+   *
+   * So the repair lays a lane along the block's north edge and runs it out to the first junction
+   * that is already on the network. A node carrying a cross street is on the network by definition,
+   * and arterial columns keep all of theirs, so the walk always terminates. The shorter of the two
+   * directions wins, so a stranded block gets a lane that goes somewhere rather than its lattice back.
+   */
+  const onNetwork = (col: number, row: number) =>
+    cross.has(`${col}:${row}`) || cross.has(`${col}:${row - 1}`)
+  const reachFrom = (col: number, step: -1 | 1, row: number) => {
+    let distance = 0
+    for (let c = col; c >= 0 && c <= blockCols; c += step) {
+      if (onNetwork(c, row)) return distance
+      distance += 1
+    }
+    return Infinity
+  }
+  for (const block of terrain.blocks.values()) {
+    if (block.use !== 'built' && block.use !== 'facility') continue
+    const { col, row } = block
+    const edges: Array<[Set<string>, string]> = [
+      [through, `${col}:${row}`],
+      [through, `${col}:${row + 1}`],
+      [cross, `${col}:${row}`],
+      [cross, `${col + 1}:${row}`],
+    ]
+    if (edges.some(([set, key]) => set.has(key))) continue
+    through.add(`${col}:${row}`)
+    const left = reachFrom(col, -1, row)
+    const right = reachFrom(col + 1, 1, row)
+    if (left <= right) {
+      for (let c = col - left; c < col; c += 1) through.add(`${c}:${row}`)
+    } else if (right < Infinity) {
+      for (let c = col + 1; c <= col + right; c += 1) through.add(`${c}:${row}`)
+    }
+  }
+
   const streets: CityStreet[] = []
   for (let row = 0; row <= blockRows; row += 1) {
     for (let col = 0; col < blockCols; col += 1) {
-      if (!keepsThrough(col, row)) continue
+      if (!through.has(`${col}:${row}`)) continue
       streets.push(
         makeStreet(
           streetIdFor('x', col, row),
@@ -1359,7 +1680,7 @@ function buildStreetNetwork(
   }
   for (let col = 0; col <= blockCols; col += 1) {
     for (let row = 0; row < blockRows; row += 1) {
-      if (!keepsCross(col, row)) continue
+      if (!cross.has(`${col}:${row}`)) continue
       streets.push(
         makeStreet(
           streetIdFor('z', col, row),
@@ -1375,7 +1696,7 @@ function buildStreetNetwork(
     }
   }
 
-  for (const avenue of diagonalAvenues(blockCols, blockRows, terrain, seed)) {
+  for (const avenue of radialAvenues(blockCols, blockRows, arterials, plazas, terrain, seed)) {
     streets.push(
       makeStreet(
         `street:d:${avenue.from.col}:${avenue.from.row}:${avenue.to.col}:${avenue.to.row}`,
@@ -1388,6 +1709,8 @@ function buildStreetNetwork(
     )
   }
 
+  const kept = pruneJunctions(streets, blockCols, blockRows, arterials, seed)
+
   /*
    * Drop the junctions nothing meets at any more.
    *
@@ -1397,7 +1720,7 @@ function buildStreetNetwork(
    * is not a junction, so it does not survive as one.
    */
   const used = new Set<string>()
-  for (const street of streets) {
+  for (const street of kept) {
     used.add(street.fromId)
     used.add(street.toId)
   }
@@ -1405,7 +1728,7 @@ function buildStreetNetwork(
     if (!used.has(id)) intersections.delete(id)
   }
 
-  return { intersections, streets }
+  return { intersections, streets: kept }
 }
 
 /** Street widths per class. Cartography, not evidence. */
@@ -1494,8 +1817,7 @@ function bowAt(field: BowField, x: number, z: number): number {
 
 /** Everything a street needs to know about the city it is being drawn in. */
 interface StreetContext {
-  readonly pitchX: number
-  readonly pitchZ: number
+  readonly warp: CityWarp
   readonly cell: number
   readonly terrain: CityTerrain
   readonly bow: BowField
@@ -1522,11 +1844,13 @@ function makeStreet(
   bowScale = 1,
   roomScale = 1,
 ): CityStreet {
-  const { pitchX, pitchZ, terrain, bow: field } = context
-  const fromX = from.col * pitchX
-  const fromZ = from.row * pitchZ
-  const toX = to.col * pitchX
-  const toZ = to.row * pitchZ
+  const { warp, terrain, bow: field } = context
+  const start = warp.node(from.col, from.row)
+  const end = warp.node(to.col, to.row)
+  const fromX = start.x
+  const fromZ = start.z
+  const toX = end.x
+  const toZ = end.z
   const midX = (fromX + toX) / 2
   const midZ = (fromZ + toZ) / 2
 
@@ -1708,20 +2032,30 @@ function onRing(ring: RingBounds, axis: 'x' | 'z', col: number, row: number): bo
 }
 
 /**
- * Diagonal avenues across the lattice, as real edges between existing intersections.
+ * Avenues that arrive somewhere, as real edges between existing junctions.
  *
- * One runs south-east and, on a grid with room for it, a second runs south-west. Each edge is
- * `sqrt(2)` block pitches long against the two pitches of the lattice legs it parallels, so Dijkstra
- * prefers it and a route across town genuinely takes the avenue.
+ * A diagonal drawn across a lattice for its own sake is just a line on graph paper at 45°. What makes
+ * an avenue read as an avenue is that it *goes* to a place: spokes converging on a square are the
+ * single most recognisable non-grid feature a city map has, and they are why you can find Place de
+ * l'Étoile on a map with the labels off.
+ *
+ * So every square gets spokes running out of it, and — on a city with room — one long cross-town
+ * diagonal that is not attached to any square, because a real city also has the one road that was
+ * there before the plan.
+ *
+ * Each edge is `sqrt(2)` block pitches long against the two pitches of the lattice legs it parallels,
+ * so Dijkstra prefers it and a route across town genuinely takes the avenue.
  *
  * An avenue cuts corner-to-corner *through* a block, so it may only cross ground the plan left empty.
  * Where a built block stands in the way the edge is dropped and the walk continues past it: the
  * avenue is interrupted, routes fall back to the lattice for that stretch, and no carriageway is ever
  * drawn through a measured building.
  */
-function diagonalAvenues(
+function radialAvenues(
   blockCols: number,
   blockRows: number,
+  arterials: ArterialRhythm,
+  plazas: readonly BlockRef[],
   terrain: CityTerrain,
   seed: string,
 ): Array<{ from: BlockRef; to: BlockRef }> {
@@ -1729,6 +2063,7 @@ function diagonalAvenues(
   if (side < 6) return []
   const rng = mulberry32(stableHash(`${seed}::avenues`))
   const edges: Array<{ from: BlockRef; to: BlockRef }> = []
+  const seen = new Set<string>()
 
   const crossable = (col: number, row: number, stepCol: 1 | -1, stepRow: 1 | -1) => {
     // The block an edge cuts through is the one at the lower corner of the pair it spans.
@@ -1738,14 +2073,22 @@ function diagonalAvenues(
     return block !== undefined && block.use !== 'built' && block.use !== 'facility'
   }
 
-  const walk = (startCol: number, startRow: number, stepCol: 1 | -1, stepRow: 1 | -1) => {
+  const walk = (
+    startCol: number,
+    startRow: number,
+    stepCol: 1 | -1,
+    stepRow: 1 | -1,
+    limit: number,
+  ) => {
     let col = startCol
     let row = startRow
-    while (true) {
+    for (let step = 0; step < limit; step += 1) {
       const nextCol = col + stepCol
       const nextRow = row + stepRow
       if (nextCol < 0 || nextCol > blockCols || nextRow < 0 || nextRow > blockRows) break
-      if (crossable(col, row, stepCol, stepRow)) {
+      const key = `${Math.min(col, nextCol)}:${Math.min(row, nextRow)}:${stepCol === stepRow ? 'a' : 'b'}`
+      if (!seen.has(key) && crossable(col, row, stepCol, stepRow)) {
+        seen.add(key)
         edges.push({ from: { col, row }, to: { col: nextCol, row: nextRow } })
       }
       col = nextCol
@@ -1753,13 +2096,290 @@ function diagonalAvenues(
     }
   }
 
-  const firstRow = Math.floor(rng() * Math.max(1, blockRows - side + 1))
-  walk(0, firstRow, 1, 1)
+  /*
+   * Spokes reach until they hit an arterial, so an avenue ends at a road rather than fizzling out
+   * mid-block. Two blocks minimum, otherwise a square in a tight corner gets four stubs.
+   */
+  const reach = (from: number, step: 1 | -1, lines: readonly number[]) => {
+    for (const line of step === 1 ? lines : [...lines].reverse()) {
+      if (step === 1 ? line > from : line < from) return Math.abs(line - from)
+    }
+    return 0
+  }
+
+  for (const plaza of plazas) {
+    for (const [stepCol, stepRow] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as const) {
+      const limit = Math.min(
+        reach(plaza.col, stepCol, arterials.cols),
+        reach(plaza.row, stepRow, arterials.rows),
+      )
+      if (limit >= 2) walk(plaza.col, plaza.row, stepCol, stepRow, limit)
+    }
+  }
+
+  // The one road that predates the plan. Skipped on a small city, where it would be most of the map.
   if (side >= 10) {
-    const secondRow = Math.min(blockRows, firstRow + Math.max(3, Math.floor(side * 0.6)))
-    walk(0, secondRow, 1, -1)
+    const startRow = Math.floor(rng() * Math.max(1, blockRows - side + 1))
+    walk(0, startRow, 1, 1, blockCols + blockRows)
   }
   return edges
+}
+
+/**
+ * Turn four-way junctions into T-junctions and cul-de-sacs, until the city stops being a lattice.
+ *
+ * This is the change that matters most, and it is not a geometric one. Boeing's survey of 27,000 real
+ * street networks (*A Multi-Scale Analysis of Urban Street Networks*, 2018) measures what the eye is
+ * actually reading when it calls something a grid:
+ *
+ * | | lattice | measured cities |
+ * | --- | --- | --- |
+ * | four-way junctions | ~100% | ~23% |
+ * | T-junctions | ~0% | ~57% |
+ * | dead ends | ~0% | ~15% |
+ * | mean junction degree | 4.0 | 2.7–3.0 |
+ *
+ * Curving a street between two junctions does not move either junction, so a curved lattice is still
+ * a lattice with 100% four-way junctions — which is exactly why the previous attempt at this read as
+ * a wiggly grid. Removing one edge between two four-way junctions converts *both* into T-junctions,
+ * so the distribution moves twice as fast as the edge count falls.
+ *
+ * Three things are never done, in priority order over the target distribution:
+ *
+ * 1. An arterial is never cut. It is the skeleton, and it is what keeps the graph connected.
+ * 2. The graph is never disconnected. Every removal is checked by walking from one end to the other.
+ * 3. A block is never left without a bounding street, or the building on it has nowhere to be entered
+ *    from. {@link rebindFrontages} then repoints each door at whichever edge survived.
+ */
+const DEGREE4_TARGET = 0.25
+const DEAD_END_TARGET = 0.14
+
+function pruneJunctions(
+  streets: readonly CityStreet[],
+  blockCols: number,
+  blockRows: number,
+  arterials: ArterialRhythm,
+  seed: string,
+): CityStreet[] {
+  const degree = new Map<string, number>()
+  const neighbours = new Map<string, Set<string>>()
+  const link = (a: string, b: string) => {
+    degree.set(a, (degree.get(a) ?? 0) + 1)
+    const list = neighbours.get(a)
+    if (list) list.add(b)
+    else neighbours.set(a, new Set([b]))
+  }
+  for (const street of streets) {
+    link(street.fromId, street.toId)
+    link(street.toId, street.fromId)
+  }
+
+  /*
+   * How many streets still bound each block.
+   *
+   * A block is bounded by the through street on its own row and the one on the row below, plus the
+   * cross street on its own column and the one on the column to its right. Avenues cut across blocks
+   * rather than round them, so they are not frontage and do not count.
+   */
+  const bounding = new Map<string, number>()
+  const boundedBy = (street: CityStreet): string[] => {
+    const [, axis, first, second] = street.id.split(':')
+    if (axis !== 'x' && axis !== 'z') return []
+    const col = Number(first)
+    const row = Number(second)
+    const blocks = axis === 'x'
+      ? [[col, row], [col, row - 1]]
+      : [[col, row], [col - 1, row]]
+    return blocks
+      .filter(([c, r]) => c >= 0 && r >= 0 && c < blockCols && r < blockRows)
+      .map(([c, r]) => blockKey(c, r))
+  }
+  for (const street of streets) {
+    for (const key of boundedBy(street)) bounding.set(key, (bounding.get(key) ?? 0) + 1)
+  }
+
+  const isArterial = (street: CityStreet) => {
+    if (street.streetClass !== 'collector') return true
+    const [, axis, first, second] = street.id.split(':')
+    if (axis === 'x') return arterials.rowSet.has(Number(second))
+    if (axis === 'z') return arterials.colSet.has(Number(first))
+    return true
+  }
+
+  /** Is `to` still reachable from `from`? The edge under test has already been unlinked. */
+  const connected = (from: string, to: string): boolean => {
+    const visited = new Set([from])
+    const queue = [from]
+    let head = 0
+    let budget = 6000
+    while (head < queue.length && budget > 0) {
+      const at = queue[head]
+      head += 1
+      if (at === to) return true
+      budget -= 1
+      for (const next of neighbours.get(at) ?? []) {
+        if (visited.has(next)) continue
+        visited.add(next)
+        queue.push(next)
+      }
+    }
+    // Out of budget means "could not prove it is safe", which is the answer that keeps a road.
+    return false
+  }
+
+  const unlink = (a: string, b: string) => {
+    degree.set(a, (degree.get(a) ?? 1) - 1)
+    neighbours.get(a)?.delete(b)
+  }
+
+  const removed = new Set<string>()
+  const rng = mulberry32(stableHash(`${seed}::prune`))
+  const candidates = seededShuffle(streets.filter(street => !isArterial(street)), rng)
+
+  const junctionCount = () => degree.size
+  const countDegree = (predicate: (value: number) => boolean) => {
+    let total = 0
+    for (const value of degree.values()) if (predicate(value)) total += 1
+    return total
+  }
+
+  /*
+   * Pass one: the T-junctions.
+   *
+   * Only edges whose *both* ends are four-way are cut, because those are the removals that buy two
+   * T-junctions for one street. Cutting an edge at a node that is already a T would make a dead end,
+   * which is the next pass's job and has a much smaller budget.
+   */
+  const total = junctionCount()
+  for (const street of candidates) {
+    if (countDegree(value => value >= 4) <= total * DEGREE4_TARGET) break
+    if ((degree.get(street.fromId) ?? 0) < 4 || (degree.get(street.toId) ?? 0) < 4) continue
+    const blocks = boundedBy(street)
+    if (blocks.some(key => (bounding.get(key) ?? 0) <= 1)) continue
+    unlink(street.fromId, street.toId)
+    unlink(street.toId, street.fromId)
+    if (!connected(street.fromId, street.toId)) {
+      link(street.fromId, street.toId)
+      link(street.toId, street.fromId)
+      continue
+    }
+    removed.add(street.id)
+    for (const key of blocks) bounding.set(key, (bounding.get(key) ?? 1) - 1)
+  }
+
+  /*
+   * Pass two: the dead ends.
+   *
+   * A cul-de-sac is a street that stops. So this pass does the opposite of the first one — it cuts an
+   * edge at a node that is *already* down to two, leaving a stub — and it deliberately does not check
+   * connectivity for the stub end, because a stub is meant to be a leaf.
+   */
+  for (const street of candidates) {
+    if (removed.has(street.id)) continue
+    if (countDegree(value => value === 1) >= total * DEAD_END_TARGET) break
+    const fromDegree = degree.get(street.fromId) ?? 0
+    const toDegree = degree.get(street.toId) ?? 0
+    // Exactly one end must be about to become a leaf; the other must have streets to spare.
+    const leafEnd = fromDegree === 2 && toDegree >= 3 ? street.fromId
+      : toDegree === 2 && fromDegree >= 3 ? street.toId
+      : null
+    if (leafEnd === null) continue
+    const other = leafEnd === street.fromId ? street.toId : street.fromId
+    const blocks = boundedBy(street)
+    if (blocks.some(key => (bounding.get(key) ?? 0) <= 1)) continue
+    unlink(street.fromId, street.toId)
+    unlink(street.toId, street.fromId)
+    if (!connected(leafEnd, other)) {
+      link(street.fromId, street.toId)
+      link(street.toId, street.fromId)
+      continue
+    }
+    removed.add(street.id)
+    for (const key of blocks) bounding.set(key, (bounding.get(key) ?? 1) - 1)
+  }
+
+  return streets.filter(street => !removed.has(street.id))
+}
+
+/**
+ * Hang every door on a street that still exists, at a point the carriageway actually passes.
+ *
+ * Two things make this necessary, and both of them only become knowable after the network settles.
+ *
+ * First, {@link placeLot} fronts a building on the street along its block's north edge, because at
+ * the time lots are placed there is always one there. {@link pruneJunctions} then removes streets,
+ * and the one a building was fronting may be among them — leaving a door opening onto nothing and a
+ * route that ends at a kerb no carriageway runs along. The guarantee that at least one of a block's
+ * four edges survives is enforced in the prune itself, which refuses to take a block's last one.
+ *
+ * Second, a street's drawn path is bowed, and on a strongly curved leg the carriageway is nowhere
+ * near the straight-line midpoint of its two junctions. So the door is placed on the *drawn* path,
+ * which is the road you can see, rather than on the chord between the junctions, which is not.
+ *
+ * This is also what makes a pruned city read correctly rather than merely differently: on a street
+ * that lost its opposite number, the buildings turn to face the one that is left, exactly as a real
+ * terrace does.
+ */
+function rebindFrontages(lots: Map<string, CityLot>, streets: readonly CityStreet[]): void {
+  const byId = new Map(streets.map(street => [street.id, street]))
+  for (const [objectId, lot] of lots) {
+    const { blockCol: col, blockRow: row } = lot
+    const options: Array<{ id: string; facing: Facing }> = [
+      { id: streetIdFor('x', col, row), facing: 'north' },
+      { id: streetIdFor('x', col, row + 1), facing: 'south' },
+      { id: streetIdFor('z', col, row), facing: 'west' },
+      { id: streetIdFor('z', col + 1, row), facing: 'east' },
+    ]
+
+    let best: { id: string; kerb: Point; facing: Facing } | null = null
+    let bestDistance = Infinity
+    for (const option of options) {
+      const street = byId.get(option.id)
+      if (!street) continue
+      const kerb = nearestOnPath(street.path, lot.x, lot.z)
+      const distance = Math.hypot(kerb.x - lot.x, kerb.z - lot.z)
+      // Ties broken by id so the choice never depends on option order changing.
+      if (distance < bestDistance || (distance === bestDistance && option.id < (best?.id ?? ''))) {
+        bestDistance = distance
+        best = { id: option.id, kerb, facing: option.facing }
+      }
+    }
+    // No bounding street at all should be impossible, but a lot with a stale door is worse than one
+    // that keeps the kerb it was given, so the fallback is to leave it alone.
+    if (!best) continue
+
+    lots.set(objectId, {
+      ...lot,
+      facing: best.facing,
+      frontageStreetId: best.id,
+      accessX: best.kerb.x,
+      accessZ: best.kerb.z,
+      rotationY: Math.atan2(best.kerb.x - lot.x, best.kerb.z - lot.z),
+    })
+  }
+}
+
+/** The point on a polyline closest to a world position. */
+function nearestOnPath(path: readonly Point[], x: number, z: number): Point {
+  let best: Point = path[0] ?? { x, z }
+  let bestDistance = Infinity
+  for (let index = 0; index + 1 < path.length; index += 1) {
+    const from = path[index]
+    const to = path[index + 1]
+    const dx = to.x - from.x
+    const dz = to.z - from.z
+    const lengthSquared = dx * dx + dz * dz
+    const t = lengthSquared < 1e-9
+      ? 0
+      : clamp(((x - from.x) * dx + (z - from.z) * dz) / lengthSquared, 0, 1)
+    const point = { x: from.x + dx * t, z: from.z + dz * t }
+    const distance = Math.hypot(point.x - x, point.z - z)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = point
+    }
+  }
+  return best
 }
 
 /**
@@ -1854,3 +2474,4 @@ function compareOrdinal(left: string, right: string): number {
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
+

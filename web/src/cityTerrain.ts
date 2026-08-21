@@ -1,5 +1,6 @@
 import { mulberry32, seededIndex } from './citySeed'
 import { stableHash } from './atlasLayout'
+import type { CityWarp } from './cityWarp'
 
 /**
  * Landform and land use for one database city.
@@ -134,13 +135,24 @@ export interface TerrainInput {
   readonly occupied: ReadonlySet<string>
   /** `col-row` keys carrying a civic facility. */
   readonly facilities: ReadonlySet<string>
+  /** `col-row` keys drawn into a public square. */
+  readonly plazas?: ReadonlySet<string>
   readonly districtIds: readonly string[]
   readonly seed: string
   /**
-   * Blocks per side of one arterial cell, so land use can be decided at the same scale the street
-   * network is. Without it a park is one block wide and the map reads as confetti.
+   * The lattice lines carrying arterials, so land use is decided at the same scale — and on the same
+   * irregular rhythm — as the street network. Without it a park is one block wide and the map reads
+   * as confetti.
    */
-  readonly superblock?: number
+  readonly arterialCols?: readonly number[]
+  readonly arterialRows?: readonly number[]
+  /**
+   * Where the junctions really are.
+   *
+   * Terrain is drawn on the same warped ground as everything else, so a river that follows a street
+   * corridor has to follow the corridor's actual path rather than a straight lattice line.
+   */
+  readonly warp?: CityWarp
 }
 
 /** Base half-width of the river, as a fraction of the street corridor it runs along. */
@@ -179,7 +191,10 @@ export function planTerrain(input: TerrainInput): CityTerrain {
     river,
     characters,
     relief,
-    bounds: { maxX: input.blockCols * input.pitchX, maxZ: input.blockRows * input.pitchZ },
+    bounds: {
+      maxX: input.warp?.maxX ?? input.blockCols * input.pitchX,
+      maxZ: input.warp?.maxZ ?? input.blockRows * input.pitchZ,
+    },
   }
 }
 
@@ -228,6 +243,10 @@ export function reliefAt(field: ReliefField, x: number, z: number): number {
  */
 function routeRiver(input: TerrainInput, relief: ReliefField, rng: () => number): RiverNode[] {
   const { blockCols, blockRows, pitchX, pitchZ } = input
+  // Where the junctions actually are, so the river follows the corridor it was routed down rather
+  // than a straight line between two lattice coordinates that no street runs along.
+  const at = (col: number, row: number): Point =>
+    input.warp?.node(col, row) ?? { x: col * pitchX, z: row * pitchZ }
   if (blockCols < MIN_RIVER_GRID || blockRows < MIN_RIVER_GRID) return []
 
   // West-to-east or north-to-south, so a city is not always crossed the same way.
@@ -249,7 +268,8 @@ function routeRiver(input: TerrainInput, relief: ReliefField, rng: () => number)
 
   // Low ground is cheap, high ground is dear, so the path settles into a valley.
   const nodeCost = (col: number, row: number) => {
-    const height = reliefAt(relief, col * pitchX, row * pitchZ)
+    const point = at(col, row)
+    const height = reliefAt(relief, point.x, point.z)
     return 1 + (height + relief.amplitude) / (relief.amplitude * 2 + 1e-6)
   }
 
@@ -310,7 +330,7 @@ function routeRiver(input: TerrainInput, relief: ReliefField, rng: () => number)
   }
   lattice.reverse()
 
-  const corridor = lattice.map(node => ({ x: node.col * pitchX, z: node.row * pitchZ }))
+  const corridor = lattice.map(node => at(node.col, node.row))
   const smoothed = smoothPolyline(corridor, RIVER_SAMPLES_PER_LEG)
   return widenRiver(smoothed, input)
 }
@@ -331,8 +351,14 @@ function widenRiver(points: readonly Point[], input: TerrainInput): RiverNode[] 
   const room = input.cell * RIVER_MAX_WIDENING
   const builtLimit = input.streetWidth / 2 + input.lotMargin * BUILT_BANK_CLEARANCE
   return points.map(point => {
-    const col = Math.floor(point.x / input.pitchX)
-    const row = Math.floor(point.z / input.pitchZ)
+    // Which block a sample sits in is no longer a division: the spans are irregular and the whole
+    // lattice is displaced, so the warp is asked.
+    const { col, row } = input.warp
+      ? input.warp.nearestNode(point.x, point.z)
+      : {
+          col: Math.floor(point.x / input.pitchX),
+          row: Math.floor(point.z / input.pitchZ),
+        }
     let open = 0
     let total = 0
     for (const dc of [0, -1]) {
@@ -454,16 +480,25 @@ function classifyBlocks(
   // Land use is decided a whole arterial cell at a time, then let go of at the edges. A park that
   // covers one block is noise; a park that covers a cell is a place, and the blocks that break ranks
   // along its boundary are what stop it looking stamped out.
-  const span = Math.max(1, input.superblock ?? 1)
+  //
+  // The cells are the irregular ones the arterials cut, so no two parks are the same size or shape.
+  const arterialCols = input.arterialCols ?? [0, blockCols]
+  const arterialRows = input.arterialRows ?? [0, blockRows]
+  const cellIndex = (lines: readonly number[], at: number) => {
+    for (let index = lines.length - 2; index >= 0; index -= 1) if (at >= lines[index]) return index
+    return 0
+  }
   const regions = new Map<string, LandUse>()
   const regionAt = (col: number, row: number): LandUse | null => {
-    if (span < 2) return null
-    const key = `${Math.floor(col / span)}:${Math.floor(row / span)}`
+    if (arterialCols.length < 2 || arterialRows.length < 2) return null
+    const cellCol = cellIndex(arterialCols, col)
+    const cellRow = cellIndex(arterialRows, row)
+    const key = `${cellCol}:${cellRow}`
     const cached = regions.get(key)
     if (cached !== undefined) return cached
     const centre = {
-      col: (Math.floor(col / span) + 0.5) * span - 0.5,
-      row: (Math.floor(row / span) + 0.5) * span - 0.5,
+      col: (arterialCols[cellCol] + arterialCols[cellCol + 1] - 1) / 2,
+      row: (arterialRows[cellRow] + arterialRows[cellRow + 1] - 1) / 2,
     }
     const radius = Math.hypot(centre.col - centreCol, centre.row - centreRow) / maxRadius
     const draw = mulberry32(stableHash(`${input.seed}::region::${key}`))()
@@ -494,12 +529,16 @@ function classifyBlocks(
   for (let row = 0; row < blockRows; row += 1) {
     for (let col = 0; col < blockCols; col += 1) {
       const key = blockKey(col, row)
-      const x = col * pitchX + streetWidth / 2 + cell / 2
-      const z = row * pitchZ + streetWidth / 2 + cell / 2
+      const centre = input.warp
+        ? input.warp.blockCenter(col, row)
+        : { x: col * pitchX + streetWidth / 2 + cell / 2, z: row * pitchZ + streetWidth / 2 + cell / 2 }
+      const x = centre.x
+      const z = centre.z
       const draw = draws[row * blockCols + col]
       const radius = Math.hypot(col - centreCol, row - centreRow) / maxRadius
       const built = input.occupied.has(key)
       const facility = input.facilities.has(key)
+      const plaza = input.plazas?.has(key) ?? false
 
       // Relief is held at zero across the built core and only allowed to rise toward the edge, so no
       // building is ever tilted or lifted relative to its neighbours. Held at a literal zero rather
@@ -515,7 +554,9 @@ function classifyBlocks(
           ? 'built'
           : facility
             ? 'facility'
-            : sceneryFor(river, x, z, cell, radius, draw, regionAt(col, row)),
+            : plaza
+              ? 'plaza'
+              : sceneryFor(river, x, z, cell, radius, draw, regionAt(col, row)),
         x,
         z,
         size: cell,

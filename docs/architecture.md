@@ -141,8 +141,9 @@ Without shared exposure a normalized schema renders almost entirely blank, becau
 and they come on-page. The strict attribution rule is deliberately unchanged; shared exposure is what
 makes that strictness survivable on a real workload.
 
-The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` builds a
-uniform block lattice and hands blocks out using a seeded generator (`web/src/citySeed.ts`), so a
+The city is laid out as a real street plan rather than a bar chart. `web/src/cityPlan.ts` builds a
+block lattice — irregularly spaced and displaced, see [the landscape section](#the-landscape-around-the-evidence)
+— and hands blocks out using a seeded generator (`web/src/citySeed.ts`), so a
 city looks like a city instead of a packed rectangle while remaining completely deterministic: the
 seed is a stable hash of the database's own id, and every draw comes from that one stream. The same
 database therefore lays out identically on every load, in every browser, on every machine.
@@ -235,27 +236,57 @@ woodland, orchard, greenway, plaza, parking, yard, or open water. Land use is ch
 cell at a time rather than a block at a time, with a minority of blocks breaking ranks along the
 boundary, so open ground reads as a region with a ragged edge instead of confetti.
 
-The street network is deliberately not a lattice. `buildStreetNetwork` lays a coarse arterial grid
-every `ARTERIAL_EVERY` blocks and then gives each cell between them one of five interior patterns:
-`downtown` keeps the full fine grid and barely bows, `ladder` keeps every through street and thins the
-cross streets to long blocks, `crescent` bows strongly around a single central spine, `estate` keeps
-one lane each way, and `open` has no interior streets at all so the cell becomes one parcel. Only
-cells that hold no building may take the patterns that drop through streets, because `placeLot`
-fronts every building on the street along its block's north edge and that street has to exist. Nodes
-left with no incident street are deleted rather than kept as unreachable islands in the routing
-graph.
+The street network is deliberately not a lattice, and it is not a wiggled lattice either. Bending a
+road between two fixed lattice points leaves two lattice points, and it is the *junctions* the eye
+reads a street plan by. So `web/src/cityWarp.ts` owns the `(col, row) → world` mapping and actually
+moves them, in four layers: spans that vary block to block instead of one constant pitch, a smooth
+low-frequency meander that bends whole runs of street together, a per-district rotation that fades to
+zero at the arterial seams so arterials stay continuous, and a pull toward each public square. Every
+block is therefore its own quadrilateral at its own angle, and the ground quads, land cover,
+neighbourhood washes and addresses are all built from that mapping rather than from a pitch. Because
+division no longer inverts the mapping, `warp.nearestNode` and `warp.blockAt` do the inverse by
+search.
+
+`WARP_HEADROOM` is the budget the whole thing is spent from: a block packed exactly to
+`cell + streetWidth` cannot deform at all without putting a corner inside a building. It is kept
+close to 1 because it compounds with `MAX_SPAN` into the average block, and blocks much larger than
+the buildings they hold leave every plot marooned in a field. `fitDisplacement` then *measures*
+rather than assumes: it checks every block's inradius against what the building needs and halves the
+displacement until it fits, so the guarantee holds on every seed. A test asserts the fit runs at full
+strength on twenty seed-and-size combinations, so the safety net can never quietly flatten a city
+back toward a grid without failing the build.
+
+On top of that, `planArterials` lays heavy roads at irregular intervals of three to seven blocks, and
+`planPlazas` opens squares where interior arterials cross. Each cell between arterials takes one of
+seven interior patterns — `downtown` (the full fine grid), `ladder`, `crescent`, `estate`, `radial`,
+`organic` and `open` — weighted by distance from the centre, so `downtown` is confined to the middle
+of town and is never the default. `radialAvenues` runs spokes into each square.
+
+The last pass is the one that matters most. Boeing's survey of 27,000 street networks
+([arxiv.org/abs/1705.02198](https://arxiv.org/abs/1705.02198)) puts a real city at roughly 57%
+T-junctions, 14.5% dead ends and only 23% four-way crossings, with a mean node degree of 2.7–3.0; a
+lattice is 100% four-way at 4.0, which is exactly why it reads as graph paper. `pruneJunctions`
+removes street segments toward those targets, refusing any removal that would disconnect the graph,
+strand a block with no street to front on, or break an arterial. Measured across seeds and city sizes
+from 24 to 700 buildings it holds mean degree 2.5–2.7, dead ends 13.5–14.3% and four-way crossings
+10–19%, and `cityPlan.test.ts` asserts that range.
 
 Streets carry a sampled `path` rather than two endpoints, bowed by a seeded field and clipped so a
 wandering centre line can never reach a building; roads that run with the river become embankments
-and roads that cross it become bridge decks. Trees, hedges, street furniture, parked cars, rooftop
-clutter, the architecture of the six facility shells, and the golden-hour sky, fog and shadows are
-all generated from the same database-id seed. The generator scripts for the Blender-authored kits
-live in `blender/` so every `.glb` in `web/src/assets/` is reproducible and auditable; regenerate
-them by running `blender --background --python blender/simcity_kit.py`.
+and roads that cross it become bridge decks. Because a bowed street's carriageway is nowhere near the
+straight-line midpoint of its junctions, `rebindFrontages` runs after placement and snaps every lot's
+access point onto the nearest point of a drawn path — the door lands on the road you can see. Trees,
+hedges, street furniture, parked cars, rooftop clutter, the architecture of the six facility shells,
+and the golden-hour sky, fog and shadows are all generated from the same database-id seed. The
+generator scripts for the Blender-authored kits live in `blender/` so every `.glb` in
+`web/src/assets/` is reproducible and auditable; regenerate them by running
+`blender --background --python blender/simcity_kit.py`.
 
 None of this is derived from a measurement, so none of it can be read as one — a park is not idle
-space, a curving street is not a slow query, and a neighbourhood with a sparser street pattern is not
-a sparser schema. The in-app legend says so in as many words under "The scenery is not evidence".
+space, a curving street is not a slow query, a big block is not a big table, a dead end is not a
+table nothing reaches, and a neighbourhood with a sparser street pattern is not a sparser schema. The
+in-app legend says so in as many words under "The scenery is not evidence" and "The street plan is
+drawn too".
 
 CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
 facilities scattered across the grid (`web/src/cityInfrastructure.ts`). Each facility's architecture

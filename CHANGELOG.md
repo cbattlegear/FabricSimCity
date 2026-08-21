@@ -349,6 +349,45 @@ First MVP release candidate. There is no tagged release yet.
     estimate from the area. Which lot inside a neighbourhood, and which neighbourhood sits next to
     which, remain arbitrary.
 
+- **The street plan is a city now, not a wiggled grid.** Streets had been given curves and a class
+  hierarchy, but every junction still sat at `col * pitch, row * pitch`, so the map still read as
+  graph paper with bent lines on it. Bending a road between two lattice points leaves two lattice
+  points, and junctions are what the eye reads a street plan by. Two things changed.
+
+  - **The junctions actually move.** A new `web/src/cityWarp.ts` owns the `(col, row) → world`
+    mapping and displaces it in four layers: spans that vary block to block, a smooth meander that
+    bends whole runs of street together, a per-district rotation that fades to zero at the arterial
+    seams so arterials stay continuous, and a pull toward each public square. Every block is now its
+    own quadrilateral at its own angle, and the land cover, neighbourhood washes, terrain and
+    addresses are all rebuilt from that mapping instead of from a pitch — division no longer inverts
+    it, so `warp.nearestNode` and `warp.blockAt` do the inverse by search. The deformation budget is
+    guaranteed rather than hoped for: `fitDisplacement` checks every block's inradius against the
+    building it has to hold and halves the displacement until it fits, and a test asserts it never
+    has to, across twenty seed-and-size combinations, so the safety net cannot quietly flatten a city
+    back toward a grid without failing the build.
+
+  - **The junction *degrees* changed, which mattered more.** Boeing's survey of 27,000 street
+    networks puts a real city at roughly 57% T-junctions, 14.5% dead ends and 23% four-way crossings
+    with a mean node degree of 2.7–3.0; a lattice is 100% four-way at 4.0. `pruneJunctions` removes
+    segments toward those targets and refuses any removal that would disconnect the graph, strand a
+    block with no street to front on, or break an arterial. Measured from 24 to 700 buildings it
+    holds mean degree 2.5–2.7, dead ends 13.5–14.3% and four-way crossings 10–19%, and the test suite
+    asserts that range so the pass cannot silently become a no-op.
+
+  Around those: arterials now run at irregular gaps of three to seven blocks instead of a fixed
+  rhythm, squares open where interior arterials cross, avenues radiate into them, and the interior
+  pattern vocabulary went from five to seven with `radial` and `organic` added and the weighting made
+  radial — so `downtown`, the one pattern that keeps a full fine grid, is confined to the middle of
+  town and is never the default. Because a bowed street's carriageway is nowhere near the
+  straight-line midpoint of its junctions, `rebindFrontages` snaps every building's access point onto
+  the nearest point of a drawn path, so doors land on the road you can see.
+
+  **No measured quantity changed.** Footprint, height, archetype, road width, dash, and facility
+  slot fill are byte-identical, the city is still a pure function of the database-id seed, and the
+  legend gained a second disclaimer — "The street plan is drawn too" — naming block size, junction
+  shape, dead ends, squares and arterial rhythm as decoration, because a warped plan offers more
+  things to misread than a lattice did.
+
 - **Query Store is now wired into the connected map.** `ConnectedDatabaseCitySource` used to emit
   `topQueryFamilies: []` and `routes: []` against a live server, so on a real connection the city had
   buildings but no workload, no roads, and no wait lanes. A new

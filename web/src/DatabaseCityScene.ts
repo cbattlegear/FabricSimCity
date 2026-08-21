@@ -54,12 +54,16 @@ export type CityLayerToggles = {
  * How strongly a neighbourhood's hue stains the ground it claims.
  *
  * The 3D city keeps it to a whisper: the buildings are already tinted, and land use — parks, water,
- * woodland — is drawn underneath and has to survive. The basemap can afford much more, because it
+ * woodland — is drawn underneath and has to survive. The basemap can afford more, because it
  * flattens every building to one grey and the wash is then the only thing dividing the map into
  * places.
+ *
+ * Both are lower than they want to be. A wash strong enough to name a neighbourhood at a glance is
+ * also strong enough to erase the land use beneath it, and at that point the map is a colouring book
+ * with roads on top. The neighbourhood label carries the identity; the wash only has to group.
  */
-const CITY_DISTRICT_OPACITY = 0.16
-const MAP_DISTRICT_OPACITY = 0.26
+const CITY_DISTRICT_OPACITY = 0.11
+const MAP_DISTRICT_OPACITY = 0.17
 
 export type CameraNudge =
   | 'panLeft'
@@ -1105,8 +1109,14 @@ export function createDatabaseCityScene(
        */
       if (block.use === 'facility') continue
       const bucket = tileFor(block.use)
-      const half = block.size / 2 + 1.2
-      pushQuad(bucket.position, block.x, block.z, half, half, LAND_LAYER[block.use] ?? -0.55)
+      // The parcel is the block's own quadrilateral, pulled in off the kerb line so the carriageway
+      // stays on top of ground rather than of another parcel.
+      pushCornerQuad(
+        bucket.position,
+        cityPlan.warp.blockCorners(block.col, block.row),
+        LAND_LAYER[block.use] ?? -0.55,
+        cityPlan.streetWidth / 2 - 1.2,
+      )
       /*
        * A whisper of per-block shade.
        *
@@ -1251,6 +1261,42 @@ export function createDatabaseCityScene(
     )
   }
 
+  /**
+   * The same quad, but from four given corners rather than a centre and half-extents.
+   *
+   * A block is no longer a rectangle: the lattice is warped, so every parcel is a quadrilateral at
+   * its own angle. Drawing it as an axis-aligned square would leave the ground square while the
+   * streets around it curve, which is precisely the tell the redesign exists to remove.
+   *
+   * Wound in the same order as {@link pushQuad}, which is counter-clockwise seen from above.
+   */
+  function pushCornerQuad(
+    out: number[],
+    corners: readonly { x: number; z: number }[],
+    y: number,
+    inset: number,
+  ) {
+    let cx = 0
+    let cz = 0
+    for (const corner of corners) {
+      cx += corner.x / corners.length
+      cz += corner.z / corners.length
+    }
+    const pulled = corners.map(corner => {
+      const dx = cx - corner.x
+      const dz = cz - corner.z
+      const length = Math.hypot(dx, dz) || 1
+      // Never past the centre, or a small block turns inside out and renders as a bow tie.
+      const step = Math.min(inset, length * 0.45)
+      return { x: corner.x + (dx / length) * step, z: corner.z + (dz / length) * step }
+    })
+    const [nw, ne, se, sw] = pulled
+    out.push(
+      nw.x, y, nw.z, sw.x, y, sw.z, se.x, y, se.z,
+      nw.x, y, nw.z, se.x, y, se.z, ne.x, y, ne.z,
+    )
+  }
+
   /** A river is a ribbon whose half-width changes along its length, so it cannot reuse the road path. */
   function riverPositions(nodes: readonly { x: number; z: number; halfWidth: number }[], grow: number, y: number) {
     const out: number[] = []
@@ -1319,20 +1365,14 @@ export function createDatabaseCityScene(
    */
   function buildDistricts(cityPlan: CityPlan) {
     clearGroup(districtGroup)
-    const pitch = streetPitch(cityPlan)
     for (const district of cityPlan.districts) {
       if (district.blocks.length === 0) continue
       const material = districtMaterial(neighborhoodTint(district.neighborhoodOrdinal))
       const positions: number[] = []
       for (const block of district.blocks) {
-        pushQuad(
-          positions,
-          block.col * pitch.x + pitch.x / 2,
-          block.row * pitch.z + pitch.z / 2,
-          pitch.x / 2,
-          pitch.z / 2,
-          -0.5,
-        )
+        // Negative inset: the wash runs a little past the kerb so adjacent blocks of one
+        // neighbourhood join into a single field of colour instead of a run of separate plates.
+        pushCornerQuad(positions, cityPlan.warp.blockCorners(block.col, block.row), -0.5, -0.5)
       }
       addMerged(districtGroup, positions, material)
     }

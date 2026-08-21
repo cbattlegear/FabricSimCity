@@ -91,13 +91,31 @@ function options(overrides: Partial<CityPlanOptions> = {}): CityPlanOptions {
 
 /** Turns a world position back into the block grid coordinates the plan placed it on. */
 function blockIndex(plan: CityPlan, x: number, z: number): { col: number; row: number } {
-  const pitch = plan.cell + STREET_WIDTH
-  return { col: Math.floor(x / pitch), row: Math.floor(z / pitch) }
+  // Division no longer inverts the mapping: block spans vary and the whole lattice is displaced, so
+  // the plan's own warp is the only thing that knows where a point landed.
+  return plan.warp.blockAt(x, z)
 }
 
 function blockOf(plan: CityPlan, x: number, z: number): string {
   const { col, row } = blockIndex(plan, x, z)
   return `${col}-${row}`
+}
+
+/** Shortest distance from a point to a drawn centre line, segments included, not just vertices. */
+function distanceToPath(path: readonly { x: number; z: number }[], x: number, z: number): number {
+  let best = Infinity
+  for (let index = 0; index + 1 < path.length; index += 1) {
+    const from = path[index]
+    const to = path[index + 1]
+    const dx = to.x - from.x
+    const dz = to.z - from.z
+    const lengthSquared = dx * dx + dz * dz
+    const t = lengthSquared < 1e-9
+      ? 0
+      : Math.min(1, Math.max(0, ((x - from.x) * dx + (z - from.z) * dz) / lengthSquared))
+    best = Math.min(best, Math.hypot(from.x + dx * t - x, from.z + dz * t - z))
+  }
+  return best
 }
 
 describe('buildingFootprint / buildingHeight', () => {
@@ -243,12 +261,24 @@ describe('planCity placement', () => {
 
   it('fronts every lot onto a street it can be entered from', () => {
     const plan = planCity(sampleCity(), options())
-    const streetIds = new Set(plan.streets.map(street => street.id))
+    const streets = new Map(plan.streets.map(street => [street.id, street]))
     for (const lot of plan.lots.values()) {
-      expect(streetIds.has(lot.frontageStreetId)).toBe(true)
-      expect(Math.abs(lot.accessZ - lot.z)).toBeLessThanOrEqual(plan.cell * BLOCK_ROWS)
-      expect(lot.accessX).toBeCloseTo(lot.x, 6)
-      expect(lot.rotationY).toBe(lot.facing === 'north' ? Math.PI : 0)
+      const street = streets.get(lot.frontageStreetId)
+      expect(street, `${lot.objectId} fronts a street that was pruned`).toBeDefined()
+
+      // The door stands on the carriageway that is drawn, not on the chord between its junctions.
+      // Which of the block's four edges that is depends on which survived the street patterns and
+      // the junction prune, so the test asserts the relationship rather than a fixed direction.
+      const offStreet = distanceToPath(street!.path, lot.accessX, lot.accessZ)
+      expect(offStreet, `${lot.objectId} is entered from a point off its own street`)
+        .toBeLessThan(1e-6)
+
+      // The door is on this block's own kerb rather than one across town.
+      expect(Math.hypot(lot.accessX - lot.x, lot.accessZ - lot.z))
+        .toBeLessThanOrEqual(plan.cell * Math.max(BLOCK_COLS, BLOCK_ROWS) * 2)
+
+      // And the building turns to face it: +Z rotated by rotationY points from centre to door.
+      expect(lot.rotationY).toBeCloseTo(Math.atan2(lot.accessX - lot.x, lot.accessZ - lot.z), 6)
     }
   })
 
@@ -571,6 +601,125 @@ function largeOptions(seed = 'db:sales'): CityPlanOptions {
     })),
   }
 }
+
+/**
+ * The degree of every junction the network actually uses, plus the junctions it stranded.
+ *
+ * Degree — how many streets meet at a point — is what separates a real street network from a
+ * lattice, and it is invisible to every other test in this file. A grid is ~100% four-way; a real
+ * city is mostly T-junctions with a meaningful tail of dead ends.
+ */
+function junctionDegrees(plan: CityPlan) {
+  const degree = new Map<string, number>()
+  for (const id of plan.intersections.keys()) degree.set(id, 0)
+  for (const street of plan.streets) {
+    degree.set(street.fromId, (degree.get(street.fromId) ?? 0) + 1)
+    degree.set(street.toId, (degree.get(street.toId) ?? 0) + 1)
+  }
+  const used = [...degree.values()].filter(count => count > 0)
+  const share = (predicate: (count: number) => boolean) =>
+    used.filter(predicate).length / Math.max(1, used.length)
+  return {
+    used,
+    orphans: [...degree.values()].filter(count => count === 0).length,
+    mean: used.reduce((total, count) => total + count, 0) / Math.max(1, used.length),
+    deadEnds: share(count => count === 1),
+    tees: share(count => count === 3),
+    fourWay: share(count => count === 4),
+  }
+}
+
+/*
+ * Boeing, *A Multi-Scale Analysis of 27,000 Urban Street Networks* (2018), gives the shape of a real
+ * street network: mean node degree 2.7–3.0, 57% T-junctions, 14.5% dead ends, and only 23% four-way.
+ * A lattice sits at 4.0 and ~100% four-way, which is exactly why it reads as graph paper.
+ *
+ * Measured across four seeds and city sizes from 24 to 700 buildings, this planner holds mean degree
+ * 2.5–2.7, dead ends 13.5–14.3%, T-junctions 27–40% and four-way crossings 10–19%. The bounds below
+ * sit a little outside that so a new seed does not fail the build, and well inside a grid so removing
+ * the junction pass does.
+ */
+describe('junction topology', () => {
+  it('does not meet four streets at every corner, the way a grid does', () => {
+    for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops']) {
+      const plan = planCity(largeCity(), largeOptions(seed))
+      const degrees = junctionDegrees(plan)
+      expect(degrees.fourWay).toBeLessThan(0.3)
+      expect(degrees.mean).toBeGreaterThan(2.3)
+      expect(degrees.mean).toBeLessThan(3.2)
+    }
+  })
+
+  it('turns more corners into T-junctions than into crossroads', () => {
+    // The single cleanest statement of "this is not a grid": on graph paper the ratio is zero.
+    const plan = planCity(largeCity(), largeOptions())
+    const degrees = junctionDegrees(plan)
+    expect(degrees.tees).toBeGreaterThan(degrees.fourWay * 1.5)
+    expect(degrees.tees).toBeGreaterThan(0.28)
+  })
+
+  it('leaves roughly one street in seven to end rather than continue', () => {
+    for (const seed of ['db:sales', 'db:ops']) {
+      const degrees = junctionDegrees(planCity(largeCity(), largeOptions(seed)))
+      expect(degrees.deadEnds).toBeGreaterThan(0.07)
+      // A city of nothing but cul-de-sacs is as unreal as a city of nothing but crossroads.
+      expect(degrees.deadEnds).toBeLessThan(0.25)
+    }
+  })
+
+  it('leaves no junction stranded with no street to reach it by', () => {
+    for (const seed of ['db:sales', 'db:warehouse']) {
+      const plan = planCity(largeCity(), largeOptions(seed))
+      expect(junctionDegrees(plan).orphans).toBe(0)
+    }
+  })
+
+  it('keeps every part of the city reachable from every other part', () => {
+    // Removing streets to make T-junctions is only safe if it never severs the network: a lot snapped
+    // onto an island has no path anywhere, and the map then falls back to drawing a straight dogleg
+    // across the city, through whatever is in the way. Swept across seeds and sizes because a split
+    // graph is a property of a particular pattern landing on a particular cell — one fixture cannot
+    // see it.
+    const split: string[] = []
+    for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops', 'db:seed1', 'db:seed2']) {
+      for (const count of [60, 120, 220, 400]) {
+        const plan = planCity(largeCity(count), { ...largeOptions(seed), totalObjects: String(count) })
+        const neighbours = new Map<string, string[]>()
+        for (const street of plan.streets) {
+          if (!neighbours.has(street.fromId)) neighbours.set(street.fromId, [])
+          if (!neighbours.has(street.toId)) neighbours.set(street.toId, [])
+          neighbours.get(street.fromId)!.push(street.toId)
+          neighbours.get(street.toId)!.push(street.fromId)
+        }
+        const start = plan.streets[0]!.fromId
+        const seen = new Set([start])
+        const queue = [start]
+        while (queue.length > 0) {
+          for (const next of neighbours.get(queue.shift()!) ?? []) {
+            if (seen.has(next)) continue
+            seen.add(next)
+            queue.push(next)
+          }
+        }
+        if (seen.size !== neighbours.size) {
+          split.push(`${seed} n=${count}: ${seen.size}/${neighbours.size} junctions reachable`)
+        }
+      }
+    }
+    expect(split).toEqual([])
+  })
+
+  it('gives every built block a street to stand on', () => {
+    const plan = planCity(largeCity(), largeOptions())
+    for (const lot of plan.lots.values()) {
+      // The access point is the lot's door, and it is bound to a carriageway the map draws.
+      const nearest = Math.min(
+        ...plan.streets.map(street => distanceToPath(street.path, lot.accessX, lot.accessZ)),
+      )
+      expect(nearest).toBeLessThanOrEqual(plan.streetWidth)
+    }
+  })
+})
 
 describe('street network', () => {
   it('draws every street between the intersections it connects', () => {

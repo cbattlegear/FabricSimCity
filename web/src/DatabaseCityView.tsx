@@ -686,13 +686,24 @@ function LegendDrawer({
           measured. The river and its banks, the ground relief, every land-use area — parks,
           woodland, orchards, plazas, parking, yards and open water — the trees, hedges, streetlights,
           benches, parked cars and other street furniture, the architecture of the six infrastructure
-          facilities, the road <em>shape</em> including curves, the ring boulevard, diagonal avenues
-          and which pattern of streets fills each district, and the whole golden-hour palette, sky and
-          shadows are all generated from the same database-id seed as the block layout. None of them
-          is derived from any measurement, so none of them can be read as one: a park is not idle
-          space, a curving street is not a slow query, a wooded edge is not a cold table, and a
-          district with few streets is not a sparse schema. Everything that does carry a quantity is
-          listed above.
+          facilities, and the whole golden-hour palette, sky and shadows are all generated from the
+          same database-id seed as the block layout. None of them is derived from any measurement, so
+          none of them can be read as one: a park is not idle space, a wooded edge is not a cold
+          table, and a district with few streets is not a sparse schema.
+        </p>
+
+        <p className="mapping-note">
+          <strong>The street plan is drawn too.</strong> This city is deliberately not a grid, and
+          none of what replaces the grid means anything. Where each junction sits, how wide each
+          block is, which streets are heavy arterials and how far apart they run, where the squares
+          open out, which pattern of streets fills each district, the curve of every road, the ring
+          boulevard and the avenues radiating from the squares — all of it comes from the seed. So do
+          the T-junctions and dead ends: roughly one junction in seven is left as a cul-de-sac and
+          most of the rest meet three streets rather than four, because that is the shape of a real
+          street network, not because anything about the database ended there. A big block is not a
+          big table, a dead end is not a table nothing reaches, a square is not a hotspot, and two
+          buildings on the same curve have nothing to do with each other. Everything that does carry
+          a quantity is listed above.
         </p>
 
         <div className="city-schema-strip" aria-label="Neighbourhoods">

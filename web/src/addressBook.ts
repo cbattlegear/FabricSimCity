@@ -60,15 +60,13 @@ export function columnLabel(index: number): string {
 /**
  * A human-readable address for a world position, as `District · Block C4`.
  *
- * Block letters and numbers come from the plan's own grid pitch, so the address names the same
- * block the map draws. It is a locator and carries no quantity claim.
+ * The block comes from the plan's own warp rather than from a division, because block spans vary and
+ * the whole lattice is displaced — so `x / pitch` would name a block the map does not draw there. It
+ * is a locator and carries no quantity claim.
  */
 export function blockAddress(plan: CityPlan, x: number, z: number, districtName?: string): string {
-  const pitchX = plan.cell + plan.streetWidth
-  const pitchZ = plan.cell + plan.streetWidth
-  const col = Math.max(0, Math.floor(x / pitchX))
-  const row = Math.max(0, Math.floor(z / pitchZ))
-  const block = `Block ${columnLabel(col)}${row + 1}`
+  const { col, row } = plan.warp.blockAt(x, z)
+  const block = `Block ${columnLabel(Math.max(0, col))}${Math.max(0, row) + 1}`
   return districtName ? `${districtName} · ${block}` : block
 }
 
