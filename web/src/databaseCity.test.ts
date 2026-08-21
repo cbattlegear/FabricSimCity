@@ -99,10 +99,13 @@ describe('database city accessibility and motion', () => {
 
   it('keeps the evidence qualification wrapped and visible on mobile', () => {
     const css = readFileSync(new URL('./App.css', import.meta.url), 'utf8')
-    const mobile = css.slice(css.indexOf('@media (max-width: 620px)'))
+    const mobile = css.slice(css.indexOf('@media (max-width: 860px)'))
 
-    expect(mobile).toMatch(/\.database-city\s*\{\s*width:\s*calc\(100vw - 24px\)/)
-    expect(mobile).toMatch(/\.city-disclosure strong\s*\{[^}]*display:\s*block/)
-    expect(mobile).not.toMatch(/\.city-disclosure[^}]*display:\s*none/)
+    // The evidence prose lives in the sidebar drawer now. Narrow screens may shrink it and wrap it,
+    // but must never hide it: the map's claims are only honest while their qualifications are legible.
+    expect(mobile).toMatch(/\.mapping-note\s*\{[^}]*overflow-wrap:\s*anywhere/)
+    expect(mobile).toMatch(/\.sidebar-drawer > summary\s*\{[^}]*display:\s*block/)
+    expect(mobile).not.toMatch(/\.sidebar-drawer[^}]*display:\s*none/)
+    expect(mobile).not.toMatch(/\.mapping-note[^}]*display:\s*none/)
   })
 })

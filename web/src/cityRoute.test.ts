@@ -3,7 +3,6 @@ import type { Evidence } from './contracts'
 import type { NormalizedShowplan, ShowplanNode } from './contracts'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import { planCity } from './cityPlan'
-import { layoutFacilities } from './cityInfrastructure'
 import {
   buildCityRoute,
   facilityForOperator,
@@ -97,11 +96,11 @@ const objects = [
 ]
 
 function context(overrides: Partial<RouteContext> = {}): RouteContext {
-  const plan = planCity(objects)
+  const plan = planCity(objects, { seed: 'db:sales' })
   return {
     plan,
     objects,
-    facilities: layoutFacilities(plan.civic),
+    facilities: plan.facilities,
     databaseName: 'sales',
     ...overrides,
   }

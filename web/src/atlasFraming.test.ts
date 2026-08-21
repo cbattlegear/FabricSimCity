@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FRAME_MARGIN, fitDistance, MIN_FRAME_EXTENT, VIEW_DIRECTION } from './atlasFraming'
+import { FRAME_MARGIN, fitDistance, MAP_VIEW_DIRECTION, MIN_FRAME_EXTENT, VIEW_DIRECTION } from './atlasFraming'
 
 const box = (x: number, y: number, z: number) => ({ x, y, z })
 
@@ -86,6 +86,69 @@ describe('VIEW_DIRECTION', () => {
     expect(VIEW_DIRECTION.x).toBeGreaterThan(0)
     expect(VIEW_DIRECTION.y).toBeGreaterThan(0)
     expect(VIEW_DIRECTION.z).toBeGreaterThan(0)
+  })
+})
+
+describe('MAP_VIEW_DIRECTION', () => {
+  it('is a unit vector, so the fitted distance is the actual distance', () => {
+    expect(Math.sqrt(dot(MAP_VIEW_DIRECTION, MAP_VIEW_DIRECTION))).toBeCloseTo(1, 6)
+  })
+
+  it('is a plan view: effectively straight down', () => {
+    expect(MAP_VIEW_DIRECTION.y).toBeGreaterThan(0.9999)
+  })
+
+  it('is not exactly straight down, because lookAt has no answer there', () => {
+    // A camera whose view axis is parallel to its up vector has no defined orientation, and three.js
+    // resolves that with a degenerate rotation matrix rather than an error. The tilt is the guard.
+    const horizontal = Math.hypot(MAP_VIEW_DIRECTION.x, MAP_VIEW_DIRECTION.z)
+    expect(horizontal).toBeGreaterThan(0)
+    const right = normalize(cross(MAP_VIEW_DIRECTION, { x: 0, y: 1, z: 0 }))
+    expect(Math.sqrt(dot(right, right))).toBeCloseTo(1, 6)
+  })
+
+  it('is north-up, the way a basemap is drawn', () => {
+    expect(Math.atan2(MAP_VIEW_DIRECTION.x, MAP_VIEW_DIRECTION.z)).toBe(0)
+  })
+
+  it('fits the footprint from overhead, ignoring the height that a plan view cannot show', () => {
+    const flat = fitDistance(box(400, 20, 400), 12, 16 / 9, FRAME_MARGIN, MAP_VIEW_DIRECTION)
+    const tall = fitDistance(box(400, 300, 400), 12, 16 / 9, FRAME_MARGIN, MAP_VIEW_DIRECTION)
+    // Looking straight down, extra height only moves the top of the box towards the camera. It does
+    // not widen what has to fit across the image, so the camera climbs by the height it gained and
+    // essentially nothing more — the footprint is framed the same either way.
+    expect(tall - flat).toBeGreaterThanOrEqual(280)
+    expect(tall - flat).toBeLessThan(280 * 1.01)
+
+    // The oblique view has to retreat further than that, because from a corner a taller city also
+    // takes up more of the image.
+    const obliqueFlat = fitDistance(box(400, 20, 400), 12, 16 / 9, FRAME_MARGIN, VIEW_DIRECTION)
+    const obliqueTall = fitDistance(box(400, 300, 400), 12, 16 / 9, FRAME_MARGIN, VIEW_DIRECTION)
+    expect(obliqueTall - obliqueFlat).toBeGreaterThan((tall - flat) * 1.5)
+  })
+
+  it('keeps every corner inside the frustum from overhead', () => {
+    const extents = box(430, 60, 380)
+    const fov = 12
+    const aspect = 16 / 9
+    const distance = fitDistance(extents, fov, aspect, 1, MAP_VIEW_DIRECTION)
+
+    const tanVertical = Math.tan((fov * Math.PI) / 360)
+    const tanHorizontal = tanVertical * aspect
+    const right = normalize(cross(MAP_VIEW_DIRECTION, { x: 0, y: 1, z: 0 }))
+    const up = cross(right, MAP_VIEW_DIRECTION)
+
+    for (const signX of [-1, 1]) {
+      for (const signY of [-1, 1]) {
+        for (const signZ of [-1, 1]) {
+          const corner = { x: extents.x * signX, y: extents.y * signY, z: extents.z * signZ }
+          const depth = distance - dot(corner, MAP_VIEW_DIRECTION)
+          expect(depth).toBeGreaterThan(0)
+          expect(Math.abs(dot(corner, right))).toBeLessThanOrEqual(tanHorizontal * depth + 1e-6)
+          expect(Math.abs(dot(corner, up))).toBeLessThanOrEqual(tanVertical * depth + 1e-6)
+        }
+      }
+    }
   })
 })
 

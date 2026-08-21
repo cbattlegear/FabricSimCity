@@ -15,6 +15,34 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **The map is the product now.** SQLSimCity opened as a document: the 3D city was one box in a
+  scrolling page, below a masthead and four tabs, between status banners, evidence tables, and prose.
+  The UI is now a full-bleed map with a sidebar over it, and every control floats on the canvas.
+  There is no tab bar and no page that is not the map.
+- **The Query Store address book.** The sidebar is one flat, searchable list of query families,
+  tables, and infrastructure facilities together, each with a measured one-line summary and an
+  address derived from the city plan (`dbo · Block C4`). One search box matches all three kinds
+  across name, schema, query hash, and the objects a query visits — so searching a table name also
+  surfaces the query families that drive traffic to it. Selecting an entry selects it on the map and
+  pushes a place card over the list, built from the existing evidence panels so no wording is lost.
+  An object that is not on the loaded bounded page has no lot, and the entry says so instead of
+  inventing a location.
+- **A flat map view, toggled against the 3D city view.** Map mode narrows the camera to a 13° field
+  of view with the polar angle locked flat, switches to a single ambient light so materials read as
+  their flat base colour, collapses buildings to footprint plates, draws roads as white fill over a
+  grey casing, and replaces facility geometry with teardrop POI pins. It is one scene, one raycaster,
+  and one set of controls in both modes, so anything selectable in 3D is selectable on the map.
+  Road colour deliberately survives the switch, because congestion colour is measured evidence rather
+  than styling.
+- **Live incidents are pinned to the building they were measured on.** A blocked waiter, or a session
+  caught in a cycle in the current wait graph, gets a pin on the lot whose lock it is waiting on, with
+  an HTML popup naming the wait, the blocker, the resolved lock resource, the source DMV, and the
+  observation time. The evidence rule holds throughout: a snapshot that never carried a lock resource
+  is reported as *not observed* rather than as no blocking; a lock resolving to an object outside the
+  loaded page is counted as off-map rather than pinned to the nearest lot; a lock that names no object
+  is listed with the parser's own reason; and a cycle in the current wait graph is reported as exactly
+  that, because SQL Server resolves real deadlocks before they can be sampled.
+
 - **`ReverseProxy` restores per-client API rate limiting behind a proxy.** The rate limiter partitions
   on the connection's remote address, so behind a reverse proxy every caller previously collapsed into
   one shared 600-per-60s bucket and one noisy client could exhaust it for everyone. Setting
@@ -192,6 +220,21 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Buildings are scattered by a seed rather than packed into a rectangle.** `web/src/citySeed.ts`
+  adds a small seeded generator, and the seed is a stable hash of the database's own id, so a city
+  looks like a city while laying out identically on every load, in every browser, on every machine —
+  nothing here touches `Math.random()`. Two invariants make that safe: the grid is sized from
+  `page.totalObjects` rather than the loaded count, and each object's slot is derived from the
+  backend's per-schema ordinals plus the complete schema list every page carries, so **appending a
+  page never moves a building that is already on screen**. Filtering the address book no longer
+  rearranges the city either.
+- **Infrastructure is distributed across the map.** The reserved civic rectangle is gone. The six
+  facilities are placed first, each accepted only when it is at least two blocks (Chebyshev) from
+  every already-placed facility. On a grid too small to satisfy that, a deterministic
+  maximise-minimum-distance sweep takes over, so a four-table database still lays out — tighter, and
+  still fully determined by the seed. Schema districts are now the bounding box of their scattered
+  members and drive only the optional tint layer, which draws per-lot pads rather than one rectangle.
+
 - **System databases are excluded from Query Store evidence.** `master`, `tempdb`, `model`, and
   `msdb` were collected like user databases, which produced noise in three places at once: a Query
   Store options probe that failed or reported `OFF`, an atlas cycle counted as **degraded** because
@@ -311,6 +354,16 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Removed
 
+- **The Query Store history, live incidents, and findings views.** SQLSimCity is a map, not an
+  assessment tool, and three tabs of tables were not the idea. `FindingsPanel`, `QueryStoreView`, and
+  `LiveIncidentsPanel` are deleted along with `findings.ts`, `findingsContracts.ts`, and
+  `queryStoreSelection.ts`. **No collection changed.** The backend, probes, fixtures, and archive
+  format are untouched: Query Store data still feeds roads, wait lanes, and the address book, and live
+  samples still feed road congestion and the new incident pins. `/api/v1/findings` and the
+  `SqlSimCity.Findings` project remain in the tree and are simply no longer drawn — removing them
+  end-to-end is a clean follow-up.
+- The `docs/images/findings.png`, `querystore.png`, and `live.png` screenshots, which showed surfaces
+  that no longer exist.
 - **The protected-storage key ring is gone.** With payloads written in the clear it protected nothing
   and could only cause harm: it regenerated itself on every startup on the connection-string path, and
   on the explicit path a missing key file failed startup outright to guard data that was already

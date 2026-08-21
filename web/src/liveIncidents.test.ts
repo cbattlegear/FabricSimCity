@@ -6,18 +6,14 @@ import {
   assertLiveIncidentResponse,
   blockingGraphSummaryLabel,
   blockingReferenceLabel,
-  collectorStatusLabel,
   computeReconnectDelayMs,
   counterDeltaLabel,
   dataStatusLabel,
   formatKb,
-  groupRequestsByAvailability,
   isSnapshotFresh,
   liveFeedConnectionGlyph,
   liveFeedConnectionLabel,
   memoryGrantLabel,
-  requestGroupSummaryLabel,
-  requestLabel,
   waitingTaskLabel,
 } from './liveIncidents'
 import type {
@@ -25,7 +21,6 @@ import type {
   CounterDelta,
   LiveCollectorStatus,
   LiveIncidentSnapshot,
-  LiveRequest,
   MemoryGrant,
   WaitingTask,
 } from './liveContracts'
@@ -33,39 +28,6 @@ import type { LiveFeedConnectionState } from './liveIncidents'
 
 function noneBlocking(sessionId: number | null = null): BlockingReference {
   return { blockingSessionId: sessionId, sentinel: 'None' }
-}
-
-function baseRequest(overrides: Partial<LiveRequest> = {}): LiveRequest {
-  return {
-    requestId: 'r1',
-    sessionId: 81,
-    loginName: 'app',
-    hostName: 'host',
-    programName: 'prog',
-    sessionStatus: 'running',
-    requestStatus: 'suspended',
-    command: 'SELECT',
-    waitType: 'LCK_M_X',
-    waitTimeMs: 1200,
-    waitResource: 'KEY: 5:1',
-    blocking: noneBlocking(80),
-    requestStartTime: '2026-01-01T00:00:00Z',
-    totalElapsedMs: 1500,
-    cpuTimeMs: 30,
-    reads: '10',
-    writes: '2',
-    logicalReads8KiBPages: '100',
-    openTransactionCount: 1,
-    databaseId: '5',
-    databaseName: 'sales',
-    currentStatementText: 'SELECT 1',
-    batchText: 'SELECT 1;',
-    availability: 'Available',
-    availabilityReason: null,
-    planState: 'NotRequested',
-    planReason: null,
-    ...overrides,
-  }
 }
 
 function baseWaitingTask(overrides: Partial<WaitingTask> = {}): WaitingTask {
@@ -178,48 +140,6 @@ describe('requirement 8: accessible, exact-value labels', () => {
     expect(POLLING_DISCLOSURE).toContain('may never appear')
   })
 
-  it('discloses a disappeared request rather than omitting it silently', () => {
-    const label = requestLabel(baseRequest({ availability: 'Disappeared', availabilityReason: 'completed or was killed' }))
-    expect(label).toContain('Session 81')
-    expect(label).toContain('disappeared between samples')
-    expect(label).toContain('completed or was killed')
-  })
-
-  it('says a stale row was carried forward after a failed probe, never that it disappeared', () => {
-    const label = requestLabel(baseRequest({ availability: 'Stale', availabilityReason: 'probe timed out' }))
-    expect(label).toContain('carried forward')
-    expect(label).toContain("this cycle's own probe failed")
-    expect(label).toContain('probe timed out')
-    expect(label).toContain('not known to have disappeared')
-    expect(label).not.toContain('disappeared between samples')
-  })
-
-  it('does not invent a reason when a stale row carries none', () => {
-    const label = requestLabel(baseRequest({ availability: 'Stale', availabilityReason: null }))
-    expect(label).toContain('no reason recorded')
-  })
-
-  it('says nothing about availability for a request observed in this cycle', () => {
-    const label = requestLabel(baseRequest({ availability: 'Available' }))
-    expect(label).not.toContain('disappeared')
-    expect(label).not.toContain('carried forward')
-    expect(label).not.toContain('unavailable')
-  })
-
-  it('marks an unavailable row as unavailable rather than active or gone', () => {
-    const label = requestLabel(baseRequest({ availability: 'Unavailable', availabilityReason: 'permission denied' }))
-    expect(label).toContain('unavailable')
-    expect(label).toContain('permission denied')
-    expect(label).not.toContain('disappeared')
-  })
-
-  it('exposes the exact wait type and duration for a request, and its blocker', () => {
-    const label = requestLabel(baseRequest())
-    expect(label).toContain('LCK_M_X')
-    expect(label).toContain('1200 ms')
-    expect(label).toContain('blocked by session 80')
-  })
-
   it('labels every parallel worker wait individually with its exec_context_id, never as a bare coordinator wait', () => {
     const worker = waitingTaskLabel(baseWaitingTask({ executionContext: 'Worker', execContextId: 3, sessionId: 90 }))
     expect(worker).toContain('parallel worker')
@@ -315,72 +235,6 @@ describe('freshness and collector status', () => {
     expect(isSnapshotFresh(snapshot, '2026-01-01T00:00:04Z')).toBe(true)
     expect(isSnapshotFresh(snapshot, '2026-01-01T00:00:06Z')).toBe(false)
     expect(isSnapshotFresh({ ...snapshot, status: 'Stale' }, '2026-01-01T00:00:01Z')).toBe(false)
-  })
-
-  it('surfaces reconnect/backoff state and reason distinctly from ordinary running', () => {
-    const running = collectorStatusLabel(baseCollectorStatus())
-    expect(running).toContain('running')
-
-    const reconnecting = collectorStatusLabel(baseCollectorStatus({
-      state: 'Reconnecting',
-      consecutiveFailures: 2,
-      lastErrorReason: 'connection timeout',
-      nextAttemptInMs: 4000,
-    }))
-    expect(reconnecting).toContain('reconnecting after an error')
-    expect(reconnecting).toContain('connection timeout')
-    expect(reconnecting).toContain('4s')
-  })
-
-  it('surfaces missed/skipped cycle counts when nonzero', () => {
-    const label = collectorStatusLabel(baseCollectorStatus({ missedCycles: 3, skippedCycles: 1 }))
-    expect(label).toContain('Missed 3, skipped 1')
-  })
-})
-
-describe('request availability grouping (Available vs Disappeared vs Stale)', () => {
-  it('never counts a disappeared or carried-forward row as active', () => {
-    const groups = groupRequestsByAvailability([
-      baseRequest({ requestId: 'a1', availability: 'Available' }),
-      baseRequest({ requestId: 'a2', availability: 'Available' }),
-      baseRequest({ requestId: 'd1', availability: 'Disappeared' }),
-      baseRequest({ requestId: 's1', availability: 'Stale' }),
-      baseRequest({ requestId: 'u1', availability: 'Unavailable' }),
-    ])
-    expect(groups.available.map(r => r.requestId)).toEqual(['a1', 'a2'])
-    expect(groups.disappeared.map(r => r.requestId)).toEqual(['d1'])
-    expect(groups.stale.map(r => r.requestId)).toEqual(['s1'])
-    expect(groups.unavailable.map(r => r.requestId)).toEqual(['u1'])
-  })
-
-  it('keeps every input row in exactly one group', () => {
-    const requests = [
-      baseRequest({ requestId: 'a1', availability: 'Available' }),
-      baseRequest({ requestId: 'd1', availability: 'Disappeared' }),
-      baseRequest({ requestId: 's1', availability: 'Stale' }),
-      baseRequest({ requestId: 's2', availability: 'Stale' }),
-      baseRequest({ requestId: 'u1', availability: 'Unavailable' }),
-    ]
-    const groups = groupRequestsByAvailability(requests)
-    const regrouped = [...groups.available, ...groups.disappeared, ...groups.stale, ...groups.unavailable]
-    expect(regrouped).toHaveLength(requests.length)
-    expect(new Set(regrouped.map(r => r.requestId)).size).toBe(requests.length)
-  })
-
-  it('produces empty groups for an empty sample', () => {
-    expect(groupRequestsByAvailability([])).toEqual({ available: [], disappeared: [], stale: [], unavailable: [] })
-  })
-
-  it('summarizes the split without describing a stale row as disappeared', () => {
-    const groups = groupRequestsByAvailability([
-      baseRequest({ requestId: 'a1', availability: 'Available' }),
-      baseRequest({ requestId: 's1', availability: 'Stale' }),
-      baseRequest({ requestId: 's2', availability: 'Stale' }),
-    ])
-    const summary = requestGroupSummaryLabel(groups)
-    expect(summary).toContain('1 active now')
-    expect(summary).toContain('0 disappeared since the last cycle')
-    expect(summary).toContain('2 carried forward after a failed probe')
   })
 })
 

@@ -1,5 +1,6 @@
 import type { AtlasSnapshot } from './contracts'
 import { AtlasScene } from './AtlasScene'
+import type { MapViewMode } from './mapStyle'
 
 type AtlasSceneCallbacks = {
   onHover: (databaseId: string | null) => void
@@ -10,6 +11,8 @@ type AtlasSceneCallbacks = {
 export interface AtlasSceneController {
   setSnapshot(snapshot: AtlasSnapshot): void
   setSelected(databaseId: string | null): void
+  /** Flat basemap or oblique 3D. Both draw the same parcels and the same measurements. */
+  setViewMode(mode: MapViewMode): void
   dispose(): void
 }
 

@@ -1,7 +1,13 @@
 :root {
   color: #e7edf3;
   background: #080c12;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /*
+   * A deliberate platform stack rather than a named webfont. SQLSimCity is self-hosted and makes no
+   * third-party requests, so a font that has to be fetched from a CDN is not an option; naming one
+   * that is never loaded is worse still, because it silently resolves to whatever comes next.
+   */
+  font-family: "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -9,6 +15,8 @@
 * { box-sizing: border-box; }
 html { min-width: 320px; background: #080c12; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
+/* The map owns the viewport, so the document itself never scrolls. */
+html, body, #root { height: 100%; overflow: hidden; }
 button, input { font: inherit; }
 button { color: inherit; }
 button:focus-visible { outline: 3px solid #7ce8ca; outline-offset: 3px; }

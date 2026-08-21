@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   fetchDatabaseCity,
   fetchPlan,
@@ -13,12 +13,16 @@ import type { LiveFeedConnectionState } from './liveIncidents'
 import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
 import { DatabaseCityViewport } from './DatabaseCityViewport'
 import type { CityLayerToggles } from './DatabaseCityScene'
-import { liveBlockingEdges } from './cityBlocking'
-import { planCity } from './cityPlan'
+import { liveBlockingEdges, type LiveBlockingSummary } from './cityBlocking'
+import { planCity, type CityPlanOptions } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
 import { CONGESTION_LABELS, gradeRoads, type RoadTraffic } from './cityTraffic'
-import { FACILITY_LABELS, layoutFacilities, projectFacilities } from './cityInfrastructure'
+import { FACILITY_LABELS, projectFacilities, type Facility } from './cityInfrastructure'
 import { projectFacilityTraffic, type FacilityTraffic } from './cityFacilityTraffic'
+import { AddressBook } from './AddressPanel'
+import { buildAddressBook, type AddressEntry } from './addressBook'
+import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
+import { projectIncidents } from './cityIncidents'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
 type Metric = (typeof metrics)[number]
@@ -27,7 +31,11 @@ type Props = {
   databaseId: string
   databaseName: string
   onBack: () => void
-  onOpenQuery: (familyId: string) => void
+  /** Flat map or 3D city. Owned by the shell so the whole app shares one look. */
+  viewMode: MapViewMode
+  onViewModeChange: (mode: MapViewMode) => void
+  /** Deployment and provenance cards, floated over the map by the shell. */
+  banners: ReactNode
 }
 
 type PlanChoice = {
@@ -39,7 +47,7 @@ type PlanChoice = {
   executionCount: string
 }
 
-export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery }: Props) {
+export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, onViewModeChange, banners }: Props) {
   const [metric, setMetric] = useState<Metric>('cpu')
   const [page, setPage] = useState<DatabaseCityPage | null>(null)
   const [objects, setObjects] = useState<DatabaseCityObject[]>([])
@@ -49,7 +57,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   // Mirrors the viewport's Schema neighborhoods layer. The count line and the schema strip both
   // describe that layer, so they follow it rather than announcing a grouping the map is not drawing.
   const [showNeighborhoods, setShowNeighborhoods] = useState(false)
-  const [filter, setFilter] = useState('')
+  const [addressTerm, setAddressTerm] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<LiveIncidentResponse | null>(null)
@@ -160,14 +168,14 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   }, [selectedRoadId, closeRoad])
 
   const selected = objects.find(object => object.objectId === selectedId) ?? null
-  const visibleObjects = useMemo(() => {
-    const term = filter.trim().toLocaleLowerCase()
-    if (!term) return objects
-    return objects.filter(object =>
-      `${object.schemaName}.${object.name} ${object.kind} ${object.indexes.map(index => index.name).join(' ')}`
-        .toLocaleLowerCase()
-        .includes(term))
-  }, [filter, objects])
+  /**
+   * The map always draws every object that has loaded.
+   *
+   * Searching used to remove buildings from the city. On a map that is the wrong behaviour — you
+   * search to find a place, not to delete the places you did not search for. The address book
+   * narrows the *list* instead, and selecting an entry flies the camera to it.
+   */
+  const visibleObjects = objects
   const displayedSchemas = useMemo(() => {
     const byId = new Map<string, { schemaId: string; name: string; neighborhoodOrdinal: number; objectCount: number }>()
     for (const object of objects) {
@@ -187,6 +195,9 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
   const facilities = useMemo(() => projectFacilities(snapshot?.snapshot ?? null), [snapshot])
   const blocking = useMemo(
     () => liveBlockingEdges(snapshot?.snapshot ?? null, visibleObjects),
+    [snapshot, visibleObjects])
+  const incidents = useMemo(
+    () => projectIncidents(snapshot?.snapshot ?? null, visibleObjects),
     [snapshot, visibleObjects])
   const families = page?.topQueryFamilies ?? []
   const facilityTraffic = useMemo(
@@ -231,16 +242,30 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
     if (selectedRoadId !== null && !roads.some(road => road.routeId === selectedRoadId)) setSelectedRoadId(null)
   }, [roads, selectedRoadId])
 
+  /**
+   * Everything `planCity` needs to lay the city out the same way every time: the database id as the
+   * scatter seed, and the full totals so the grid is sized for the whole database rather than for
+   * whichever pages happen to have arrived.
+   */
+  const planOptions: CityPlanOptions = useMemo(
+    () => ({ seed: databaseId, totalObjects: page?.totalObjects ?? null, schemas: page?.schemas }),
+    [databaseId, page?.totalObjects, page?.schemas],
+  )
+
+  const cityPlan = useMemo(
+    () => planCity(visibleObjects, planOptions),
+    [visibleObjects, planOptions],
+  )
+
   const route: CityRoute | null = useMemo(() => {
     if (!activePlan) return null
-    const cityPlan = planCity(visibleObjects)
     return buildCityRoute(activePlan.showplan, {
       plan: cityPlan,
       objects: visibleObjects,
-      facilities: layoutFacilities(cityPlan.civic),
+      facilities: cityPlan.facilities,
       databaseName,
     })
-  }, [activePlan, visibleObjects, databaseName])
+  }, [activePlan, cityPlan, visibleObjects, databaseName])
 
   const loadMore = () => {
     if (!page?.nextPageToken) return
@@ -368,59 +393,81 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
     }
   }, [])
 
-  const finder = (
-    <div className="hud-finder">
-      <label className="hud-field">
-        <span>Find object or index</span>
-        <input
-          type="search"
-          value={filter}
-          onChange={event => setFilter(event.target.value)}
-          placeholder="dbo.Customer"
-        />
-      </label>
-      <form
-        className="hud-field"
-        onSubmit={event => {
-          event.preventDefault()
-          void searchPlans()
-        }}
-      >
-        <label>
-          <span>Find a query plan</span>
-          <input
-            type="search"
-            value={planQuery}
-            onChange={event => setPlanQuery(event.target.value)}
-            placeholder="plan id, family id, query hash, or text"
-          />
-        </label>
-        <button type="submit">Route it</button>
-      </form>
-      {planSearchState === 'loading' && <p className="hud-note" role="status">Searching captured plans…</p>}
-      {planSearchState === 'error' && <p className="hud-note is-error" role="alert">{planSearchError}</p>}
-      {planSearchState === 'ready' && planChoices.length === 0 && (
-        <p className="hud-note">No captured plan matches. Query Store only returns plans it captured.</p>
-      )}
-      {planChoices.length > 0 && (
-        <ul className="hud-results">
-          {planChoices.slice(0, 12).map(choice => (
-            <li key={`${choice.familyId}:${choice.planId}`}>
-              <button
-                type="button"
-                aria-pressed={activePlan?.choice.planId === choice.planId}
-                onClick={() => void choosePlan(choice)}
-              >
-                <strong>{choice.planId}</strong>
-                <small>{choice.text ?? choice.textReason}</small>
-                <small>{choice.familyId} · {choice.executionCount} executions</small>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {routeError && <p className="hud-note is-error" role="alert">{routeError}</p>}
-    </div>
+  const addressEntries = useMemo(
+    () => buildAddressBook(visibleObjects, page?.topQueryFamilies ?? [], facilities, cityPlan),
+    [visibleObjects, page?.topQueryFamilies, facilities, cityPlan],
+  )
+
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null)
+
+  /**
+   * One click on an address does what that kind of address means: a table selects its building, a
+   * query draws its plan across the city, and a facility selects the facility. All three then show
+   * their place card over the list, which is the pattern every web map uses.
+   */
+  const openAddress = useCallback((entry: AddressEntry) => {
+    setSelectedAddressId(entry.id)
+    if (entry.kind === 'table') {
+      selectObject(entry.targetId)
+      return
+    }
+    if (entry.kind === 'query') {
+      const family = page?.topQueryFamilies.find(candidate => candidate.familyId === entry.targetId)
+      if (family) void showFamilyOnMap(family)
+    }
+  }, [page?.topQueryFamilies, selectObject, showFamilyOnMap])
+
+  const selectedFacility = selectedAddressId?.startsWith('facility:')
+    ? facilities.find(facility => `facility:${facility.kind}` === selectedAddressId) ?? null
+    : null
+
+  const planFinder = (
+    <details className="sidebar-drawer">
+      <summary>Route a captured query plan</summary>
+      <div className="sidebar-drawer-body">
+        <form
+          className="hud-field"
+          onSubmit={event => {
+            event.preventDefault()
+            void searchPlans()
+          }}
+        >
+          <label>
+            <span>Find a query plan</span>
+            <input
+              type="search"
+              value={planQuery}
+              onChange={event => setPlanQuery(event.target.value)}
+              placeholder="plan id, family id, query hash, or text"
+            />
+          </label>
+          <button type="submit">Route it</button>
+        </form>
+        {planSearchState === 'loading' && <p className="hud-note" role="status">Searching captured plans…</p>}
+        {planSearchState === 'error' && <p className="hud-note is-error" role="alert">{planSearchError}</p>}
+        {planSearchState === 'ready' && planChoices.length === 0 && (
+          <p className="hud-note">No captured plan matches. Query Store only returns plans it captured.</p>
+        )}
+        {planChoices.length > 0 && (
+          <ul className="hud-results">
+            {planChoices.slice(0, 12).map(choice => (
+              <li key={`${choice.familyId}:${choice.planId}`}>
+                <button
+                  type="button"
+                  aria-pressed={activePlan?.choice.planId === choice.planId}
+                  onClick={() => void choosePlan(choice)}
+                >
+                  <strong>{choice.planId}</strong>
+                  <small>{choice.text ?? choice.textReason}</small>
+                  <small>{choice.familyId} · {choice.executionCount} executions</small>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {routeError && <p className="hud-note is-error" role="alert">{routeError}</p>}
+      </div>
+    </details>
   )
 
   const liveStatus = (
@@ -433,7 +480,8 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
     </div>
   )
 
-  const panel = route
+  /** The place card: whatever the map is currently pointing at, rendered over the address list. */
+  const placeCard = route
     ? <RoutePanel route={route} plan={activePlan!} onClear={() => setActivePlan(null)} />
     : selectedRoad
       ? <RoadPanel
@@ -444,46 +492,85 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
         hasEndpoint={objectId => objects.some(object => object.objectId === objectId)}
         onClose={closeRoad}
       />
-      : selected
-        ? <BuildingPanel object={selected} metric={metric} facilityCount={facilities.length} />
-        : null
+      : selectedFacility
+        ? <FacilityPanel facility={selectedFacility} onClose={() => setSelectedAddressId(null)} />
+        : selected
+          ? <BuildingPanel object={selected} metric={metric} facilityCount={facilities.length} />
+          : null
+
+  const sidebar = (
+    <>
+      <SidebarHeader
+        brand={<div className="sidebar-brand"><span className="sidebar-mark" aria-hidden="true" />SQLSimCity</div>}
+        title={databaseName}
+        subtitle={`${page?.totalObjects ?? '—'} objects · database city`}
+        onBack={onBack}
+        backLabel="Back to the server atlas"
+      />
+
+      {placeCard && <div className="sidebar-place-card">{placeCard}</div>}
+
+      <AddressBook
+        entries={addressEntries}
+        term={addressTerm}
+        onTermChange={setAddressTerm}
+        selectedId={selectedAddressId}
+        onSelect={openAddress}
+        footer={
+          <>
+            <div className="sidebar-metric">
+              <label>Rank workload
+                <select value={metric} onChange={event => setMetric(event.target.value as Metric)}>
+                  {metrics.map(value => <option key={value}>{value}</option>)}
+                </select>
+              </label>
+              {page?.nextPageToken && (
+                <button type="button" className="load-more" onClick={loadMore}>
+                  Load next bounded object page
+                </button>
+              )}
+            </div>
+            {planFinder}
+            {page && <LegendDrawer
+              page={page}
+              objects={visibleObjects}
+              metric={metric}
+              selectedId={selectedId}
+              selectedRoadId={selectedRoadId}
+              onSelectObject={selectObject}
+              onSelectRoad={selectRoad}
+              endpointName={endpointName}
+              roads={roads}
+              facilities={facilities}
+              facilityTraffic={facilityTraffic}
+              blocking={blocking}
+              showNeighborhoods={showNeighborhoods}
+              displayedSchemas={displayedSchemas}
+              activePlanFamilyId={activePlan?.choice.familyId ?? null}
+              mappingFamilyId={mappingFamilyId}
+              onShowFamily={showFamilyOnMap}
+              selectedObject={selected}
+            />}
+          </>
+        }
+      />
+    </>
+  )
 
   return (
-    <section className="database-city" aria-labelledby="database-city-title">
-      <nav className="breadcrumbs" aria-label="Atlas level">
-        <button type="button" onClick={onBack}>Server atlas</button>
-        <span aria-hidden="true">/</span>
-        <strong>{databaseName}</strong>
-        <span>database overview and object detail</span>
-      </nav>
+    <MapShell sidebar={sidebar}>
+      {loading && !page && (
+        <section className="stage-message loading" role="status">
+          <span className="loading-mark" aria-hidden="true" /> Loading bounded database evidence…
+        </section>
+      )}
+      {error && <section className="stage-message error" role="alert">{error}</section>}
 
-      <div className="city-heading">
-        <div>
-          <p className="eyebrow">Database city · factual projection</p>
-          <h2 id="database-city-title" ref={headingRef} tabIndex={-1}>{databaseName}</h2>
-          <p>
-            {page?.totalObjects ?? '—'} objects
-            {showNeighborhoods && <> · {displayedSchemas.length || '—'} schema neighborhoods loaded</>}
-          </p>
-        </div>
-        <div className="city-controls">
-          <label>Rank workload
-            <select value={metric} onChange={event => setMetric(event.target.value as Metric)}>
-              {metrics.map(value => <option key={value}>{value}</option>)}
-            </select>
-          </label>
-        </div>
-      </div>
-
-      {loading && <p className="source-banner" role="status">Loading bounded database evidence…</p>}
-      {error && <p className="error" role="alert">{error}</p>}
-      {page && <>
-        <p className={`city-disclosure status-${page.evidence.status.toLowerCase()}`}>
-          <strong>{page.evidence.source} · {page.evidence.status}</strong> {page.evidence.reason}
-        </p>
-
+      {page && (
         <DatabaseCityViewport
           objects={visibleObjects}
+          planOptions={planOptions}
+          viewMode={viewMode}
           roads={roads}
           facilities={facilities}
           facilityTraffic={facilityTraffic}
@@ -493,11 +580,81 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           onSelect={selectObject}
           onSelectRoad={selectRoad}
           roadLabels={roadLabels}
-          finder={finder}
-          panel={panel}
           liveStatus={liveStatus}
+          incidents={incidents}
           onLayersChange={onLayersChange}
         />
+      )}
+
+      {page && (
+        <StatusChip degraded={page.evidence.status !== 'Available'} title={page.evidence.reason}>
+          {page.evidence.source} · {page.evidence.status}
+        </StatusChip>
+      )}
+
+      <ViewModeTile mode={viewMode} onChange={onViewModeChange} />
+      {banners}
+    </MapShell>
+  )
+}
+
+/**
+ * Everything the map draws, written out as text.
+ *
+ * This is not an appendix. It is the accessible and auditable equivalent of the city, and the only
+ * place some facts can appear at all — wait time with no facility to queue at, workload naming no
+ * loaded object, lock waits that resolved to nothing. It lives behind a disclosure because the map
+ * is the page now, not because any of it is optional.
+ */
+function LegendDrawer({
+  page,
+  objects,
+  metric,
+  selectedId,
+  selectedRoadId,
+  onSelectObject,
+  onSelectRoad,
+  endpointName,
+  roads,
+  facilities,
+  facilityTraffic,
+  blocking,
+  showNeighborhoods,
+  displayedSchemas,
+  activePlanFamilyId,
+  mappingFamilyId,
+  onShowFamily,
+  selectedObject,
+}: {
+  page: DatabaseCityPage
+  objects: readonly DatabaseCityObject[]
+  metric: Metric
+  selectedId: string | null
+  selectedRoadId: string | null
+  onSelectObject: (objectId: string) => void
+  onSelectRoad: (routeId: string) => void
+  endpointName: (objectId: string) => string
+  roads: readonly RoadTraffic[]
+  facilities: readonly Facility[]
+  facilityTraffic: FacilityTraffic
+  blocking: LiveBlockingSummary
+  showNeighborhoods: boolean
+  displayedSchemas: ReadonlyArray<{ schemaId: string; name: string; neighborhoodOrdinal: number; objectCount: number }>
+  activePlanFamilyId: string | null
+  mappingFamilyId: string | null
+  onShowFamily: (family: DatabaseCityQueryFamily) => void | Promise<void>
+  selectedObject: DatabaseCityObject | null
+}) {
+  return (
+    <details className="sidebar-drawer">
+      <summary>Legend &amp; evidence</summary>
+      <div className="sidebar-drawer-body">
+        <div className="city-legend" aria-label="Database city legend">
+          <span><i className="legend-direct" /> direct cumulative DMV activity</span>
+          <span><i className="legend-attributed" /> attributed Query Store aggregate</span>
+          <span><i className="legend-unknown">×</i> unknown, nonquantitative size</span>
+          <span><i className="legend-route" /> confidence-graded co-reference, never row flow</span>
+        </div>
 
         <p className="mapping-note">
           <strong>What encodes evidence.</strong> Building footprint maps exact reserved 8-KiB pages
@@ -515,153 +672,163 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, onOpenQuery
           neither divided between those buildings nor counted inside any of their own totals.
           Unknown size or unavailable activity uses fixed wireframe geometry and makes no quantity
           claim. Ground labels name each building and facility and carry identity only — a label
-          never restates or qualifies a measurement. Labels draw in front of all geometry so a name
-          is never hidden by the city it describes; a label names only the building at its own
-          anchor, so one that happens to overlap other geometry is not naming that geometry. Every building stands alone on its own block,          which separates one table from the next without depending on a layer being switched on;
-          a building&apos;s block position comes from its stable layout ordinals and encodes nothing,
-          so neighbouring buildings are not related by being neighbours. Everything else — roof
-          shapes, windows, doors, setbacks, crowns, sidewalks, schema neighborhood tints — is
-          decoration seeded from each object&apos;s stable id and encodes nothing. Schema
-          neighborhood tints are off by default, because the schema name a tint grouped by is now
-          written on every building label; turn them back on from the Layers control.
+          never restates or qualifies a measurement.
         </p>
 
-        <details className="evidence-tables" open>
-          <summary>Evidence tables · the text-first equivalent of the map</summary>
+        <p className="mapping-note">
+          <strong>Where things stand encodes nothing.</strong> Every building has its own block, and
+          which block it gets is drawn from a generator seeded with the database id, so the same
+          database always produces the same city on every machine while two databases of identical
+          shape produce different ones. Infrastructure facilities are scattered across the grid at
+          least two blocks apart so they act as landmarks rather than one civic corner. Because
+          placement is seeded rather than sorted, neighbouring buildings are <em>not</em> related by
+          being neighbours, and a schema is a tint rather than a quarter. Street class, roof shapes,
+          windows, setbacks, crowns and sidewalks are decoration and encode nothing.
+        </p>
 
-          <div className="city-legend" aria-label="Database city legend">
-            <span><i className="legend-direct" /> direct cumulative DMV activity</span>
-            <span><i className="legend-attributed" /> attributed Query Store aggregate</span>
-            <span><i className="legend-unknown">×</i> unknown, nonquantitative size</span>
-            <span><i className="legend-route" /> confidence-graded co-reference, never row flow</span>
+        {showNeighborhoods && <div className="city-schema-strip" aria-label="Schema neighborhoods">
+          {displayedSchemas.map(schema => <div key={schema.schemaId}>
+            <strong>{schema.name}</strong>
+            <span>{schema.objectCount} objects · neighborhood {schema.neighborhoodOrdinal + 1}</span>
+          </div>)}
+        </div>}
+
+        <section className="table-region" aria-labelledby="city-object-table">
+          <div className="section-heading">
+            <div><h2 id="city-object-table">Objects and attached indexes</h2><p>Text-first equivalent of the viewport</p></div>
           </div>
-          {showNeighborhoods && <div className="city-schema-strip" aria-label="Schema neighborhoods">
-            {displayedSchemas.map(schema => <div key={schema.schemaId}>
-              <strong>{schema.name}</strong>
-              <span>{schema.objectCount} objects · neighborhood {schema.neighborhoodOrdinal + 1}</span>
-            </div>)}
-          </div>}
-
-          <div className="analysis-grid city-analysis">
-            <section className="table-region" aria-labelledby="city-object-table">
-              <div className="section-heading">
-                <div><h2 id="city-object-table">Objects and attached indexes</h2><p>Text-first equivalent of the viewport</p></div>
-              </div>
-              <div className="table-scroll">
-                <table>
-                  <thead><tr><th>Object</th><th>Size</th><th>Direct activity</th><th>Attributed exposure</th></tr></thead>
-                  <tbody>{visibleObjects.map(object => <tr key={object.objectId} className={selectedId === object.objectId ? 'is-selected' : undefined}>
-                    <th scope="row"><button type="button" aria-label={accessibleObjectLabel(object)}
-                      aria-pressed={selectedId === object.objectId} onClick={() => selectObject(object.objectId)}>
-                      {object.schemaName}.{object.name}
-                    </button><small>{object.kind} · {object.indexes.length} attached indexes</small></th>
-                    <td>{object.reservedBytes === null ? <><strong>Unknown ×</strong><small>{object.sizeReason}</small></> :
-                      <><strong>{formatKiB(object.reservedBytes)} reserved</strong><small>{formatKiB(object.usedBytes!)} used</small></>}</td>
-                    <td><strong>{object.directActivity.totalOperations ?? object.directActivity.evidence.status}</strong>
-                      <small>{object.directActivity.evidence.source} · {object.directActivity.evidence.reason}</small></td>
-                    <td><strong>{databaseCityMetricValue(object, metric) ?? object.attributedExposure.evidence.status}</strong>
-                      <small>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}</small></td>
-                  </tr>)}</tbody>
-                </table>
-              </div>
-              {page.nextPageToken && <button type="button" className="load-more" onClick={loadMore}>
-                Load next bounded object page
-              </button>}
-            </section>
-            <ObjectDetail object={selected} metric={metric} />
-          </div>
-
-          <section className="city-infrastructure-table" aria-labelledby="city-infrastructure-title">
-            <div className="section-heading">
-              <div><h2 id="city-infrastructure-title">Civic infrastructure</h2>
-                <p>CPU, memory, storage, tempdb, log, and lock facilities from the live snapshot</p></div>
-            </div>
-            <ul className="facility-list">
-              {facilities.map(facility => <li key={facility.kind} className={facility.known ? undefined : 'is-unknown'}>
-                <strong>{FACILITY_LABELS[facility.kind]}</strong>
-                <span>{facility.headline}</span>
-                <small>{facility.status} · {facility.reason}</small>
-                {facility.units.length > 0 && <ul>
-                  {facility.units.slice(0, 8).map(unit => <li key={unit.id}>
-                    {unit.label}: {unit.detail}{unit.alert ? ' ⚠' : ''}
-                  </li>)}
-                </ul>}
-              </li>)}
-            </ul>
-            {blocking.unresolved.length > 0 && <p className="hud-note">
-              {blocking.unresolved.length} live lock wait(s) could not be resolved to an object:
-              {' '}{blocking.unresolved[0].reason}
-            </p>}
-            {blocking.offPageCount > 0 && <p className="hud-note">
-              {blocking.offPageCount} resolved lock wait(s) name an object outside this bounded page.
-            </p>}
-          </section>
-
-          <FacilityTrafficTable traffic={facilityTraffic} objects={visibleObjects} />
-
-          <section className="city-workload" aria-labelledby="city-workload-title">
-            <div className="section-heading">
-              <div><h2 id="city-workload-title">Top query-family exposure</h2>
-                <p>Backend-ranked top 12; no browser-side 100k layout</p></div>
-            </div>
-            <div className="table-scroll"><table>
-              <thead><tr><th>Family</th><th>Executions</th><th>CPU µs</th><th>Duration µs</th><th>Reads (8-KiB)</th><th>Attribution</th><th>Map</th></tr></thead>
-              <tbody>{page.topQueryFamilies.map(family => <tr key={family.familyId}>
-                <th scope="row">{family.familyId.startsWith('qf:')
-                  ? <button type="button" onClick={() => onOpenQuery(family.familyId)}>{family.familyId}</button>
-                  : family.familyId}<small>{family.queryHash} · {family.evidence.source}</small></th>
-                <td>{family.executionCount}</td><td>{family.totalCpuMicroseconds}</td>
-                <td>{family.totalDurationMicroseconds}</td><td>{family.totalLogicalReads8KiBPages}</td>
-                <td>{family.confidence}<small>{family.rationale}</small></td>
-                <td className="map-cell"><button
-                  type="button"
-                  disabled={mappingFamilyId === family.familyId}
-                  aria-label={`Draw the plan for ${family.familyId} on the map`}
-                  onClick={() => void showFamilyOnMap(family)}
-                >{mappingFamilyId === family.familyId ? 'Reading plan…' : 'Show on map'}</button>
-                  {activePlan?.choice.familyId === family.familyId &&
-                    <small>Drawn as plan {activePlan.choice.planId}</small>}</td>
+          <div className="table-scroll">
+            <table>
+              <thead><tr><th>Object</th><th>Size</th><th>Direct activity</th><th>Attributed exposure</th></tr></thead>
+              <tbody>{objects.map(object => <tr key={object.objectId} className={selectedId === object.objectId ? 'is-selected' : undefined}>
+                <th scope="row"><button type="button" aria-label={accessibleObjectLabel(object)}
+                  aria-pressed={selectedId === object.objectId} onClick={() => onSelectObject(object.objectId)}>
+                  {object.schemaName}.{object.name}
+                </button><small>{object.kind} · {object.indexes.length} attached indexes</small></th>
+                <td>{object.reservedBytes === null ? <><strong>Unknown ×</strong><small>{object.sizeReason}</small></> :
+                  <><strong>{formatKiB(object.reservedBytes)} reserved</strong><small>{formatKiB(object.usedBytes!)} used</small></>}</td>
+                <td><strong>{object.directActivity.totalOperations ?? object.directActivity.evidence.status}</strong>
+                  <small>{object.directActivity.evidence.source} · {object.directActivity.evidence.reason}</small></td>
+                <td><strong>{databaseCityMetricValue(object, metric) ?? object.attributedExposure.evidence.status}</strong>
+                  <small>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}</small></td>
               </tr>)}</tbody>
-              <tfoot><tr><th scope="row">Other workload ({page.otherWorkload.familyCount ?? 'count unavailable'} families)</th>
-                <td>{page.otherWorkload.executionCount ?? 'Unavailable'}</td><td>{page.otherWorkload.totalCpuMicroseconds ?? 'Unavailable'}</td>
-                <td>{page.otherWorkload.totalDurationMicroseconds ?? 'Unavailable'}</td>
-                <td>{page.otherWorkload.totalLogicalReads8KiBPages ?? 'Unavailable'}</td>
-                <td>Aggregate only<small>{page.otherWorkload.evidence.reason}</small></td>
-                <td>Not a single query<small>An aggregate has no one plan to draw.</small></td></tr></tfoot>
-            </table></div>
-          </section>
+            </table>
+          </div>
+        </section>
 
-          <section className="topology city-routes" aria-labelledby="city-routes-title">
-            <div className="section-heading"><div><h2 id="city-routes-title">Evidence-labeled routes</h2>
-              <p>Confidence is encoded by pattern and text; routes do not claim row flow</p></div></div>
-            <ul>{page.routes.map(route => {
-              const graded = roads.find(road => road.routeId === route.routeId) ?? null
-              return <li key={route.routeId} className={route.routeId === selectedRoadId ? 'is-selected' : undefined}>
-                <span className={`edge-mark edge-${route.confidence.toLowerCase()}`} aria-hidden="true" />
-                <strong>{route.kind} · {route.confidence}</strong>
-                <span>
-                  {graded
-                    ? <button
-                      type="button"
-                      className="route-endpoints"
-                      aria-pressed={route.routeId === selectedRoadId}
-                      onClick={() => selectRoad(route.routeId)}
-                    >
-                      {endpointName(route.fromObjectId)} ↔ {endpointName(route.toId)}
-                    </button>
-                    : <>{endpointName(route.fromObjectId)} ↔ {endpointName(route.toId)}</>}
-                  <br />
-                  {graded
-                    ? `${CONGESTION_LABELS[graded.grade]} · ${graded.rationale} `
-                    : 'Not drawn on the map: an endpoint is outside the loaded page or filter. '}
-                  {route.rationale} · {route.evidence.status}
-                </span>
-              </li>
-            })}</ul>
-          </section>
-        </details>
-      </>}
-    </section>
+        <ObjectDetail object={selectedObject} metric={metric} />
+
+        <section className="city-infrastructure-table" aria-labelledby="city-infrastructure-title">
+          <div className="section-heading">
+            <div><h2 id="city-infrastructure-title">Civic infrastructure</h2>
+              <p>CPU, memory, storage, tempdb, log, and lock facilities from the live snapshot</p></div>
+          </div>
+          <ul className="facility-list">
+            {facilities.map(facility => <li key={facility.kind} className={facility.known ? undefined : 'is-unknown'}>
+              <strong>{FACILITY_LABELS[facility.kind]}</strong>
+              <span>{facility.headline}</span>
+              <small>{facility.status} · {facility.reason}</small>
+              {facility.units.length > 0 && <ul>
+                {facility.units.slice(0, 8).map(unit => <li key={unit.id}>
+                  {unit.label}: {unit.detail}{unit.alert ? ' ⚠' : ''}
+                </li>)}
+              </ul>}
+            </li>)}
+          </ul>
+          {blocking.unresolved.length > 0 && <p className="hud-note">
+            {blocking.unresolved.length} live lock wait(s) could not be resolved to an object:
+            {' '}{blocking.unresolved[0].reason}
+          </p>}
+          {blocking.offPageCount > 0 && <p className="hud-note">
+            {blocking.offPageCount} resolved lock wait(s) name an object outside this bounded page.
+          </p>}
+        </section>
+
+        <FacilityTrafficTable traffic={facilityTraffic} objects={objects} />
+
+        <section className="city-workload" aria-labelledby="city-workload-title">
+          <div className="section-heading">
+            <div><h2 id="city-workload-title">Top query-family exposure</h2>
+              <p>Backend-ranked top 12; no browser-side 100k layout</p></div>
+          </div>
+          <div className="table-scroll"><table>
+            <thead><tr><th>Family</th><th>Executions</th><th>CPU µs</th><th>Duration µs</th><th>Reads (8-KiB)</th><th>Attribution</th><th>Map</th></tr></thead>
+            <tbody>{page.topQueryFamilies.map(family => <tr key={family.familyId}>
+              <th scope="row">{family.familyId}<small>{family.queryHash} · {family.evidence.source}</small></th>
+              <td>{family.executionCount}</td><td>{family.totalCpuMicroseconds}</td>
+              <td>{family.totalDurationMicroseconds}</td><td>{family.totalLogicalReads8KiBPages}</td>
+              <td>{family.confidence}<small>{family.rationale}</small></td>
+              <td className="map-cell"><button
+                type="button"
+                disabled={mappingFamilyId === family.familyId}
+                aria-label={`Draw the plan for ${family.familyId} on the map`}
+                onClick={() => void onShowFamily(family)}
+              >{mappingFamilyId === family.familyId ? 'Reading plan…' : 'Show on map'}</button>
+                {activePlanFamilyId === family.familyId && <small>Drawn on the map</small>}</td>
+            </tr>)}</tbody>
+            <tfoot><tr><th scope="row">Other workload ({page.otherWorkload.familyCount ?? 'count unavailable'} families)</th>
+              <td>{page.otherWorkload.executionCount ?? 'Unavailable'}</td><td>{page.otherWorkload.totalCpuMicroseconds ?? 'Unavailable'}</td>
+              <td>{page.otherWorkload.totalDurationMicroseconds ?? 'Unavailable'}</td>
+              <td>{page.otherWorkload.totalLogicalReads8KiBPages ?? 'Unavailable'}</td>
+              <td>Aggregate only<small>{page.otherWorkload.evidence.reason}</small></td>
+              <td>Not a single query<small>An aggregate has no one plan to draw.</small></td></tr></tfoot>
+          </table></div>
+        </section>
+
+        <section className="topology city-routes" aria-labelledby="city-routes-title">
+          <div className="section-heading"><div><h2 id="city-routes-title">Evidence-labeled routes</h2>
+            <p>Confidence is encoded by pattern and text; routes do not claim row flow</p></div></div>
+          <ul>{page.routes.map(route => {
+            const graded = roads.find(road => road.routeId === route.routeId) ?? null
+            return <li key={route.routeId} className={route.routeId === selectedRoadId ? 'is-selected' : undefined}>
+              <span className={`edge-mark edge-${route.confidence.toLowerCase()}`} aria-hidden="true" />
+              <strong>{route.kind} · {route.confidence}</strong>
+              <span>
+                {graded
+                  ? <button
+                    type="button"
+                    className="route-endpoints"
+                    aria-pressed={route.routeId === selectedRoadId}
+                    onClick={() => onSelectRoad(route.routeId)}
+                  >
+                    {endpointName(route.fromObjectId)} ↔ {endpointName(route.toId)}
+                  </button>
+                  : <>{endpointName(route.fromObjectId)} ↔ {endpointName(route.toId)}</>}
+                <br />
+                {graded
+                  ? `${CONGESTION_LABELS[graded.grade]} · ${graded.rationale} `
+                  : 'Not drawn on the map: an endpoint is outside the loaded page. '}
+                {route.rationale} · {route.evidence.status}
+              </span>
+            </li>
+          })}</ul>
+        </section>
+      </div>
+    </details>
+  )
+}
+
+/** Place card for one infrastructure facility, opened from the address book. */
+function FacilityPanel({ facility, onClose }: { facility: Facility; onClose: () => void }) {
+  return (
+    <aside className="detail place-card" aria-labelledby="facility-panel-title">
+      <div className="detail-title">
+        <h2 id="facility-panel-title">{FACILITY_LABELS[facility.kind]}</h2>
+        <button type="button" onClick={onClose} aria-label="Close facility detail">✕</button>
+      </div>
+      <p className={facility.known ? undefined : 'is-unknown'}>{facility.headline}</p>
+      {facility.units.length > 0 && (
+        <dl>
+          {facility.units.slice(0, 10).map(unit => (
+            <div key={unit.id}><dt>{unit.label}</dt><dd>{unit.detail}{unit.alert ? ' ⚠' : ''}</dd></div>
+          ))}
+        </dl>
+      )}
+      <div className="source-note">
+        <strong>{facility.status}</strong>
+        <p>{facility.reason}</p>
+      </div>
+    </aside>
   )
 }
 
@@ -897,7 +1064,7 @@ function BuildingPanel({
         <div><dt>{metric} attributed</dt><dd>{databaseCityMetricValue(object, metric) ?? 'Unavailable'}</dd></div>
         <div><dt>Attached indexes</dt><dd>{object.indexes.length}</dd></div>
       </dl>
-      <p className="hud-note">{facilityCount} civic facilities are drawn in the infrastructure district.</p>
+      <p className="hud-note">{facilityCount} civic facilities are scattered across the block grid.</p>
       <div className="source-note">
         <strong>Attributed evidence</strong>
         <p>{object.attributedExposure.confidence} · {object.attributedExposure.rationale}</p>

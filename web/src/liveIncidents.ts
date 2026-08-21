@@ -4,12 +4,9 @@ import type {
   BlockingSentinelKind,
   CounterDelta,
   DataStatus,
-  LiveCollectorStatus,
   LiveIncidentResponse,
   LiveIncidentSnapshot,
-  LiveRequest,
   MemoryGrant,
-  SamplerRunState,
   WaitingTask,
 } from './liveContracts'
 
@@ -54,90 +51,6 @@ export function dataStatusLabel(status: DataStatus): string {
 export function isSnapshotFresh(snapshot: LiveIncidentSnapshot, now: string): boolean {
   return snapshot.status === 'Available' &&
     snapshot.freshUntil !== null && Date.parse(snapshot.freshUntil) >= Date.parse(now)
-}
-
-export function samplerStateLabel(state: SamplerRunState): string {
-  const labels: Record<SamplerRunState, string> = {
-    Running: 'running',
-    Paused: 'paused',
-    Stopped: 'stopped',
-    Reconnecting: 'reconnecting after an error',
-  }
-  return labels[state]
-}
-
-/** Accessible summary of collector health, independent of whether a snapshot has ever arrived. */
-export function collectorStatusLabel(status: LiveCollectorStatus): string {
-  const base = `Collector is ${samplerStateLabel(status.state)}. Cycle ${status.sequence}.`
-  if (status.state === 'Reconnecting' && status.lastErrorReason) {
-    const retry = status.nextAttemptInMs !== null ? ` Retrying in ${Math.round(status.nextAttemptInMs / 1000)}s.` : ''
-    return `${base} Last error: ${status.lastErrorReason}.${retry}`
-  }
-  if (status.missedCycles > 0 || status.skippedCycles > 0) {
-    return `${base} Missed ${status.missedCycles}, skipped ${status.skippedCycles} cycles since start.`
-  }
-  return base
-}
-
-/*
- * Availability is a four-state fact, never collapsed: only 'Available' means observed in this
- * cycle. 'Stale' means this cycle's own probe failed and the row was carried forward, which is not
- * evidence that the request is gone — reporting it as 'Disappeared' would invent a fact.
- */
-function availabilityDisclosure(request: LiveRequest): string {
-  switch (request.availability) {
-    case 'Available':
-      return ''
-    case 'Disappeared':
-      return ` This request disappeared between samples (completed or was killed) — ${request.availabilityReason ?? 'not observed further'}.`
-    case 'Stale':
-      return ` This row was carried forward from an earlier cycle because this cycle's own probe failed — ` +
-        `${request.availabilityReason ?? 'no reason recorded'}. It is not known to have disappeared, and these values are not current.`
-    case 'Unavailable':
-      return ` This request's current state is unavailable — ${request.availabilityReason ?? 'no reason recorded'}.`
-  }
-}
-
-/** Session/request row label: exact wait, blocking reference, and short-lived-query disclosure never implied as complete capture. */
-export function requestLabel(request: LiveRequest): string {
-  const wait = request.waitType ? ` waiting on ${request.waitType}${request.waitTimeMs !== null ? ` for ${request.waitTimeMs} ms` : ''}.` : ' not waiting.'
-  const blockingText = blockingReferenceLabel(request.blocking)
-  return `Session ${request.sessionId}, ${request.requestStatus ?? 'unknown status'}.${wait} ${blockingText}.${availabilityDisclosure(request)}`
-}
-
-/** Requests split by availability so no view can count a carried-forward or gone row as active. */
-export interface RequestAvailabilityGroups {
-  available: LiveRequest[]
-  disappeared: LiveRequest[]
-  stale: LiveRequest[]
-  unavailable: LiveRequest[]
-}
-
-export function groupRequestsByAvailability(requests: readonly LiveRequest[]): RequestAvailabilityGroups {
-  const groups: RequestAvailabilityGroups = { available: [], disappeared: [], stale: [], unavailable: [] }
-  for (const request of requests) {
-    switch (request.availability) {
-      case 'Available':
-        groups.available.push(request)
-        break
-      case 'Disappeared':
-        groups.disappeared.push(request)
-        break
-      case 'Stale':
-        groups.stale.push(request)
-        break
-      case 'Unavailable':
-        groups.unavailable.push(request)
-        break
-    }
-  }
-  return groups
-}
-
-/** Header text for a non-active group; never says "disappeared" about a merely stale row. */
-export function requestGroupSummaryLabel(groups: RequestAvailabilityGroups): string {
-  return `${groups.available.length} active now, ${groups.disappeared.length} disappeared since the last cycle, ` +
-    `${groups.stale.length} carried forward after a failed probe, ${groups.unavailable.length} unavailable.`
 }
 
 /**

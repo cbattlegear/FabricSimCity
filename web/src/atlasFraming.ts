@@ -21,6 +21,15 @@ export type HalfExtents = Readonly<{ x: number; y: number; z: number }>
  */
 export const VIEW_DIRECTION = Object.freeze({ x: 0.469777, y: 0.5665, z: 0.67704 })
 
+/**
+ * The map-mode view direction: north-up and effectively straight down, the way a basemap is drawn.
+ *
+ * Not *exactly* straight down. A camera looking along its own up vector has no defined orientation,
+ * and `lookAt` degenerates there, so the direction keeps a fraction of a degree of tilt. At atlas
+ * distances that is a sub-pixel difference from a true plan view.
+ */
+export const MAP_VIEW_DIRECTION = Object.freeze({ x: 0, y: 0.99999988, z: 0.0005 })
+
 /** Fraction of extra room left around the content, so cities never touch the viewport edge. */
 export const FRAME_MARGIN = 1.12
 
@@ -44,12 +53,16 @@ export const MIN_FRAME_EXTENT = 90
  * distance, the smallest distance satisfying one corner is a closed form. The answer is the largest of
  * those over all eight corners. Margin is applied by narrowing the half-angles rather than by scaling
  * the result, so the padding is an even border in the image rather than a fraction of a distance.
+ *
+ * `view` is the direction from the subject towards the camera; pass `MAP_VIEW_DIRECTION` to solve the
+ * plan view. It must be a unit vector and must not be exactly world up.
  */
 export function fitDistance(
   halfExtents: HalfExtents,
   fovDegrees: number,
   aspect: number,
   margin = FRAME_MARGIN,
+  view: Vector = VIEW_DIRECTION,
 ): number {
   for (const axis of ['x', 'y', 'z'] as const) {
     const value = halfExtents[axis]
@@ -66,7 +79,6 @@ export function fitDistance(
   const tanVertical = Math.tan((fovDegrees * Math.PI) / 360) / margin
   const tanHorizontal = tanVertical * aspect
 
-  const view = VIEW_DIRECTION
   // The camera basis. `right` is horizontal because it is perpendicular to world up.
   const right = normalize(cross(view, { x: 0, y: 1, z: 0 }))
   const up = cross(right, view)

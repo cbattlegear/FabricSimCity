@@ -10,9 +10,20 @@ import { CONGESTION_COLORS, CONGESTION_LABELS, type RoadTraffic } from './cityTr
 import { LANE_COLORS, type FacilityTraffic } from './cityFacilityTraffic'
 import { FACILITY_LABELS, type Facility, type FacilityKind } from './cityInfrastructure'
 import type { CityRoute } from './cityRoute'
+import type { CityPlanOptions } from './cityPlan'
+import type { MapViewMode } from './mapStyle'
+import type { IncidentProjection } from './cityIncidents'
+import { IncidentPopup, IncidentSummary } from './IncidentPopup'
 
 type Props = {
   objects: readonly DatabaseCityObject[]
+  /**
+   * Seed and totals that make placement deterministic and stable across pages. Passed straight to
+   * `planCity`, so the scene plans the same city the surrounding view does.
+   */
+  planOptions: CityPlanOptions
+  /** Flat basemap or oblique 3D city. Both draw the same plan and the same measurements. */
+  viewMode: MapViewMode
   roads: readonly RoadTraffic[]
   facilities: readonly Facility[]
   facilityTraffic: FacilityTraffic
@@ -28,6 +39,8 @@ type Props = {
   /** Rendered into the right HUD slot: object detail or turn-by-turn directions. */
   panel?: ReactNode
   liveStatus?: ReactNode
+  /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
+  incidents?: IncidentProjection
   /**
    * Called with the live layer state on mount and on every toggle, so surrounding chrome can stay
    * consistent with what the map is actually drawing.
@@ -64,6 +77,8 @@ function swatch(color: number): string {
 
 export function DatabaseCityViewport({
   objects,
+  planOptions,
+  viewMode,
   roads,
   facilities,
   facilityTraffic,
@@ -76,6 +91,7 @@ export function DatabaseCityViewport({
   finder,
   panel,
   liveStatus,
+  incidents,
   onLayersChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -83,6 +99,8 @@ export function DatabaseCityViewport({
   const [unavailable, setUnavailable] = useState(false)
   const [heading, setHeading] = useState(0)
   const [hoveredRoadId, setHoveredRoadId] = useState<string | null>(null)
+  const [openIncidentId, setOpenIncidentId] = useState<string | null>(null)
+  const [popupAt, setPopupAt] = useState<{ x: number; y: number } | null>(null)
   const [layers, setLayers] = useState<CityLayerToggles>({
     traffic: true,
     waitLanes: true,
@@ -102,6 +120,7 @@ export function DatabaseCityViewport({
         onSelect,
         onSelectRoad,
         onHoverRoad: setHoveredRoadId,
+        onSelectIncident: setOpenIncidentId,
         onCameraChange: () => setHeading(sceneRef.current?.heading() ?? 0),
       })
     } catch {
@@ -115,7 +134,7 @@ export function DatabaseCityViewport({
     }
   }, [onSelect, onSelectRoad])
 
-  useEffect(() => sceneRef.current?.setObjects(objects), [objects])
+  useEffect(() => sceneRef.current?.setObjects(objects, planOptions), [objects, planOptions])
   useEffect(() => sceneRef.current?.setRoads(roads), [roads])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
   useEffect(
@@ -125,6 +144,37 @@ export function DatabaseCityViewport({
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
   useEffect(() => sceneRef.current?.setSelectedRoad(selectedRoadId), [selectedRoadId])
   useEffect(() => sceneRef.current?.setLayers(layers), [layers])
+  useEffect(() => sceneRef.current?.setViewMode(viewMode), [viewMode])
+  useEffect(() => sceneRef.current?.setIncidents(incidents?.markers ?? []), [incidents])
+
+  /**
+   * The popup is HTML over a canvas, so it has to follow the pin as the camera moves. Projecting on
+   * an animation frame is what keeps it glued; the loop only runs while a popup is actually open.
+   */
+  useEffect(() => {
+    if (!openIncidentId) {
+      setPopupAt(null)
+      return
+    }
+    let handle = 0
+    const track = () => {
+      const next = sceneRef.current?.incidentScreenPosition(openIncidentId) ?? null
+      setPopupAt(current =>
+        current && next && Math.abs(current.x - next.x) < 0.5 && Math.abs(current.y - next.y) < 0.5
+          ? current
+          : next)
+      handle = requestAnimationFrame(track)
+    }
+    handle = requestAnimationFrame(track)
+    return () => cancelAnimationFrame(handle)
+  }, [openIncidentId])
+
+  // A marker that disappears from the snapshot must take its popup with it.
+  useEffect(() => {
+    if (openIncidentId && !incidents?.markers.some(marker => marker.id === openIncidentId)) {
+      setOpenIncidentId(null)
+    }
+  }, [incidents, openIncidentId])
   useEffect(() => onLayersChange?.(layers), [layers, onLayersChange])
 
   const nudge = useCallback((action: CameraNudge) => {
@@ -161,6 +211,7 @@ export function DatabaseCityViewport({
   ].sort()
 
   const hoverLabel = hoveredRoadId === null ? null : roadLabels.get(hoveredRoadId) ?? null
+  const openIncident = incidents?.markers.find(marker => marker.id === openIncidentId) ?? null
 
   if (unavailable) {
     return (
@@ -206,7 +257,17 @@ export function DatabaseCityViewport({
           ))}
         </fieldset>
         {liveStatus}
+        {incidents && <IncidentSummary projection={incidents} />}
       </div>
+
+      {openIncident && popupAt && (
+        <IncidentPopup
+          marker={openIncident}
+          x={popupAt.x}
+          y={popupAt.y}
+          onClose={() => setOpenIncidentId(null)}
+        />
+      )}
 
       <div className="hud hud-bottom-left">
         <details className="hud-legend">

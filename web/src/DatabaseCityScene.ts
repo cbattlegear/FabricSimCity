@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { ARTERIAL_WIDTH, planCity, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan } from './cityPlan'
+import { ARTERIAL_WIDTH, planCity, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions } from './cityPlan'
 import { ARCHETYPE_COLORS, buildBuildingGeometry } from './cityBuildings'
 import { type RoadTraffic } from './cityTraffic'
 import {
@@ -14,7 +14,7 @@ import {
   offsetPolyline,
   type DashPattern,
 } from './cityRoads'
-import { layoutFacilities, type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
+import { type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
 import type { FacilityLane, SharedFacilityLane } from './cityFacilityTraffic'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
 import {
@@ -26,6 +26,8 @@ import {
   LABEL_WORLD_HEIGHT,
 } from './cityLabels'
 import type { CityRoute } from './cityRoute'
+import { MAP_PALETTE, MAP_PIN, MAP_ROAD, type MapViewMode } from './mapStyle'
+import type { IncidentMarker } from './cityIncidents'
 
 export type CityLayerToggles = {
   traffic: boolean
@@ -49,7 +51,7 @@ export type CameraNudge =
   | 'rotateRight'
 
 export type DatabaseCitySceneController = {
-  setObjects(objects: readonly DatabaseCityObject[]): void
+  setObjects(objects: readonly DatabaseCityObject[], planOptions?: CityPlanOptions): void
   /** Roads are graded outside the scene so the map and the HUD read the same numbers. */
   setRoads(roads: readonly RoadTraffic[]): void
   setFacilities(facilities: readonly Facility[]): void
@@ -63,6 +65,20 @@ export type DatabaseCitySceneController = {
   /** Highlights one road and pins both of its endpoints. */
   setSelectedRoad(routeId: string | null): void
   setLayers(layers: Partial<CityLayerToggles>): void
+  /** Live incident pins, anchored to the lot of each object a blocked waiter named. */
+  setIncidents(markers: readonly IncidentMarker[]): void
+  /**
+   * Screen position of one incident pin, or null when it is not drawn or is behind the camera.
+   * Used to anchor the HTML popup over the canvas.
+   */
+  incidentScreenPosition(id: string): { x: number; y: number } | null
+  /**
+   * Switches between the flat basemap drawing and the oblique 3D city.
+   *
+   * Both modes draw the same plan and the same measurements; only colour, massing, and camera
+   * change. Nothing a mode shows is unavailable in the other.
+   */
+  setViewMode(mode: MapViewMode): void
   /** Frames the whole city. Only ever called on first load or from an explicit user action. */
   resetView(): void
   /** Frames the currently drawn GPS route. No-op when there is none. */
@@ -84,6 +100,8 @@ type SceneOptions = {
   /** Fired with a road's id when one is clicked, and with null when the click missed everything. */
   onSelectRoad?: (routeId: string | null) => void
   onHoverRoad?: (routeId: string | null) => void
+  /** Fired with an incident marker id when its pin is clicked, and with null when a click misses. */
+  onSelectIncident?: (incidentId: string | null) => void
 }
 
 export function createDatabaseCityScene(
@@ -115,13 +133,27 @@ export function createDatabaseCityScene(
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
   controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
 
-  scene.add(new THREE.HemisphereLight(0x9fc6e8, 0x0a1018, 1.4))
-  const key = new THREE.DirectionalLight(0xfff2dd, 2)
-  key.position.set(320, 480, 220)
-  scene.add(key)
-  const fill = new THREE.DirectionalLight(0x6f9ecb, 0.65)
-  fill.position.set(-240, 180, -180)
-  scene.add(fill)
+  const hemiLight = new THREE.HemisphereLight(0x9fc6e8, 0x0a1018, 1.4)
+  scene.add(hemiLight)
+  const keyLight = new THREE.DirectionalLight(0xfff2dd, 2)
+  keyLight.position.set(320, 480, 220)
+  scene.add(keyLight)
+  const fillLight = new THREE.DirectionalLight(0x6f9ecb, 0.65)
+  fillLight.position.set(-240, 180, -180)
+  scene.add(fillLight)
+  // Map mode's only light. Flat white ambient makes a standard material render as its base colour.
+  /**
+   * Map mode's only light.
+   *
+   * The intensity is π on purpose, not 1. Three.js resolves ambient light through the Lambert BRDF,
+   * which divides by π, so an intensity of 1 renders every surface at about a third of its own
+   * colour — that is what turned the paper basemap into wet asphalt. Cancelling the divide is what
+   * makes a lit material draw as exactly its base colour, which is the unlit look a basemap needs
+   * without swapping every material's class.
+   */
+  const ambientLight = new THREE.AmbientLight(0xffffff, Math.PI)
+  ambientLight.visible = false
+  scene.add(ambientLight)
 
   const materials = {
     unknown: new THREE.MeshBasicMaterial({ color: 0x6e7d88, wireframe: true }),
@@ -172,18 +204,218 @@ export function createDatabaseCityScene(
     return material
   }
 
+  /**
+   * The two looks.
+   *
+   * Map mode is not the 3D city seen from above — it is a different drawing of the same plan:
+   * paper-grey land, white carriageways over grey casings, flattened footprint plates, and POI pins.
+   * The switch changes colour, massing, and camera. It never changes a measurement: footprints,
+   * road widths, congestion colours, and wait-lane widths are computed once, outside this file, and
+   * both modes draw exactly those numbers.
+   */
+  const CITY_COLORS: Record<string, number> = {
+    unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
+    exposure: 0xe2a957, ground: 0x11181f, asphalt: 0x252c37, laneMark: 0x5f6b7a, sidewalk: 0x38414d,
+    district: 0x2b4a63, facility: 0x53707f, facilityUnknown: 0x7d8b96, facilityFill: 0x63d8ff,
+    facilityAlert: 0xe4483c, route: 0x2fe0ff, routePin: 0x2fe0ff, roadHighlight: 0xf4f9ff,
+    roadPin: 0xf4f9ff, roadPinOffMap: 0xb0bcc7, selection: 0xffd479, selectionPin: 0xffd479,
+  }
+  const MAP_COLORS: Record<string, number> = {
+    unknown: 0x9aa4ac, window: 0xdfe6ec, trim: 0xb9bdc2, index: 0x63b9a6, unknownIndex: 0xa8b0b6,
+    exposure: 0xd99a3f, ground: MAP_PALETTE.ground, asphalt: MAP_PALETTE.roadFill,
+    laneMark: 0xdcd9d2, sidewalk: MAP_PALETTE.roadCasing, district: MAP_PALETTE.park,
+    facility: MAP_PALETTE.facility, facilityUnknown: 0x9fb0c0, facilityFill: 0x4a90d9,
+    facilityAlert: MAP_PALETTE.pinIncident, route: 0x1a73e8, routePin: 0x1a73e8,
+    roadHighlight: 0x202124, roadPin: 0x202124, roadPinOffMap: 0x8a8f94,
+    selection: 0xffb300, selectionPin: 0xffb300,
+  }
+  /** Emissive glow is a night-city effect. Map mode has no light source to glow against. */
+  const CITY_EMISSIVE: Record<string, number> = {
+    window: 0x2f4f6a, exposure: 0x3a2400, facilityFill: 0x11455c, facilityAlert: 0x4a0f0a,
+    routePin: 0x0d5f70, roadPin: 0x5d7183, roadPinOffMap: 0x39434d, selectionPin: 0x6b4a06,
+  }
+
+  let viewMode: MapViewMode = 'city'
+
+  /**
+   * The oblique angle the 3D city is viewed from, and the heading carried across a mode switch.
+   * Kept as angles rather than a direction vector so map mode — which has no readable azimuth of its
+   * own — can hand the heading back when you return to the city.
+   */
+  const DEFAULT_POLAR = 0.848
+  const DEFAULT_AZIMUTH = 0.595
+  let cityAzimuth = DEFAULT_AZIMUTH
+
+  /** POI pins, drawn in map mode only. A flat plate needs a marker to be findable. */
+  const poiGroup = new THREE.Group()
+  poiGroup.visible = false
+  scene.add(poiGroup)
+
+  /**
+   * Live incident pins. Unlike POI pins these are drawn in *both* modes: a blocked waiter is the
+   * one thing on this map worth interrupting you for, and hiding it behind a mode switch would be a
+   * way of not telling you.
+   */
+  const incidentGroup = new THREE.Group()
+  scene.add(incidentGroup)
+  const incidentPickable: THREE.Object3D[] = []
+  const incidentAnchors = new Map<string, THREE.Vector3>()
+
+  const SEVERITY_COLORS: Record<IncidentMarker['severity'], number> = {
+    blocked: 0xe4483c,
+    waiting: 0xe2a957,
+    deadlock: 0xb02a8f,
+  }
+
+  function buildIncidents(markers: readonly IncidentMarker[]) {
+    clearGroup(incidentGroup)
+    incidentPickable.length = 0
+    incidentAnchors.clear()
+    if (!plan) return
+
+    for (const marker of markers) {
+      const lot = plan.lots.get(marker.objectId)
+      if (!lot) continue
+      const color = SEVERITY_COLORS[marker.severity]
+      // Map mode flattens the buildings, so the pin has to come down with them. Anchoring to the
+      // massing that is actually drawn keeps the popup's tail on its building instead of parallaxing
+      // off it at the edges of a top-down view.
+      const y = viewMode === 'map' ? 4 : (lot.height ?? 8) + 9
+      const material = poiMaterial(color)
+      const head = new THREE.Mesh(track(new THREE.SphereGeometry(2.2, 16, 12)), material)
+      head.position.set(lot.x, y, lot.z)
+      head.userData.incidentId = marker.id
+      const stem = new THREE.Mesh(track(new THREE.ConeGeometry(1.5, 5.5, 12)), material)
+      stem.position.set(lot.x, y - 3.4, lot.z)
+      stem.rotation.x = Math.PI
+      stem.userData.incidentId = marker.id
+      incidentGroup.add(head, stem)
+      incidentPickable.push(head, stem)
+      incidentAnchors.set(marker.id, new THREE.Vector3(lot.x, y + 2.4, lot.z))
+    }
+  }
+
+  function addPoiPin(x: number, z: number, color: number, radius: number, height: number) {
+    const material = poiMaterial(color)
+    const stem = new THREE.Mesh(track(new THREE.ConeGeometry(radius * 0.62, height * 0.62, 12)), material)
+    stem.position.set(x, height * 0.31, z)
+    stem.rotation.x = Math.PI
+    const head = new THREE.Mesh(track(new THREE.SphereGeometry(radius, 14, 12)), material)
+    head.position.set(x, height * 0.62 + radius * 0.5, z)
+    poiGroup.add(stem, head)
+  }
+
+  const poiMaterials = new Map<number, THREE.MeshBasicMaterial>()
+  const casingMaterial = new THREE.MeshBasicMaterial({ color: MAP_PALETTE.roadCasing })
+  function poiMaterial(color: number): THREE.MeshBasicMaterial {
+    let material = poiMaterials.get(color)
+    if (!material) {
+      material = new THREE.MeshBasicMaterial({ color })
+      poiMaterials.set(color, material)
+    }
+    return material
+  }
+
+  function applyViewMode() {
+    const flat = viewMode === 'map'
+    const table = flat ? MAP_COLORS : CITY_COLORS
+
+    scene.background = new THREE.Color(flat ? MAP_PALETTE.ground : 0x070b11)
+
+    for (const [name, material] of Object.entries(materials)) {
+      const hex = table[name]
+      if (hex !== undefined) (material as THREE.Material & { color: THREE.Color }).color.setHex(hex)
+      const emissive = (material as THREE.Material & { emissive?: THREE.Color }).emissive
+      if (emissive) emissive.setHex(flat ? 0x000000 : CITY_EMISSIVE[name] ?? 0x000000)
+    }
+    // Archetype colours are the cache key, so restoring them needs no separate table.
+    for (const [color, material] of archetypeMaterials) {
+      material.color.setHex(flat ? MAP_PALETTE.building : color)
+    }
+    materials.district.opacity = flat ? 0.34 : 0.15
+
+    // Under ambient light alone a standard material renders as its flat base colour, which is the
+    // unlit look a basemap needs — without swapping every material's class.
+    hemiLight.visible = !flat
+    keyLight.visible = !flat
+    fillLight.visible = !flat
+    ambientLight.visible = flat
+
+    // Height is a 3D-mode claim. Flattening the same geometry keeps footprint, roof-cap tint, and
+    // index annexes readable as a plan drawing instead of building a second scene graph.
+    const massing = flat ? 0.012 : 1
+    buildingGroup.scale.y = massing
+    infrastructureGroup.scale.y = massing
+    poiGroup.visible = flat
+    roadCasingGroup.visible = flat
+
+    // A very narrow field of view from far away is parallel projection for every practical purpose,
+    // and it keeps one camera, one raycaster, and one set of controls for both modes.
+    const previousFov = THREE.MathUtils.degToRad(camera.fov)
+    camera.fov = flat ? 13 : 46
+    controls.enableRotate = !flat
+    controls.minPolarAngle = flat ? 0 : 0.05
+    controls.maxPolarAngle = flat ? 0 : Math.PI / 2 - 0.05
+    controls.touches = flat
+      ? { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN }
+      : { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
+    controls.mouseButtons = flat
+      ? { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+      : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+    camera.updateProjectionMatrix()
+    // Incident pins are anchored to the massing, which just changed.
+    buildIncidents(currentIncidents)
+
+    /*
+     * Keep looking at what you were looking at.
+     *
+     * Re-framing the whole city on every toggle would throw away your position, which is exactly the
+     * wrong behaviour when the point of the toggle is to compare the same place two ways. So the
+     * orbit target is left alone and only the camera moves: the distance is rescaled by the ratio of
+     * the two fields of view, which keeps the apparent size of what you are looking at unchanged
+     * across a 46° → 13° swap.
+     *
+     * The heading is carried across explicitly rather than read back off the camera, because a
+     * camera placed exactly overhead has no azimuth to read — the round trip through map mode would
+     * silently reset you to north.
+     */
+    const offset = camera.position.clone().sub(controls.target)
+    if (!flat && (offset.x !== 0 || offset.z !== 0)) cityAzimuth = Math.atan2(offset.x, offset.z)
+    const distance = Math.max(offset.length(), 1)
+    const scaled = distance * (Math.tan(previousFov / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2))
+    // Not exactly straight down: a camera looking along its own up vector has no defined orientation,
+    // and a hair of tilt also lets the orbit controls keep hold of the heading.
+    const polar = flat ? 0.0005 : DEFAULT_POLAR
+    // Map mode is north-up, the way every basemap is. The oblique heading is remembered rather than
+    // carried over, so leaving map mode puts the city back on the bearing you left it on.
+    const azimuth = flat ? 0 : cityAzimuth
+    const direction = new THREE.Vector3(
+      Math.sin(polar) * Math.sin(azimuth),
+      Math.cos(polar),
+      Math.sin(polar) * Math.cos(azimuth))
+    camera.position.copy(controls.target).addScaledVector(direction, scaled)
+    camera.near = Math.max(0.5, scaled / 900)
+    camera.far = scaled * 30
+    camera.updateProjectionMatrix()
+    controls.update()
+    requestRender()
+  }
+
   // One group per layer keeps toggling a layer O(1) and avoids rebuilding the scene graph.
   const groundGroup = new THREE.Group()
   const districtGroup = new THREE.Group()
   const buildingGroup = new THREE.Group()
   const roadGroup = new THREE.Group()
+  /** Wider ribbons drawn beneath the road fill. Map mode only — casings are a basemap idiom. */
+  const roadCasingGroup = new THREE.Group()
+  roadCasingGroup.visible = false
   const laneGroup = new THREE.Group()
   const roadHighlightGroup = new THREE.Group()
   const infrastructureGroup = new THREE.Group()
   const routeGroup = new THREE.Group()
   const selectionGroup = new THREE.Group()
   // Labels are their own layer, but facility labels nest so they disappear with the facilities they
-  // name rather than hovering over an empty civic district.
+  // name rather than hovering over empty ground.
   const labelGroup = new THREE.Group()
   const buildingLabelGroup = new THREE.Group()
   const facilityLabelGroup = new THREE.Group()
@@ -192,6 +424,7 @@ export function createDatabaseCityScene(
   scene.add(
     groundGroup,
     districtGroup,
+    roadCasingGroup,
     roadGroup,
     roadHighlightGroup,
     laneGroup,
@@ -210,10 +443,11 @@ export function createDatabaseCityScene(
   const pointer = new THREE.Vector2()
 
   let plan: CityPlan | null = null
-  let facilitySites = new Map<FacilityKind, FacilitySite>()
+  let facilitySites: ReadonlyMap<FacilityKind, FacilitySite> = new Map<FacilityKind, FacilitySite>()
   let currentRoads: readonly RoadTraffic[] = []
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
+  let currentIncidents: readonly IncidentMarker[] = []
   let currentLanes: readonly FacilityLane[] = []
   let currentSharedLanes: readonly SharedFacilityLane[] = []
   let selectedId: string | null = null
@@ -357,9 +591,10 @@ export function createDatabaseCityScene(
   }
 
   /**
-   * Draws one tint per schema neighborhood. The civic district is deliberately not drawn here: this
-   * layer is named for schema neighborhoods, and the infrastructure district is drawn with the
-   * facilities it holds so the toggle stays literally true.
+   * Draws one tint per schema neighborhood. Facilities are deliberately not tinted here: this layer
+   * is named for schema neighborhoods, and the facilities are drawn with their own layer so the
+   * toggle stays literally true. Since placement scatters a schema's objects across the grid, a
+   * district is the bounding box of its members and boxes may overlap.
    */
   function buildDistricts(cityPlan: CityPlan) {
     clearGroup(districtGroup)
@@ -461,6 +696,7 @@ export function createDatabaseCityScene(
    */
   function buildRoads(roads: readonly RoadTraffic[], cityPlan: CityPlan) {
     clearGroup(roadGroup)
+    clearGroup(roadCasingGroup)
     roadPickable.length = 0
     roadPaths.clear()
 
@@ -489,6 +725,20 @@ export function createDatabaseCityScene(
       roadGroup.add(mesh)
       roadPickable.push(mesh)
       roadPaths.set(road.routeId, { road, polyline: centreline, endsOffMap: !to })
+
+      // The casing is the same ribbon, wider and beneath. On a light basemap it is what separates a
+      // route from the land it crosses; in 3D mode the dark ground already does that, so it hides.
+      const casing = ribbonGeometry(
+        points,
+        Math.max(road.width, MAP_ROAD.minFill) + MAP_ROAD.casingPad * 2,
+        DASH_PATTERNS[road.pattern],
+        offset,
+      )
+      if (casing) {
+        const shadow = new THREE.Mesh(track(casing), casingMaterial)
+        shadow.position.y = mesh.position.y - 0.008
+        roadCasingGroup.add(shadow)
+      }
 
       if (!to) {
         const marker = new THREE.Mesh(track(new THREE.ConeGeometry(3.4, 9, 4)), roadMaterial(road.color, false))
@@ -582,24 +832,36 @@ export function createDatabaseCityScene(
   function buildInfrastructure(facilities: readonly Facility[]) {
     clearGroup(infrastructureGroup)
     clearGroup(facilityLabelGroup)
+    clearGroup(poiGroup)
     if (!plan) return
-
-    // The civic district's tint travels with its facilities rather than with the schema
-    // neighborhoods, so switching schema neighborhoods off still leaves the infrastructure
-    // district legible as a place.
-    addQuad(
-      infrastructureGroup,
-      plan.civic.maxX - plan.civic.minX,
-      plan.civic.maxZ - plan.civic.minZ,
-      plan.civic.centerX,
-      plan.civic.centerZ,
-      -0.5,
-      materials.district,
-    )
 
     for (const facility of facilities) {
       const site = facilitySites.get(facility.kind)
       if (!site) continue
+
+      // Flattened to a plate in map mode, a facility needs a marker to stay findable. The pin is
+      // pure wayfinding: it says "a facility is here", never how loaded it is.
+      addPoiPin(
+        site.x,
+        site.z,
+        facility.known ? MAP_PALETTE.pinFacility : 0x8a8f94,
+        MAP_PIN.facilityRadius,
+        MAP_PIN.facilityHeight,
+      )
+
+      // Facilities are scattered across the grid now, so there is no civic rectangle to tint. Each
+      // one carries its own pad instead, which keeps it legible as a place with the schema
+      // neighborhood layer switched off.
+      addQuad(
+        infrastructureGroup,
+        site.radius * 2,
+        site.radius * 2,
+        site.x,
+        site.z,
+        -0.5,
+        materials.district,
+      )
+
       addFacilityLabel(facility, site)
       const group = new THREE.Group()
       group.position.set(site.x, 0, site.z)
@@ -717,7 +979,15 @@ export function createDatabaseCityScene(
       size.y / (2 * Math.tan(vFov / 2)),
     ) * 1.16
     controls.target.set(center.x, size.y * 0.12, center.z)
-    const direction = new THREE.Vector3(0.42, 0.66, 0.62).normalize()
+    // Framing has to respect the mode: dropping the camera to an oblique angle while the controls are
+    // locked flat would snap back on the next update and reset your heading on the way.
+    const flat = viewMode === 'map'
+    const polar = flat ? 0.0005 : DEFAULT_POLAR
+    const azimuth = flat ? 0 : cityAzimuth
+    const direction = new THREE.Vector3(
+      Math.sin(polar) * Math.sin(azimuth),
+      Math.cos(polar),
+      Math.sin(polar) * Math.cos(azimuth))
     camera.position.copy(controls.target).addScaledVector(direction, distance)
     camera.near = Math.max(0.5, distance / 900)
     camera.far = distance * 30
@@ -754,12 +1024,22 @@ export function createDatabaseCityScene(
 
   const select = (event: PointerEvent) => {
     setPointer(event)
+    // Incident pins sit on top of everything and are checked first: a pin exists to be clicked, and
+    // it always marks a building that a plain click would select anyway.
+    const pin = raycaster.intersectObjects(incidentPickable, false)[0]
+    const incidentId = pin?.object.userData.incidentId
+    if (typeof incidentId === 'string') {
+      options.onSelectIncident?.(incidentId)
+      return
+    }
     const hit = raycaster.intersectObjects(pickable, false)[0]
     const objectId = hit?.object.userData.objectId
     if (typeof objectId === 'string') {
+      options.onSelectIncident?.(null)
       options.onSelect(objectId)
       return
     }
+    options.onSelectIncident?.(null)
     // Only a click that missed every building can be a road click, so a road drawn under an
     // overhanging building never steals the building's selection.
     options.onSelectRoad?.(pickRoadAt(event))
@@ -818,9 +1098,9 @@ export function createDatabaseCityScene(
   draw()
 
   return {
-    setObjects(objects) {
-      plan = planCity(objects)
-      facilitySites = layoutFacilities(plan.civic)
+    setObjects(objects, planOptions) {
+      plan = planCity(objects, planOptions)
+      facilitySites = plan.facilities
       buildGround(plan)
       buildDistricts(plan)
       buildBuildings(objects, plan)
@@ -828,6 +1108,7 @@ export function createDatabaseCityScene(
       buildFacilityLanes(currentLanes, currentSharedLanes)
       buildInfrastructure(currentFacilities)
       buildRoute(currentRoute)
+      buildIncidents(currentIncidents)
       applySelection()
       // Fit-to-bounds runs once. Re-framing on every update would yank the viewpoint on each live
       // tick. It is not latched until the canvas has a real size, so the first frame is never
@@ -874,6 +1155,27 @@ export function createDatabaseCityScene(
       applyLayers()
       if (!layers.traffic) clearHover()
       requestRender()
+    },
+    setViewMode(mode) {
+      if (mode === viewMode) return
+      viewMode = mode
+      applyViewMode()
+      requestRender()
+    },
+    setIncidents(markers) {
+      currentIncidents = markers
+      buildIncidents(markers)
+      requestRender()
+    },
+    incidentScreenPosition(id) {
+      const anchor = incidentAnchors.get(id)
+      if (!anchor) return null
+      const projected = anchor.clone().project(camera)
+      if (projected.z > 1) return null
+      return {
+        x: (projected.x * 0.5 + 0.5) * canvas.clientWidth,
+        y: (-projected.y * 0.5 + 0.5) * canvas.clientHeight,
+      }
     },
     resetView() {
       frame(cityBox())
@@ -977,6 +1279,8 @@ export function createDatabaseCityScene(
       for (const material of Object.values(materials)) material.dispose()
       for (const material of archetypeMaterials.values()) material.dispose()
       for (const material of roadMaterials.values()) material.dispose()
+      for (const material of poiMaterials.values()) material.dispose()
+      casingMaterial.dispose()
       labelFactory.dispose()
       renderer.dispose()
     },
