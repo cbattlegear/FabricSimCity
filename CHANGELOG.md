@@ -15,6 +15,57 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **Shared Query Store exposure** ([#40]). The strict attribution rule is unchanged — an object is
+  credited with totals only when a ranked family names it and nothing else — but on a normalized
+  schema that condition is close to unreachable, so a join-heavy database rendered with no exposure
+  anywhere and every building `Unavailable`. Families that name an object *alongside others* now
+  contribute a separate `DatabaseCitySharedExposureV1`, carrying the query-level totals **whole** on
+  every object the query named, with a rationale in the payload stating they must not be summed
+  across buildings.
+
+  Totals are deliberately **not** divided between the named objects. Query Store measures one figure
+  per query and says nothing about which table caused what, so any per-object share would be
+  invented. The map draws shared exposure as an *outlined* roof cap against the solid one used for
+  attributed exposure, matching the wireframe-means-not-measured convention already used for unknown
+  index annexes and unsampled facilities.
+
+  `BuildExposure` now emits an entry for every on-page object any ranked family named, which fixes a
+  third bug by construction: an object named only by multi-object families previously fell through
+  both the sole and shared buckets and hit the connected source's "no ranked family names this object"
+  fallback, which was false. That fallback now fires only when it is literally true.
+
+- The offline fixture gained `dbo.OrderDetail`, a child table every ranked plan reaches through a
+  join. It has null attributed totals and non-null shared totals, so the shape that motivated the
+  change above is visible in the shipped demo rather than only asserted in a test.
+
+- **The map is the product now.** SQLSimCity opened as a document: the 3D city was one box in a
+  scrolling page, below a masthead and four tabs, between status banners, evidence tables, and prose.
+  The UI is now a full-bleed map with a sidebar over it, and every control floats on the canvas.
+  There is no tab bar and no page that is not the map.
+- **The Query Store address book.** The sidebar is one flat, searchable list of query families,
+  tables, and infrastructure facilities together, each with a measured one-line summary and an
+  address derived from the city plan (`dbo · Block C4`). One search box matches all three kinds
+  across name, schema, query hash, and the objects a query visits — so searching a table name also
+  surfaces the query families that drive traffic to it. Selecting an entry selects it on the map and
+  pushes a place card over the list, built from the existing evidence panels so no wording is lost.
+  An object that is not on the loaded bounded page has no lot, and the entry says so instead of
+  inventing a location.
+- **A flat map view, toggled against the 3D city view.** Map mode narrows the camera to a 13° field
+  of view with the polar angle locked flat, switches to a single ambient light so materials read as
+  their flat base colour, collapses buildings to footprint plates, draws roads as white fill over a
+  grey casing, and replaces facility geometry with teardrop POI pins. It is one scene, one raycaster,
+  and one set of controls in both modes, so anything selectable in 3D is selectable on the map.
+  Road colour deliberately survives the switch, because congestion colour is measured evidence rather
+  than styling.
+- **Live incidents are pinned to the building they were measured on.** A blocked waiter, or a session
+  caught in a cycle in the current wait graph, gets a pin on the lot whose lock it is waiting on, with
+  an HTML popup naming the wait, the blocker, the resolved lock resource, the source DMV, and the
+  observation time. The evidence rule holds throughout: a snapshot that never carried a lock resource
+  is reported as *not observed* rather than as no blocking; a lock resolving to an object outside the
+  loaded page is counted as off-map rather than pinned to the nearest lot; a lock that names no object
+  is listed with the parser's own reason; and a cycle in the current wait graph is reported as exactly
+  that, because SQL Server resolves real deadlocks before they can be sampled.
+
 - **`ReverseProxy` restores per-client API rate limiting behind a proxy.** The rate limiter partitions
   on the connection's remote address, so behind a reverse proxy every caller previously collapsed into
   one shared 600-per-60s bucket and one noisy client could exhaust it for everyone. Setting
@@ -192,6 +243,21 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Changed
 
+- **Buildings are scattered by a seed rather than packed into a rectangle.** `web/src/citySeed.ts`
+  adds a small seeded generator, and the seed is a stable hash of the database's own id, so a city
+  looks like a city while laying out identically on every load, in every browser, on every machine —
+  nothing here touches `Math.random()`. Two invariants make that safe: the grid is sized from
+  `page.totalObjects` rather than the loaded count, and each object's slot is derived from the
+  backend's per-schema ordinals plus the complete schema list every page carries, so **appending a
+  page never moves a building that is already on screen**. Filtering the address book no longer
+  rearranges the city either.
+- **Infrastructure is distributed across the map.** The reserved civic rectangle is gone. The six
+  facilities are placed first, each accepted only when it is at least two blocks (Chebyshev) from
+  every already-placed facility. On a grid too small to satisfy that, a deterministic
+  maximise-minimum-distance sweep takes over, so a four-table database still lays out — tighter, and
+  still fully determined by the seed. Schema districts are now the bounding box of their scattered
+  members and drive only the optional tint layer, which draws per-lot pads rather than one rectangle.
+
 - **System databases are excluded from Query Store evidence.** `master`, `tempdb`, `model`, and
   `msdb` were collected like user databases, which produced noise in three places at once: a Query
   Store options probe that failed or reported `OFF`, an atlas cycle counted as **degraded** because
@@ -311,6 +377,16 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Removed
 
+- **The Query Store history, live incidents, and findings views.** SQLSimCity is a map, not an
+  assessment tool, and three tabs of tables were not the idea. `FindingsPanel`, `QueryStoreView`, and
+  `LiveIncidentsPanel` are deleted along with `findings.ts`, `findingsContracts.ts`, and
+  `queryStoreSelection.ts`. **No collection changed.** The backend, probes, fixtures, and archive
+  format are untouched: Query Store data still feeds roads, wait lanes, and the address book, and live
+  samples still feed road congestion and the new incident pins. `/api/v1/findings` and the
+  `SqlSimCity.Findings` project remain in the tree and are simply no longer drawn — removing them
+  end-to-end is a clean follow-up.
+- The `docs/images/findings.png`, `querystore.png`, and `live.png` screenshots, which showed surfaces
+  that no longer exist.
 - **The protected-storage key ring is gone.** With payloads written in the clear it protected nothing
   and could only cause harm: it regenerated itself on every startup on the connection-string path, and
   on the explicit path a missing key file failed startup outright to guard data that was already
@@ -330,6 +406,28 @@ First MVP release candidate. There is no tagged release yet.
   rebuilds from SQL Server, not a system of record, so the cost is one collection interval.
 
 ### Fixed
+
+- **A connected instance reported no object total at all** ([#41]). `DatabaseCityPageV1.TotalObjects`
+  was only ever populated on the archive path; the connected source hard-coded `null` because its
+  inventory probe used keyset pagination and never counted past the current page. The probe now
+  derives its eligibility predicate once in an `eligible_objects` CTE, counts it unbounded in
+  `eligible_total`, and cross-joins that single value onto the page. The distinction between "not
+  measured" and "measured zero" is preserved exactly: zero rows on the first page is `"0"`, zero rows
+  on a later page stays `null` (objects can only vanish mid-walk), and a probe that could not run
+  stays `null`. Verified against SQL Server 2025, including the heap, indexed-view, and empty-database
+  cases.
+
+  This was more than a missing number. The city grid is sized from `totalObjects`, so with `null` it
+  was sized from whatever happened to be loaded — meaning appending a bounded page reshuffled every
+  building already on screen, breaking the guarantee the map is built on.
+
+- **A ranked query could claim to name exactly one object while being refused as that object's
+  attribution, in the same payload** ([#40]). `ExposureEligible` required `local.Count == 1` *and* no
+  off-page, cross-database, or unresolved references, but the rationale sentence tested only the
+  cross-database half. A family naming one on-page table plus one off-page table therefore said
+  "names exactly one local object" and was simultaneously rejected. Both now read the same predicate,
+  and a family in that position says what is actually true: it names one object on this page
+  *alongside N further references below*, so the totals stay query-level.
 
 - `tools/container-smoke.sh` asserted a fail-closed startup message that no longer exists, so the
   `container` CI job failed on the commit that reworded it. The connected Query Store requirement
@@ -525,3 +623,6 @@ First MVP release candidate. There is no tagged release yet.
 - Behind a reverse proxy, forwarded-header processing is intentionally disabled,
   so API rate-limit partitioning collapses all clients into one bucket. This is
   correct for the documented loopback/trusted-network model.
+
+[#40]: https://github.com/cbattlegear/SQLSimCity/issues/40
+[#41]: https://github.com/cbattlegear/SQLSimCity/issues/41

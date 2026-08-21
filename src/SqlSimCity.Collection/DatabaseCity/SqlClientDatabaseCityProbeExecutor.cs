@@ -39,8 +39,11 @@ public sealed class SqlClientDatabaseCityProbeExecutor(
             async (reader, token) =>
             {
                 var rows = new List<DatabaseCityInventoryRow>();
+                string? totalObjects = null;
                 while (await reader.ReadAsync(token).ConfigureAwait(false))
                 {
+                    // The probe repeats the same unbounded eligible-object count on every row.
+                    totalObjects ??= NullableUnsigned(reader["total_objects"]);
                     rows.Add(new DatabaseCityInventoryRow(
                         Convert.ToInt32(reader["object_id"], CultureInfo.InvariantCulture),
                         Convert.ToInt32(reader["schema_id"], CultureInfo.InvariantCulture),
@@ -62,7 +65,12 @@ public sealed class SqlClientDatabaseCityProbeExecutor(
                             ? null
                             : IndexKind(Convert.ToString(reader["index_type_desc"], CultureInfo.InvariantCulture))));
                 }
-                return (IReadOnlyList<DatabaseCityInventoryRow>)rows;
+
+                // A first page that selected nothing is proof the database holds no eligible
+                // objects, so it reports a measured zero. A later page can only come back empty if
+                // objects were dropped mid-walk, which leaves the total genuinely unknown.
+                totalObjects ??= afterObjectId == 0 ? "0" : null;
+                return (Rows: (IReadOnlyList<DatabaseCityInventoryRow>)rows, TotalObjects: totalObjects);
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -94,9 +102,10 @@ public sealed class SqlClientDatabaseCityProbeExecutor(
                 },
                 cancellationToken).ConfigureAwait(false);
             return new DatabaseCityProbePage(
-                inventory, usage, DataStatus.Available,
+                inventory.Rows, usage, DataStatus.Available,
                 "Direct cumulative index usage counters were collected; reset epoch is unavailable because database detach/shutdown resets are not timestamped.",
-                timeProvider.GetUtcNow());
+                timeProvider.GetUtcNow(),
+                inventory.TotalObjects);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -105,12 +114,14 @@ public sealed class SqlClientDatabaseCityProbeExecutor(
         catch (ProbePermissionDeniedException ex)
         {
             return new DatabaseCityProbePage(
-                inventory, [], DataStatus.PermissionDenied, ex.Reason, timeProvider.GetUtcNow());
+                inventory.Rows, [], DataStatus.PermissionDenied, ex.Reason, timeProvider.GetUtcNow(),
+                inventory.TotalObjects);
         }
         catch (ProbeObjectUnavailableException ex)
         {
             return new DatabaseCityProbePage(
-                inventory, [], DataStatus.Unsupported, ex.Reason, timeProvider.GetUtcNow());
+                inventory.Rows, [], DataStatus.Unsupported, ex.Reason, timeProvider.GetUtcNow(),
+                inventory.TotalObjects);
         }
     }
 

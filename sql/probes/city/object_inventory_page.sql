@@ -11,23 +11,26 @@
 --   by TOP (@TopN) and object_id > @AfterObjectId before index expansion. reserved_pages and
 --   used_pages are exact bigint totals over all partitions and remain object totals on each
 --   attached-index row. Missing partition counters remain NULL rather than measured zero. Tables
---   with a heap retain index_id 0; only indexed views are included.
--- Relative cost: low; keyset bounded by @TopN.
+--   with a heap retain index_id 0; only indexed views are included. total_objects repeats on every
+--   row and counts every object this probe would ever return across all pages, unbounded by the
+--   keyset, so a caller knows the whole city's size from its first page.
+-- Relative cost: low; keyset bounded by @TopN. total_objects adds one metadata-only count over the
+--   same catalog predicate.
 SET NOCOUNT ON;
 SET DEADLOCK_PRIORITY LOW;
 SET LOCK_TIMEOUT 5000;
 
-WITH selected_objects AS
+-- eligible_objects states which catalog objects become buildings exactly once, so the page and its
+-- total can never disagree about what a city contains.
+WITH eligible_objects AS
 (
-    SELECT TOP (@TopN)
+    SELECT
         o.object_id,
         o.schema_id,
-        (SELECT COUNT(*) FROM sys.schemas AS earlier_schema WHERE earlier_schema.schema_id < o.schema_id) AS schema_layout_ordinal,
         o.name AS object_name,
         o.type
     FROM sys.objects AS o
-    WHERE o.object_id > @AfterObjectId
-      AND o.is_ms_shipped = 0
+    WHERE o.is_ms_shipped = 0
       AND
       (
           o.type = 'U'
@@ -43,7 +46,22 @@ WITH selected_objects AS
               )
           )
       )
-    ORDER BY o.object_id
+),
+eligible_total AS
+(
+    SELECT COUNT_BIG(*) AS total_objects FROM eligible_objects
+),
+selected_objects AS
+(
+    SELECT TOP (@TopN)
+        eligible.object_id,
+        eligible.schema_id,
+        (SELECT COUNT(*) FROM sys.schemas AS earlier_schema WHERE earlier_schema.schema_id < eligible.schema_id) AS schema_layout_ordinal,
+        eligible.object_name,
+        eligible.type
+    FROM eligible_objects AS eligible
+    WHERE eligible.object_id > @AfterObjectId
+    ORDER BY eligible.object_id
 ),
 object_space AS
 (
@@ -67,8 +85,10 @@ SELECT
     space.used_pages,
     indexes.index_id,
     indexes.name AS index_name,
-    indexes.type_desc AS index_type_desc
+    indexes.type_desc AS index_type_desc,
+    totals.total_objects
 FROM selected_objects AS selected
+CROSS JOIN eligible_total AS totals
 JOIN sys.schemas AS schemas
   ON schemas.schema_id = selected.schema_id
 LEFT JOIN sys.indexes AS indexes

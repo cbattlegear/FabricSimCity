@@ -3,7 +3,8 @@ import {
   BLOCK_COLS,
   BLOCK_ROWS,
   CELLS_PER_BLOCK,
-  CIVIC_DISTRICT_ID,
+  MIN_FACILITY_BLOCK_GAP,
+  STREET_WIDTH,
   buildingArchetype,
   buildingFootprint,
   buildingHeight,
@@ -12,8 +13,11 @@ import {
   streetPath,
   streetPolyline,
   streetPolylineThrough,
+  type CityPlan,
+  type CityPlanOptions,
 } from './cityPlan'
-import type { DatabaseCityObject } from './databaseCityContracts'
+import { FACILITY_ORDER } from './cityInfrastructure'
+import type { DatabaseCityObject, DatabaseCitySchema } from './databaseCityContracts'
 import type { Evidence } from './contracts'
 
 const evidence: Evidence = {
@@ -69,6 +73,30 @@ function sampleCity(): DatabaseCityObject[] {
   }
   objects.push(object('object:arc:900', 'schema:archive', 2, 0, null, null))
   return objects
+}
+
+/** The schema list and totals every page of {@link sampleCity} would carry. */
+function sampleSchemas(): DatabaseCitySchema[] {
+  return [
+    { schemaId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, objectCount: '11', evidence },
+    { schemaId: 'schema:reporting', name: 'reporting', neighborhoodOrdinal: 1, objectCount: '5', evidence },
+    { schemaId: 'schema:archive', name: 'archive', neighborhoodOrdinal: 2, objectCount: '1', evidence },
+  ]
+}
+
+function options(overrides: Partial<CityPlanOptions> = {}): CityPlanOptions {
+  return { seed: 'db:sales', totalObjects: '17', schemas: sampleSchemas(), ...overrides }
+}
+
+/** Turns a world position back into the block grid coordinates the plan placed it on. */
+function blockIndex(plan: CityPlan, x: number, z: number): { col: number; row: number } {
+  const pitch = plan.cell + STREET_WIDTH
+  return { col: Math.floor(x / pitch), row: Math.floor(z / pitch) }
+}
+
+function blockOf(plan: CityPlan, x: number, z: number): string {
+  const { col, row } = blockIndex(plan, x, z)
+  return `${col}-${row}`
 }
 
 describe('buildingFootprint / buildingHeight', () => {
@@ -128,12 +156,13 @@ describe('buildingArchetype', () => {
   })
 })
 
-describe('planCity', () => {
+describe('planCity placement', () => {
   it('is independent of the order rows arrive in', () => {
-    const forward = planCity(sampleCity())
-    const reversed = planCity([...sampleCity()].reverse())
+    const forward = planCity(sampleCity(), options())
+    const reversed = planCity([...sampleCity()].reverse(), options())
     const shuffled = planCity(
       [...sampleCity()].sort((left, right) => left.objectId.localeCompare(right.objectId)).reverse(),
+      options(),
     )
     for (const plan of [reversed, shuffled]) {
       expect(plan.blockCols).toBe(forward.blockCols)
@@ -144,19 +173,40 @@ describe('planCity', () => {
     }
   })
 
+  it('produces the identical city every time for the same seed', () => {
+    const first = planCity(sampleCity(), options())
+    const second = planCity(sampleCity(), options())
+    expect([...second.lots.entries()]).toEqual([...first.lots.entries()])
+    expect([...second.facilities.entries()]).toEqual([...first.facilities.entries()])
+  })
+
+  it('gives a different database a different city', () => {
+    const sales = planCity(sampleCity(), options({ seed: 'db:sales' }))
+    const archive = planCity(sampleCity(), options({ seed: 'db:archive' }))
+    const moved = [...sales.lots.entries()].filter(([objectId, lot]) => {
+      const other = archive.lots.get(objectId)!
+      return other.x !== lot.x || other.z !== lot.z
+    })
+    // Two databases of identical shape must not produce the same town, or the seed is doing nothing.
+    expect(moved.length).toBeGreaterThan(sales.lots.size / 2)
+  })
+
   it('keeps a building on the same lot when a later bounded page is appended', () => {
     const firstPage = sampleCity().filter(item => item.schemaId === 'schema:dbo')
-    const planned = planCity(firstPage)
-    const withMorePages = planCity(sampleCity())
+    // The totals and schema list are identical on every page, which is what lets the first page be
+    // planned against the whole database rather than against itself.
+    const planned = planCity(firstPage, options())
+    const withMorePages = planCity(sampleCity(), options())
     for (const item of firstPage) {
       const before = planned.lots.get(item.objectId)!
       const after = withMorePages.lots.get(item.objectId)!
       expect({ x: after.x, z: after.z }).toEqual({ x: before.x, z: before.z })
     }
+    expect([...withMorePages.facilities.entries()]).toEqual([...planned.facilities.entries()])
   })
 
   it('never overlaps two lots', () => {
-    const plan = planCity(sampleCity())
+    const plan = planCity(sampleCity(), options())
     const lots = [...plan.lots.values()]
     for (let left = 0; left < lots.length; left += 1) {
       for (let right = left + 1; right < lots.length; right += 1) {
@@ -169,8 +219,18 @@ describe('planCity', () => {
     }
   })
 
-  it('keeps every building inside its own district rectangle', () => {
-    const plan = planCity(sampleCity())
+  it('never puts a building on a facility block', () => {
+    const plan = planCity(sampleCity(), options())
+    const facilityBlocks = new Set(
+      [...plan.facilities.values()].map(site => blockOf(plan, site.x, site.z)),
+    )
+    for (const lot of plan.lots.values()) {
+      expect(facilityBlocks.has(blockOf(plan, lot.x, lot.z))).toBe(false)
+    }
+  })
+
+  it('keeps every building inside its own district bounding box', () => {
+    const plan = planCity(sampleCity(), options())
     for (const lot of plan.lots.values()) {
       const district = plan.districts.find(item => item.districtId === lot.districtId)!
       expect(lot.x).toBeGreaterThan(district.minX)
@@ -181,7 +241,7 @@ describe('planCity', () => {
   })
 
   it('fronts every lot onto a street it can be entered from', () => {
-    const plan = planCity(sampleCity())
+    const plan = planCity(sampleCity(), options())
     const streetIds = new Set(plan.streets.map(street => street.id))
     for (const lot of plan.lots.values()) {
       expect(streetIds.has(lot.frontageStreetId)).toBe(true)
@@ -191,30 +251,21 @@ describe('planCity', () => {
     }
   })
 
-  it('always reserves an infrastructure district that holds no schema objects', () => {
-    const plan = planCity(sampleCity())
-    expect(plan.civic.districtId).toBe(CIVIC_DISTRICT_ID)
-    expect(plan.civic.objectCount).toBe(0)
-    expect(plan.districts.some(item => item.districtId === CIVIC_DISTRICT_ID)).toBe(false)
-    // The civic district must not move schema districts when live data appears or disappears.
-    expect(planCity(sampleCity()).civic).toEqual(plan.civic)
-  })
-
   it('gives every building its own block, ringed by street', () => {
     const objects = Array.from({ length: 9 }, (_unused, index) =>
       object(`object:dbo:${index}`, 'schema:dbo', 0, index))
-    const plan = planCity(objects)
+    const plan = planCity(objects, options())
     const blocks = new Set([...plan.lots.values()].map(lot => lot.blockId))
 
     // The separation that schema tints used to provide now lives in the street lattice, so no two
-    // buildings may share a block no matter how many objects the district holds.
+    // buildings may share a block no matter how many objects the database holds.
     expect(blocks.size).toBe(objects.length)
     expect(CELLS_PER_BLOCK).toBe(1)
     expect(BLOCK_COLS * BLOCK_ROWS).toBe(CELLS_PER_BLOCK)
   })
 
   it('separates every pair of buildings by at least a street width', () => {
-    const plan = planCity(sampleCity())
+    const plan = planCity(sampleCity(), options())
     const lots = [...plan.lots.values()]
     for (const left of lots) {
       for (const right of lots) {
@@ -228,18 +279,65 @@ describe('planCity', () => {
     }
   })
 
+  it('scatters buildings rather than packing them into a corner', () => {
+    const plan = planCity(sampleCity(), options())
+    const rows = new Set([...plan.lots.values()].map(lot => blockOf(plan, lot.x, lot.z).split('-')[1]))
+    const cols = new Set([...plan.lots.values()].map(lot => blockOf(plan, lot.x, lot.z).split('-')[0]))
+    // A packed layout would occupy a few contiguous rows; a scattered one reaches across the grid.
+    expect(rows.size).toBeGreaterThan(plan.blockRows / 2)
+    expect(cols.size).toBeGreaterThan(plan.blockCols / 2)
+  })
+
   it('plans a usable city from a single object', () => {
-    const plan = planCity([object('object:dbo:1', 'schema:dbo', 0, 0)])
+    const plan = planCity([object('object:dbo:1', 'schema:dbo', 0, 0)], options())
     expect(plan.lots.size).toBe(1)
     expect(plan.streets.length).toBeGreaterThan(0)
     expect(plan.bounds.width).toBeGreaterThan(0)
   })
 
-  it('plans an empty city without throwing', () => {
-    const plan = planCity([])
+  it('plans an empty city without throwing, and still sites its infrastructure', () => {
+    const plan = planCity([], options())
     expect(plan.lots.size).toBe(0)
     expect(plan.districts).toHaveLength(0)
-    expect(plan.civic.districtId).toBe(CIVIC_DISTRICT_ID)
+    expect(plan.facilities.size).toBe(FACILITY_ORDER.length)
+  })
+})
+
+describe('facility scatter', () => {
+  it('places every facility at least two blocks from every other', () => {
+    for (const seed of ['db:sales', 'db:archive', 'db:1', 'db:2', 'db:3']) {
+      const plan = planCity(sampleCity(), options({ seed }))
+      const blocks = [...plan.facilities.values()].map(site => blockIndex(plan, site.x, site.z))
+      expect(blocks).toHaveLength(FACILITY_ORDER.length)
+      for (let left = 0; left < blocks.length; left += 1) {
+        for (let right = left + 1; right < blocks.length; right += 1) {
+          const gap = Math.max(
+            Math.abs(blocks[left]!.col - blocks[right]!.col),
+            Math.abs(blocks[left]!.row - blocks[right]!.row),
+          )
+          expect(gap).toBeGreaterThanOrEqual(MIN_FACILITY_BLOCK_GAP)
+        }
+      }
+    }
+  })
+
+  it('sites one facility per kind, in a consistent reading order', () => {
+    const plan = planCity(sampleCity(), options())
+    expect([...plan.facilities.keys()]).toEqual([...FACILITY_ORDER])
+    const blocks = FACILITY_ORDER.map(kind => blockIndex(plan, plan.facilities.get(kind)!.x, plan.facilities.get(kind)!.z))
+    for (let index = 1; index < blocks.length; index += 1) {
+      const previous = blocks[index - 1]!
+      const current = blocks[index]!
+      expect(current.row > previous.row || (current.row === previous.row && current.col > previous.col)).toBe(true)
+    }
+  })
+
+  it('still lays out when the grid cannot satisfy the spacing rule', () => {
+    // Falls back to a maximise-minimum-distance sweep rather than throwing or dropping a facility.
+    const plan = planCity([], { seed: 'tiny' })
+    expect(plan.facilities.size).toBe(FACILITY_ORDER.length)
+    const seen = new Set([...plan.facilities.values()].map(site => `${site.x}/${site.z}`))
+    expect(seen.size).toBe(FACILITY_ORDER.length)
   })
 })
 

@@ -1,14 +1,21 @@
 import { stableHash } from './atlasLayout'
-import type { DatabaseCityObject } from './databaseCityContracts'
+import { FACILITY_LABELS, FACILITY_ORDER, type FacilityKind, type FacilitySite } from './cityInfrastructure'
+import { mulberry32, seededShuffle } from './citySeed'
+import type { DatabaseCityObject, DatabaseCitySchema } from './databaseCityContracts'
 
 /**
  * Deterministic town plan for one database city.
  *
- * Placement derives only from the backend's stable layout ordinals
- * (`layout.neighborhoodOrdinal` / `layout.objectOrdinal`) and from ordinal-stable string comparisons,
- * never from the order rows happen to arrive in. This preserves the architectural rule that
- * database-city layout is deterministic and independent of source row order, and it keeps a building
- * on the same lot when a later bounded page is appended.
+ * The city is *scattered* — buildings and infrastructure are spread across the whole block grid
+ * rather than packed into contiguous rectangles — but it is not random. Every position comes from a
+ * generator seeded with the database's own id, so the same database produces byte-identical
+ * placement on every load, in every browser, on every machine. Scatter is a look, not a lottery.
+ *
+ * Placement derives only from that seed and from the backend's stable layout ordinals
+ * (`layout.neighborhoodOrdinal` / `layout.objectOrdinal`), never from the order rows happen to
+ * arrive in. This preserves the architectural rule that database-city layout is deterministic and
+ * independent of source row order, and it keeps a building on the same lot when a later bounded page
+ * is appended.
  *
  * Only building footprint and height carry a quantity claim (both documented logarithmic mappings of
  * exact 8-KiB page counts). The archetype selected here changes *style* only -- a house and a
@@ -111,8 +118,38 @@ export interface CityPlan {
   readonly intersections: ReadonlyMap<string, CityIntersection>
   readonly streets: readonly CityStreet[]
   readonly bounds: CityBounds
-  /** Reserved district that hosts the CPU / memory / storage / tempdb / log / lock facilities. */
-  readonly civic: CityDistrict
+  /**
+   * Where the CPU / memory / storage / tempdb / log / lock facilities stand.
+   *
+   * Facilities are scattered across the grid rather than gathered into one civic quarter, because a
+   * single infrastructure block turns into a corner of the map you look at once. Spread out, they
+   * become landmarks you navigate by — and a route to a table genuinely passes them.
+   */
+  readonly facilities: ReadonlyMap<FacilityKind, FacilitySite>
+}
+
+/** Options that make a plan reproducible and stable as bounded pages arrive. */
+export interface CityPlanOptions {
+  /**
+   * Seed source for the scatter. The database id, so a database's layout is the same everywhere.
+   * Two databases with identical shapes still get different cities, which is the point.
+   */
+  readonly seed?: string
+  /**
+   * Total object count for the whole database, from `page.totalObjects`.
+   *
+   * The grid is sized from this rather than from the loaded count, which is what stops the city
+   * from being re-planned — and every building from moving — the moment a second page arrives.
+   */
+  readonly totalObjects?: string | number | null
+  /**
+   * All schemas in the database with their full object counts, from `page.schemas`.
+   *
+   * Every page carries the complete schema list, so these counts give each object a global slot
+   * index that does not depend on which page it arrived on. Without them the slot index is derived
+   * from the loaded objects alone, which is only stable once everything is loaded.
+   */
+  readonly schemas?: readonly DatabaseCitySchema[]
 }
 
 /**
@@ -137,6 +174,9 @@ export const ARTERIAL_WIDTH = 23
 export const LOT_MARGIN = 11
 export const MIN_CELL = 26
 
+/** Every Nth lattice line is an arterial, giving the map a legible major-road rhythm. */
+export const ARTERIAL_EVERY = 4
+
 /** Footprint and height used for an object whose page counts are unavailable. Nonquantitative by design. */
 export const UNKNOWN_FOOTPRINT = 11
 export const UNKNOWN_HEIGHT = 8
@@ -150,15 +190,39 @@ export const ARCHETYPE_THRESHOLD_PAGES = {
 } as const
 
 /**
- * Civic district size in blocks. Blocks are one lot each now, so the reserved rectangle is sized in
- * many small blocks rather than a few large ones; {@link layoutFacilities} divides whatever rectangle
- * it is given into a fixed 3x2 grid, and these dimensions keep each facility's footprint close to
- * what it was when a block held eight buildings. Facilities are civic landmarks and must not shrink
- * to the size of the tables they serve.
+ * Minimum gap, in blocks, between any two infrastructure facilities.
+ *
+ * Measured as Chebyshev distance on the block grid, so diagonal neighbours count as adjacent too.
+ * Two blocks apart means there is always at least one full block of ordinary city between any pair
+ * of facilities — enough that they read as separate districts of the map rather than a campus.
  */
-const CIVIC_BLOCK_COLS = 5
-const CIVIC_BLOCK_ROWS = 3
-export const CIVIC_DISTRICT_ID = 'civic:infrastructure'
+export const MIN_FACILITY_BLOCK_GAP = 2
+
+/**
+ * How many blocks the grid holds beyond the strict minimum.
+ *
+ * A grid packed exactly to size cannot scatter: every block is taken, so the "scatter" is just a
+ * permutation of a solid rectangle. The slack buys empty blocks between buildings, which is what
+ * makes the result look like a city with streets rather than a filled array.
+ */
+const GRID_SLACK = 1.9
+
+/**
+ * Smallest grid the city is ever planned on.
+ *
+ * Six facilities two blocks apart need room to breathe; below this the spacing rule starts failing
+ * and the fallback runs. A four-table database still gets a plausible small town this way.
+ */
+const MIN_GRID_SIDE = 7
+
+/**
+ * How many seeded attempts to make at a spaced facility layout before falling back.
+ *
+ * Each attempt is a greedy pass over a freshly shuffled block list, which is a random maximal
+ * independent set — usually successful on the first or second try at these grid sizes. The cap
+ * exists so an adversarially small grid terminates instead of spinning.
+ */
+const FACILITY_PLACEMENT_ATTEMPTS = 32
 
 /**
  * Building footprint in world units from exact reserved 8-KiB pages.
@@ -198,62 +262,61 @@ export function buildingArchetype(object: DatabaseCityObject): BuildingArchetype
   return 'skyscraper'
 }
 
-export function planCity(objects: readonly DatabaseCityObject[]): CityPlan {
-  const districts = groupDistricts(objects)
+export function planCity(
+  objects: readonly DatabaseCityObject[],
+  options: CityPlanOptions = {},
+): CityPlan {
   const cell = chooseCell(objects)
   const pitchX = BLOCK_COLS * cell + STREET_WIDTH
   const pitchZ = BLOCK_ROWS * cell + STREET_WIDTH
 
-  const totalBlocks =
-    districts.reduce((sum, district) => sum + blocksNeeded(district.members.length), 0) +
-    CIVIC_BLOCK_COLS * CIVIC_BLOCK_ROWS
-  const shelfWidth = Math.max(CIVIC_BLOCK_COLS, Math.ceil(Math.sqrt(Math.max(totalBlocks, 1))))
-
-  const placements = packDistricts(districts, shelfWidth)
-  const blockCols = placements.reduce((max, item) => Math.max(max, item.startCol + item.cols), 0)
-  const blockRows = placements.reduce((max, item) => Math.max(max, item.startRow + item.rows), 0)
-
-  const { intersections, streets } = buildStreetLattice(
-    blockCols,
-    blockRows,
-    pitchX,
-    pitchZ,
-    placements,
+  const ordered = orderObjects(objects)
+  const slots = globalSlots(ordered, options.schemas)
+  const capacity = Math.max(
+    parseCount(options.totalObjects) ?? 0,
+    ordered.length,
+    // A slot index past the end would wrap and collide, so the grid always covers the highest one.
+    ...[...slots.values()].map(slot => slot + 1),
   )
 
-  const lots = new Map<string, CityLot>()
-  const districtResults: CityDistrict[] = []
+  const side = Math.max(
+    MIN_GRID_SIDE,
+    Math.ceil(Math.sqrt((capacity + FACILITY_ORDER.length) * GRID_SLACK)),
+  )
+  const blockCols = side
+  const blockRows = side
 
-  for (const placement of placements) {
-    const bounds = districtBounds(placement, pitchX, pitchZ)
-    districtResults.push({
-      districtId: placement.districtId,
-      name: placement.name,
-      neighborhoodOrdinal: placement.neighborhoodOrdinal,
-      kind: placement.kind,
-      objectCount: placement.members.length,
-      ...bounds,
-    })
-    placement.members.forEach((object, localIndex) => {
-      lots.set(
-        object.objectId,
-        placeLot(object, localIndex, placement, cell, pitchX, pitchZ),
-      )
-    })
+  // One generator for the whole plan: facilities draw first, buildings take what is left. Both read
+  // from the same stream, so the seed alone determines the entire city.
+  const rng = mulberry32(stableHash(options.seed ?? 'sqlsimcity'))
+  const facilityBlocks = placeFacilities(blockCols, blockRows, rng)
+  const facilityKeys = new Set(facilityBlocks.map(block => blockKey(block.col, block.row)))
+
+  const freeBlocks = allBlocks(blockCols, blockRows).filter(
+    block => !facilityKeys.has(blockKey(block.col, block.row)),
+  )
+  const shuffled = seededShuffle(freeBlocks, rng)
+
+  const lots = new Map<string, CityLot>()
+  for (const object of ordered) {
+    const slot = slots.get(object.objectId) ?? 0
+    const block = shuffled[slot % shuffled.length]
+    lots.set(object.objectId, placeLot(object, block, cell, pitchX, pitchZ))
   }
 
-  const civic = districtResults.find(district => district.districtId === CIVIC_DISTRICT_ID)!
+  const { intersections, streets } = buildStreetLattice(blockCols, blockRows, pitchX, pitchZ)
+
   return {
     cell,
     streetWidth: STREET_WIDTH,
     blockCols,
     blockRows,
-    districts: districtResults.filter(district => district.kind === 'schema'),
+    districts: describeDistricts(ordered, lots, cell),
     lots,
     intersections,
     streets,
     bounds: cityBounds(blockCols, blockRows, pitchX, pitchZ),
-    civic,
+    facilities: facilitySites(facilityBlocks, cell, pitchX, pitchZ),
   }
 }
 
@@ -405,54 +468,233 @@ function pushElbow(
 
 const AXIS_EPSILON = 1e-9
 
-type DistrictGroup = {
-  districtId: string
-  name: string
-  neighborhoodOrdinal: number
-  kind: 'schema' | 'civic'
-  members: DatabaseCityObject[]
+/** A block on the grid. Blocks hold exactly one lot, so a block address is a building address. */
+interface BlockRef {
+  readonly col: number
+  readonly row: number
 }
 
-type DistrictPlacement = DistrictGroup & {
-  startCol: number
-  startRow: number
-  cols: number
-  rows: number
+function blockKey(col: number, row: number): string {
+  return `${col}-${row}`
 }
 
-function groupDistricts(objects: readonly DatabaseCityObject[]): DistrictGroup[] {
-  const groups = new Map<string, DistrictGroup>()
-  for (const object of objects) {
-    const existing = groups.get(object.schemaId)
-    if (existing) {
-      existing.members.push(object)
-      existing.neighborhoodOrdinal = Math.min(
-        existing.neighborhoodOrdinal,
-        object.layout.neighborhoodOrdinal,
-      )
-    } else {
-      groups.set(object.schemaId, {
-        districtId: object.schemaId,
-        name: object.schemaName,
-        neighborhoodOrdinal: object.layout.neighborhoodOrdinal,
-        kind: 'schema',
-        members: [object],
+function allBlocks(blockCols: number, blockRows: number): BlockRef[] {
+  const blocks: BlockRef[] = []
+  for (let row = 0; row < blockRows; row += 1) {
+    for (let col = 0; col < blockCols; col += 1) blocks.push({ col, row })
+  }
+  return blocks
+}
+
+/** Chebyshev distance in blocks: diagonal neighbours are one block apart, same as orthogonal ones. */
+function blockGap(left: BlockRef, right: BlockRef): number {
+  return Math.max(Math.abs(left.col - right.col), Math.abs(left.row - right.row))
+}
+
+/** Stable object order: neighbourhood, then object ordinal, then id. Never row arrival order. */
+function orderObjects(objects: readonly DatabaseCityObject[]): DatabaseCityObject[] {
+  return [...objects].sort(
+    (left, right) =>
+      left.layout.neighborhoodOrdinal - right.layout.neighborhoodOrdinal ||
+      compareOrdinal(left.schemaId, right.schemaId) ||
+      left.layout.objectOrdinal - right.layout.objectOrdinal ||
+      compareOrdinal(left.objectId, right.objectId),
+  )
+}
+
+function parseCount(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null
+}
+
+/**
+ * A page-independent slot index for every object.
+ *
+ * The backend numbers objects *within* a schema, so an object ordinal alone is not a position in the
+ * city. Adding the running total of every earlier schema's full object count turns it into one, and
+ * because every page carries the complete schema list with complete counts, that sum is the same on
+ * page one as it is on page nine. This is what actually delivers the promise that appending a page
+ * moves nothing: an object's block is a function of its own identity, not of who else is loaded.
+ *
+ * Without schema counts the offsets are derived from the loaded objects instead, which is correct
+ * once everything is loaded and drifts while it is not.
+ */
+function globalSlots(
+  ordered: readonly DatabaseCityObject[],
+  schemas: readonly DatabaseCitySchema[] | undefined,
+): Map<string, number> {
+  const counts = new Map<string, { ordinal: number; count: number }>()
+
+  if (schemas && schemas.length > 0) {
+    for (const schema of schemas) {
+      counts.set(schema.schemaId, {
+        ordinal: schema.neighborhoodOrdinal,
+        count: parseCount(schema.objectCount) ?? 0,
       })
     }
   }
-  const ordered = [...groups.values()].sort(
-    (left, right) =>
-      left.neighborhoodOrdinal - right.neighborhoodOrdinal ||
-      compareOrdinal(left.districtId, right.districtId),
-  )
-  for (const group of ordered) {
-    group.members.sort(
-      (left, right) =>
-        left.layout.objectOrdinal - right.layout.objectOrdinal ||
-        compareOrdinal(left.objectId, right.objectId),
-    )
+  for (const object of ordered) {
+    const existing = counts.get(object.schemaId)
+    // A schema the list did not mention, or one whose count is short of what actually arrived,
+    // still has to fit; widen it rather than overlap the next schema's slots.
+    const observed = object.layout.objectOrdinal + 1
+    if (!existing) {
+      counts.set(object.schemaId, { ordinal: object.layout.neighborhoodOrdinal, count: observed })
+    } else if (observed > existing.count) {
+      counts.set(object.schemaId, { ordinal: existing.ordinal, count: observed })
+    }
   }
-  return ordered
+
+  const offsets = new Map<string, number>()
+  let running = 0
+  const orderedSchemas = [...counts.entries()].sort(
+    (left, right) => left[1].ordinal - right[1].ordinal || compareOrdinal(left[0], right[0]),
+  )
+  for (const [schemaId, entry] of orderedSchemas) {
+    offsets.set(schemaId, running)
+    running += entry.count
+  }
+
+  const slots = new Map<string, number>()
+  for (const object of ordered) {
+    slots.set(object.objectId, (offsets.get(object.schemaId) ?? 0) + object.layout.objectOrdinal)
+  }
+  return slots
+}
+
+/**
+ * Chooses six blocks for the infrastructure facilities, every pair at least
+ * {@link MIN_FACILITY_BLOCK_GAP} blocks apart.
+ *
+ * Each attempt greedily walks a freshly shuffled block list and takes any block that still clears
+ * the gap — a random maximal independent set, which scatters the facilities properly instead of
+ * pushing them into a lattice. If an attempt runs out of grid before placing all six it is
+ * discarded and the next shuffle tried, so a lucky-but-cramped partial layout never ships.
+ *
+ * The chosen blocks are finally sorted top-left to bottom-right and zipped against
+ * {@link FACILITY_ORDER}, so the facilities appear in a consistent reading order across the map.
+ */
+function placeFacilities(blockCols: number, blockRows: number, rng: () => number): BlockRef[] {
+  const blocks = allBlocks(blockCols, blockRows)
+  for (let attempt = 0; attempt < FACILITY_PLACEMENT_ATTEMPTS; attempt += 1) {
+    const chosen: BlockRef[] = []
+    for (const block of seededShuffle(blocks, rng)) {
+      if (chosen.length === FACILITY_ORDER.length) break
+      if (chosen.every(taken => blockGap(taken, block) >= MIN_FACILITY_BLOCK_GAP)) chosen.push(block)
+    }
+    if (chosen.length === FACILITY_ORDER.length) return sortForReading(chosen)
+  }
+  return sortForReading(spreadFacilities(blocks))
+}
+
+/**
+ * Deterministic fallback for a grid too small to satisfy the gap rule.
+ *
+ * Starts at the first block and repeatedly takes whichever free block is furthest from everything
+ * already taken, ties broken by block index. The spacing rule is relaxed rather than enforced —
+ * a tiny database still gets a laid-out city, just a tighter one — and the result is still entirely
+ * determined by the grid size, so it never varies between loads.
+ */
+function spreadFacilities(blocks: readonly BlockRef[]): BlockRef[] {
+  if (blocks.length === 0) return []
+  const chosen: BlockRef[] = [blocks[0]]
+  while (chosen.length < FACILITY_ORDER.length) {
+    let best: BlockRef | null = null
+    let bestGap = -1
+    for (const candidate of blocks) {
+      if (chosen.some(taken => taken.col === candidate.col && taken.row === candidate.row)) continue
+      const gap = Math.min(...chosen.map(taken => blockGap(taken, candidate)))
+      if (gap > bestGap) {
+        bestGap = gap
+        best = candidate
+      }
+    }
+    // Fewer blocks than facilities: reuse from the front rather than return a short list, so every
+    // facility still has somewhere to stand.
+    chosen.push(best ?? blocks[chosen.length % blocks.length])
+  }
+  return chosen
+}
+
+function sortForReading(blocks: readonly BlockRef[]): BlockRef[] {
+  return [...blocks].sort((left, right) => left.row - right.row || left.col - right.col)
+}
+
+function facilitySites(
+  blocks: readonly BlockRef[],
+  cell: number,
+  pitchX: number,
+  pitchZ: number,
+): Map<FacilityKind, FacilitySite> {
+  const sites = new Map<FacilityKind, FacilitySite>()
+  FACILITY_ORDER.forEach((kind, index) => {
+    const block = blocks[index]
+    if (!block) return
+    sites.set(kind, {
+      kind,
+      label: FACILITY_LABELS[kind],
+      x: block.col * pitchX + STREET_WIDTH / 2 + cell / 2,
+      z: block.row * pitchZ + STREET_WIDTH / 2 + cell / 2,
+      // Facilities fill their block. They are civic landmarks and must stay legible next to a
+      // skyscraper, so their size is fixed by the block, never by a measurement.
+      radius: cell / 2,
+    })
+  })
+  return sites
+}
+
+/**
+ * Districts are now the bounding box of their scattered members rather than a packed rectangle.
+ *
+ * Because members are spread across the grid these boxes overlap, so the neighbourhood layer draws
+ * per-lot pads instead of one filled rectangle. The box survives only as a framing target for
+ * "show me this schema".
+ */
+function describeDistricts(
+  ordered: readonly DatabaseCityObject[],
+  lots: ReadonlyMap<string, CityLot>,
+  cell: number,
+): CityDistrict[] {
+  const groups = new Map<string, { name: string; ordinal: number; lots: CityLot[] }>()
+  for (const object of ordered) {
+    const lot = lots.get(object.objectId)
+    if (!lot) continue
+    const existing = groups.get(object.schemaId)
+    if (existing) {
+      existing.lots.push(lot)
+      existing.ordinal = Math.min(existing.ordinal, object.layout.neighborhoodOrdinal)
+    } else {
+      groups.set(object.schemaId, {
+        name: object.schemaName,
+        ordinal: object.layout.neighborhoodOrdinal,
+        lots: [lot],
+      })
+    }
+  }
+
+  const half = cell / 2
+  return [...groups.entries()]
+    .sort((left, right) => left[1].ordinal - right[1].ordinal || compareOrdinal(left[0], right[0]))
+    .map(([districtId, group]) => {
+      const minX = Math.min(...group.lots.map(lot => lot.x)) - half
+      const maxX = Math.max(...group.lots.map(lot => lot.x)) + half
+      const minZ = Math.min(...group.lots.map(lot => lot.z)) - half
+      const maxZ = Math.max(...group.lots.map(lot => lot.z)) + half
+      return {
+        districtId,
+        name: group.name,
+        neighborhoodOrdinal: group.ordinal,
+        kind: 'schema' as const,
+        objectCount: group.lots.length,
+        minX,
+        maxX,
+        minZ,
+        maxZ,
+        centerX: (minX + maxX) / 2,
+        centerZ: (minZ + maxZ) / 2,
+      }
+    })
 }
 
 /**
@@ -469,97 +711,38 @@ function chooseCell(objects: readonly DatabaseCityObject[]): number {
   return Math.max(MIN_CELL, Math.ceil(widest + LOT_MARGIN))
 }
 
-/** One block per building, so a district needs exactly as many blocks as it has members. */
-function blocksNeeded(memberCount: number): number {
-  return Math.max(1, Math.ceil(memberCount / CELLS_PER_BLOCK))
-}
-
-/** Shelf packing in neighbourhood order, so districts occupy contiguous rectangles of blocks. */
-function packDistricts(districts: DistrictGroup[], shelfWidth: number): DistrictPlacement[] {
-  const civic: DistrictGroup = {
-    districtId: CIVIC_DISTRICT_ID,
-    name: 'Infrastructure',
-    neighborhoodOrdinal: Number.MAX_SAFE_INTEGER,
-    kind: 'civic',
-    members: [],
-  }
-
-  const placements: DistrictPlacement[] = []
-  let cursorCol = 0
-  let cursorRow = 0
-  let shelfHeight = 0
-
-  const place = (district: DistrictGroup, cols: number, rows: number) => {
-    if (cursorCol > 0 && cursorCol + cols > shelfWidth) {
-      cursorCol = 0
-      cursorRow += shelfHeight
-      shelfHeight = 0
-    }
-    placements.push({ ...district, startCol: cursorCol, startRow: cursorRow, cols, rows })
-    cursorCol += cols
-    shelfHeight = Math.max(shelfHeight, rows)
-  }
-
-  for (const district of districts) {
-    const need = blocksNeeded(district.members.length)
-    const cols = Math.max(1, Math.min(need, shelfWidth))
-    place(district, cols, Math.ceil(need / cols))
-  }
-  place(civic, CIVIC_BLOCK_COLS, CIVIC_BLOCK_ROWS)
-  return placements
-}
-
 function placeLot(
   object: DatabaseCityObject,
-  localIndex: number,
-  placement: DistrictPlacement,
+  block: BlockRef,
   cell: number,
   pitchX: number,
   pitchZ: number,
 ): CityLot {
-  const blockIndex = Math.floor(localIndex / CELLS_PER_BLOCK)
-  const cellIndex = localIndex % CELLS_PER_BLOCK
-  const blockCol = placement.startCol + (blockIndex % placement.cols)
-  const blockRow = placement.startRow + Math.floor(blockIndex / placement.cols)
-  const cellCol = cellIndex % BLOCK_COLS
-  const cellRow = Math.floor(cellIndex / BLOCK_COLS)
-
-  const blockOriginX = blockCol * pitchX + STREET_WIDTH / 2
-  const blockOriginZ = blockRow * pitchZ + STREET_WIDTH / 2
-  const x = blockOriginX + (cellCol + 0.5) * cell
-  const z = blockOriginZ + (cellRow + 0.5) * cell
+  const x = block.col * pitchX + STREET_WIDTH / 2 + cell / 2
+  const z = block.row * pitchZ + STREET_WIDTH / 2 + cell / 2
 
   // One lot per block, so the building fronts the street along its block's north edge and the other
   // three sides are open street too. There is no back row to face the other way.
   const facing: Facing = 'north'
-  const kerbZ = blockRow * pitchZ
-  const frontageStreetId = streetIdFor('x', blockCol, blockRow)
+  const kerbZ = block.row * pitchZ
 
   return {
     objectId: object.objectId,
-    districtId: placement.districtId,
-    blockId: `${placement.districtId}/block/${blockCol}-${blockRow}`,
+    districtId: object.schemaId,
+    blockId: `block/${block.col}-${block.row}`,
     x,
     z,
     rotationY: Math.PI,
     facing,
     accessX: x,
     accessZ: kerbZ,
-    frontageStreetId,
+    frontageStreetId: streetIdFor('x', block.col, block.row),
     lotSize: cell,
     footprint: buildingFootprint(object.reservedPages8KiB),
     height: buildingHeight(object.usedPages8KiB),
     archetype: buildingArchetype(object),
     seed: stableHash(object.objectId),
   }
-}
-
-function districtBounds(placement: DistrictPlacement, pitchX: number, pitchZ: number) {
-  const minX = placement.startCol * pitchX
-  const maxX = (placement.startCol + placement.cols) * pitchX
-  const minZ = placement.startRow * pitchZ
-  const maxZ = (placement.startRow + placement.rows) * pitchZ
-  return { minX, maxX, minZ, maxZ, centerX: (minX + maxX) / 2, centerZ: (minZ + maxZ) / 2 }
 }
 
 function cityBounds(
@@ -582,12 +765,19 @@ function cityBounds(
   }
 }
 
+/**
+ * The street lattice: a road on every block boundary, so each building is ringed by street.
+ *
+ * Arterials used to fall on district edges. With districts scattered there are no edges to follow,
+ * so arterials fall on a fixed rhythm instead — every {@link ARTERIAL_EVERY} lines, plus the city
+ * boundary. That gives the map the major-road structure it needs to be readable at a glance without
+ * pretending the road hierarchy is measured: street class is cartography, not evidence.
+ */
 function buildStreetLattice(
   blockCols: number,
   blockRows: number,
   pitchX: number,
   pitchZ: number,
-  placements: readonly DistrictPlacement[],
 ) {
   const intersections = new Map<string, CityIntersection>()
   for (let row = 0; row <= blockRows; row += 1) {
@@ -602,28 +792,20 @@ function buildStreetLattice(
     }
   }
 
-  const boundaryCols = new Set<number>([0, blockCols])
-  const boundaryRows = new Set<number>([0, blockRows])
-  for (const placement of placements) {
-    boundaryCols.add(placement.startCol)
-    boundaryCols.add(placement.startCol + placement.cols)
-    boundaryRows.add(placement.startRow)
-    boundaryRows.add(placement.startRow + placement.rows)
-  }
+  const isArterialCol = (col: number) =>
+    col === 0 || col === blockCols || col % ARTERIAL_EVERY === 0
+  const isArterialRow = (row: number) =>
+    row === 0 || row === blockRows || row % ARTERIAL_EVERY === 0
 
   const streets: CityStreet[] = []
   for (let row = 0; row <= blockRows; row += 1) {
     for (let col = 0; col < blockCols; col += 1) {
-      streets.push(
-        segment('x', col, row, col + 1, row, pitchX, pitchZ, boundaryRows.has(row)),
-      )
+      streets.push(segment('x', col, row, col + 1, row, pitchX, pitchZ, isArterialRow(row)))
     }
   }
   for (let col = 0; col <= blockCols; col += 1) {
     for (let row = 0; row < blockRows; row += 1) {
-      streets.push(
-        segment('z', col, row, col, row + 1, pitchX, pitchZ, boundaryCols.has(col)),
-      )
+      streets.push(segment('z', col, row, col, row + 1, pitchX, pitchZ, isArterialCol(col)))
     }
   }
   return { intersections, streets }

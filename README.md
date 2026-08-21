@@ -11,7 +11,7 @@ drawn as a wireframe rather than a guess.
 **[Try the live demo →](https://sqlsimcity.battagler.me/)** · Heavily inspired by
 [PGSimCity](https://github.com/NikolayS/PGSimCity).
 
-![The database city view: tables drawn as buildings, query traffic as roads, and waits as lanes into infrastructure facilities](docs/images/city.png)
+![The database city: a full-screen 3D map with tables drawn as buildings, query traffic as roads, and waits as lanes into scattered infrastructure facilities, beside the Query Store address book sidebar](docs/images/city.png)
 
 ## What it does
 
@@ -19,14 +19,21 @@ drawn as a wireframe rather than a guess.
   and tallest tower by used storage.
 - **Database city** — tables and indexes as buildings, query families as roads, Query Store waits as
   lanes into tempdb, log, lock, memory-grant, CPU, and I/O facilities.
-- **Query Store history** — ranked query families with runtime timelines and compiled-plan comparison.
-- **Live incidents** — sampled requests, waits, blocking graphs, memory grants, tempdb, I/O, and log pressure.
-- **Findings** — evidence-backed leads with explicit caveats and next checks, never automated verdicts.
+- **Two views of the same city** — a flat top-down map for reading structure and traffic, and a 3D
+  city for reading massing. One toggle, one object graph, the same evidence.
+- **The Query Store address book** — one searchable sidebar listing query families, tables, and
+  infrastructure together, each with its measured metric and its block address on the map.
+- **Incident pins** — live blocking and wait-graph cycles pinned to the building they were measured
+  on, with the source DMV and observation time in the popup.
 - **Offline archives** and an optional **outward-only edge connector** for servers you can't reach directly.
+
+Building placement is deterministic: every lot is derived from a seeded generator keyed on the
+database's own id, so the same database lays out identically on every load and every machine, and
+loading another page of objects never moves a building that is already on screen.
 
 SQLSimCity is strictly read-only against monitored servers. Query Store history is aggregate
 evidence, live DMVs are point-in-time samples, and inferred relationships are always labelled with
-their confidence.
+their confidence. A subsystem that could not be sampled is drawn as unavailable, never as clear.
 
 > [!WARNING]
 > **SQLSimCity has no built-in login.** Anyone who can reach the page sees all evidence. Keep it on
@@ -64,11 +71,12 @@ permissions, Azure SQL, Query Store, and live sampling.
 
 ## Screenshots
 
-| Server atlas | Query Store history |
+| Flat map view | Server atlas |
 | --- | --- |
-| ![Server atlas showing every database on the instance as its own city, with the plot sized by allocated storage and the tallest tower by used storage](docs/images/atlas.png) | ![Query Store history ranking query families by CPU, with a runtime timeline for the selected family](docs/images/querystore.png) |
-| **Live incidents** | **Findings** |
-| ![Live incidents panel showing active requests, waiting tasks, a blocking graph, tempdb, and scheduler pressure](docs/images/live.png) | ![Findings panel showing a serious plan-regression finding with its measured impact, observed window, source, and evidence](docs/images/findings.png) |
+| ![The same city in flat map mode: a north-up paper basemap with white carriageways over grey casings, infrastructure facilities scattered across the block grid as POIs, and a red pin on the table with a blocked waiter](docs/images/map.png) | ![Server atlas showing every database on the instance as its own city, with the plot sized by allocated storage and the tallest tower by used storage, beside the searchable sidebar](docs/images/atlas.png) |
+
+Both surfaces are the same map shell: a full-screen map, a searchable sidebar, and one toggle
+between the flat map and the 3D city. The tile at the bottom-left of the map switches between them.
 
 ## Documentation
 

@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AtlasSnapshot } from './contracts'
 import { createAtlasScene, tryCreateAtlasScene, type AtlasSceneController } from './atlasSceneFactory'
+import type { MapViewMode } from './mapStyle'
 
 type AtlasViewportProps = {
   snapshot: AtlasSnapshot
   selectedId: string | null
+  /** Flat basemap or oblique 3D city. Owned by the shell so both levels share one look. */
+  viewMode: MapViewMode
   onHover: (databaseId: string | null) => void
   onSelect: (databaseId: string) => void
   onOpen: (databaseId: string) => void
 }
 
-export function AtlasViewport({ snapshot, selectedId, onHover, onSelect, onOpen }: AtlasViewportProps) {
+export function AtlasViewport({ snapshot, selectedId, viewMode, onHover, onSelect, onOpen }: AtlasViewportProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<AtlasSceneController | null>(null)
   const [unavailable, setUnavailable] = useState(false)
@@ -25,6 +28,7 @@ export function AtlasViewport({ snapshot, selectedId, onHover, onSelect, onOpen 
     sceneRef.current = scene
     scene.setSnapshot(snapshot)
     scene.setSelected(selectedId)
+    scene.setViewMode(viewMode)
     return () => {
       scene.dispose()
       sceneRef.current = null
@@ -33,6 +37,7 @@ export function AtlasViewport({ snapshot, selectedId, onHover, onSelect, onOpen 
 
   useEffect(() => sceneRef.current?.setSnapshot(snapshot), [snapshot])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
+  useEffect(() => sceneRef.current?.setViewMode(viewMode), [viewMode])
 
   return (
     <div className="atlas-viewport">

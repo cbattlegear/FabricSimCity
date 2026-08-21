@@ -15,7 +15,7 @@ describe('3D scene initialization fallback', () => {
   })
 
   it('returns the controller when WebGL initialization succeeds', () => {
-    const controller = { setSnapshot: vi.fn(), setSelected: vi.fn(), dispose: vi.fn() }
+    const controller = { setSnapshot: vi.fn(), setSelected: vi.fn(), setViewMode: vi.fn(), dispose: vi.fn() }
     const factory: AtlasSceneFactory = () => controller
 
     expect(tryCreateAtlasScene(factory, canvas, callbacks)).toBe(controller)

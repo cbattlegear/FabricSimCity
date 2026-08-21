@@ -1,4 +1,5 @@
 using SqlSimCity.Collection.DatabaseCity;
+using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
 
@@ -27,6 +28,26 @@ public sealed class ConnectedDatabaseCitySourceTests
         Assert.NotNull(page.NextPageToken);
         Assert.Null(page.OtherWorkload.TotalCpuMicroseconds);
         Assert.Equal("1", Assert.Single(page.Schemas).ObjectCount);
+
+        // The whole database's object count, not this page's: the city grid is sized from it, so a
+        // null here would make every later page reshuffle the buildings already on screen.
+        Assert.Equal("7", page.TotalObjects);
+    }
+
+    /// <summary>
+    /// A probe that could not run leaves the count unknown. Reporting zero would say the database
+    /// is empty, which is a measurement the failed probe never made.
+    /// </summary>
+    [Fact]
+    public async Task TotalObjectsStaysUnknownWhenTheInventoryProbeFails()
+    {
+        var source = new ConnectedDatabaseCitySource(new FakeAtlasSource(), new FailingCityProbeExecutor());
+
+        var page = await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 1, null, CancellationToken.None);
+
+        Assert.Null(page!.TotalObjects);
+        Assert.Empty(page.Objects);
     }
 
     [Fact]
@@ -103,6 +124,11 @@ public sealed class ConnectedDatabaseCitySourceTests
         Assert.Equal(QueryAttributionConfidence.Unknown, orderHeader.AttributedExposure.Confidence);
         Assert.Contains(
             "not measured zero", orderHeader.AttributedExposure.Rationale, StringComparison.Ordinal);
+
+        // family-2 named OrderHeader alongside Customer, so the page reports what that query
+        // measured instead of leaving the building looking as though nothing ever touched it.
+        Assert.Equal("400", orderHeader.AttributedExposure.Shared!.TotalCpuMicroseconds);
+        Assert.Equal("400", customer.AttributedExposure.Shared!.TotalCpuMicroseconds);
     }
 
     /// <summary>
@@ -156,7 +182,8 @@ public sealed class ConnectedDatabaseCitySourceTests
                 [new DatabaseCityIndexUsageRow(10, 1, "5")],
                 DataStatus.Available,
                 "Direct cumulative index usage counters.",
-                new DateTimeOffset(2026, 8, 17, 17, 0, 0, TimeSpan.Zero)));
+                new DateTimeOffset(2026, 8, 17, 17, 0, 0, TimeSpan.Zero),
+                TotalObjects: "7"));
         }
     }
 
@@ -180,6 +207,17 @@ public sealed class ConnectedDatabaseCitySourceTests
                 DataStatus.Available,
                 "Direct cumulative index usage counters.",
                 new DateTimeOffset(2026, 8, 17, 17, 0, 0, TimeSpan.Zero)));
+    }
+
+    private sealed class FailingCityProbeExecutor : IDatabaseCityProbeExecutor
+    {
+        public Task<DatabaseCityProbePage> CollectPageAsync(
+            string databaseName,
+            int afterObjectId,
+            int topN,
+            CancellationToken cancellationToken) =>
+            throw new ProbePermissionDeniedException(
+                "The reader lacks VIEW DATABASE STATE.", null, null);
     }
 
     private sealed class FakeAtlasSource : IAtlasSnapshotSource

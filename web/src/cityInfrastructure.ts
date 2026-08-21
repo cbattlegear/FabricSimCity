@@ -1,4 +1,3 @@
-import type { CityDistrict } from './cityPlan'
 import type {
   DataStatus,
   FileIoDelta,
@@ -8,10 +7,10 @@ import type {
 } from './liveContracts'
 
 /**
- * Projects one live snapshot onto the city's infrastructure district: the places a running query
- * actually visits. CPU schedulers, memory grants, data files, tempdb and the transaction log are
- * separate physical resources in the engine, so they are separate facilities here rather than one
- * abstract "resources" bar.
+ * Projects one live snapshot onto the city's civic facilities: the places a running query actually
+ * visits. CPU schedulers, memory grants, data files, tempdb and the transaction log are separate
+ * physical resources in the engine, so they are separate facilities here rather than one abstract
+ * "resources" bar.
  *
  * Every facility carries its own {@link DataStatus} and reason. A facility whose subsystem could not
  * be sampled renders as a nonquantitative wireframe and makes no claim at all -- an unavailable probe
@@ -20,7 +19,10 @@ import type {
 
 export type FacilityKind = 'cpu' | 'memory' | 'storage' | 'tempdb' | 'log' | 'lock'
 
-/** Ordinal position of each facility within the infrastructure district. Fixed, so facilities never move. */
+/**
+ * Placement order for the facilities. The seeded scatter in `cityPlan` walks this list, so the order
+ * is what makes a database's facility layout reproducible rather than merely random.
+ */
 export const FACILITY_ORDER: readonly FacilityKind[] = [
   'cpu',
   'memory',
@@ -68,6 +70,12 @@ const NOT_SAMPLED: DataStatus = 'Unknown'
 const NO_SNAPSHOT_REASON =
   'No live snapshot has been received yet, so no claim is made about this resource.'
 
+/**
+ * Where one facility stands. Positions come from the city plan, which scatters facilities across the
+ * grid at least {@link MIN_FACILITY_BLOCK_GAP} blocks apart and derives every position from the
+ * database's seed — so a facility never moves when live data appears, disappears, or changes. You
+ * can learn where the Memory Grant Office is.
+ */
 export interface FacilitySite {
   readonly kind: FacilityKind
   readonly label: string
@@ -76,32 +84,6 @@ export interface FacilitySite {
   readonly z: number
   /** Plot half-extent; the facility's geometry stays inside this. */
   readonly radius: number
-}
-
-/**
- * Places the six facilities in the reserved civic district on a fixed 3x2 grid, in
- * {@link FACILITY_ORDER}. Positions depend only on the district rectangle, so a facility never moves
- * when live data appears, disappears, or changes -- you can learn where the Memory Grant Office is.
- */
-export function layoutFacilities(civic: CityDistrict): Map<FacilityKind, FacilitySite> {
-  const cols = 3
-  const rows = 2
-  const cellW = (civic.maxX - civic.minX) / cols
-  const cellD = (civic.maxZ - civic.minZ) / rows
-  const radius = Math.max(6, Math.min(cellW, cellD) / 2 - 6)
-  const sites = new Map<FacilityKind, FacilitySite>()
-  FACILITY_ORDER.forEach((kind, index) => {
-    const col = index % cols
-    const row = Math.floor(index / cols)
-    sites.set(kind, {
-      kind,
-      label: FACILITY_LABELS[kind],
-      x: civic.minX + cellW * (col + 0.5),
-      z: civic.minZ + cellD * (row + 0.5),
-      radius,
-    })
-  })
-  return sites
 }
 
 /** Facilities in fixed order. Always returns one entry per {@link FACILITY_ORDER} member. */

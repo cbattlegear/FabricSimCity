@@ -43,6 +43,24 @@ only for exact formatting and converts to bounded numeric scales solely for visu
 
 ## Product surfaces
 
+The UI is one surface: a full-bleed map with a sidebar over it. The map is the product — there is no
+tab bar, and no page that is not the map.
+
+The sidebar is an **address book** (`web/src/addressBook.ts`): one flat, searchable list holding
+query families, tables, and infrastructure facilities together, each with a measured one-line summary
+and an address derived from the city plan (`dbo · Block C4`). One search box matches all three kinds,
+so you look up a place rather than first having to know which category it lives in — searching a
+table name also surfaces the query families that drive traffic to it. Selecting an entry selects it
+on the map and replaces the list with a place card carrying the existing evidence panels verbatim.
+An entry whose object is not on the loaded bounded page has no lot, and says so rather than inventing
+a location.
+
+Everything else floats over the canvas: the view-mode toggle, camera controls, the layer switches,
+a status chip, and the incident summary. The evidence tables and the visual-semantics prose live
+behind a "Legend & evidence" disclosure in the sidebar footer — kept in full for accessibility and
+honesty, but no longer the page. The deployment-security notice and the archive and edge banners are
+floating cards that default to visible and are dismissed only by the reader.
+
 ### Server atlas
 
 The atlas shows up to 100 databases, and each one is drawn as a small city on a shared grid, not as a
@@ -101,21 +119,62 @@ Schemas are stable neighborhoods. Tables and indexed views are buildings sized b
 counts. Indexes are attached structures on their parent object. Direct index DMV activity and
 Query Store-attributed exposure use different evidence and visual styles.
 
-The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` packs each
-schema district into blocks of lots on a uniform lattice, derived strictly from the backend's stable
-`neighborhoodOrdinal` / `objectOrdinal`, so layout is deterministic and independent of source row
-order. The plan also emits the intersections and streets that roads are drawn on and that query
-routes walk, so nothing is drawn diagonally through a building. A civic district is always allocated
-last, which keeps schema districts from shifting when infrastructure appears.
+#### Attributed and shared exposure
 
-Exactly seven properties encode evidence. Everything else in the scene is decoration seeded from an
-object's stable id and carries no data claim; the in-app legend states this split verbatim.
+Query Store measures one set of totals per query, not per object. A query that joins four tables has
+one CPU figure, and nothing in Query Store says how much of it each table caused. SQLSimCity
+therefore reports exposure in two separate shapes and never mixes them:
+
+- **Attributed exposure** is assigned to an object only when a ranked query family names that object
+  and nothing else — no second local object, no cross-database target, no reference the collector
+  could not resolve. Anything less and the totals are not that object's to claim.
+- **Shared exposure** carries the query-level totals of families that named the object *alongside
+  others*. The figures appear **whole** on every object those families named, because a per-object
+  share would have to be invented. `DatabaseCitySharedExposureV1.Rationale` says so in the payload
+  itself, and the map draws it as an outlined roof cap rather than a solid one.
+
+Summing shared exposure across buildings double-counts by construction. That is the point: a total
+that cannot be divided honestly is better shown repeated, and labelled, than split or hidden.
+
+Without shared exposure a normalized schema renders almost entirely blank, because on such a schema
+`local.Count == 1` is close to unreachable — shrink the page and joined tables fall off it, widen it
+and they come on-page. The strict attribution rule is deliberately unchanged; shared exposure is what
+makes that strictness survivable on a real workload.
+
+The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` builds a
+uniform block lattice and scatters lots across it using a seeded generator (`web/src/citySeed.ts`),
+so a city looks like a city instead of a packed rectangle while remaining completely deterministic:
+the seed is a stable hash of the database's own id, and every draw comes from that one stream. The
+same database therefore lays out identically on every load, in every browser, on every machine.
+
+Two rules make that scatter safe to build on:
+
+- **Appending a page never moves a building.** The grid is sized from `page.totalObjects` (plus the
+  facilities and slack), not from how many objects happen to be loaded, and each object's slot is
+  `Σ(objectCount of schemas with a lower neighborhoodOrdinal) + objectOrdinal`. Because every page
+  carries the complete schema list with full per-schema counts, that slot is page-independent.
+  Filtering the address book does not rearrange the city either.
+- **Facilities are spread out.** The six civic facilities are placed first, each drawn from the seeded
+  stream and accepted only when its Chebyshev distance to every already-placed facility is at least
+  `MIN_FACILITY_BLOCK_GAP` (2 blocks), so infrastructure is distributed across the map rather than
+  clustered in one corner. On a grid too small to satisfy that, a deterministic
+  maximise-minimum-distance sweep takes over, so a four-table database still lays out — just tighter,
+  and still fully determined by the seed.
+
+The plan also emits the intersections and streets that roads are drawn on and that query routes walk,
+so nothing is drawn diagonally through a building. Schema districts are now the bounding box of their
+scattered members and are used only for the optional tint layer, which draws per-lot pads rather than
+one contiguous rectangle.
+
+Every property in the table below encodes evidence. Everything else in the scene is decoration seeded
+from an object's stable id and carries no data claim; the in-app legend states this split verbatim.
 
 | Encoded property | Evidence |
 | --- | --- |
 | Building footprint | log₂ of exact reserved 8-KiB pages |
 | Building height | log₂ of exact used 8-KiB pages (zero used pages is zero height) |
-| Amber roof-cap height | attributed Query Store CPU |
+| Solid amber roof-cap height | Query Store CPU measured for that object alone |
+| Outlined amber roof-cap height | Query Store CPU of queries that also named other objects |
 | Index annex width | direct DMV operations on that index |
 | Road width | executions of query families naming both endpoints |
 | Road colour | captured wait share, graded low/medium/high, upgraded only by a resolved live lock |
@@ -133,10 +192,45 @@ Colour and confidence deliberately occupy independent channels: once colour carr
 confidence moves to line pattern, so neither dimension can be mistaken for the other.
 
 CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
-facilities in the civic district (`web/src/cityInfrastructure.ts`). Each facility's architecture is
-fixed decoration so its location stays learnable with no evidence at all; only the *height* of the
+facilities scattered across the grid (`web/src/cityInfrastructure.ts`). Each facility's architecture
+is fixed decoration so its location stays learnable with no evidence at all; only the *height* of the
 measured units inside it varies, interpolated between a documented floor and ceiling. A subsystem
 that could not be sampled renders as a wireframe with its reason and claims nothing.
+
+#### Map view and city view
+
+The same object graph is drawn two ways, switched by one toggle (`web/src/mapStyle.ts`). There is one
+scene, one raycaster, and one set of controls in both modes — the mode changes appearance, never
+content, so anything selectable in 3D is selectable on the flat map.
+
+| | Map view | City view |
+| --- | --- | --- |
+| Camera | narrowed to a 13° field of view with the polar angle locked flat, which is parallel projection for practical purposes | oblique perspective, free orbit |
+| Lighting | a single white ambient light, so materials render as their flat base colour | hemisphere, key, and fill lights |
+| Massing | buildings collapse to footprint plates — height is a claim the 3D view makes, not this one | full height |
+| Roads | white fill over a grey casing, drawn from the sidewalk strips the lattice already had | asphalt with kerbs |
+| Facilities | teardrop POI pins | full facility geometry |
+
+Road colour survives the switch in both directions, because congestion colour is measured evidence
+rather than styling. Only the drawing style changes.
+
+#### Incident pins
+
+`web/src/cityIncidents.ts` projects a live snapshot into map pins: a blocked waiter, or a session
+caught in a cycle in the current wait graph, anchored to the building whose lock it is waiting on.
+`IncidentPopup.tsx` draws the callout as HTML over the canvas so the text is real text — selectable,
+screen-reader reachable, legible at any zoom.
+
+The projection follows the same evidence rule as everything else, and the distinctions are load-bearing:
+
+- A snapshot that never carried a `lockResource` field means the probe did not run. That is reported
+  as "not observed", never as "no blocking".
+- A lock that resolves to a real object outside the loaded bounded page is **counted** as an off-map
+  incident rather than pinned to the nearest available lot.
+- A lock that names no object at all — a page lock, a database lock — is listed with the parser's own
+  reason rather than guessed onto a building.
+- A cycle in the *current* wait graph is reported as exactly that. SQL Server resolves real deadlocks
+  before they can be sampled in `sys.dm_exec_requests`, so the popup says what was measured.
 
 #### Waits as traffic to infrastructure
 
@@ -194,7 +288,18 @@ The camera is a full orbit/pan/zoom control with keyboard equivalents (arrows pa
 filtering or a live tick never yanks the viewpoint. The full evidence tables remain below the map as
 the text-first, non-WebGL equivalent.
 
-### Query Store history
+## Evidence layers
+
+These are collection layers, not screens. Each one is collected in full by the backend and surfaces
+on the map: Query Store aggregates become roads, wait lanes, and address-book metrics; live samples
+become road congestion and incident pins.
+
+> [!NOTE]
+> Findings are still computed and still served from `/api/v1/findings`, but the UI no longer draws
+> them. SQLSimCity is a map, not an assessment tool. Removing the backend end-to-end is a clean
+> follow-up rather than part of this change.
+
+### Query Store aggregates
 
 Query families preserve physical query/context splits, regular/aborted/exception execution types,
 replica groups, reset epochs, plan forcing state, and PSP/OPPO relationships where supported.
@@ -204,7 +309,7 @@ Raw SQL text and Showplan XML are on-demand protected payloads only. The normali
 prohibits DTDs/resolvers and applies depth, node, text, and character limits. Query Store supplies
 compiled plans and query-level aggregates, never actual operator progress.
 
-### Live incidents
+### Live sampling
 
 The live sampler exposes current requests and sessions, every visible task-level wait, MARS and
 parallel blocking edges, root blockers, memory grants, tempdb, file I/O deltas, scheduler pressure,
@@ -228,8 +333,9 @@ not that a request holds no lock. Parsing runs on every sampled request and wait
 connected and fixture mode, because it is pure and costs nothing. The hobt-resolving lookup step is a
 separate, bounded call: the fixture declares a sanitized resolution table so the resolved path is
 demonstrable offline, and a connected collector that has not yet issued the probe simply reports
-`RequiresLookup` and names the probe that would resolve it. The city consumes the result to upgrade a
-road to red congestion, and only where a resolved lock names one of the loaded objects.
+`RequiresLookup` and names the probe that would resolve it. The city consumes the result twice — to
+upgrade a road to red congestion, and to place an incident pin — and only where a resolved lock names
+one of the loaded objects.
 
 ### Findings
 
@@ -239,6 +345,8 @@ alternate explanations, next checks, and read-only recommendations. Insufficient
 
 Rules avoid folklore such as universal page-life-expectancy thresholds, treating every scan or
 `CXPACKET` wait as bad, or assigning a query's total work to each operator/table.
+
+They are computed and served, and no UI draws them.
 
 ## Acquisition modes
 

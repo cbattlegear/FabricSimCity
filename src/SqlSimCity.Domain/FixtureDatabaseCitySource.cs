@@ -125,6 +125,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
     {
         var customerId = "object:dbo:100";
         var orderId = "object:dbo:110";
+        var detailId = "object:dbo:120";
         var rollupId = "object:reporting:300";
         return
         [
@@ -140,7 +141,13 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 DirectActivity = Direct("11553"),
                 AttributedExposure = Exposure("2276", "14089536", "25779084", "625203",
                     QueryAttributionConfidence.Confirmed,
-                    "Only normalized single-database plans that name dbo.Customer contribute; multi-object plans are excluded."),
+                    "Only normalized single-database plans that name dbo.Customer contribute; multi-object plans are excluded.")
+                with
+                {
+                    // Family 6 names dbo.Customer, dbo.OrderHeader, and dbo.OrderDetail together, so
+                    // it cannot be attributed to any of them. Its totals appear whole on all three.
+                    Shared = Shared("1", "1010", "10000030", "18000070", "520130"),
+                },
             },
             new DatabaseCityObjectEvidence(
                 orderId, "schema:dbo", "OrderHeader", DatabaseObjectKind.Table,
@@ -154,7 +161,37 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 DirectActivity = Direct("32801"),
                 AttributedExposure = Exposure("2525", "25000075", "45000175", "1300325",
                     QueryAttributionConfidence.Confirmed,
-                    "Only normalized single-object plan references to dbo.OrderHeader contribute."),
+                    "Only normalized single-object plan references to dbo.OrderHeader contribute.")
+                with
+                {
+                    // Families 6 and 7 both name dbo.OrderHeader alongside something else -- Customer
+                    // and dbo.OrderDetail in one case, a cross-database target in the other -- so
+                    // neither can be attributed to it. Their totals are the sums of those two rows
+                    // exactly as BuildQueries emits them, carried whole rather than divided.
+                    Shared = Shared("2", "1919", "19000057", "34200133", "988247"),
+                },
+            },
+            new DatabaseCityObjectEvidence(
+                detailId, "schema:dbo", "OrderDetail", DatabaseObjectKind.Table,
+                "212992", "196608",
+                [
+                    Index(detailId, 1, "PK_OrderDetail", DatabaseIndexKind.Clustered, "41207"),
+                    Index(detailId, 2, "IX_OrderDetail_OrderId", DatabaseIndexKind.Nonclustered, "17330"),
+                ],
+                ["family:sales:006"])
+            {
+                DirectActivity = Direct("58911"),
+                // The case issue #40 reported: a normalized child table that no ranked query ever
+                // names on its own, because it is only ever read through a join. Its attributed
+                // totals stay null -- nothing was measured for it alone -- while the query-level
+                // totals it participates in are reported whole. Without this object the fixture
+                // would only ever show the easy world where every table has its own queries.
+                AttributedExposure = Unattributed(
+                    "No ranked Query Store family names dbo.OrderDetail on its own; every plan that reads it also names dbo.OrderHeader, so no total is measured for this object alone.")
+                with
+                {
+                    Shared = Shared("1", "1010", "10000030", "18000070", "520130"),
+                },
             },
             new DatabaseCityObjectEvidence(
                 rollupId, "schema:reporting", "SalesRollup", DatabaseObjectKind.IndexedView,
@@ -192,7 +229,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 1 or 4 => new[] { "object:dbo:100" },
                 2 or 5 => new[] { "object:dbo:110" },
                 3 => new[] { "object:reporting:300" },
-                6 => new[] { "object:dbo:100", "object:dbo:110" },
+                6 => new[] { "object:dbo:100", "object:dbo:110", "object:dbo:120" },
                 7 => new[] { "object:dbo:110", "fixture-target-primary/database/warehouse" },
                 _ => Array.Empty<string>(),
             };
@@ -213,7 +250,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 : objectIds.Length switch
                 {
                     1 => "A normalized compiled plan names exactly one local object.",
-                    > 1 => "A normalized plan names multiple objects; totals remain query-level and are not copied onto each object.",
+                    > 1 => "A normalized plan names multiple objects; totals remain query-level and are reported whole on each named object rather than divided between them.",
                     _ => "No normalized object reference was available; workload remains unattributed.",
                 };
             var waitCategories = WaitCategories(index);
@@ -334,6 +371,26 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
         QueryAttributionConfidence confidence,
         string rationale) =>
         new(executions, cpu, duration, reads, confidence, rationale, AttributedEvidence);
+
+    /// <summary>
+    /// An object no ranked family names on its own. Every total is null because none was measured for
+    /// this object alone -- not because the probe failed, which is why the evidence stays Available.
+    /// </summary>
+    private static DatabaseCityAttributedExposureV1 Unattributed(string rationale) =>
+        new(null, null, null, null, QueryAttributionConfidence.Unknown, rationale, AttributedEvidence);
+
+    /// <summary>
+    /// Query-level totals from families that named this object alongside others. These repeat in full
+    /// on every object those families named, so summing them across the city double-counts.
+    /// </summary>
+    private static DatabaseCitySharedExposureV1 Shared(
+        string familyCount,
+        string executions,
+        string cpu,
+        string duration,
+        string reads) =>
+        new(familyCount, executions, cpu, duration, reads,
+            "Totals belong to queries that named several objects; they are shown whole on each and must not be summed across buildings.");
 
     private static IReadOnlyList<DatabaseCityRouteV1> BuildRoutes() =>
     [

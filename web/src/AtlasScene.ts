@@ -3,10 +3,11 @@ import { isFreshLive } from './atlas'
 import { CityActivation } from './atlasActivation'
 import { cityGeometrySignature, planAtlasCity, type AtlasCityPlan } from './atlasCity'
 import { buildAtlasCityGeometry, PAD_HEIGHT, type AtlasCityGeometry } from './atlasCityBuildings'
-import { fitDistance, MIN_FRAME_EXTENT, VIEW_DIRECTION } from './atlasFraming'
+import { fitDistance, MAP_VIEW_DIRECTION, MIN_FRAME_EXTENT, VIEW_DIRECTION } from './atlasFraming'
 import { AtlasLayoutReservations, stableHash } from './atlasLayout'
 import { createCityLabels, databaseLabelText, labelAnchor, type CityLabels } from './cityLabels'
 import type { AtlasSnapshot, DatabaseAtlasItem, EdgeConfidence } from './contracts'
+import { MAP_PALETTE, type MapViewMode } from './mapStyle'
 
 /**
  * The server atlas: one small city per database on a shared grid.
@@ -54,6 +55,10 @@ export class AtlasScene {
   private readonly reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
   private frame: number | null = null
   private hoveredId: string | null = null
+  /** Flat basemap or oblique 3D. The atlas rebuilds on switch; it holds only a handful of cities. */
+  private viewMode: MapViewMode = 'city'
+  private lastSnapshot: AtlasSnapshot | null = null
+  private lastSelectedId: string | null = null
   private readonly canvas: HTMLCanvasElement
   private readonly callbacks: AtlasSceneCallbacks
   private readonly labels: CityLabels = createCityLabels(ATLAS_LABEL_WORLD_HEIGHT)
@@ -71,6 +76,9 @@ export class AtlasScene {
   private readonly contentBounds = new THREE.Box3()
   private readonly frameCenter = new THREE.Vector3()
   private readonly frameExtents = new THREE.Vector3(MIN_FRAME_EXTENT, MIN_FRAME_EXTENT, MIN_FRAME_EXTENT)
+  private readonly nightLights: THREE.Object3D[]
+  private readonly ambientLight: THREE.AmbientLight
+  private readonly grid: THREE.GridHelper
 
   constructor(canvas: HTMLCanvasElement, callbacks: AtlasSceneCallbacks) {
     this.canvas = canvas
@@ -85,10 +93,17 @@ export class AtlasScene {
     const key = new THREE.DirectionalLight(0xfff4d4, 2.8)
     key.position.set(-80, 160, 100)
     this.scene.add(key)
+    this.nightLights = [this.scene.children[0], key]
+    // Intensity π, not 1: three.js resolves ambient light through the Lambert BRDF, which divides by
+    // π, so an intensity of 1 would draw every surface at about a third of its own colour. Cancelling
+    // that divide is what makes a lit material render as exactly its base colour in map mode.
+    this.ambientLight = new THREE.AmbientLight(0xffffff, Math.PI)
+    this.ambientLight.visible = false
+    this.scene.add(this.ambientLight)
 
-    const grid = new THREE.GridHelper(1240, 62, 0x38516a, 0x1a2735)
-    grid.position.y = -0.2
-    this.scene.add(grid)
+    this.grid = new THREE.GridHelper(1240, 62, 0x38516a, 0x1a2735)
+    this.grid.position.y = -0.2
+    this.scene.add(this.grid)
 
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(canvas)
@@ -101,6 +116,7 @@ export class AtlasScene {
   }
 
   setSnapshot(snapshot: AtlasSnapshot): void {
+    this.lastSnapshot = snapshot
     this.clearAtlasObjects()
     this.contentBounds.makeEmpty()
     const centers = new Map<string, THREE.Vector3>()
@@ -133,9 +149,33 @@ export class AtlasScene {
   }
 
   setSelected(databaseId: string | null): void {
+    this.lastSelectedId = databaseId
+    const base = this.viewMode === 'map' ? 0 : 0.08
+    const active = this.viewMode === 'map' ? 0.35 : 0.75
     for (const [id, materials] of this.cityMaterials) {
-      for (const material of materials) material.emissiveIntensity = id === databaseId ? 0.75 : 0.08
+      for (const material of materials) material.emissiveIntensity = id === databaseId ? active : base
     }
+    this.render()
+  }
+
+  /**
+   * Switches the atlas between the flat basemap drawing and the oblique 3D view.
+   *
+   * The atlas holds one parcel per database, so a rebuild is cheaper and far simpler than a material
+   * indirection. Nothing measured changes: parcel size, tint, and label are computed in
+   * `planAtlasCity` and are identical in both modes.
+   */
+  setViewMode(mode: MapViewMode): void {
+    if (mode === this.viewMode) return
+    this.viewMode = mode
+    const flat = mode === 'map'
+    this.renderer.setClearColor(flat ? MAP_PALETTE.ground : 0x080c12, 1)
+    for (const light of this.nightLights) light.visible = !flat
+    this.ambientLight.visible = flat
+    this.grid.visible = !flat
+    if (this.lastSnapshot) this.setSnapshot(this.lastSnapshot)
+    else this.placeCamera()
+    this.setSelected(this.lastSelectedId)
     this.render()
   }
 
@@ -166,16 +206,21 @@ export class AtlasScene {
 
     const tint = plan.sizeKnown ? colorFor(database.databaseId) : 0x637080
     const materials: THREE.MeshStandardMaterial[] = []
+    const flat = this.viewMode === 'map'
 
     // The pad is always present, so it is what a pointer finds over a city with no massing at all.
+    // In map mode it becomes the parcel itself: a light plate with the database's tint, the way a
+    // basemap draws a named area.
     const padMaterial = new THREE.MeshStandardMaterial({
-      color: plan.sizeKnown ? 0x1d2a36 : 0x2a323b,
+      color: flat
+        ? (plan.sizeKnown ? MAP_PALETTE.block : 0xe4e2da)
+        : (plan.sizeKnown ? 0x1d2a36 : 0x2a323b),
       roughness: 0.95,
       metalness: 0.02,
       transparent: !plan.sizeKnown,
       opacity: plan.sizeKnown ? 1 : 0.55,
       emissive: tint,
-      emissiveIntensity: 0.08,
+      emissiveIntensity: flat ? 0 : 0.08,
     })
     materials.push(padMaterial)
     this.addCityMesh(geometry.pad, padMaterial, center, database.databaseId, true)
@@ -186,7 +231,7 @@ export class AtlasScene {
         roughness: 0.72,
         metalness: 0.08,
         emissive: tint,
-        emissiveIntensity: 0.08,
+        emissiveIntensity: flat ? 0 : 0.08,
       })
       materials.push(massingMaterial)
       this.addCityMesh(geometry.massing, massingMaterial, center, database.databaseId, true)
@@ -194,18 +239,22 @@ export class AtlasScene {
 
     if (geometry.trim) {
       const trimMaterial = new THREE.MeshStandardMaterial({
-        color: 0xdbe7f2,
+        color: flat ? MAP_PALETTE.buildingEdge : 0xdbe7f2,
         roughness: 0.5,
         metalness: 0.05,
         emissive: tint,
-        emissiveIntensity: 0.08,
+        emissiveIntensity: flat ? 0 : 0.08,
       })
       materials.push(trimMaterial)
       this.addCityMesh(geometry.trim, trimMaterial, center, database.databaseId, false)
     }
 
     if (geometry.streets) {
-      const streetMaterial = new THREE.LineBasicMaterial({ color: 0x8fb4d4, transparent: true, opacity: 0.42 })
+      const streetMaterial = new THREE.LineBasicMaterial({
+        color: flat ? MAP_PALETTE.roadCasing : 0x8fb4d4,
+        transparent: true,
+        opacity: flat ? 0.9 : 0.42,
+      })
       const streets = new THREE.LineSegments(geometry.streets, streetMaterial)
       streets.position.copy(center)
       streets.userData.atlasObject = true
@@ -233,6 +282,8 @@ export class AtlasScene {
   ): void {
     const mesh = new THREE.Mesh(geometry, material)
     mesh.position.copy(center)
+    // Massing is a 3D claim. The flat drawing keeps the same footprint and tint but no height.
+    if (this.viewMode === 'map') mesh.scale.y = 0.02
     mesh.userData.databaseId = databaseId
     mesh.userData.atlasObject = true
     this.disposables.push(material)
@@ -413,12 +464,22 @@ export class AtlasScene {
    * on snapshot, because a narrower panel needs to stand further back to hold the same cities.
    */
   private placeCamera(): void {
-    const distance = fitDistance(this.frameExtents, this.camera.fov, this.camera.aspect)
+    // Map mode is a plan view on the same heading, with a narrow field of view so parcels at the edge
+    // of the atlas are not skewed by perspective — a basemap that keels over at the margins reads as a
+    // rendering fault rather than as a map.
+    const flat = this.viewMode === 'map'
+    const view = flat ? MAP_VIEW_DIRECTION : VIEW_DIRECTION
+    const fov = flat ? 12 : 36
+    if (this.camera.fov !== fov) {
+      this.camera.fov = fov
+      this.camera.updateProjectionMatrix()
+    }
+    const distance = fitDistance(this.frameExtents, this.camera.fov, this.camera.aspect, undefined, view)
     const reach = this.frameExtents.length()
     this.camera.position.set(
-      this.frameCenter.x + VIEW_DIRECTION.x * distance,
-      this.frameCenter.y + VIEW_DIRECTION.y * distance,
-      this.frameCenter.z + VIEW_DIRECTION.z * distance,
+      this.frameCenter.x + view.x * distance,
+      this.frameCenter.y + view.y * distance,
+      this.frameCenter.z + view.z * distance,
     )
     this.camera.lookAt(this.frameCenter)
     this.camera.near = Math.max(1, distance - reach * 2)

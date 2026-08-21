@@ -736,7 +736,7 @@
         }
       ],
       "resultSets": 1,
-      "resultContract": "Zero or more rows, one per attached index for at most @TopN parent tables/indexed views selected by object_id > @AfterObjectId. schema_layout_ordinal is the stable compact rank of schema_id in sys.schemas. Exact bigint reserved_pages/used_pages are object totals over all partitions and repeat only to preserve each index's parent attachment.",
+      "resultContract": "Zero or more rows, one per attached index for at most @TopN parent tables/indexed views selected by object_id > @AfterObjectId. schema_layout_ordinal is the stable compact rank of schema_id in sys.schemas. Exact bigint reserved_pages/used_pages are object totals over all partitions and repeat only to preserve each index's parent attachment. total_objects repeats on every row and counts every object the probe would return across all pages, unbounded by the keyset; zero rows on the first page therefore means the database holds no eligible objects.",
       "relativeCost": "low"
     },
     {
