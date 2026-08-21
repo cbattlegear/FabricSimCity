@@ -121,7 +121,7 @@ jobs:
             VERSION=${{ github.ref_name }}
             REVISION=${{ github.sha }}
           provenance: mode=max
-          sbom: type=spdx
+          sbom: true
           cache-from: type=gha,scope=sqlsimcity-release
           cache-to: type=gha,mode=max,scope=sqlsimcity-release
 
