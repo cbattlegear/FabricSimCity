@@ -349,6 +349,80 @@ First MVP release candidate. There is no tagged release yet.
     estimate from the area. Which lot inside a neighbourhood, and which neighbourhood sits next to
     which, remain arbitrary.
 
+- **The streets are traced now, not laid out.** The previous pass moved the junctions off the lattice
+  and the result was still, in the end, a wiggly grid: displacing `col * pitch, row * pitch` gives you
+  a deformed lattice, and a deformed lattice is a lattice. So the street plan is no longer authored at
+  all. Five new modules generate it and the blocks are whatever the streets happen to enclose.
+
+  - **A tensor field decides which way the streets run** (`web/src/cityField.ts`). A tensor rather
+    than a vector because a tensor carries two perpendicular directions at once, so tracing one family
+    along the first and the cross streets along the second makes them meet at right angles everywhere
+    while both curve freely — orthogonality is a property of the mathematics rather than a rule
+    anything has to enforce. The field is a sum of overlapping district grains, each with its own
+    bearing and extent, plus a term that turns streets to run along the river instead of into it.
+
+  - **Streets are traced through it and stop when they meet each other**
+    (`web/src/cityStreamlines.ts`), integrating with RK4 and growing outward from what already exists.
+    That single stopping rule is what produces the look: streets end where they run into other
+    streets, in T-junctions, without anything having decided to make a T-junction.
+
+  - **Blocks are recovered, not allocated** (`web/src/cityGraph.ts`, `web/src/cityBlocks.ts`). The
+    traced curves are split at their crossings, welded, snapped and trimmed into a planar graph, and
+    the city blocks are its faces — every one a different shape and size because the streets around it
+    are. A share of the crossroads is then broken down into pairs of T-junctions, because two
+    orthogonal families produce more four-way junctions than a real city has.
+
+  There is deliberately **no ring road, no radial spokes and no centre** in the field, after three
+  attempts at one all failed and each looked right in the code. A radial element gives a dozen
+  concentric rings converging on a point, so the most ordered part of the map is exactly where a real
+  city is most tangled. Adding noise turns those rings into a *spiral*, because a street tracing a
+  ring comes back round one street's width inside where it began and carries on — and nothing objects,
+  since each arm of the spiral is a legal distance from the last. Peaking the element on a circle
+  removes the whirlpool but leaves four or five concentric rings on the ring line, because a field
+  cannot say "exactly one ring road": it gives a direction everywhere and the tracer fills the space
+  with streets parallel to it. The large scale is now left to emerge from overlapping district grains,
+  and the city gets a legible skeleton and a centre without either having been drawn. District grain
+  scales with distance from the middle, so the core is a mosaic of small parcels and the outskirts are
+  single large plans.
+
+  Measured against Boeing's survey of 27,000 real networks — 23.4% four-way, 14.5% dead ends, mean
+  degree 2.7–3.0 — the traced city holds 23.5–26.6% four-way, 16–18% dead ends and mean degree
+  2.73–2.75, and every sample journey routes, where the earlier tuning left islands the router could
+  not reach.
+
+- **Query routes are driven now, not walked.** Roads gained a real hierarchy, speed limits, and
+  satnav-style routing, and the workload decides where the traffic goes.
+
+  - **Road class is measured on the network rather than asserted** (`web/src/cityRouting.ts`). Edge
+    betweenness — the share of shortest routes between all pairs of junctions that use each street —
+    finds the roads everything has to pass through, which is the definition of an arterial. Classes
+    are assigned by *rank*, not by score against the busiest street: a city of overlapping grains has
+    many roughly equal cross-town routes rather than one clear peak, and scoring promoted a third of
+    the network. Fixing the proportions instead makes the ladder read on a six-table database and a
+    six-thousand-table one alike, and is the honest reading of what betweenness measures — a ranking,
+    not an absolute. Class sets a speed limit and a carriageway width.
+
+  - **Routing is A\* over travel time with turn penalties.** States sit on *directed* edges rather
+    than junctions, which is the only way to charge for a turn at all: at a junction you have no idea
+    which way the journey arrived, so there is nothing to compare the departure against. Turn
+    penalties stop a route zig-zagging block by block toward its destination, and following a bend
+    costs nothing because headings are read from the vertices either side of the junction.
+
+  - **The measured workload loads the network** (`web/src/cityAssignment.ts`). Each ranked query
+    family contributes trips between the objects it named, in proportion to its measured execution
+    count, and those trips are assigned incrementally: route a journey, add its traffic, recost the
+    streets it filled with the standard BPR congestion curve, route the next. Busy corridors slow as
+    they fill and later journeys find their own way round, so two heavy families between the same pair
+    of buildings are drawn on different roads instead of on top of each other. Trips are normalised to
+    a unit total first, so how congested the map looks reflects the *shape* of the workload rather
+    than how busy the server happened to be.
+
+  **No measured quantity changed.** Footprint, height, archetype, road width, dash, and facility slot
+  fill are byte-identical, and street geometry and road class remain a pure function of the
+  database-id seed, so the same database still draws the same city. The demand is measured and used
+  verbatim; the route it takes is not evidence, and the legend's "The street plan is drawn too" block
+  now names road class, speed limit, block shape and congestion alongside the rest.
+
 - **The street plan is a city now, not a wiggled grid.** Streets had been given curves and a class
   hierarchy, but every junction still sat at `col * pitch, row * pitch`, so the map still read as
   graph paper with bent lines on it. Bending a road between two lattice points leaves two lattice

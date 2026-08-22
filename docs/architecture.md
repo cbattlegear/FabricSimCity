@@ -141,21 +141,21 @@ Without shared exposure a normalized schema renders almost entirely blank, becau
 and they come on-page. The strict attribution rule is deliberately unchanged; shared exposure is what
 makes that strictness survivable on a real workload.
 
-The city is laid out as a real street plan rather than a bar chart. `web/src/cityPlan.ts` builds a
-block lattice — irregularly spaced and displaced, see [the landscape section](#the-landscape-around-the-evidence)
-— and hands blocks out using a seeded generator (`web/src/citySeed.ts`), so a
+The city is laid out as a real street plan rather than a bar chart. `web/src/cityPlan.ts` traces a
+street network — see [the landscape section](#the-landscape-around-the-evidence) — recovers the city
+blocks it encloses, and hands those blocks out using a seeded generator (`web/src/citySeed.ts`), so a
 city looks like a city instead of a packed rectangle while remaining completely deterministic: the
 seed is a stable hash of the database's own id, and every draw comes from that one stream. The same
 database therefore lays out identically on every load, in every browser, on every machine.
 
 Blocks are not handed out from one city-wide shuffle. `planNeighborhoods` first partitions the
-buildable grid into one **contiguous territory per schema**, so a schema is a quarter of the city
+buildable blocks into one **contiguous territory per schema**, so a schema is a quarter of the city
 rather than a colour sprinkled across it. Each schema gets a seed block chosen by farthest-point
 sampling, and the territories then grow outward a block at a time in rounds, each schema taking
 ground until it meets a quota proportional to its full object count. Every block carries a fixed
 seeded handicap on its cost, so regions grow as ragged blobs rather than discs and the borders land
 wherever two regions happen to meet. A territory that gets walled in falls back to the nearest free
-ground, so every object is housed even on a cramped grid.
+ground, so every object is housed even in a cramped city.
 
 Two rules make that layout safe to build on:
 
@@ -236,57 +236,128 @@ woodland, orchard, greenway, plaza, parking, yard, or open water. Land use is ch
 cell at a time rather than a block at a time, with a minority of blocks breaking ranks along the
 boundary, so open ground reads as a region with a ragged edge instead of confetti.
 
-The street network is deliberately not a lattice, and it is not a wiggled lattice either. Bending a
-road between two fixed lattice points leaves two lattice points, and it is the *junctions* the eye
-reads a street plan by. So `web/src/cityWarp.ts` owns the `(col, row) → world` mapping and actually
-moves them, in four layers: spans that vary block to block instead of one constant pitch, a smooth
-low-frequency meander that bends whole runs of street together, a per-district rotation that fades to
-zero at the arterial seams so arterials stay continuous, and a pull toward each public square. Every
-block is therefore its own quadrilateral at its own angle, and the ground quads, land cover,
-neighbourhood washes and addresses are all built from that mapping rather than from a pitch. Because
-division no longer inverts the mapping, `warp.nearestNode` and `warp.blockAt` do the inverse by
-search.
+The street network is not a lattice, and it is not a wiggled lattice either. Bending a road between
+two fixed lattice points leaves two lattice points, and it is the *junctions* the eye reads a street
+plan by. So the streets are not laid out at all; they are **traced**, and the blocks are whatever
+they enclose. Five modules do it, and none of them ever sees a measurement:
 
-`WARP_HEADROOM` is the budget the whole thing is spent from: a block packed exactly to
-`cell + streetWidth` cannot deform at all without putting a corner inside a building. It is kept
-close to 1 because it compounds with `MAX_SPAN` into the average block, and blocks much larger than
-the buildings they hold leave every plot marooned in a field. `fitDisplacement` then *measures*
-rather than assumes: it checks every block's inradius against what the building needs and halves the
-displacement until it fits, so the guarantee holds on every seed. A test asserts the fit runs at full
-strength on twenty seed-and-size combinations, so the safety net can never quietly flatten a city
-back toward a grid without failing the build.
+- **`cityField.ts`** plans a **tensor field** over the city — a direction for every point on the
+  ground. A tensor rather than a vector because a tensor carries *two* perpendicular directions at
+  once: trace one family of streets along the first and the cross streets along the second, and
+  because the eigenvectors of a symmetric tensor are orthogonal by construction the two families meet
+  at right angles everywhere while both curve freely. It is stored as `(a, b) = (R·cos2θ, R·sin2θ)`;
+  the doubled angle is what makes a street running north–south identical to one running south–north,
+  and it is what lets two fields be blended by ordinary addition, which averaging angles cannot do.
+  The field is a sum of district grains — a dozen to forty overlapping quarters, each with its own
+  bearing, extent and falloff, some laid out around a point rather than along a bearing — plus a
+  boundary term that turns streets to run along the river rather than into it.
+- **`cityStreamlines.ts`** traces streets by integrating the field with RK4 from seed points, growing
+  the network outward from what already exists, and stopping a street when it comes within half a
+  separation of another. That one rule is what produces the characteristic look: streets end where
+  they meet other streets, in T-junctions, without anything having decided to make a T-junction.
+- **`cityGraph.ts`** turns the traced curves into a planar graph — splitting them at their crossings,
+  welding coincident junctions, snapping near misses onto the network and trimming stubs that stop in
+  open ground — and then walks the graph's faces to recover the city blocks. It also breaks a share of
+  the crossroads down into pairs of T-junctions, because tracing two orthogonal families produces more
+  four-way junctions than a real city has.
+- **`cityBlocks.ts`** insets each face by the pavement setback to get the buildable ground inside it,
+  and measures how many lots that ground will hold.
+- **`cityRouting.ts`** assigns each street a class, a speed limit and a width.
 
-On top of that, `planArterials` lays heavy roads at irregular intervals of three to seven blocks, and
-`planPlazas` opens squares where interior arterials cross. Each cell between arterials takes one of
-seven interior patterns — `downtown` (the full fine grid), `ladder`, `crescent`, `estate`, `radial`,
-`organic` and `open` — weighted by distance from the centre, so `downtown` is confined to the middle
-of town and is never the default. `radialAvenues` runs spokes into each square.
+There is deliberately **no city-wide element in the field** — no ring road, no radial spokes, no
+centre. Three attempts at one all failed the same way, and the failures are worth recording because
+each looked correct in the code. A single radial element at the middle produces a dozen perfectly
+concentric rings converging on a point, so the most ordered part of the map is exactly where a real
+city is most tangled. Adding noise to break them up turns the rings into a **spiral**: a street
+tracing a ring comes back round about one street's width inside where it began, carries on, and does
+it again — and no rule objects, because each arm of the spiral is a legal distance from the last. And
+peaking the element on a *circle* rather than a point removes the whirlpool but still yields four or
+five concentric rings sitting on the ring line, because a field cannot say "exactly one ring road": it
+gives a direction everywhere, and the tracer fills the space with streets parallel to it. Even at a
+third of a district's weight the nest of arcs was the first thing the eye found.
 
-The last pass is the one that matters most. Boeing's survey of 27,000 street networks
-([arxiv.org/abs/1705.02198](https://arxiv.org/abs/1705.02198)) puts a real city at roughly 57%
-T-junctions, 14.5% dead ends and only 23% four-way crossings, with a mean node degree of 2.7–3.0; a
-lattice is 100% four-way at 4.0, which is exactly why it reads as graph paper. `pruneJunctions`
-removes street segments toward those targets, refusing any removal that would disconnect the graph,
-strand a block with no street to front on, or break an arterial. Measured across seeds and city sizes
-from 24 to 700 buildings it holds mean degree 2.5–2.7, dead ends 13.5–14.3% and four-way crossings
-10–19%, and `cityPlan.test.ts` asserts that range.
+So the large scale is left to emerge instead. Overlapping district grains already bend long streets
+into arcs that cross several quarters, and the classification pass below discovers which of them the
+network actually depends on. The city ends up with a legible skeleton and a centre without either
+having been drawn, which is also how the real thing happened. District grain scales with distance
+from the middle, so the core is a mosaic of small parcels laid out one at a time and the outskirts
+are single large plans — a medieval centre and a post-war estate, from one line of arithmetic.
 
-Streets carry a sampled `path` rather than two endpoints, bowed by a seeded field and clipped so a
-wandering centre line can never reach a building; roads that run with the river become embankments
-and roads that cross it become bridge decks. Because a bowed street's carriageway is nowhere near the
-straight-line midpoint of its junctions, `rebindFrontages` runs after placement and snaps every lot's
-access point onto the nearest point of a drawn path — the door lands on the road you can see. Trees,
-hedges, street furniture, parked cars, rooftop clutter, the architecture of the six facility shells,
-and the golden-hour sky, fog and shadows are all generated from the same database-id seed. The
-generator scripts for the Blender-authored kits live in `blender/` so every `.glb` in
+Boeing's survey of 27,000 street networks ([arxiv.org/abs/1705.02198](https://arxiv.org/abs/1705.02198))
+puts a real city at roughly 57% T-junctions, 14.5% dead ends and only 23% four-way crossings, with a
+mean node degree of 2.7–3.0; a lattice is 100% four-way at 4.0, which is exactly why it reads as
+graph paper. The traced network measures 23.5–26.6% four-way, 39–44% T, 16–18% dead ends and mean
+degree 2.73–2.75 across seeds, and the tests assert that range.
+
+##### Road hierarchy, speed limits and where the traffic goes
+
+A street's importance is not asserted, it is **measured on the network**: `classifyRoads` computes
+edge betweenness — for every pair of junctions, the share of shortest routes between them that use
+each street — and the streets everything has to pass through are the ones that come out highest. That
+is the definition of an arterial road, and discovering it rather than declaring it is why the
+hierarchy lands on roads that genuinely go somewhere.
+
+Classification is by **rank**, not by score. Scoring against the busiest street assumes the
+distribution has a clear peak; a city of overlapping grains has many roughly equal cross-town routes
+instead, they all sit near the maximum, and a third of the network came out as arterial. Fixing the
+proportions instead — the busiest 3% are motorways, to 9% primary, 19% secondary, 35% tertiary, 80%
+residential, the rest service roads — guarantees the ladder reads on any network from six tables to
+six thousand. It is also the honest reading of what betweenness measures: a ranking, not an absolute.
+"This street is in the busiest three per cent" is exactly the claim the algorithm supports. Class then
+sets a speed limit and a carriageway width.
+
+Query routes are then driven like a satnav rather than walked. `RoadRouter` is A* over **travel
+time** — length over speed limit — with states on *directed* edges rather than on junctions, which is
+the only way to charge for turns at all: at a junction you have no idea which way the journey arrived,
+so there is nothing to compare the departure against. Turn penalties are what stop a route zig-zagging
+block by block toward its destination when the staircase happens to measure a metre shorter, and
+following a road as it bends costs nothing because headings are taken from the vertices next to the
+junction rather than the far ends of the streets.
+
+`cityAssignment.ts` closes the loop with the workload. Each ranked query family contributes trips
+between the objects it named, in proportion to its measured execution count, and those trips are
+loaded onto the network incrementally: route a journey, add its traffic, recost the streets it filled
+with the standard BPR congestion curve, route the next. So a busy corridor gets slower as it fills and
+later journeys find their own way round, which is why two heavy families between the same pair of
+buildings are drawn on different roads instead of on top of each other. Three details matter:
+
+- **Costs are updated after every journey, not once per wave**, which is what a textbook incremental
+  assignment does. Per-wave recosting converges on the right flows but draws identical journeys
+  identically, and the whole point here is that they diverge.
+- **The congestion ceiling clamps the load, not the resulting delay.** Clamping the delay makes every
+  jammed street cost the same, the router can no longer tell them apart, and it silently reverts to
+  shortest path — the exact opposite of the intent.
+- **Each family is drawn on its modal route across the waves, not its final one.** Routing once more
+  over settled traffic puts a family's own trips in its way, so a family big enough to fill a street
+  gets diverted around traffic that is entirely its own, and is drawn on a back street while the main
+  road it actually filled sits empty.
+
+Trips are normalised to a unit total before loading, so how congested the map looks is a property of
+the *shape* of the workload and not of how busy the server happened to be that hour. The demand is
+measured and used verbatim; the route it takes is not evidence and never was.
+
+Because a six-thousand-table database draws a city with five and a half thousand junctions, the
+betweenness sweep samples its sources above a few hundred junctions and scales the totals back up —
+the standard estimator for this measure. It is an unusually safe approximation here because the result
+is only used as a ranking and the band edges are quantiles of the same distribution; a test measures
+the sampled ranking against the exact one by rank correlation rather than trusting it.
+
+Streets carry a sampled `path` rather than two endpoints, so roads that run with the river become
+embankments and roads that cross it become bridge decks. Because a traced street's carriageway is
+nowhere near the straight-line midpoint of its junctions, `rebindFrontages` runs after placement and
+snaps every lot's access point onto the nearest point of a drawn path — the door lands on the road you
+can see. Trees, hedges, street furniture, parked cars, rooftop clutter, the architecture of the six
+facility shells, and the golden-hour sky, fog and shadows are all generated from the same database-id
+seed. The generator scripts for the Blender-authored kits live in `blender/` so every `.glb` in
 `web/src/assets/` is reproducible and auditable; regenerate them by running
 `blender --background --python blender/simcity_kit.py`.
 
 None of this is derived from a measurement, so none of it can be read as one — a park is not idle
 space, a curving street is not a slow query, a big block is not a big table, a dead end is not a
-table nothing reaches, and a neighbourhood with a sparser street pattern is not a sparser schema. The
-in-app legend says so in as many words under "The scenery is not evidence" and "The street plan is
-drawn too".
+table nothing reaches, a motorway is not a hot table, a speed limit is not a latency, congestion on a
+street is not contention in the database, and a neighbourhood with a sparser street pattern is not a
+sparser schema. The in-app legend says so in as many words under "The scenery is not evidence" and
+"The street plan is drawn too".
 
 CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
 facilities scattered across the grid (`web/src/cityInfrastructure.ts`). Each facility's architecture
