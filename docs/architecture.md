@@ -255,6 +255,13 @@ they enclose. Five modules do it, and none of them ever sees a measurement:
   the network outward from what already exists, and stopping a street when it comes within half a
   separation of another. That one rule is what produces the characteristic look: streets end where
   they meet other streets, in T-junctions, without anything having decided to make a T-junction.
+  Propagation alone cannot cover a radial field — spokes diverge, so no seed dropped beside one ever
+  lands in the widening gap — so afterwards the plan is swept for ground no street came near and the
+  uncovered points are seeded and traced again. Coverage only ever grows, which is what lets the
+  sweep be cheap: the candidate grid is laid out once and each pass hands the next only the cells it
+  could not cover, so the second sweep and every sweep after it ignore the whole built-up map. It is
+  also what makes the sweep correct to skip that ground, and the invariant is asserted directly in
+  `cityStreamlines.test.ts` because nothing else would notice it breaking.
 - **`cityGraph.ts`** turns the traced curves into a planar graph — splitting them at their crossings,
   welding coincident junctions, snapping near misses onto the network and trimming stubs that stop in
   open ground — and then walks the graph's faces to recover the city blocks. It also breaks a share of
@@ -271,6 +278,16 @@ so sizing each one as a fraction of the radius makes the grain coarsen with ever
 district large enough simply *is* a city-wide element under another name. The largest instances
 spiralled for exactly this reason while every small one looked right. The rule generalises — **anything
 sized as a fraction of the city radius eventually becomes a city-wide element.**
+
+The city's own radius is `RADIUS_PER_ROOT_OBJECT · √objects` separations, and that constant is worth
+respecting because its effect is quadratic. A traced block covers roughly 1.34 separations squared,
+so a disc of that radius holds about `2.3 · k²` blocks per object: at `k = 1.75` every building has
+nine blocks to itself and the map is four fifths empty, at `k = 1.0` it has a little over two. The
+difference is not only cosmetic — every stage downstream, from tracing to growing neighbourhoods,
+pays for ground nothing stands on. `RADIUS_FLOOR_STEPS` puts a floor under small cities, where the
+blocks fall off with a disc's area while the buildings that need them do not, and it has to be large
+enough that a nine-table database still has more blocks than tables after the setback and capacity
+filters take their share.
 
 ###### Islands
 

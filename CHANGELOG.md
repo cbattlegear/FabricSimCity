@@ -403,6 +403,25 @@ First MVP release candidate. There is no tagged release yet.
   degree 2.7–3.0 — the traced city holds 23.7–25.6% four-way, 13–20% dead ends and mean degree
   2.73–2.83, at every size, and every sample journey routes.
 
+  Two sizing faults made a large database slow to open, and both were arithmetic rather than
+  algorithm. The city's radius was set at 1.75·√objects separations, which sounds like a modest
+  margin but is not: a traced block covers about 1.34 separations squared, so the ground grows as
+  the *square* of that constant and the map came out with nine blocks for every building — four
+  fifths empty, and four times the streets to trace, weld, classify and grow neighbourhoods across
+  for ground nothing would ever stand on. At 1.0 it is a little over two blocks per building, which
+  still leaves the facilities, the water and the gaps between neighbourhoods their room. Separately,
+  the gap sweep that fills the parts of a radial field propagation cannot reach was rasterising the
+  entire plan on every pass and never converging, so it always ran its full six passes per family
+  and paid the full price for each. Coverage only ever grows, so the candidate grid is now laid out
+  once and whittled down. Together these take planning a 2400-table city from **9.9 s to 1.3 s**,
+  with every street, lot and neighbourhood bit-for-bit unchanged by the sweep half of it.
+
+  Denser neighbourhoods then exposed a bug in their own labels. The name was written at the mean of
+  the blocks a schema owns, with a comment explaining why the *bounding box* centre would not do —
+  an L-shaped territory does not contain it. The mean has exactly the same flaw for a crescent,
+  whose middle is the bay. The label is now pulled to the owned block nearest that mean, which lies
+  on the neighbourhood by construction whatever shape it grew into.
+
 - **Query routes are driven now, not walked.** Roads gained a real hierarchy, speed limits, and
   satnav-style routing, and the workload decides where the traffic goes.
 
