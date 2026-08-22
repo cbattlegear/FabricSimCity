@@ -230,9 +230,18 @@ export class RoadRouter {
   private readonly properties: ReadonlyMap<number, RoadProperties>
   private readonly fastest: number
 
+  /**
+   * @param delay Optional live multiplier on each street's travel time, one entry per edge id, for
+   *   routing around traffic. The map is read on every traversal rather than copied, so a caller
+   *   loading the network in waves can update it between routes and see the effect immediately.
+   *   Values below one are clamped away: the A* heuristic divides the straight-line distance by the
+   *   fastest speed limit, and a street that beat its own limit would make that estimate optimistic
+   *   and the search no longer guaranteed to find the quickest way.
+   */
   constructor(
     private readonly graph: PlanarGraph,
     properties: ReadonlyMap<number, RoadProperties>,
+    private readonly delay?: ReadonlyMap<number, number>,
   ) {
     this.properties = properties
     for (const [nodeId, edgeIds] of graph.incident) this.outgoing.set(nodeId, [...edgeIds])
@@ -313,7 +322,8 @@ export class RoadRouter {
 
   private traversalTime(edge: GraphEdge): number {
     const speed = this.properties.get(edge.id)?.speedLimit ?? 1
-    return edge.length / speed
+    const congestion = Math.max(1, this.delay?.get(edge.id) ?? 1)
+    return (edge.length / speed) * congestion
   }
 
   /**
