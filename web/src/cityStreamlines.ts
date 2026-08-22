@@ -336,12 +336,37 @@ function traceBoth(
   index: ProximityIndex,
 ): Point[] {
   const forward = traceOneWay(field, family, seed, 1, separationAt, inside, index)
+  // A street that came back to where it started is a complete ring; tracing the other way from the
+  // seed would only retrace the same loop backwards.
+  if (forward.closed) return forward.points
   const backward = traceOneWay(field, family, seed, -1, separationAt, inside, index)
   const points: Point[] = []
-  for (let i = backward.length - 1; i >= 1; i -= 1) points.push(backward[i])
-  for (const point of forward) points.push(point)
+  for (let i = backward.points.length - 1; i >= 1; i -= 1) points.push(backward.points[i])
+  for (const point of forward.points) points.push(point)
   return points
 }
+
+/**
+ * Arc a street must cover before it is allowed to close on its own start, in separations.
+ *
+ * Without a floor a street that merely doubles back over a block would be closed into a tiny loop.
+ * Eight separations is several blocks of travel — far enough that returning to the start really does
+ * mean the street went round something.
+ */
+const RING_MIN_ARC = 8
+
+/**
+ * How near the start a street must come to be closed into a ring, in separations.
+ *
+ * Wider than the stopping distance used against other streets, and deliberately so. A ring traced
+ * through a field with any noise in it does not come back to its exact start; it comes back one
+ * street's width off, and keeps going, and the next lap is another width in, and the result is a
+ * spiral. A spiral does not break any separation rule — each arm is a legal distance from the last —
+ * so nothing else in the tracer objects to it, and it is one continuous street where a city would
+ * have a ring and the roads that cross it. Closing anything that gets within a street or so of its
+ * own start is what turns that spiral back into the ring it was trying to be.
+ */
+const RING_CLOSE_FRACTION = 1.4
 
 function traceOneWay(
   field: CityField,
@@ -351,11 +376,12 @@ function traceOneWay(
   separationAt: (x: number, z: number) => number,
   inside: (x: number, z: number) => boolean,
   index: ProximityIndex,
-): Point[] {
+): { points: Point[]; closed: boolean } {
   const points: Point[] = [{ x: seed.x, z: seed.z }]
   let reference = directionAt(field, family, seed.x, seed.z, null)
-  if (reference === null) return points
+  if (reference === null) return { points, closed: false }
   reference = { x: reference.x * sign, z: reference.z * sign }
+  let arc = 0
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const current = points[points.length - 1]
@@ -364,6 +390,16 @@ function traceOneWay(
     const next = integrate(field, family, current, reference, stride)
     if (next === null) break
     if (!inside(next.point.x, next.point.z)) break
+
+    arc += Math.hypot(next.point.x - current.x, next.point.z - current.z)
+    if (arc > separation * RING_MIN_ARC) {
+      const back = Math.hypot(next.point.x - seed.x, next.point.z - seed.z)
+      if (back < separation * RING_CLOSE_FRACTION) {
+        points.push(next.point)
+        points.push({ x: seed.x, z: seed.z })
+        return { points, closed: true }
+      }
+    }
 
     /*
      * Stopping *at* an existing street of the same family rather than short of it. The point is
@@ -382,7 +418,7 @@ function traceOneWay(
     points.push(next.point)
     reference = next.direction
   }
-  return points
+  return { points, closed: false }
 }
 
 /**

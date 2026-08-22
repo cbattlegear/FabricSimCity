@@ -144,6 +144,17 @@ export interface FieldElement {
   readonly theta: number
   readonly weight: number
   readonly decay: number
+  /**
+   * Distance from the element's centre at which it is strongest, instead of at the centre itself.
+   *
+   * A radial element peaked at its own centre is a whirlpool: its influence is strongest exactly
+   * where the streets are supposed to be most tangled, so the historic core comes out as the most
+   * perfectly ordered part of the city, which is the reverse of every real one. Real ring roads sit
+   * at a radius — an orbital, a boulevard on the line of the old walls — with an irregular core
+   * inside them that owes nothing to the ring. Peaking the element on a circle rather than a point
+   * reproduces that, and leaves the middle to the local district grain.
+   */
+  readonly ringRadius?: number
 }
 
 /**
@@ -187,7 +198,12 @@ export function sampleField(field: CityField, x: number, z: number): Tensor {
   for (const element of field.elements) {
     const dx = x - element.x
     const dz = z - element.z
-    const falloff = Math.exp(-element.decay * (dx * dx + dz * dz))
+    const distanceSquared = dx * dx + dz * dz
+    // The square root is only paid for by elements that actually peak on a circle.
+    const spread = element.ringRadius === undefined
+      ? distanceSquared
+      : (Math.sqrt(distanceSquared) - element.ringRadius) ** 2
+    const falloff = Math.exp(-element.decay * spread)
     if (falloff < FALLOFF_EPSILON) continue
 
     const raw = element.kind === 'radial'
@@ -367,19 +383,22 @@ export function planField(options: CityFieldOptions): CityField {
   const elements: FieldElement[] = []
 
   /*
-   * The dominant centre decays over roughly the whole city, so its rings and spokes organise the
-   * core strongly and the outskirts only loosely. `3.1 / radius²` puts the falloff at about 4% of
-   * full strength at the edge of the built-up area — present everywhere, dominant only in the middle.
+   * There is deliberately no city-wide element here, and that is the hardest-won line in the module.
+   *
+   * The obvious way to give a city a centre is one strong radial element in the middle. It produces
+   * a bullseye: a dozen perfectly concentric rings crossed by spokes. Peaking that element on a
+   * circle instead of a point — an orbital where the walls used to be — fixes the whirlpool at the
+   * very centre and still leaves four or five concentric rings sitting on the ring line, because a
+   * field cannot say "exactly one ring road". A field gives a direction everywhere and the tracer
+   * fills space with streets parallel to it, so asking for a ring always yields a family of rings.
+   * Even at a third of a district's weight the nest of arcs is the first thing the eye finds.
+   *
+   * So the large scale is left to emerge instead. Overlapping district grains already bend the long
+   * streets into arcs that cross several quarters, and the betweenness pass in `cityRouting` then
+   * finds which of them the network actually depends on and promotes those to arterials. The result
+   * has a legible skeleton and a centre without any single element having been told to draw one —
+   * which is also how the real thing happened.
    */
-  elements.push({
-    kind: 'radial',
-    x: centreX,
-    z: centreZ,
-    theta: 0,
-    weight: 1.35,
-    decay: 3.1 / (radius * radius),
-  })
-
   const districts = Math.round(
     clamp(Math.PI * radius * radius * DISTRICTS_PER_UNIT_AREA, DISTRICTS_MIN, DISTRICTS_MAX),
   )
@@ -392,18 +411,25 @@ export function planField(options: CityFieldOptions): CityField {
     const angle = rng() * Math.PI * 2
     const distance = radius * 1.02 * Math.sqrt(rng())
     /*
-     * Mostly grid elements. A radial element sweeps a whole quarter of the map into concentric
-     * arcs, so a field made largely of them returns to the bullseye by another route; used sparingly
-     * they read as the market towns and village greens a city grew around.
+     * Mostly grid elements, and the radial ones are held well below their neighbours' weight. A
+     * radial element sweeps its whole footprint into concentric arcs, so at full strength it plants
+     * a small bullseye — a village green ringed four times over — which is as artificial at district
+     * scale as it was at city scale. Kept faint they do what they are for: bend the surrounding
+     * streets around a market place that was there before the streets were.
      */
-    const kind: FieldElementKind = rng() < 0.3 ? 'radial' : 'grid'
-    const spread = 0.24 + rng() * 0.26
+    const radialDistrict = rng() < 0.2
+    /*
+     * Districts get finer towards the middle. A medieval core is a mosaic of small parcels laid out
+     * one at a time, and a post-war estate on the edge is one plan over a large area; matching that
+     * gives the core its tangle and the outskirts their long coherent runs, from one line.
+     */
+    const spread = 0.11 + 0.2 * (distance / radius) + rng() * 0.13
     elements.push({
-      kind,
+      kind: radialDistrict ? 'radial' : 'grid',
       x: centreX + Math.cos(angle) * distance,
       z: centreZ + Math.sin(angle) * distance,
       theta: rng() * Math.PI,
-      weight: 0.55 + rng() * 0.75,
+      weight: (0.55 + rng() * 0.75) * (radialDistrict ? 0.6 : 1),
       decay: 1 / (radius * spread * (radius * spread)),
     })
   }

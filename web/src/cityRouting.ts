@@ -61,46 +61,87 @@ const CLASS_PROPERTIES: Record<RoadClass, { speed: number; width: number }> = {
 }
 
 /**
- * Betweenness at which a street is promoted to each class, as a share of the maximum found.
+ * Share of the network in each class, counted from the busiest street down.
  *
- * Thresholds are relative rather than absolute so the same ladder works for a six-table database and
- * a six-thousand-table one. The shares are steep — the top class needs half the busiest street's
- * centrality — because a road hierarchy in which a third of the streets are arterials is not a
- * hierarchy, and the map has to be readable at a glance from the weight of the lines alone.
+ * Classification is by *rank*, not by betweenness relative to the busiest street, and the difference
+ * matters more than it looks. A threshold on relative betweenness assumes the distribution has a
+ * clear peak — one dominant arterial everything funnels through — and gives a clean hierarchy when
+ * it does. A city built from overlapping district grains has no such peak: centrality is spread over
+ * many roughly equal cross-town routes, they all sit near the maximum, and a third of the network is
+ * promoted to arterial. A third of the streets being main roads is not a hierarchy, and the map
+ * stops being readable from the weight of its lines, which is the one job the classification has.
+ *
+ * Fixing the proportions instead guarantees the ladder reads on any network, from a six-table
+ * database to a six-thousand-table one, and it is honest about what betweenness measures: not an
+ * absolute importance but a ranking. "This street is in the busiest three per cent" is exactly the
+ * claim the algorithm supports.
+ *
+ * The proportions are roughly those of a real road network — arterials are a few per cent of the
+ * length and carry most of the traffic, which is what makes a road atlas legible at a glance.
  */
-const CLASS_THRESHOLDS: ReadonlyArray<{ roadClass: RoadClass; share: number }> = [
-  { roadClass: 'motorway', share: 0.52 },
-  { roadClass: 'primary', share: 0.32 },
-  { roadClass: 'secondary', share: 0.185 },
-  { roadClass: 'tertiary', share: 0.085 },
-  { roadClass: 'residential', share: 0.018 },
+const CLASS_SHARES: ReadonlyArray<{ roadClass: RoadClass; upTo: number }> = [
+  { roadClass: 'motorway', upTo: 0.03 },
+  { roadClass: 'primary', upTo: 0.09 },
+  { roadClass: 'secondary', upTo: 0.19 },
+  { roadClass: 'tertiary', upTo: 0.35 },
+  { roadClass: 'residential', upTo: 0.8 },
 ]
+
+/**
+ * Junctions a network needs before it may have a motorway.
+ *
+ * The top class of a nine-street village is still a village street. Without a floor, rank-based
+ * classification hands the busiest edge of any network the widest road on the map, and a hamlet gets
+ * a four-lane bypass through the middle of it.
+ */
+const MOTORWAY_MIN_EDGES = 60
 
 export function classifyRoads(graph: PlanarGraph): Map<number, RoadProperties> {
   const betweenness = edgeBetweenness(graph)
   let peak = 0
   for (const value of betweenness.values()) peak = Math.max(peak, value)
 
-  const properties = new Map<number, RoadProperties>()
+  /*
+   * A dead end is never a through route however the numbers fall. Betweenness already says so, but a
+   * cul-de-sac hanging off a very busy street can still rank high enough to be promoted, and a
+   * four-lane road that stops after thirty metres is the sort of detail that makes a generated map
+   * look generated. They are set aside before ranking so they do not consume arterial places either.
+   */
+  const dangling = new Set<number>()
   for (const edge of graph.edges) {
-    const share = peak === 0 ? 0 : (betweenness.get(edge.id) ?? 0) / peak
-    /*
-     * A dead end is never a through route however the numbers fall. Betweenness already says so, but
-     * a cul-de-sac hanging off a very busy street can still pick up a share large enough to promote
-     * it, and a four-lane road that stops after thirty metres is the sort of detail that makes a
-     * generated map look generated.
-     */
-    const dangling = (graph.incident.get(edge.fromId)?.length ?? 0) <= 1 ||
-      (graph.incident.get(edge.toId)?.length ?? 0) <= 1
-    const roadClass = dangling
-      ? 'service'
-      : CLASS_THRESHOLDS.find(entry => share >= entry.share)?.roadClass ?? 'service'
+    if ((graph.incident.get(edge.fromId)?.length ?? 0) <= 1 ||
+        (graph.incident.get(edge.toId)?.length ?? 0) <= 1) {
+      dangling.add(edge.id)
+    }
+  }
+
+  const ranked = graph.edges
+    .filter(edge => !dangling.has(edge.id))
+    .map(edge => ({ id: edge.id, score: betweenness.get(edge.id) ?? 0 }))
+    .sort((a, b) => b.score - a.score || a.id - b.id)
+
+  const properties = new Map<number, RoadProperties>()
+  const total = ranked.length
+  ranked.forEach((entry, rank) => {
+    const position = total === 0 ? 1 : rank / total
+    let roadClass: RoadClass = CLASS_SHARES.find(band => position < band.upTo)?.roadClass ?? 'service'
+    if (roadClass === 'motorway' && graph.edges.length < MOTORWAY_MIN_EDGES) roadClass = 'primary'
     const base = CLASS_PROPERTIES[roadClass]
-    properties.set(edge.id, {
+    properties.set(entry.id, {
       roadClass,
       speedLimit: base.speed,
       width: base.width,
-      betweenness: share,
+      betweenness: peak === 0 ? 0 : entry.score / peak,
+    })
+  })
+
+  for (const edgeId of dangling) {
+    const base = CLASS_PROPERTIES.service
+    properties.set(edgeId, {
+      roadClass: 'service',
+      speedLimit: base.speed,
+      width: base.width,
+      betweenness: peak === 0 ? 0 : (betweenness.get(edgeId) ?? 0) / peak,
     })
   }
   return properties
