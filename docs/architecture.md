@@ -248,9 +248,9 @@ they enclose. Five modules do it, and none of them ever sees a measurement:
   at right angles everywhere while both curve freely. It is stored as `(a, b) = (R·cos2θ, R·sin2θ)`;
   the doubled angle is what makes a street running north–south identical to one running south–north,
   and it is what lets two fields be blended by ordinary addition, which averaging angles cannot do.
-  The field is a sum of district grains — a dozen to forty overlapping quarters, each with its own
-  bearing, extent and falloff, some laid out around a point rather than along a bearing — plus a
-  boundary term that turns streets to run along the river rather than into it.
+  The field is a sum of district grains — a few dozen to a couple of hundred overlapping quarters,
+  each with its own bearing, extent and falloff, some laid out around a point rather than along a
+  bearing — plus a boundary term that turns streets to run along the river rather than into it.
 - **`cityStreamlines.ts`** traces streets by integrating the field with RK4 from seed points, growing
   the network outward from what already exists, and stopping a street when it comes within half a
   separation of another. That one rule is what produces the characteristic look: streets end where
@@ -259,10 +259,30 @@ they enclose. Five modules do it, and none of them ever sees a measurement:
   welding coincident junctions, snapping near misses onto the network and trimming stubs that stop in
   open ground — and then walks the graph's faces to recover the city blocks. It also breaks a share of
   the crossroads down into pairs of T-junctions, because tracing two orthogonal families produces more
-  four-way junctions than a real city has.
+  four-way junctions than a real city has. Finally it joins any stranded pocket of streets to the rest
+  by a link road across the shortest gap — see *Islands* below.
 - **`cityBlocks.ts`** insets each face by the pavement setback to get the buildable ground inside it,
   and measures how many lots that ground will hold.
 - **`cityRouting.ts`** assigns each street a class, a speed limit and a width.
+
+A district's extent is derived from the spacing the districts actually have, never from the city
+radius. This is easy to get wrong and the symptom is delayed: the count of districts grows with area,
+so sizing each one as a fraction of the radius makes the grain coarsen with every table added, and a
+district large enough simply *is* a city-wide element under another name. The largest instances
+spiralled for exactly this reason while every small one looked right. The rule generalises — **anything
+sized as a fraction of the city radius eventually becomes a city-wide element.**
+
+###### Islands
+
+Tracing can strand a pocket of streets with no way in, where one quarter's grain turns hard against
+its neighbour's and the seam between them opens wider than the radius within which loose ends get
+snapped together. It is the worst kind of fault because it is invisible: the pocket draws perfectly,
+blocks and all, and the only symptom is a query ribbon that never appears — which looks exactly like a
+query that was never run. `connectComponents` links each island to the main network across its closest
+approach, smallest gap first so that a chain of pockets can link out through its neighbour. It runs
+*after* the faces are walked, so blocks are still recovered from a strictly planar graph and only the
+routing network gains the road. In practice it adds one edge in a city of five hundred, and none in
+most.
 
 There is deliberately **no city-wide element in the field** — no ring road, no radial spokes, no
 centre. Three attempts at one all failed the same way, and the failures are worth recording because
@@ -286,8 +306,9 @@ are single large plans — a medieval centre and a post-war estate, from one lin
 Boeing's survey of 27,000 street networks ([arxiv.org/abs/1705.02198](https://arxiv.org/abs/1705.02198))
 puts a real city at roughly 57% T-junctions, 14.5% dead ends and only 23% four-way crossings, with a
 mean node degree of 2.7–3.0; a lattice is 100% four-way at 4.0, which is exactly why it reads as
-graph paper. The traced network measures 23.5–26.6% four-way, 39–44% T, 16–18% dead ends and mean
-degree 2.73–2.75 across seeds, and the tests assert that range.
+graph paper. The traced network measures 23.7–25.6% four-way, 41–47% T, 13–20% dead ends and mean
+degree 2.73–2.83 across seeds, and holds that range from a hundred-table database to a six-thousand
+-table one. The tests assert it.
 
 ##### Road hierarchy, speed limits and where the traffic goes
 

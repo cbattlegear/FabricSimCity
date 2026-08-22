@@ -385,10 +385,23 @@ First MVP release candidate. There is no tagged release yet.
   scales with distance from the middle, so the core is a mosaic of small parcels and the outskirts are
   single large plans.
 
+  A fourth failure was subtler and only appeared on the biggest instances: a district's extent was a
+  fraction of the *city* radius, so as a database grew the districts grew with it and the grain
+  coarsened until a district was, in effect, a city-wide element again. Extent now comes from the
+  spacing the districts actually have, which holds the grain constant from a hundred tables to six
+  thousand. The general lesson is worth keeping: anything sized as a fraction of the city radius
+  eventually becomes a city-wide element.
+
+  Tracing can also strand a pocket of streets with no way in, where one quarter's grain turns hard
+  against its neighbour's and the seam opens wider than the radius that snaps loose ends together.
+  That fault is invisible — the pocket draws perfectly, blocks and all — and shows up only as a query
+  ribbon that never appears, which looks exactly like a query that was never run. Each island is now
+  joined across its closest approach, after the faces are walked so the blocks still come from a
+  strictly planar graph.
+
   Measured against Boeing's survey of 27,000 real networks — 23.4% four-way, 14.5% dead ends, mean
-  degree 2.7–3.0 — the traced city holds 23.5–26.6% four-way, 16–18% dead ends and mean degree
-  2.73–2.75, and every sample journey routes, where the earlier tuning left islands the router could
-  not reach.
+  degree 2.7–3.0 — the traced city holds 23.7–25.6% four-way, 13–20% dead ends and mean degree
+  2.73–2.83, at every size, and every sample journey routes.
 
 - **Query routes are driven now, not walked.** Roads gained a real hierarchy, speed limits, and
   satnav-style routing, and the workload decides where the traffic goes.
