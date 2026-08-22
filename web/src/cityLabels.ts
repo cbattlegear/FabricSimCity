@@ -1,13 +1,17 @@
 import * as THREE from 'three'
 
 /**
- * Ground labels that name each building and facility on the map.
+ * Ground labels that name each building, facility and neighbourhood on the map.
  *
  * A label carries identity and nothing else. It never restates a measurement and never qualifies
  * one: footprint, height, roof cap, road width, lane width, and colour keep their documented
- * meanings, and reading a label tells you only which object you are looking at. That matters most
- * when schema neighborhoods are switched off, because the district tint is then no longer there to
- * say which schema a building belongs to -- so a building label is schema-qualified.
+ * meanings, and reading a label tells you only which object you are looking at.
+ *
+ * A building label is the bare object name. It used to be schema-qualified, because a schema was a
+ * tint you could not read and the qualifier was the only way to find out which one a building
+ * belonged to. Schemas are neighbourhoods now, so that fact is written once over the neighbourhood
+ * instead of repeated on every building inside it — which is both how a map does it and how the
+ * building's own name gets the width it needs.
  *
  * Labels are drawn in front of every other object rather than depth-tested against the city. A name
  * hidden behind the building it names is worth nothing, and at the default framing most of them were
@@ -41,12 +45,55 @@ export const LABEL_MAX_CHARS = 24
 const ELLIPSIS = '…'
 
 /**
- * Schema-qualifies a building label. The qualifier is what a district tint used to convey, so it is
- * kept even though it costs width.
+ * Names one building. The bare object name: the schema it belongs to is written over the
+ * neighbourhood it stands in, so repeating it here would spend width saying the same thing twice.
  */
-export function buildingLabelText(schemaName: string, name: string): string {
-  const qualified = schemaName.length > 0 ? `${schemaName}.${name}` : name
-  return elideMiddle(qualified, LABEL_MAX_CHARS)
+export function buildingLabelText(name: string): string {
+  return elideMiddle(name, LABEL_MAX_CHARS)
+}
+
+/**
+ * Names one schema's neighbourhood.
+ *
+ * Set in capitals with the letters spaced apart, which is how a basemap distinguishes the name of an
+ * *area* from the name of a thing standing in it. Nothing is added to it — no count, no size — because
+ * a place name that carries a number invites the number to be read off the map.
+ */
+export function neighborhoodLabelText(schemaName: string): string {
+  const trimmed = schemaName.trim()
+  if (trimmed.length === 0) return ''
+  return [...elideMiddle(trimmed.toLocaleUpperCase(), NEIGHBORHOOD_LABEL_MAX_CHARS)].join('\u2009')
+}
+
+/**
+ * Longest neighbourhood name drawn before elision.
+ *
+ * Shorter than {@link LABEL_MAX_CHARS} because the letter spacing roughly doubles the width a name
+ * takes, and a neighbourhood label spans several blocks already.
+ */
+export const NEIGHBORHOOD_LABEL_MAX_CHARS = 16
+
+/**
+ * Height of a neighbourhood name in world units, before it is scaled to the territory.
+ *
+ * A place name has to outrank the labels of the things standing in it, or it is just one more tag in
+ * the pile. At three times a building label it reads as a different order of thing — the way a
+ * basemap sets a district name far larger than the streets inside it.
+ */
+export const NEIGHBORHOOD_LABEL_WORLD_HEIGHT = 34
+
+/**
+ * Scales a neighbourhood name to the ground it covers.
+ *
+ * A ten-table schema and a five-hundred-table schema get very different amounts of city, and one
+ * fixed type size either shouts over the small one or disappears on the large one. Sizing by the
+ * square root of the claimed area tracks the territory's *width* rather than its area, so the name
+ * grows the way the place does. Clamped at both ends so a two-block schema still gets a readable
+ * name and a dominant one does not write across the entire map.
+ */
+export function neighborhoodLabelHeight(blockCount: number, blockPitch: number): number {
+  const width = Math.sqrt(Math.max(1, blockCount)) * blockPitch
+  return Math.min(NEIGHBORHOOD_LABEL_WORLD_HEIGHT * 2.2, Math.max(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, width * 0.16))
 }
 
 /**
@@ -109,9 +156,26 @@ export function labelAnchor(
 
 export type CityLabels = {
   /** Returns null when the browser refuses a 2D context, so the caller simply draws no label. */
-  make(text: string): THREE.Sprite | null
+  make(text: string, style?: LabelStyle): THREE.Sprite | null
   dispose(): void
 }
+
+/**
+ * How a label is drawn.
+ *
+ * `building` is a dark plate with light text: a tag pinned to one object, which has to stay legible
+ * over ground, asphalt and roof alike. `neighborhood` is plate-less text with a dark halo and a
+ * coloured cast, which is how a map writes the name of an area — it belongs to the ground it sits
+ * over rather than sitting on top of it.
+ */
+export type LabelStyle = {
+  readonly variant: 'building' | 'neighborhood'
+  /** Neighbourhood hue, so the name and the ground it names agree. Ignored by `building`. */
+  readonly tint?: number
+  readonly worldHeight?: number
+}
+
+const BUILDING_STYLE: LabelStyle = { variant: 'building' }
 
 /** A rasterized label: the shared material plus the pixel size the sprite scale is derived from. */
 type RasterizedLabel = {
@@ -136,38 +200,56 @@ type RasterizedLabel = {
 export function createCityLabels(worldHeight: number = LABEL_WORLD_HEIGHT): CityLabels {
   const cache = new Map<string, RasterizedLabel | null>()
 
-  function rasterize(text: string): RasterizedLabel | null {
-    const cached = cache.get(text)
+  function rasterize(text: string, style: LabelStyle): RasterizedLabel | null {
+    // The tint is baked into the texture, so it has to be part of what identifies one.
+    const cacheKey = `${style.variant}|${style.tint ?? ''}|${text}`
+    const cached = cache.get(cacheKey)
     if (cached !== undefined) return cached
 
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
     if (!context) {
-      cache.set(text, null)
+      cache.set(cacheKey, null)
       return null
     }
 
-    const font = `600 ${FONT_PX}px "Segoe UI", system-ui, sans-serif`
+    const neighborhood = style.variant === 'neighborhood'
+    const font = neighborhood
+      ? `700 ${FONT_PX}px "Segoe UI", system-ui, sans-serif`
+      : `600 ${FONT_PX}px "Segoe UI", system-ui, sans-serif`
     context.font = font
     const measured = Math.ceil(context.measureText(text).width)
-    canvas.width = measured + PAD_X * 2
-    canvas.height = FONT_PX + PAD_Y * 2
+    const padX = neighborhood ? PAD_X * 1.6 : PAD_X
+    const padY = neighborhood ? PAD_Y * 1.6 : PAD_Y
+    canvas.width = measured + padX * 2
+    canvas.height = FONT_PX + padY * 2
 
     // Resizing a canvas resets its 2D state, so the font has to be set again before drawing.
     context.font = font
     context.textAlign = 'center'
     context.textBaseline = 'middle'
 
-    // A dark plate keeps the text legible over ground, asphalt, and district tint alike.
-    context.fillStyle = 'rgba(7, 11, 17, 0.82)'
-    roundedRect(context, 0, 0, canvas.width, canvas.height, PAD_Y + 2)
-    context.fill()
-    context.strokeStyle = 'rgba(159, 198, 232, 0.35)'
-    context.lineWidth = 2
-    context.stroke()
+    if (neighborhood) {
+      // No plate. A halo instead, so the name reads over parkland, roofs and water without cutting a
+      // hole in the map underneath it. Heavy enough to survive being drawn over a lit white facade.
+      context.lineJoin = 'round'
+      context.strokeStyle = 'rgba(9, 13, 20, 0.85)'
+      context.lineWidth = 14
+      context.strokeText(text, canvas.width / 2, canvas.height / 2 + 1)
+      context.fillStyle = style.tint === undefined ? '#f4ece0' : lighten(style.tint)
+      context.fillText(text, canvas.width / 2, canvas.height / 2 + 1)
+    } else {
+      // A dark plate keeps the text legible over ground, asphalt, and neighbourhood tint alike.
+      context.fillStyle = 'rgba(7, 11, 17, 0.82)'
+      roundedRect(context, 0, 0, canvas.width, canvas.height, padY + 2)
+      context.fill()
+      context.strokeStyle = 'rgba(159, 198, 232, 0.35)'
+      context.lineWidth = 2
+      context.stroke()
 
-    context.fillStyle = '#e8f1f8'
-    context.fillText(text, canvas.width / 2, canvas.height / 2 + 1)
+      context.fillStyle = '#e8f1f8'
+      context.fillText(text, canvas.width / 2, canvas.height / 2 + 1)
+    }
 
     const texture = new THREE.CanvasTexture(canvas)
     texture.colorSpace = THREE.SRGBColorSpace
@@ -186,23 +268,26 @@ export function createCityLabels(worldHeight: number = LABEL_WORLD_HEIGHT): City
         // behind it. Identity is the one thing that must survive any camera angle: a name you
         // cannot read is no more useful than no name at all.
         depthTest: false,
+        opacity: neighborhood ? 0.9 : 1,
       }),
       pixelWidth: canvas.width,
       pixelHeight: canvas.height,
     }
-    cache.set(text, entry)
+    cache.set(cacheKey, entry)
     return entry
   }
 
   return {
-    make(text) {
-      const entry = rasterize(text)
+    make(text, style = BUILDING_STYLE) {
+      const entry = rasterize(text, style)
       if (!entry) return null
+      const height = style.worldHeight ?? worldHeight
       const sprite = new THREE.Sprite(entry.material)
-      sprite.scale.set(labelWorldWidth(entry.pixelWidth, entry.pixelHeight, worldHeight), worldHeight, 1)
+      sprite.scale.set(labelWorldWidth(entry.pixelWidth, entry.pixelHeight, height), height, 1)
       // Above every other render order in the scene, so labels resolve last and against each other
-      // by camera distance rather than by the order buildings happened to be added.
-      sprite.renderOrder = 10
+      // by camera distance rather than by the order buildings happened to be added. A neighbourhood
+      // name sits a rank below a building name: it is the larger, less urgent of the two.
+      sprite.renderOrder = style.variant === 'neighborhood' ? 9 : 10
       return sprite
     },
     dispose() {
@@ -213,6 +298,15 @@ export function createCityLabels(worldHeight: number = LABEL_WORLD_HEIGHT): City
       cache.clear()
     },
   }
+}
+
+/** Lifts a neighbourhood hue to something that reads as text against a dark halo. */
+function lighten(color: number): string {
+  const to = (channel: number) => Math.round(channel + (255 - channel) * 0.52)
+  const r = to((color >> 16) & 0xff)
+  const g = to((color >> 8) & 0xff)
+  const b = to(color & 0xff)
+  return `rgb(${r}, ${g}, ${b})`
 }
 
 function roundedRect(

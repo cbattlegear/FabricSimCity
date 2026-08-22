@@ -14,23 +14,51 @@ export type MapViewMode = 'map' | 'city'
 
 export const MAP_PALETTE = {
   /** Land under everything. Warm paper grey, the standard basemap ground. */
-  ground: 0xf0efe9,
-  /** Block interiors — very slightly lighter than the ground so blocks read as parcels. */
-  block: 0xf6f5f0,
+  ground: 0xf2f0e8,
+  /*
+   * Built-up land, and deliberately *darker* than the ground rather than lighter.
+   *
+   * Every web map you can read at a glance does this: the settled part of the sheet is a warm grey
+   * plate and the roads are white lines cut out of it. Drawn lighter than its surroundings — which is
+   * what this was — a parcel has nothing for a white road to read against, and the whole drawing goes
+   * flat and pastel with no figure and no ground.
+   */
+  block: 0xe6e3d8,
   /** Park and open space. */
-  park: 0xc8e0c0,
-  /** Water. Unused today; reserved so a future water feature has one canonical blue. */
-  water: 0xaadaff,
+  park: 0xbfdfb0,
+  /** Water. */
+  water: 0x9fd0ee,
+  /** Water's edge — a darker rim is what makes a river read as a river rather than a blue smear. */
+  waterEdge: 0x74aacd,
+  /** Woodland: denser than park, the way a forest polygon is drawn a shade deeper. */
+  woodland: 0xa6cf98,
+  /** A linear green — a river bank, a rail cutting, a verge. */
+  greenway: 0xcce8c0,
+  /** Orchard and allotment: green with a hint of the soil under it. */
+  orchard: 0xd4e2a4,
+  /** Hard landscaping in front of a civic building. */
+  plaza: 0xe9e5d4,
+  /** Surface parking. */
+  parking: 0xe8e5da,
+  /** Service yard and hardstanding. */
+  yard: 0xe1ddce,
   /** Road fill, drawn over the casing. */
   roadFill: 0xffffff,
   /** Road casing, drawn wider and beneath the fill. This is what makes roads read as roads. */
-  roadCasing: 0xd4d2cc,
+  roadCasing: 0xc4c0b2,
   /** Arterial fill — very slightly warm, the way major roads are tinted on real basemaps. */
-  arterialFill: 0xfff6d8,
-  arterialCasing: 0xe6d3a8,
+  /*
+   * Arterial fill — very slightly warm, the way major roads are tinted on real basemaps.
+   *
+   * "Slightly" is the whole of it. An arterial ribbon is nearly half the width of the corridor it
+   * runs in, so any real saturation here stops being a road and becomes a yellow lattice laid over
+   * the sheet. The hierarchy has to come from the casing and the width, not from the fill shouting.
+   */
+  arterialFill: 0xfff7de,
+  arterialCasing: 0xdfc793,
   /** Building footprint plate and its outline. */
-  building: 0xe0ded6,
-  buildingEdge: 0xc9c6bc,
+  building: 0xd2cec0,
+  buildingEdge: 0xa4a092,
   /** Selected building plate. */
   buildingSelected: 0xffd27f,
   /** Ranked-workload plate: buildings carrying attributed exposure read warmer. */
@@ -55,9 +83,63 @@ export const MAP_ROAD = {
   minFill: 0.5,
 } as const
 
+/**
+ * Ground cover for every land-use class the terrain planner emits, in both drawings.
+ *
+ * None of this is measured. A block's land use is seeded from the database id, exactly like every
+ * other piece of scenery, and says nothing whatsoever about the database. It exists because ~47% of
+ * blocks are deliberately empty, and blank white voids are the largest and least useful surface on
+ * the map. The legend says so in as many words.
+ */
+export const LANDUSE_MAP_COLORS = {
+  built: MAP_PALETTE.block,
+  facility: MAP_PALETTE.facility,
+  water: MAP_PALETTE.water,
+  park: MAP_PALETTE.park,
+  greenway: MAP_PALETTE.greenway,
+  woodland: MAP_PALETTE.woodland,
+  orchard: MAP_PALETTE.orchard,
+  plaza: MAP_PALETTE.plaza,
+  parking: MAP_PALETTE.parking,
+  yard: MAP_PALETTE.yard,
+} as const
+
+/** The same ground cover at golden hour, where it is lit rather than printed. */
+export const LANDUSE_CITY_COLORS = {
+  /*
+   * Built parcels are the lightest large surface on purpose.
+   *
+   * On a real map the city block is what the eye rests on and everything else — roads, greens,
+   * water — is read against it. Pitched warm-brown it collapsed into the terrain underneath and the
+   * towers looked like they were standing in a field, so it is a warm dry stone: light enough to
+   * hold its own against the carriageways, warm enough to belong to the same afternoon.
+   */
+  built: 0x99917f,
+  facility: 0x7e8a90,
+  water: 0x35809f,
+  park: 0x7aa85f,
+  greenway: 0x80ad66,
+  woodland: 0x5f8c4d,
+  orchard: 0x94a058,
+  /* Paving is a warm grey, not a cool one. A cool plaza reads as another road. */
+  plaza: 0x969084,
+  parking: 0x8a857c,
+  yard: 0x8f8b6c,
+} as const
+
+/** Street hierarchy in the flat drawing. A map without a road hierarchy is a diagram. */
+export const MAP_STREET = {
+  arterial: { fill: MAP_PALETTE.arterialFill, casing: MAP_PALETTE.arterialCasing, width: 1 },
+  boulevard: { fill: MAP_PALETTE.arterialFill, casing: MAP_PALETTE.arterialCasing, width: 1 },
+  avenue: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.94 },
+  riverside: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.88 },
+  collector: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.86 },
+} as const
+
 /** Heights (y) used to stack the flat drawing without z-fighting. Ordered bottom to top. */
 export const MAP_LAYER = {
   ground: 0,
+  landuse: 0.005,
   block: 0.01,
   roadCasing: 0.02,
   roadFill: 0.03,

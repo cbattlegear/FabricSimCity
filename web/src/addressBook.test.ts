@@ -128,12 +128,18 @@ describe('blockAddress', () => {
     expect(blockAddress(plan, 0, 0, 'dbo')).toBe('dbo · Block A1')
   })
 
-  it('advances one block per grid pitch', () => {
+  it('advances one block per block, on ground whose spacing is no longer uniform', () => {
     const plan = samplePlan()
-    const pitch = plan.cell + plan.streetWidth
-    expect(blockAddress(plan, pitch, 0)).toBe('Block B1')
-    expect(blockAddress(plan, 0, pitch)).toBe('Block A2')
-    expect(blockAddress(plan, pitch * 2, pitch * 3)).toBe('Block C4')
+    // Block spans vary and the whole lattice is displaced, so the address is checked against the
+    // centre of the block it should name rather than against a multiple of a pitch.
+    const centre = (col: number, row: number) => plan.warp.blockCenter(col, row)
+    const at = (col: number, row: number) => {
+      const point = centre(col, row)
+      return blockAddress(plan, point.x, point.z)
+    }
+    expect(at(1, 0)).toBe('Block B1')
+    expect(at(0, 1)).toBe('Block A2')
+    expect(at(2, 3)).toBe('Block C4')
   })
 
   it('never produces a negative block for a position left of the origin', () => {

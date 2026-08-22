@@ -141,18 +141,29 @@ Without shared exposure a normalized schema renders almost entirely blank, becau
 and they come on-page. The strict attribution rule is deliberately unchanged; shared exposure is what
 makes that strictness survivable on a real workload.
 
-The city is laid out as a real street grid rather than a bar chart. `web/src/cityPlan.ts` builds a
-uniform block lattice and scatters lots across it using a seeded generator (`web/src/citySeed.ts`),
-so a city looks like a city instead of a packed rectangle while remaining completely deterministic:
-the seed is a stable hash of the database's own id, and every draw comes from that one stream. The
-same database therefore lays out identically on every load, in every browser, on every machine.
+The city is laid out as a real street plan rather than a bar chart. `web/src/cityPlan.ts` builds a
+block lattice — irregularly spaced and displaced, see [the landscape section](#the-landscape-around-the-evidence)
+— and hands blocks out using a seeded generator (`web/src/citySeed.ts`), so a
+city looks like a city instead of a packed rectangle while remaining completely deterministic: the
+seed is a stable hash of the database's own id, and every draw comes from that one stream. The same
+database therefore lays out identically on every load, in every browser, on every machine.
 
-Two rules make that scatter safe to build on:
+Blocks are not handed out from one city-wide shuffle. `planNeighborhoods` first partitions the
+buildable grid into one **contiguous territory per schema**, so a schema is a quarter of the city
+rather than a colour sprinkled across it. Each schema gets a seed block chosen by farthest-point
+sampling, and the territories then grow outward a block at a time in rounds, each schema taking
+ground until it meets a quota proportional to its full object count. Every block carries a fixed
+seeded handicap on its cost, so regions grow as ragged blobs rather than discs and the borders land
+wherever two regions happen to meet. A territory that gets walled in falls back to the nearest free
+ground, so every object is housed even on a cramped grid.
+
+Two rules make that layout safe to build on:
 
 - **Appending a page never moves a building.** The grid is sized from `page.totalObjects` (plus the
-  facilities and slack), not from how many objects happen to be loaded, and each object's slot is
-  `Σ(objectCount of schemas with a lower neighborhoodOrdinal) + objectOrdinal`. Because every page
-  carries the complete schema list with full per-schema counts, that slot is page-independent.
+  facilities and slack), not from how many objects happen to be loaded. The partition is a function
+  of the seed, the grid, and the *full* per-schema counts carried on every page — never of which
+  objects have loaded — and an object's block is `objectOrdinal % territory.length`, an index local
+  to its own schema. Appending a page therefore fills a neighbourhood in; it never redraws one.
   Filtering the address book does not rearrange the city either.
 - **Facilities are spread out.** The six civic facilities are placed first, each drawn from the seeded
   stream and accepted only when its Chebyshev distance to every already-placed facility is at least
@@ -162,9 +173,35 @@ Two rules make that scatter safe to build on:
   and still fully determined by the seed.
 
 The plan also emits the intersections and streets that roads are drawn on and that query routes walk,
-so nothing is drawn diagonally through a building. Schema districts are now the bounding box of their
-scattered members and are used only for the optional tint layer, which draws per-lot pads rather than
-one contiguous rectangle.
+so nothing is drawn diagonally through a building. Each `CityDistrict` carries the blocks its schema
+claimed, a bounding box, and a label anchor averaged over *owned* ground — an L-shaped territory's
+bounding-box centre can be a block the schema does not own, so the neighbourhood name is placed on
+the centroid of what it actually holds.
+
+#### What a neighbourhood does and does not say
+
+Grouping is evidence: two buildings in the same quarter really are in the same schema, and that is a
+catalogue fact you can verify. Everything downstream of the grouping is not:
+
+- **Which block inside the quarter** a building gets is seeded, so adjacent buildings are not related
+  by being adjacent.
+- **How far apart two neighbourhoods sit**, and which two share a border, is an accident of seeding.
+- **The hue** comes from `neighborhoodHue(ordinal)` in `cityPlan.ts` — golden-angle steps over the
+  schema's place in the catalogue listing. It is a set of names, not a scale: no hue is larger,
+  hotter or busier than another. The hue lives in `cityPlan.ts` rather than in the renderer because
+  the sidebar swatch must not load `three`, and a second copy of the formula would be a colour key
+  that quietly lies. `neighborhoodTint` (3D) and `neighborhoodSwatch` (CSS) both read it.
+- **The tint weight** is 0.26, deliberately low: a skyscraper in the green neighbourhood still has to
+  look like a skyscraper. Vacant parcels are never tinted, because unmeasured ground must not be made
+  to look like a building.
+- **The amount of ground a schema claims** follows its object count, because its growth quota is
+  proportional to it — a schema with ten times the tables gets roughly ten times the territory. But
+  only roughly: quotas are approximate, borders land wherever two growing regions happen to meet, and
+  a walled-in region takes whatever free ground is nearest. Area is a rough impression of how much a
+  schema holds, never a figure to read off the map. The exact counts are in the sidebar strip.
+
+Building labels carry the bare object name; the schema name is drawn once across the neighbourhood
+instead, set in tracked capitals the way a basemap names an area rather than a thing standing in it.
 
 Every property in the table below encodes evidence. Everything else in the scene is decoration seeded
 from an object's stable id and carries no data claim; the in-app legend states this split verbatim.
@@ -190,6 +227,66 @@ measured footprint and height are unchanged by it. Unknown size yields a fenced 
 
 Colour and confidence deliberately occupy independent channels: once colour carries congestion,
 confidence moves to line pattern, so neither dimension can be mistaken for the other.
+
+#### The landscape around the evidence
+
+The city stands in a landscape, and none of that landscape is measured. `web/src/cityTerrain.ts`
+plans a river, a gentle relief field, and a land use for every block that holds no building — park,
+woodland, orchard, greenway, plaza, parking, yard, or open water. Land use is chosen a whole arterial
+cell at a time rather than a block at a time, with a minority of blocks breaking ranks along the
+boundary, so open ground reads as a region with a ragged edge instead of confetti.
+
+The street network is deliberately not a lattice, and it is not a wiggled lattice either. Bending a
+road between two fixed lattice points leaves two lattice points, and it is the *junctions* the eye
+reads a street plan by. So `web/src/cityWarp.ts` owns the `(col, row) → world` mapping and actually
+moves them, in four layers: spans that vary block to block instead of one constant pitch, a smooth
+low-frequency meander that bends whole runs of street together, a per-district rotation that fades to
+zero at the arterial seams so arterials stay continuous, and a pull toward each public square. Every
+block is therefore its own quadrilateral at its own angle, and the ground quads, land cover,
+neighbourhood washes and addresses are all built from that mapping rather than from a pitch. Because
+division no longer inverts the mapping, `warp.nearestNode` and `warp.blockAt` do the inverse by
+search.
+
+`WARP_HEADROOM` is the budget the whole thing is spent from: a block packed exactly to
+`cell + streetWidth` cannot deform at all without putting a corner inside a building. It is kept
+close to 1 because it compounds with `MAX_SPAN` into the average block, and blocks much larger than
+the buildings they hold leave every plot marooned in a field. `fitDisplacement` then *measures*
+rather than assumes: it checks every block's inradius against what the building needs and halves the
+displacement until it fits, so the guarantee holds on every seed. A test asserts the fit runs at full
+strength on twenty seed-and-size combinations, so the safety net can never quietly flatten a city
+back toward a grid without failing the build.
+
+On top of that, `planArterials` lays heavy roads at irregular intervals of three to seven blocks, and
+`planPlazas` opens squares where interior arterials cross. Each cell between arterials takes one of
+seven interior patterns — `downtown` (the full fine grid), `ladder`, `crescent`, `estate`, `radial`,
+`organic` and `open` — weighted by distance from the centre, so `downtown` is confined to the middle
+of town and is never the default. `radialAvenues` runs spokes into each square.
+
+The last pass is the one that matters most. Boeing's survey of 27,000 street networks
+([arxiv.org/abs/1705.02198](https://arxiv.org/abs/1705.02198)) puts a real city at roughly 57%
+T-junctions, 14.5% dead ends and only 23% four-way crossings, with a mean node degree of 2.7–3.0; a
+lattice is 100% four-way at 4.0, which is exactly why it reads as graph paper. `pruneJunctions`
+removes street segments toward those targets, refusing any removal that would disconnect the graph,
+strand a block with no street to front on, or break an arterial. Measured across seeds and city sizes
+from 24 to 700 buildings it holds mean degree 2.5–2.7, dead ends 13.5–14.3% and four-way crossings
+10–19%, and `cityPlan.test.ts` asserts that range.
+
+Streets carry a sampled `path` rather than two endpoints, bowed by a seeded field and clipped so a
+wandering centre line can never reach a building; roads that run with the river become embankments
+and roads that cross it become bridge decks. Because a bowed street's carriageway is nowhere near the
+straight-line midpoint of its junctions, `rebindFrontages` runs after placement and snaps every lot's
+access point onto the nearest point of a drawn path — the door lands on the road you can see. Trees,
+hedges, street furniture, parked cars, rooftop clutter, the architecture of the six facility shells,
+and the golden-hour sky, fog and shadows are all generated from the same database-id seed. The
+generator scripts for the Blender-authored kits live in `blender/` so every `.glb` in
+`web/src/assets/` is reproducible and auditable; regenerate them by running
+`blender --background --python blender/simcity_kit.py`.
+
+None of this is derived from a measurement, so none of it can be read as one — a park is not idle
+space, a curving street is not a slow query, a big block is not a big table, a dead end is not a
+table nothing reaches, and a neighbourhood with a sparser street pattern is not a sparser schema. The
+in-app legend says so in as many words under "The scenery is not evidence" and "The street plan is
+drawn too".
 
 CPU, memory, storage, tempdb, log, and lock evidence from `/api/v1/live` are placed as six civic
 facilities scattered across the grid (`web/src/cityInfrastructure.ts`). Each facility's architecture

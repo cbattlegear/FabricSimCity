@@ -1,3 +1,6 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Blender-authored scenery kits. Binary, so never line-ending normalised or diffed as text.
+*.glb binary

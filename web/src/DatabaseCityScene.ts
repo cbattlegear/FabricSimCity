@@ -2,8 +2,8 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { ARTERIAL_WIDTH, planCity, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions } from './cityPlan'
-import { ARCHETYPE_COLORS, buildBuildingGeometry } from './cityBuildings'
+import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
+import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
 import { type RoadTraffic } from './cityTraffic'
 import {
   claimLane,
@@ -17,16 +17,28 @@ import {
 import { type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
 import type { FacilityLane, SharedFacilityLane } from './cityFacilityTraffic'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
+import { LANDMARK_ASSETS, loadCityAssets, type AssetRole, type CityAssets, type SceneryAsset } from './cityAssets'
 import {
   buildingLabelText,
   createCityLabels,
   elideMiddle,
   labelAnchor,
+  neighborhoodLabelHeight,
+  neighborhoodLabelText,
   LABEL_MAX_CHARS,
   LABEL_WORLD_HEIGHT,
 } from './cityLabels'
 import type { CityRoute } from './cityRoute'
-import { MAP_PALETTE, MAP_PIN, MAP_ROAD, type MapViewMode } from './mapStyle'
+import {
+  LANDUSE_CITY_COLORS,
+  LANDUSE_MAP_COLORS,
+  MAP_PALETTE,
+  MAP_PIN,
+  MAP_ROAD,
+  MAP_STREET,
+  type MapViewMode,
+} from './mapStyle'
+import type { LandUse, TerrainBlock } from './cityTerrain'
 import type { IncidentMarker } from './cityIncidents'
 
 export type CityLayerToggles = {
@@ -34,11 +46,24 @@ export type CityLayerToggles = {
   waitLanes: boolean
   infrastructure: boolean
   route: boolean
-  /** Schema neighborhood tints. Off by default: the tint crowds the map and names nothing on its own. */
-  districts: boolean
-  /** Ground labels naming each building and facility. */
+  /** Ground labels naming each building, facility and neighbourhood. */
   labels: boolean
 }
+
+/**
+ * How strongly a neighbourhood's hue stains the ground it claims.
+ *
+ * The 3D city keeps it to a whisper: the buildings are already tinted, and land use — parks, water,
+ * woodland — is drawn underneath and has to survive. The basemap can afford more, because it
+ * flattens every building to one grey and the wash is then the only thing dividing the map into
+ * places.
+ *
+ * Both are lower than they want to be. A wash strong enough to name a neighbourhood at a glance is
+ * also strong enough to erase the land use beneath it, and at that point the map is a colouring book
+ * with roads on top. The neighbourhood label carries the identity; the wash only has to group.
+ */
+const CITY_DISTRICT_OPACITY = 0.11
+const MAP_DISTRICT_OPACITY = 0.17
 
 export type CameraNudge =
   | 'panLeft'
@@ -111,6 +136,11 @@ export function createDatabaseCityScene(
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.outputColorSpace = THREE.SRGBColorSpace
+  // Soft shadows are the whole point of a low sun: they are what turns a field of extruded boxes into
+  // a city with depth. Enabled here and switched off per-frame in map mode, where a printed basemap
+  // casts nothing.
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
 
   const reducedMotion =
     typeof window.matchMedia === 'function' &&
@@ -129,19 +159,118 @@ export function createDatabaseCityScene(
   controls.maxDistance = 4000
   // Never let the camera drop below the horizon: a city viewed from underground is disorienting.
   controls.maxPolarAngle = Math.PI / 2 - 0.05
+
+  /*
+   * Depth range, set from the orbit distance rather than left wide open.
+   *
+   * The ground is half a dozen wafer-thin layers stacked inside a single world unit — land cover,
+   * kerb, carriageway, centre line — and the depth buffer is the only thing keeping them in order.
+   * A far/near ratio in the tens of thousands leaves so little precision at ground level that the
+   * layers start trading places across the map, which is what turned the flat basemap into stripes.
+   * Keeping the ratio near a thousand costs nothing visible: everything past the fog is haze anyway.
+   */
+  function setDepthRange(distance: number) {
+    camera.near = Math.max(1, distance / 200)
+    camera.far = distance * 8
+    camera.updateProjectionMatrix()
+  }
   controls.minPolarAngle = 0.05
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
   controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
 
-  const hemiLight = new THREE.HemisphereLight(0x9fc6e8, 0x0a1018, 1.4)
+  /*
+   * Golden hour.
+   *
+   * The 3D city is lit as late afternoon rather than as a neutral studio, because a low sun is the
+   * cheapest and most honest depth cue available: every building's own shadow states its height a
+   * second time, and the ~47% of ground that carries no building finally has something on it. The
+   * light is decoration and encodes nothing — the sun sits in the same place for a healthy instance
+   * and a failing one.
+   */
+  /*
+   * Shadow fill is as deliberate as the key.
+   *
+   * A low sun paired with a weak sky turns every shadow into a navy void, and since roughly half the
+   * ground is in shadow at this hour that erases half the map. The hemisphere is pitched bright and
+   * only lightly cool, with a warm bounce underneath, so shaded parkland still reads as parkland.
+   */
+  const hemiLight = new THREE.HemisphereLight(0xa8b6c9, 0x6a5a45, 1.75)
   scene.add(hemiLight)
-  const keyLight = new THREE.DirectionalLight(0xfff2dd, 2)
-  keyLight.position.set(320, 480, 220)
+  const keyLight = new THREE.DirectionalLight(0xffc286, 2.2)
+  keyLight.position.set(560, 320, 250)
+  keyLight.castShadow = true
+  keyLight.shadow.mapSize.set(2048, 2048)
+  keyLight.shadow.bias = -0.0012
+  keyLight.shadow.normalBias = 0.6
   scene.add(keyLight)
-  const fillLight = new THREE.DirectionalLight(0x6f9ecb, 0.65)
-  fillLight.position.set(-240, 180, -180)
+  scene.add(keyLight.target)
+  const fillLight = new THREE.DirectionalLight(0x8aa6d2, 0.5)
+  fillLight.position.set(-300, 260, -280)
   scene.add(fillLight)
-  // Map mode's only light. Flat white ambient makes a standard material render as its base colour.
+
+  /*
+   * The sky.
+   *
+   * An inside-out sphere with the gradient baked into its vertex colours: no shader, no texture, no
+   * extra request. It rides with the camera and is scaled off the far plane, so it never clips no
+   * matter how far out the city is framed.
+   *
+   * The warm band is deliberately narrow. A golden hour is warm *at the horizon* and deep blue
+   * overhead — spread the orange across the whole dome and it stops reading as a sunset and starts
+   * reading as a wall.
+   */
+  const SKY_ZENITH = new THREE.Color(0x14203c)
+  const SKY_UPPER = new THREE.Color(0x3c4a72)
+  const SKY_HORIZON = new THREE.Color(0xf0b072)
+  /*
+   * Below the horizon the dome is not sky at all — it is the haze that distant ground dissolves
+   * into, and at this camera angle it is most of what you see. It has to obey aerial perspective,
+   * which means distance makes ground *lighter and warmer*, not darker: the band is brightest right
+   * at the horizon and settles toward the colour of the land as it comes back down towards the
+   * viewer. Painting it dark turned the whole background into a muddy wall.
+   */
+  const HAZE_NEAR = new THREE.Color(0xc6a184)
+  const HAZE_FAR = new THREE.Color(0x6d6b52)
+  const skyGeometry = new THREE.SphereGeometry(1, 24, 20)
+  {
+    const position = skyGeometry.getAttribute('position')
+    const colors = new Float32Array(position.count * 3)
+    const color = new THREE.Color()
+    for (let index = 0; index < position.count; index += 1) {
+      const y = position.getY(index)
+      if (y >= 0) {
+        // Two stops rather than one: warm to dusk-blue in the first few degrees, dusk-blue to
+        // near-black over the rest of the dome.
+        const low = Math.min(1, Math.pow(y, 0.28))
+        color.copy(SKY_HORIZON).lerp(SKY_UPPER, low).lerp(SKY_ZENITH, Math.pow(y, 1.4))
+      } else {
+        color.copy(HAZE_NEAR).lerp(HAZE_FAR, Math.min(1, Math.pow(-y, 0.5)))
+      }
+      colors[index * 3] = color.r
+      colors[index * 3 + 1] = color.g
+      colors[index * 3 + 2] = color.b
+    }
+    skyGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  }
+  const skyDome = new THREE.Mesh(
+    skyGeometry,
+    new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, depthWrite: false, fog: false }),
+  )
+  skyDome.renderOrder = -1
+  scene.add(skyDome)
+
+  /**
+   * Haze at the edge of the city, so the ground fades into the horizon rather than ending at a hard
+   * edge. Tinted to the warm band it is dissolving into.
+   */
+  const cityFog = new THREE.Fog(0xc6a184, 900, 3200)
+  /*
+   * City mode is the mode the scene opens in, and `applyViewMode` only runs on a *change* — so the
+   * atmosphere has to be armed here or the first view of every city renders with no fog, which is
+   * what left the ground plane sitting in the sky as a hard-edged slab.
+   */
+  scene.fog = cityFog
+  scene.background = new THREE.Color(0x131f36)
   /**
    * Map mode's only light.
    *
@@ -171,11 +300,14 @@ export function createDatabaseCityScene(
     // draws was never measured for this building. Shared exposure belongs to the queries that named
     // it alongside other tables, so it is outlined rather than solid.
     sharedExposure: new THREE.MeshBasicMaterial({ color: 0xe2a957, wireframe: true }),
-    ground: new THREE.MeshStandardMaterial({ color: 0x11181f, roughness: 0.98 }),
-    asphalt: new THREE.MeshStandardMaterial({ color: 0x252c37, roughness: 0.95 }),
-    laneMark: new THREE.MeshStandardMaterial({ color: 0x5f6b7a, roughness: 0.85 }),
-    sidewalk: new THREE.MeshStandardMaterial({ color: 0x38414d, roughness: 0.9 }),
-    district: new THREE.MeshBasicMaterial({ color: 0x2b4a63, transparent: true, opacity: 0.15 }),
+    // The plane the city sits on runs past the fog in every direction, so it is doing the job of
+    // countryside rather than of floor. Kept close in value to the built parcels it abuts: a big
+    // value step at the plan boundary turns the city into a rug thrown on a floor.
+    ground: new THREE.MeshStandardMaterial({ color: 0x7e7c58, roughness: 0.98 }),
+    asphalt: new THREE.MeshStandardMaterial({ color: 0x6a6a71, roughness: 0.95 }),
+    laneMark: new THREE.MeshStandardMaterial({ color: 0xc4c0b3, roughness: 0.85 }),
+    sidewalk: new THREE.MeshStandardMaterial({ color: 0x8d8a81, roughness: 0.9 }),
+    civicPad: new THREE.MeshBasicMaterial({ color: 0x2b4a63, transparent: true, opacity: 0.15 }),
     facility: new THREE.MeshStandardMaterial({ color: 0x53707f, roughness: 0.62 }),
     facilityUnknown: new THREE.MeshBasicMaterial({ color: 0x7d8b96, wireframe: true }),
     facilityFill: new THREE.MeshStandardMaterial({ color: 0x63d8ff, emissive: 0x11455c, roughness: 0.35 }),
@@ -187,12 +319,121 @@ export function createDatabaseCityScene(
     roadPinOffMap: new THREE.MeshStandardMaterial({ color: 0xb0bcc7, emissive: 0x39434d, roughness: 0.45 }),
     selection: new THREE.MeshBasicMaterial({ color: 0xffd479, transparent: true, opacity: 0.26 }),
     selectionPin: new THREE.MeshStandardMaterial({ color: 0xffd479, emissive: 0x6b4a06, roughness: 0.35 }),
+
+    /*
+     * Materials for the authored `.glb` kits.
+     *
+     * `flatShading` is not a style choice here, it is the contract: the kits ship without a normal
+     * attribute (see `cityAssets.ts`), so three.js has to derive face normals in the fragment shader.
+     * They are separate from the materials above because the procedural fallback shells *do* carry
+     * smooth normals, and faceting a cylinder that was authored round looks like a bug.
+     */
+    kitBody: new THREE.MeshStandardMaterial({ color: 0x5b7a8c, roughness: 0.66, flatShading: true }),
+    kitTrim: new THREE.MeshStandardMaterial({ color: 0x93a1ae, roughness: 0.58, flatShading: true }),
+    kitGlass: new THREE.MeshStandardMaterial({
+      color: 0xd8e8f4,
+      emissive: 0x2f4f6a,
+      roughness: 0.22,
+      flatShading: true,
+    }),
+    kitMetal: new THREE.MeshStandardMaterial({
+      color: 0x8b98a4,
+      roughness: 0.42,
+      metalness: 0.5,
+      flatShading: true,
+    }),
+    kitTrunk: new THREE.MeshStandardMaterial({ color: 0x5b4634, roughness: 0.92, flatShading: true }),
+    kitLeaf: new THREE.MeshStandardMaterial({ color: 0x4f7f4a, roughness: 0.88, flatShading: true }),
+    kitWater: new THREE.MeshStandardMaterial({
+      color: 0x2f6d8c,
+      roughness: 0.14,
+      metalness: 0.3,
+      flatShading: true,
+    }),
   }
+
+  /*
+   * Ground cover.
+   *
+   * One material per land use rather than vertex colours baked into a single terrain mesh: the two
+   * view modes need two entirely different palettes, and swapping a colour on ten materials is free
+   * where rebuilding a vertex-colour buffer across thousands of blocks is not.
+   *
+   * None of this is measured. Land use is drawn from the database id's seed, exactly like block
+   * placement, and the legend says so.
+   */
+  const LAND_USES = Object.keys(LANDUSE_CITY_COLORS) as LandUse[]
+  const landMaterials = Object.fromEntries(
+    LAND_USES.map(use => [
+      use,
+      new THREE.MeshStandardMaterial({ color: LANDUSE_CITY_COLORS[use], roughness: 0.95, vertexColors: true }),
+    ]),
+  ) as Record<LandUse, THREE.MeshStandardMaterial>
+  // Water is the one cover that should catch the sun rather than absorb it.
+  landMaterials.water.roughness = 0.16
+  landMaterials.water.metalness = 0.35
+
+  /*
+   * Street hierarchy.
+   *
+   * A map without a road hierarchy is a diagram: every line the same weight, nothing to navigate by.
+   * Each class gets a fill and a casing, and the casing table is what carries the difference in map
+   * mode — white arterials over a dark casing, quieter greys for collectors, exactly the way a
+   * printed basemap grades its roads.
+   *
+   * Street *class* is a plan property, not a measurement. What a road carries — executions, dash
+   * confidence, congestion colour — is drawn in `roadGroup` and is untouched by any of this.
+   */
+  const STREET_CLASSES: readonly StreetClass[] = ['arterial', 'boulevard', 'avenue', 'riverside', 'collector']
+  /*
+   * The ground layer is lit almost entirely by skylight.
+   *
+   * At golden hour the sun grazes the city, so vertical faces catch it and horizontal ones barely
+   * do — which is correct, and which means every one of these colours renders far darker than it
+   * reads here. They are pitched light on purpose so that paving, kerbs and land cover still
+   * separate from each other once the low sun has taken most of their value away.
+   */
+  /*
+   * Carriageways are warm mid-greys, not the blue-black they look like from a car at night.
+   *
+   * Seen from the air a road is a *light* line across darker ground — dry concrete and weathered
+   * asphalt, closer to stone than to tar. Painting them dark makes the road network the figure and
+   * the land the background, which is exactly backwards: on a map the land is the subject and the
+   * roads are the lines you read it with. Casings are the kerb and pavement, so they run lighter
+   * still, and the hierarchy stays legible through width rather than through value.
+   */
+  const CITY_STREET: Record<StreetClass, { fill: number; casing: number }> = {
+    arterial: { fill: 0x76767a, casing: 0x9a968c },
+    boulevard: { fill: 0x74747a, casing: 0x98948a },
+    avenue: { fill: 0x6f6f75, casing: 0x939086 },
+    riverside: { fill: 0x717176, casing: 0x969288 },
+    collector: { fill: 0x6a6a71, casing: 0x8d8a81 },
+  }
+  const streetFill = Object.fromEntries(
+    STREET_CLASSES.map(klass => [klass, new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].fill, roughness: 0.94 })]),
+  ) as Record<StreetClass, THREE.MeshStandardMaterial>
+  const streetCasing = Object.fromEntries(
+    STREET_CLASSES.map(klass => [klass, new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].casing, roughness: 0.92 })]),
+  ) as Record<StreetClass, THREE.MeshStandardMaterial>
+
+  /**
+   * One material per drawn body colour, carrying both looks.
+   *
+   * The city colour is the cache key; the basemap colour rides along in `userData` because it cannot
+   * be recovered from the city colour once the neighbourhood hue has been mixed in. Materials are
+   * created in whichever mode is current, so buildings that arrive after a mode switch are not left
+   * painted for the mode the scene is no longer in.
+   */
   const archetypeMaterials = new Map<number, THREE.MeshStandardMaterial>()
-  const bodyMaterial = (color: number) => {
+  const bodyMaterial = (color: number, mapColor: number) => {
     let material = archetypeMaterials.get(color)
     if (!material) {
-      material = new THREE.MeshStandardMaterial({ color, roughness: 0.78, metalness: 0.06 })
+      material = new THREE.MeshStandardMaterial({
+        color: viewMode === 'map' ? mapColor : color,
+        roughness: 0.78,
+        metalness: 0.06,
+      })
+      material.userData.mapColor = mapColor
       archetypeMaterials.set(color, material)
     }
     return material
@@ -207,6 +448,26 @@ export function createDatabaseCityScene(
     }
     return material
   }
+  /**
+   * One wash material per neighbourhood hue.
+   *
+   * Basic rather than standard: this is a stain on the ground, and a stain that took the sun would
+   * turn into a slab lit differently from the land it sits on.
+   */
+  const districtMaterials = new Map<number, THREE.MeshBasicMaterial>()
+  const districtMaterial = (color: number) => {
+    let material = districtMaterials.get(color)
+    if (!material) {
+      material = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: viewMode === 'map' ? MAP_DISTRICT_OPACITY : CITY_DISTRICT_OPACITY,
+        depthWrite: false,
+      })
+      districtMaterials.set(color, material)
+    }
+    return material
+  }
 
   /**
    * The two looks.
@@ -217,28 +478,35 @@ export function createDatabaseCityScene(
    * road widths, congestion colours, and wait-lane widths are computed once, outside this file, and
    * both modes draw exactly those numbers.
    */
-  const CITY_COLORS: Record<string, number> = {
-    unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
-    exposure: 0xe2a957, ground: 0x11181f, asphalt: 0x252c37, laneMark: 0x5f6b7a, sidewalk: 0x38414d,
+  const CITY_COLORS: Record<string, number> = {    unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
+    exposure: 0xe2a957, ground: 0x7e7c58, asphalt: 0x6a6a71, laneMark: 0xc4c0b3, sidewalk: 0x8d8a81,
     sharedExposure: 0xe2a957,
-    district: 0x2b4a63, facility: 0x53707f, facilityUnknown: 0x7d8b96, facilityFill: 0x63d8ff,
+    civicPad: 0x2b4a63, facility: 0x53707f, facilityUnknown: 0x7d8b96, facilityFill: 0x63d8ff,
     facilityAlert: 0xe4483c, route: 0x2fe0ff, routePin: 0x2fe0ff, roadHighlight: 0xf4f9ff,
     roadPin: 0xf4f9ff, roadPinOffMap: 0xb0bcc7, selection: 0xffd479, selectionPin: 0xffd479,
+    kitBody: 0x5b7a8c, kitTrim: 0x93a1ae, kitGlass: 0xd8e8f4, kitMetal: 0x8b98a4,
+    kitTrunk: 0x5b4634, kitLeaf: 0x4f7f4a, kitWater: 0x2f6d8c,
   }
   const MAP_COLORS: Record<string, number> = {
     unknown: 0x9aa4ac, window: 0xdfe6ec, trim: 0xb9bdc2, index: 0x63b9a6, unknownIndex: 0xa8b0b6,
     exposure: 0xd99a3f, ground: MAP_PALETTE.ground, asphalt: MAP_PALETTE.roadFill,
     sharedExposure: 0xd99a3f,
-    laneMark: 0xdcd9d2, sidewalk: MAP_PALETTE.roadCasing, district: MAP_PALETTE.park,
+    laneMark: 0xdcd9d2, sidewalk: MAP_PALETTE.roadCasing, civicPad: MAP_PALETTE.park,
     facility: MAP_PALETTE.facility, facilityUnknown: 0x9fb0c0, facilityFill: 0x4a90d9,
     facilityAlert: MAP_PALETTE.pinIncident, route: 0x1a73e8, routePin: 0x1a73e8,
     roadHighlight: 0x202124, roadPin: 0x202124, roadPinOffMap: 0x8a8f94,
     selection: 0xffb300, selectionPin: 0xffb300,
+    // Landmarks flatten to a civic plate in map mode, so the whole kit resolves to the two greys a
+    // basemap uses for a building and its outline rather than to six separate materials.
+    kitBody: MAP_PALETTE.facility, kitTrim: MAP_PALETTE.facilityEdge, kitGlass: 0xdfe6ec,
+    kitMetal: MAP_PALETTE.facilityEdge, kitTrunk: 0x9aa892, kitLeaf: MAP_PALETTE.park,
+    kitWater: MAP_PALETTE.water,
   }
   /** Emissive glow is a night-city effect. Map mode has no light source to glow against. */
   const CITY_EMISSIVE: Record<string, number> = {
     window: 0x2f4f6a, exposure: 0x3a2400, facilityFill: 0x11455c, facilityAlert: 0x4a0f0a,
     routePin: 0x0d5f70, roadPin: 0x5d7183, roadPinOffMap: 0x39434d, selectionPin: 0x6b4a06,
+    kitGlass: 0x2f4f6a,
   }
 
   let viewMode: MapViewMode = 'city'
@@ -326,7 +594,12 @@ export function createDatabaseCityScene(
     const flat = viewMode === 'map'
     const table = flat ? MAP_COLORS : CITY_COLORS
 
-    scene.background = new THREE.Color(flat ? MAP_PALETTE.ground : 0x070b11)
+    scene.background = new THREE.Color(flat ? MAP_PALETTE.ground : 0x131f36)
+    // A printed basemap has no atmosphere and no sun. Both are switched off wholesale rather than
+    // tuned, so map mode stays a flat drawing of the same plan.
+    scene.fog = flat ? null : cityFog
+    skyDome.visible = !flat
+    renderer.shadowMap.enabled = !flat
 
     for (const [name, material] of Object.entries(materials)) {
       const hex = table[name]
@@ -334,11 +607,29 @@ export function createDatabaseCityScene(
       const emissive = (material as THREE.Material & { emissive?: THREE.Color }).emissive
       if (emissive) emissive.setHex(flat ? 0x000000 : CITY_EMISSIVE[name] ?? 0x000000)
     }
-    // Archetype colours are the cache key, so restoring them needs no separate table.
-    for (const [color, material] of archetypeMaterials) {
-      material.color.setHex(flat ? MAP_PALETTE.building : color)
+    for (const use of LAND_USES) {
+      landMaterials[use].color.setHex((flat ? LANDUSE_MAP_COLORS : LANDUSE_CITY_COLORS)[use])
     }
-    materials.district.opacity = flat ? 0.34 : 0.15
+    for (const klass of STREET_CLASSES) {
+      streetFill[klass].color.setHex(flat ? MAP_STREET[klass].fill : CITY_STREET[klass].fill)
+      streetCasing[klass].color.setHex(flat ? MAP_STREET[klass].casing : CITY_STREET[klass].casing)
+    }
+    // Archetype colours are the cache key, so restoring them needs no separate table. The basemap
+    // colour is the one that carries the neighbourhood on paper, so it is remembered per material.
+    for (const [color, material] of archetypeMaterials) {
+      material.color.setHex(flat ? (material.userData.mapColor as number) : color)
+    }
+    /*
+     * The neighbourhood wash carries more weight on the basemap.
+     *
+     * In the 3D city the buildings themselves are tinted, so the ground only has to agree with them.
+     * Map mode already tints the plates too, but it also draws far more competing land cover per
+     * block, so the wash has to push harder to hold a quarter together underneath it.
+     */
+    for (const material of districtMaterials.values()) {
+      material.opacity = flat ? MAP_DISTRICT_OPACITY : CITY_DISTRICT_OPACITY
+    }
+    materials.civicPad.opacity = flat ? 0.34 : 0.15
 
     // Under ambient light alone a standard material renders as its flat base colour, which is the
     // unlit look a basemap needs — without swapping every material's class.
@@ -353,6 +644,9 @@ export function createDatabaseCityScene(
     buildingGroup.scale.y = massing
     infrastructureGroup.scale.y = massing
     poiGroup.visible = flat
+    // Trees and street furniture are a golden-hour effect. A printed basemap draws land cover, not
+    // individual shrubs, and instancing thousands of them under a flat camera buys nothing.
+    sceneryGroup.visible = !flat
     roadCasingGroup.visible = flat
 
     // A very narrow field of view from far away is parallel projection for every practical purpose,
@@ -400,15 +694,15 @@ export function createDatabaseCityScene(
       Math.cos(polar),
       Math.sin(polar) * Math.cos(azimuth))
     camera.position.copy(controls.target).addScaledVector(direction, scaled)
-    camera.near = Math.max(0.5, scaled / 900)
-    camera.far = scaled * 30
-    camera.updateProjectionMatrix()
+    setDepthRange(scaled)
     controls.update()
     requestRender()
   }
 
   // One group per layer keeps toggling a layer O(1) and avoids rebuilding the scene graph.
   const groundGroup = new THREE.Group()
+  /** Trees, furniture and parked cars. Pure decoration, so it is a layer of its own and 3D only. */
+  const sceneryGroup = new THREE.Group()
   const districtGroup = new THREE.Group()
   const buildingGroup = new THREE.Group()
   const roadGroup = new THREE.Group()
@@ -425,10 +719,12 @@ export function createDatabaseCityScene(
   const labelGroup = new THREE.Group()
   const buildingLabelGroup = new THREE.Group()
   const facilityLabelGroup = new THREE.Group()
-  labelGroup.add(buildingLabelGroup, facilityLabelGroup)
+  const neighborhoodLabelGroup = new THREE.Group()
+  labelGroup.add(buildingLabelGroup, facilityLabelGroup, neighborhoodLabelGroup)
   const labelFactory = createCityLabels()
   scene.add(
     groundGroup,
+    sceneryGroup,
     districtGroup,
     roadCasingGroup,
     roadGroup,
@@ -461,6 +757,7 @@ export function createDatabaseCityScene(
   let hoveredRoadId: string | null = null
   let framedOnce = false
   let disposed = false
+  let assets: CityAssets | null = null
   let animationHandle = 0
   let renderRequested = false
   const layers: CityLayerToggles = {
@@ -468,7 +765,6 @@ export function createDatabaseCityScene(
     waitLanes: true,
     infrastructure: true,
     route: true,
-    districts: false,
     labels: true,
   }
 
@@ -481,6 +777,9 @@ export function createDatabaseCityScene(
     for (const child of [...group.children]) {
       group.remove(child)
       child.traverse(node => {
+        // An instanced mesh owns a per-instance matrix buffer even when its geometry is shared kit
+        // geometry that must outlive the rebuild, so it is disposed on its own terms.
+        if (node instanceof THREE.InstancedMesh) node.dispose()
         if (node instanceof THREE.Mesh && disposables.has(node.geometry)) {
           disposables.delete(node.geometry)
           node.geometry.dispose()
@@ -499,7 +798,6 @@ export function createDatabaseCityScene(
     roadHighlightGroup.visible = layers.traffic
     infrastructureGroup.visible = layers.infrastructure
     routeGroup.visible = layers.route
-    districtGroup.visible = layers.districts
     labelGroup.visible = layers.labels
     facilityLabelGroup.visible = layers.infrastructure
   }
@@ -513,6 +811,24 @@ export function createDatabaseCityScene(
       renderer.setSize(width, height, false)
       camera.aspect = width / height
       camera.updateProjectionMatrix()
+    }
+    // The sky follows the camera across the plan but stays pinned to the ground plane in height, so
+    // its horizon is the city's horizon. Centring it on the camera instead puts the horizon at eye
+    // level, which from an aerial view means the whole background is the *under* side of the dome.
+    if (skyDome.visible) {
+      skyDome.position.set(camera.position.x, 0, camera.position.z)
+      skyDome.scale.setScalar(camera.far * 0.4)
+      /*
+       * Haze is keyed to how far away you are standing, not to how big the database is.
+       *
+       * A fixed distance derived from the plan looks right at one zoom and wrong at every other:
+       * pulled back it swallows the city, pushed in it disappears. Anchoring both planes to the
+       * orbit distance keeps whatever you are actually looking at clear, and always puts the
+       * dissolve just beyond it.
+       */
+      const orbit = camera.position.distanceTo(controls.target)
+      cityFog.near = orbit * 0.95
+      cityFog.far = orbit * 3.1
     }
     renderer.render(scene, camera)
   }
@@ -544,39 +860,326 @@ export function createDatabaseCityScene(
     else requestRender()
   })
 
+  /*
+   * The ground.
+   *
+   * Rebuilt as merged geometry rather than one mesh per quad: a large instance has thousands of
+   * street legs, and the previous four-meshes-per-street layout put the draw call count in the tens
+   * of thousands. Everything here is decoration — land cover, water, kerbs, lane markings — so it can
+   * be batched freely. The measured layer (buildings, road traffic, wait lanes) is drawn elsewhere
+   * and stays individually addressable for picking.
+   */
   function buildGround(cityPlan: CityPlan) {
     clearGroup(groundGroup)
-    const pad = ARTERIAL_WIDTH * 2
-    const ground = new THREE.Mesh(
-      track(new THREE.PlaneGeometry(cityPlan.bounds.width + pad * 2, cityPlan.bounds.depth + pad * 2)),
-      materials.ground,
-    )
+    /*
+     * Deliberately enormous. The ground is the only thing between the city and the haze, and the
+     * moment its edge comes into frame the whole illusion collapses into a slab floating in fog.
+     * Sized so the edge always sits past the far fog plane at any orbit distance the controls allow.
+     */
+    const span = Math.max(cityPlan.bounds.width, cityPlan.bounds.depth) * 30 + 4000
+    const ground = new THREE.Mesh(track(new THREE.PlaneGeometry(span, span)), materials.ground)
     ground.rotation.x = -Math.PI / 2
-    ground.position.set(cityPlan.bounds.centerX, -0.6, cityPlan.bounds.centerZ)
+    ground.position.set(cityPlan.bounds.centerX, -0.75, cityPlan.bounds.centerZ)
+    ground.receiveShadow = true
     groundGroup.add(ground)
 
-    // Streets are flat quads laid on the street graph, with a sidewalk strip either side.
+    buildLandCover(cityPlan)
+    buildCarriageways(cityPlan)
+    buildScenery(cityPlan)
+    aimSunAt(cityPlan)
+  }
+
+  /*
+   * Street furniture, trees and parked cars.
+   *
+   * Every placement is a pure function of the block's own seed, which is itself a pure function of
+   * the database id — so the same database always grows the same trees in the same places. None of
+   * it is measured, and the legend says as much. Parked cars are parked and never move: a moving
+   * vehicle would imply flow, and flow on this map is evidence.
+   *
+   * Drawn with one `InstancedMesh` per (asset, role) so a few thousand props cost a few dozen draw
+   * calls, and capped so a ten-thousand-table instance does not spend its frame budget on shrubbery.
+   */
+  const MAX_SCENERY = 2600
+  /** How many buildings may cast into the shadow map before the frame cost outgrows the depth cue. */
+  const MAX_SHADOW_CASTERS = 900
+
+  function buildScenery(cityPlan: CityPlan) {
+    clearGroup(sceneryGroup)
+    const kit = assets?.scenery
+    if (!kit) return
+
+    const placements = new Map<SceneryAsset, THREE.Matrix4[]>()
+    let budget = MAX_SCENERY
+    const place = (asset: SceneryAsset, x: number, z: number, spin: number, scale: number | THREE.Vector3, y = 0) => {
+      if (budget <= 0 || !kit.has(asset)) return
+      budget -= 1
+      const matrix = new THREE.Matrix4()
+      const size = typeof scale === 'number' ? new THREE.Vector3(scale, scale, scale) : scale
+      matrix.compose(
+        new THREE.Vector3(x, y, z),
+        new THREE.Quaternion().setFromAxisAngle(UP, spin),
+        size,
+      )
+      const list = placements.get(asset)
+      if (list) list.push(matrix)
+      else placements.set(asset, [matrix])
+    }
+
+    // Blocks are visited in key order so the cap always truncates the same tail.
+    const blocks = [...cityPlan.terrain.blocks.values()].sort((left, right) => left.key.localeCompare(right.key))
+    for (const block of blocks) {
+      if (budget <= 0) break
+      dressBlock(block, place)
+    }
+
     for (const street of cityPlan.streets) {
-      const from = cityPlan.intersections.get(street.fromId)
-      const to = cityPlan.intersections.get(street.toId)
-      if (!from || !to) continue
-      const alongX = Math.abs(to.x - from.x) > Math.abs(to.z - from.z)
-      const length = alongX ? Math.abs(to.x - from.x) : Math.abs(to.z - from.z)
-      const cx = (from.x + to.x) / 2
-      const cz = (from.z + to.z) / 2
-      addQuad(groundGroup, alongX ? length : street.width, alongX ? street.width : length, cx, cz, -0.25, materials.asphalt)
-      // Kerbs sit proud of the carriageway, which is what makes the grid read as streets rather
-      // than as gaps between plates.
-      const offset = street.width / 2 + 1.6
-      if (alongX) {
-        addQuad(groundGroup, length, 3.2, cx, cz - offset, -0.12, materials.sidewalk)
-        addQuad(groundGroup, length, 3.2, cx, cz + offset, -0.12, materials.sidewalk)
-        addQuad(groundGroup, length * 0.94, 0.5, cx, cz, -0.2, materials.laneMark)
-      } else {
-        addQuad(groundGroup, 3.2, length, cx - offset, cz, -0.12, materials.sidewalk)
-        addQuad(groundGroup, 3.2, length, cx + offset, cz, -0.12, materials.sidewalk)
-        addQuad(groundGroup, 0.5, length * 0.94, cx, cz, -0.2, materials.laneMark)
+      if (!street.bridge || budget <= 0) continue
+      dressBridge(street.path, street.width, place)
+    }
+
+    for (const [asset, matrices] of placements) {
+      for (const role of kit.roles(asset)) {
+        const geometry = kit.geometry(asset, role)
+        if (!geometry) continue
+        const mesh = new THREE.InstancedMesh(geometry, KIT_MATERIALS[role], matrices.length)
+        for (let i = 0; i < matrices.length; i += 1) mesh.setMatrixAt(i, matrices[i])
+        mesh.instanceMatrix.needsUpdate = true
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        // Props are small and scattered; letting three.js cull them per instance costs more than it
+        // saves, and a wrong bounding sphere would pop whole blocks in and out.
+        mesh.frustumCulled = false
+        sceneryGroup.add(mesh)
       }
+    }
+  }
+
+  type Placer = (
+    asset: SceneryAsset,
+    x: number,
+    z: number,
+    spin: number,
+    scale: number | THREE.Vector3,
+    y?: number,
+  ) => void
+
+  /** What grows on each kind of ground. One recipe per land use, all seeded from the block. */
+  function dressBlock(block: TerrainBlock, place: Placer) {
+    const random = seededStream(block.seed)
+    const reach = block.size / 2 - 2.5
+    if (reach <= 0) return
+    const spot = () => ({ x: block.x + (random() * 2 - 1) * reach, z: block.z + (random() * 2 - 1) * reach })
+    const spin = () => random() * Math.PI * 2
+    const scatter = (asset: SceneryAsset, count: number, low: number, high: number) => {
+      for (let i = 0; i < count; i += 1) {
+        const point = spot()
+        place(asset, point.x, point.z, spin(), low + random() * (high - low))
+      }
+    }
+
+    switch (block.use) {
+      case 'park': {
+        // Denser tree cover further from the built core, which is what `relief` is for: it is a
+        // decorative distance-from-centre field and drives nothing that is measured.
+        scatter('tree_broadleaf', 3 + Math.round(block.relief * 3), 0.85, 1.35)
+        scatter('tree_ornamental', 2, 0.8, 1.1)
+        scatter('shrub', 3, 0.8, 1.3)
+        const bench = spot()
+        place('bench', bench.x, bench.z, spin(), 1)
+        if (random() < 0.32) place('fountain', block.x, block.z, 0, 1)
+        else if (random() < 0.3) place('pavilion', block.x, block.z, spin(), 1)
+        break
+      }
+      case 'woodland':
+        scatter('tree_conifer', 6 + Math.round(block.relief * 5), 0.9, 1.5)
+        scatter('tree_broadleaf', 3, 0.9, 1.25)
+        scatter('shrub', 2, 0.7, 1.1)
+        break
+      case 'greenway': {
+        // A greenway is a strip, so its trees line up rather than scatter.
+        const rows = 4
+        for (let i = 0; i < rows; i += 1) {
+          const t = (i + 0.5) / rows
+          const x = block.x - reach + t * reach * 2
+          place('tree_ornamental', x, block.z - reach * 0.4, spin(), 0.8 + random() * 0.3)
+          place('hedge', x, block.z + reach * 0.5, 0, new THREE.Vector3(reach * 2 / rows, 1, 1))
+        }
+        break
+      }
+      case 'orchard': {
+        // Planted, so it is drawn planted: a regular grid is the whole visual signature.
+        const rows = 3
+        for (let row = 0; row < rows; row += 1) {
+          for (let col = 0; col < rows; col += 1) {
+            const x = block.x + (col / (rows - 1) - 0.5) * reach * 1.9
+            const z = block.z + (row / (rows - 1) - 0.5) * reach * 1.9
+            place('tree_ornamental', x, z, spin(), 0.85 + random() * 0.2)
+          }
+        }
+        break
+      }
+      case 'plaza': {
+        place('fountain', block.x, block.z, 0, 1.15)
+        for (let i = 0; i < 4; i += 1) {
+          const angle = (i / 4) * Math.PI * 2 + Math.PI / 4
+          place('bench', block.x + Math.cos(angle) * reach * 0.55, block.z + Math.sin(angle) * reach * 0.55, angle, 1)
+        }
+        place('kiosk', block.x + reach * 0.7, block.z - reach * 0.7, spin(), 1)
+        scatter('tree_ornamental', 2, 0.8, 1)
+        break
+      }
+      case 'parking': {
+        // Two rows either side of a centre aisle, which is what makes a car park read as a car park.
+        const bays = 4
+        for (let row = 0; row < 2; row += 1) {
+          for (let bay = 0; bay < bays; bay += 1) {
+            const x = block.x + ((bay + 0.5) / bays - 0.5) * reach * 1.9
+            const z = block.z + (row === 0 ? -1 : 1) * reach * 0.52
+            place('parked_car', x, z, row === 0 ? 0 : Math.PI, 1)
+          }
+        }
+        place('streetlight', block.x - reach * 0.9, block.z, 0, 1)
+        break
+      }
+      case 'yard':
+        place('bus_shelter', block.x, block.z + reach * 0.6, Math.PI, 1)
+        place('streetlight', block.x + reach * 0.8, block.z - reach * 0.5, 0, 1)
+        scatter('shrub', 3, 0.7, 1.1)
+        break
+      case 'built':
+        // Occupied blocks get furniture only, never planting: the building is the measurement, and
+        // nothing decorative may crowd it.
+        place('streetlight', block.x - block.size / 2 - 2.2, block.z - block.size / 2 - 2.2, 0, 1)
+        if (block.seed % 5 === 0) place('signal', block.x + block.size / 2 + 2.2, block.z + block.size / 2 + 2.2, Math.PI, 1)
+        break
+      default:
+        break
+    }
+  }
+
+  /** Repeats the authored one-metre bridge tile along a crossing, stretched to the street's width. */
+  function dressBridge(path: readonly { x: number; z: number }[], width: number, place: Placer) {
+    for (let i = 1; i < path.length; i += 1) {
+      const ax = path[i - 1].x
+      const az = path[i - 1].z
+      const length = Math.hypot(path[i].x - ax, path[i].z - az)
+      if (length < 0.5) continue
+      const heading = Math.atan2(path[i].x - ax, path[i].z - az) - Math.PI / 2
+      place(
+        'bridge_deck',
+        (ax + path[i].x) / 2,
+        (az + path[i].z) / 2,
+        heading,
+        new THREE.Vector3(length, 1, width + 3.6),
+        -0.12,
+      )
+    }
+  }
+
+  const UP = new THREE.Vector3(0, 1, 0)
+
+  /** The same small deterministic stream the plan uses, so scenery inherits the plan's determinism. */
+  function seededStream(seed: number) {
+    let state = (seed >>> 0) || 1
+    return () => {
+      state = (state * 1664525 + 1013904223) >>> 0
+      return state / 4294967296
+    }
+  }
+
+  /** Land cover and water: the ~47% of the plan that carries no building. */
+  function buildLandCover(cityPlan: CityPlan) {
+    const terrain = cityPlan.terrain
+    const tiles = new Map<LandUse, { position: number[]; color: number[] }>()
+    const tileFor = (use: LandUse) => {
+      let bucket = tiles.get(use)
+      if (!bucket) {
+        bucket = { position: [], color: [] }
+        tiles.set(use, bucket)
+      }
+      return bucket
+    }
+
+    for (const block of terrain.blocks.values()) {
+      /*
+       * Facility blocks are skipped because the landmark draws its own plate there. Built blocks are
+       * not: a parcel is a surface on a real map, and without one every occupied plot fell through to
+       * the bare terrain underneath and the city read as buildings standing in a field.
+       */
+      if (block.use === 'facility') continue
+      const bucket = tileFor(block.use)
+      // The parcel is the block's own quadrilateral, pulled in off the kerb line so the carriageway
+      // stays on top of ground rather than of another parcel.
+      pushCornerQuad(
+        bucket.position,
+        cityPlan.warp.blockCorners(block.col, block.row),
+        LAND_LAYER[block.use] ?? -0.55,
+        cityPlan.streetWidth / 2 - 1.2,
+      )
+      /*
+       * A whisper of per-block shade.
+       *
+       * Vertex colour *multiplies* the material colour, so one seeded value near 1.0 breaks up a
+       * large expanse of parkland in both palettes without needing a second material or a texture.
+       * Kept inside ±12% so it never reads as a category of its own.
+       */
+      const shade = 0.88 + ((block.seed % 97) / 97) * 0.24
+      for (let i = 0; i < 6; i += 1) bucket.color.push(shade, shade, shade)
+    }
+
+    for (const [use, bucket] of tiles) {
+      if (bucket.position.length === 0) continue
+      const geometry = track(new THREE.BufferGeometry())
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(bucket.position, 3))
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(bucket.color, 3))
+      geometry.computeVertexNormals()
+      const mesh = new THREE.Mesh(geometry, landMaterials[use])
+      mesh.receiveShadow = true
+      groundGroup.add(mesh)
+    }
+
+    if (terrain.river.length > 1) {
+      const banks = riverPositions(terrain.river, 3.4, -0.46)
+      const water = riverPositions(terrain.river, 0, -0.5)
+      addMerged(groundGroup, banks, landMaterials.yard, 1)
+      addMerged(groundGroup, water, landMaterials.water, 1)
+    }
+  }
+
+  /** Kerbs, carriageways, centre lines and bridge decks, merged per street class. */
+  function buildCarriageways(cityPlan: CityPlan) {
+    const fill = new Map<StreetClass, number[]>()
+    const casing = new Map<StreetClass, number[]>()
+    const laneMark: number[] = []
+    const deck: number[] = []
+    const bucket = (map: Map<StreetClass, number[]>, key: StreetClass) => {
+      let list = map.get(key)
+      if (!list) {
+        list = []
+        map.set(key, list)
+      }
+      return list
+    }
+
+    for (const street of cityPlan.streets) {
+      const path = street.path
+      if (path.length < 2) continue
+      const klass = street.streetClass
+      if (street.bridge) {
+        // A bridge is drawn as a deck sitting over the water rather than as ground painted on it,
+        // so the crossing reads as a crossing from the oblique view.
+        ribbonPositions(path, street.width + 4.4, null, 0, deck, -0.16)
+        ribbonPositions(path, street.width, null, 0, bucket(fill, klass), -0.1)
+        ribbonPositions(path, 0.5, DASH_PATTERNS.dashed, 0, laneMark, -0.06)
+        continue
+      }
+      // One casing ribbon rather than two offset kerb strips: on a curve, two independently offset
+      // polylines drift apart on the outside of the bend and cross on the inside. A single wider
+      // ribbon under the carriageway follows the same centre line, so it can never come adrift.
+      ribbonPositions(path, street.width + 6.4, null, 0, bucket(casing, klass), -0.3)
+      ribbonPositions(path, street.width, null, 0, bucket(fill, klass), -0.25)
+      ribbonPositions(path, 0.5, null, 0, laneMark, -0.2)
     }
 
     /*
@@ -590,9 +1193,147 @@ export function createDatabaseCityScene(
      */
     for (const cornerX of [cityPlan.bounds.minX, cityPlan.bounds.maxX]) {
       for (const cornerZ of [cityPlan.bounds.minZ, cityPlan.bounds.maxZ]) {
-        addQuad(groundGroup, ARTERIAL_WIDTH, ARTERIAL_WIDTH, cornerX, cornerZ, -0.25, materials.asphalt)
+        pushQuad(bucket(casing, 'arterial'), cornerX, cornerZ, ARTERIAL_WIDTH / 2 + 3.2, ARTERIAL_WIDTH / 2 + 3.2, -0.3)
+        pushQuad(bucket(fill, 'arterial'), cornerX, cornerZ, ARTERIAL_WIDTH / 2, ARTERIAL_WIDTH / 2, -0.25)
       }
     }
+
+    // Casings first, so the wider ribbon of a minor street can never paint over an arterial's fill.
+    for (const [klass, positions] of casing) addMerged(groundGroup, positions, streetCasing[klass])
+    for (const [klass, positions] of fill) addMerged(groundGroup, positions, streetFill[klass])
+    addMerged(groundGroup, laneMark, materials.laneMark)
+    addMerged(groundGroup, deck, streetCasing.arterial)
+  }
+
+  /**
+   * Point the sun at the city and size its shadow frustum to fit.
+   *
+   * A directional light's shadow camera is orthographic and has no idea how big the scene is, so it
+   * has to be told. Sized off the plan's own diagonal, one city gets crisp shadows and another gets
+   * shadows at all, rather than one hard-coded box that suits neither.
+   */
+  function aimSunAt(cityPlan: CityPlan) {
+    const { centerX, centerZ, width, depth } = cityPlan.bounds
+    const reach = Math.max(width, depth) * 0.62 + ARTERIAL_WIDTH * 6
+    keyLight.target.position.set(centerX, 0, centerZ)
+    keyLight.target.updateMatrixWorld()
+    keyLight.position.set(centerX + reach * 1.35, reach * 1.15, centerZ + reach * 0.6)
+    const shadow = keyLight.shadow.camera
+    shadow.left = -reach
+    shadow.right = reach
+    shadow.top = reach
+    shadow.bottom = -reach
+    shadow.near = 1
+    shadow.far = reach * 5
+    shadow.updateProjectionMatrix()
+    fillLight.position.set(centerX - reach, reach * 1.1, centerZ - reach)
+  }
+
+  /** Layer heights for land cover, so parkland never z-fights the plate it sits on. */
+  const LAND_LAYER: Partial<Record<LandUse, number>> = {
+    // Built parcels sit lowest so every other cover type reads as laid on top of the city fabric.
+    built: -0.6,
+    water: -0.58,
+    park: -0.55,
+    greenway: -0.54,
+    woodland: -0.55,
+    orchard: -0.54,
+    plaza: -0.53,
+    parking: -0.53,
+    yard: -0.52,
+  }
+
+  /*
+   * Wound counter-clockwise seen from above, so the face normal points at the sky.
+   *
+   * Worth stating because getting it backwards is silent: a downward-facing quad is simply a back
+   * face to an aerial camera, so the whole land cover disappears without an error, a warning, or a
+   * missing draw call to notice.
+   */
+  function pushQuad(out: number[], x: number, z: number, halfW: number, halfD: number, y: number) {
+    out.push(
+      x - halfW, y, z - halfD,
+      x - halfW, y, z + halfD,
+      x + halfW, y, z + halfD,
+      x - halfW, y, z - halfD,
+      x + halfW, y, z + halfD,
+      x + halfW, y, z - halfD,
+    )
+  }
+
+  /**
+   * The same quad, but from four given corners rather than a centre and half-extents.
+   *
+   * A block is no longer a rectangle: the lattice is warped, so every parcel is a quadrilateral at
+   * its own angle. Drawing it as an axis-aligned square would leave the ground square while the
+   * streets around it curve, which is precisely the tell the redesign exists to remove.
+   *
+   * Wound in the same order as {@link pushQuad}, which is counter-clockwise seen from above.
+   */
+  function pushCornerQuad(
+    out: number[],
+    corners: readonly { x: number; z: number }[],
+    y: number,
+    inset: number,
+  ) {
+    let cx = 0
+    let cz = 0
+    for (const corner of corners) {
+      cx += corner.x / corners.length
+      cz += corner.z / corners.length
+    }
+    const pulled = corners.map(corner => {
+      const dx = cx - corner.x
+      const dz = cz - corner.z
+      const length = Math.hypot(dx, dz) || 1
+      // Never past the centre, or a small block turns inside out and renders as a bow tie.
+      const step = Math.min(inset, length * 0.45)
+      return { x: corner.x + (dx / length) * step, z: corner.z + (dz / length) * step }
+    })
+    const [nw, ne, se, sw] = pulled
+    out.push(
+      nw.x, y, nw.z, sw.x, y, sw.z, se.x, y, se.z,
+      nw.x, y, nw.z, se.x, y, se.z, ne.x, y, ne.z,
+    )
+  }
+
+  /** A river is a ribbon whose half-width changes along its length, so it cannot reuse the road path. */
+  function riverPositions(nodes: readonly { x: number; z: number; halfWidth: number }[], grow: number, y: number) {
+    const out: number[] = []
+    const edge = (index: number, side: number) => {
+      const node = nodes[index]
+      const before = nodes[index - 1] ?? node
+      const after = nodes[index + 1] ?? node
+      const dx = after.x - before.x
+      const dz = after.z - before.z
+      const length = Math.hypot(dx, dz) || 1
+      const half = node.halfWidth + grow
+      return { x: node.x + (-dz / length) * half * side, z: node.z + (dx / length) * half * side }
+    }
+    for (let i = 1; i < nodes.length; i += 1) {
+      const al = edge(i - 1, 1)
+      const ar = edge(i - 1, -1)
+      const bl = edge(i, 1)
+      const br = edge(i, -1)
+      out.push(al.x, y, al.z, bl.x, y, bl.z, br.x, y, br.z, al.x, y, al.z, br.x, y, br.z, ar.x, y, ar.z)
+    }
+    return out
+  }
+
+  function addMerged(group: THREE.Group, positions: number[], material: THREE.Material, shade?: number) {
+    if (positions.length === 0) return
+    const geometry = track(new THREE.BufferGeometry())
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    // Land-cover materials multiply by vertex colour; a ribbon that carries no per-block shade still
+    // has to supply the attribute or the shader reads garbage.
+    if (shade !== undefined) {
+      const colors = new Float32Array(positions.length).fill(shade)
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    }
+    geometry.computeVertexNormals()
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.receiveShadow = true
+    group.add(mesh)
   }
 
   function addQuad(
@@ -612,29 +1353,55 @@ export function createDatabaseCityScene(
   }
 
   /**
-   * Draws one tint per schema neighborhood. Facilities are deliberately not tinted here: this layer
-   * is named for schema neighborhoods, and the facilities are drawn with their own layer so the
-   * toggle stays literally true. Since placement scatters a schema's objects across the grid, a
-   * district is the bounding box of its members and boxes may overlap.
+   * Washes each schema's neighbourhood over the ground it claimed.
+   *
+   * One quad per claimed block rather than one bounding rectangle: territories are grown, so their
+   * real shape is ragged, and a bounding box would paint over the neighbours either side of an
+   * L-shaped one. Drawn at low opacity under the roads, so it tints the land without hiding what is
+   * on it — the same way a basemap shades a district behind its streets rather than in front of them.
+   *
+   * Facilities are not washed. They belong to the whole city rather than to any schema, and a tinted
+   * plate under one would say it belonged to the neighbourhood that happens to surround it.
    */
   function buildDistricts(cityPlan: CityPlan) {
     clearGroup(districtGroup)
     for (const district of cityPlan.districts) {
-      addQuad(
-        districtGroup,
-        district.maxX - district.minX,
-        district.maxZ - district.minZ,
-        district.centerX,
-        district.centerZ,
-        -0.5,
-        materials.district,
-      )
+      if (district.blocks.length === 0) continue
+      const material = districtMaterial(neighborhoodTint(district.neighborhoodOrdinal))
+      const positions: number[] = []
+      for (const block of district.blocks) {
+        // Negative inset: the wash runs a little past the kerb so adjacent blocks of one
+        // neighbourhood join into a single field of colour instead of a run of separate plates.
+        pushCornerQuad(positions, cityPlan.warp.blockCorners(block.col, block.row), -0.5, -0.5)
+      }
+      addMerged(districtGroup, positions, material)
+    }
+  }
+
+  /** Places a neighbourhood's name over the middle of the ground it owns. */
+  function buildNeighborhoodLabels(cityPlan: CityPlan) {
+    clearGroup(neighborhoodLabelGroup)
+    const pitch = streetPitch(cityPlan)
+    for (const district of cityPlan.districts) {
+      const text = neighborhoodLabelText(district.name)
+      if (text.length === 0 || district.blocks.length === 0) continue
+      const worldHeight = neighborhoodLabelHeight(district.blocks.length, (pitch.x + pitch.z) / 2)
+      const sprite = labelFactory.make(text, {
+        variant: 'neighborhood',
+        tint: neighborhoodTint(district.neighborhoodOrdinal),
+        worldHeight,
+      })
+      if (!sprite) continue
+      // Above the rooftops of an ordinary street, and above its own type size, so the name floats
+      // over its neighbourhood instead of being lost among the buildings it names.
+      sprite.position.set(district.labelX, worldHeight / 2 + 34, district.labelZ)
+      neighborhoodLabelGroup.add(sprite)
     }
   }
 
   /** Places a label on the pavement in front of a building, in world space so it never rotates with the lot. */
   function addBuildingLabel(object: DatabaseCityObject, lot: CityLot) {
-    const sprite = labelFactory.make(buildingLabelText(object.schemaName, object.name))
+    const sprite = labelFactory.make(buildingLabelText(object.name))
     if (!sprite) return
     const anchor = labelAnchor(lot.x, lot.z, lot.accessX, lot.accessZ, (lot.footprint ?? 11) / 2 + 3)
     sprite.position.set(anchor.x, LABEL_WORLD_HEIGHT / 2 + 0.7, anchor.z)
@@ -645,22 +1412,49 @@ export function createDatabaseCityScene(
     clearGroup(buildingGroup)
     clearGroup(buildingLabelGroup)
     pickable.length = 0
+    // Every building in a schema takes the same hue, which is what makes a neighbourhood read as one
+    // place from the air rather than as a run of unrelated blocks that happen to be adjacent.
+    const tints = new Map<string, number>(
+      cityPlan.districts.map(district => [district.districtId, neighborhoodTint(district.neighborhoodOrdinal)]),
+    )
+    /*
+     * Shadow casting is capped rather than universal.
+     *
+     * Every caster is another draw of the whole building into the depth map, so a ten-thousand-table
+     * instance would spend its entire frame budget rendering the scene twice. Casters are taken from
+     * the front of the object list, which the planner has already ordered deterministically, so the
+     * same database always casts the same shadows. Everything still *receives* shadow, which is where
+     * most of the depth cue actually comes from.
+     */
+    const casters = Math.min(objects.length, MAX_SHADOW_CASTERS)
+    let drawn = 0
     for (const object of objects) {
       const lot = cityPlan.lots.get(object.objectId)
       if (!lot) continue
       addBuildingLabel(object, lot)
       const known = lot.footprint !== null && lot.height !== null
+      const casts = drawn < casters
+      drawn += 1
       const group = new THREE.Group()
       group.position.set(lot.x, 0, lot.z)
       group.rotation.y = lot.rotationY
       group.userData.objectId = object.objectId
 
-      const geometry = buildBuildingGeometry(lot)
+      const character = cityPlan.terrain.characters.get(lot.districtId)
+      const geometry = buildBuildingGeometry(lot, character)
+      const tint = tints.get(lot.districtId)
       const body = new THREE.Mesh(
         track(geometry.body),
-        known ? bodyMaterial(ARCHETYPE_COLORS[lot.archetype]) : materials.unknown,
+        known
+          ? bodyMaterial(
+              buildingColor(lot.archetype, character, tint),
+              mapBuildingColor(lot.archetype, MAP_PALETTE.building, tint),
+            )
+          : materials.unknown,
       )
       body.userData.objectId = object.objectId
+      body.castShadow = casts
+      body.receiveShadow = true
       group.add(body)
       pickable.push(body)
 
@@ -729,6 +1523,7 @@ export function createDatabaseCityScene(
     // Widest first, so the heaviest traffic keeps the centre line and the light roads move aside.
     const ordered = [...roads].sort((left, right) => right.width - left.width || left.routeId.localeCompare(right.routeId))
     const corridorLanes = new Map<string, Set<number>>()
+    const pitch = streetPitch(cityPlan)
 
     for (const road of ordered) {
       const from = cityPlan.lots.get(road.fromObjectId)
@@ -737,7 +1532,7 @@ export function createDatabaseCityScene(
       // A cross-database reference leaves the city on a ramp through the nearest boundary.
       const target = to ? { x: to.accessX, z: to.accessZ } : rampPoint(cityPlan, from)
       const points = streetPolyline(cityPlan, { x: from.accessX, z: from.accessZ }, target)
-      const corridors = corridorKeys(points)
+      const corridors = corridorKeys(points, pitch)
       const lane = claimLane(corridorLanes, corridors)
       const offset = laneOffset(lane)
       const centreline = offsetPolyline(points, offset)
@@ -876,8 +1671,8 @@ export function createDatabaseCityScene(
       )
 
       // Facilities are scattered across the grid now, so there is no civic rectangle to tint. Each
-      // one carries its own pad instead, which keeps it legible as a place with the schema
-      // neighborhood layer switched off.
+      // one carries its own pad instead, which keeps it legible as a place of its own rather than
+      // part of whichever schema's neighbourhood happens to surround it.
       addQuad(
         infrastructureGroup,
         site.radius * 2,
@@ -885,7 +1680,7 @@ export function createDatabaseCityScene(
         site.x,
         site.z,
         -0.5,
-        materials.district,
+        materials.civicPad,
       )
 
       addFacilityLabel(facility, site)
@@ -894,15 +1689,7 @@ export function createDatabaseCityScene(
 
       // The architecture is always drawn, so a facility's location stays learnable even with no
       // evidence. It is fixed decoration and never varies with a measurement.
-      const shell = facilityShell(facility.kind, site.radius)
-      const shellMaterial = facility.known ? materials.facility : materials.facilityUnknown
-      group.add(new THREE.Mesh(track(shell.body), shellMaterial))
-      if (shell.trim) {
-        group.add(new THREE.Mesh(track(shell.trim), facility.known ? materials.trim : materials.facilityUnknown))
-      }
-      if (shell.glass) {
-        group.add(new THREE.Mesh(track(shell.glass), facility.known ? materials.window : materials.facilityUnknown))
-      }
+      group.add(buildFacilityArchitecture(facility.kind, site.radius, facility.known))
 
       if (!facility.known) {
         infrastructureGroup.add(group)
@@ -938,6 +1725,57 @@ export function createDatabaseCityScene(
       })
       infrastructureGroup.add(group)
     }
+  }
+
+  const KIT_MATERIALS: Record<AssetRole, THREE.Material> = {
+    body: materials.kitBody,
+    trim: materials.kitTrim,
+    glass: materials.kitGlass,
+    metal: materials.kitMetal,
+    trunk: materials.kitTrunk,
+    leaf: materials.kitLeaf,
+    water: materials.kitWater,
+  }
+
+  /**
+   * Draws a facility's building.
+   *
+   * Prefers the authored landmark from `landmarks.glb`, which is modelled to a plot radius of 1 and
+   * therefore scaled rather than rebuilt. Falls back to the procedural shell when the kit has not
+   * arrived — or never arrives. Either way the architecture is decoration: it is identical for a
+   * facility carrying a terabyte of evidence and one carrying none, and only the units inside it move.
+   * An unmeasured facility is drawn in the wireframe material for exactly that reason.
+   */
+  function buildFacilityArchitecture(kind: FacilityKind, radius: number, known: boolean): THREE.Group {
+    const group = new THREE.Group()
+    const kit = assets?.landmarks
+    const asset = LANDMARK_ASSETS[kind]
+    if (kit && kit.has(asset)) {
+      group.scale.setScalar(radius)
+      for (const role of kit.roles(asset)) {
+        const geometry = kit.geometry(asset, role)
+        if (!geometry) continue
+        // Kit geometry is shared across every rebuild, so it is deliberately not tracked for disposal.
+        const mesh = new THREE.Mesh(geometry, known ? KIT_MATERIALS[role] : materials.facilityUnknown)
+        // Landmarks always cast: there are six of them, and they are what you navigate by.
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        group.add(mesh)
+      }
+      return group
+    }
+
+    const shell = facilityShell(kind, radius)
+    const add = (geometry: THREE.BufferGeometry, material: THREE.Material) => {
+      const mesh = new THREE.Mesh(track(geometry), material)
+      mesh.castShadow = true
+      mesh.receiveShadow = true
+      group.add(mesh)
+    }
+    add(shell.body, known ? materials.facility : materials.facilityUnknown)
+    if (shell.trim) add(shell.trim, known ? materials.trim : materials.facilityUnknown)
+    if (shell.glass) add(shell.glass, known ? materials.window : materials.facilityUnknown)
+    return group
   }
 
   /** Names a facility on the pavement at the front of its plot, matching how buildings are labelled. */
@@ -1015,9 +1853,7 @@ export function createDatabaseCityScene(
       Math.cos(polar),
       Math.sin(polar) * Math.cos(azimuth))
     camera.position.copy(controls.target).addScaledVector(direction, distance)
-    camera.near = Math.max(0.5, distance / 900)
-    camera.far = distance * 30
-    camera.updateProjectionMatrix()
+    setDepthRange(distance)
     controls.update()
     requestRender()
   }
@@ -1123,12 +1959,31 @@ export function createDatabaseCityScene(
   resize.observe(canvas)
   draw()
 
+  /*
+   * Fetch the authored kits in the background.
+   *
+   * The city draws immediately with procedural shells, and swaps in the landmarks and scenery when
+   * they arrive — usually within the same second, since they are ~290 KiB and requested alongside the
+   * three.js chunk. Nothing waits on them: a kit that never loads costs the map some decoration, and
+   * every measurement is drawn either way.
+   */
+  void loadCityAssets().then(loaded => {
+    if (disposed || !loaded) return
+    assets = loaded
+    if (plan) {
+      buildGround(plan)
+      buildInfrastructure(currentFacilities)
+      requestRender()
+    }
+  })
+
   return {
     setObjects(objects, planOptions) {
       plan = planCity(objects, planOptions)
       facilitySites = plan.facilities
       buildGround(plan)
       buildDistricts(plan)
+      buildNeighborhoodLabels(plan)
       buildBuildings(objects, plan)
       buildRoads(currentRoads, plan)
       buildFacilityLanes(currentLanes, currentSharedLanes)
@@ -1318,15 +2173,16 @@ export function createDatabaseCityScene(
  * `dash` repeats a fixed-length on/off pattern along the whole polyline, which is how the reduced
  * confidence patterns are expressed without needing a line material.
  */
-function ribbonGeometry(
+function ribbonPositions(
   points: ReadonlyArray<{ x: number; z: number }>,
   width: number,
   dash: DashPattern | null,
   offset = 0,
-): THREE.BufferGeometry | null {
+  out: number[] = [],
+  y = 0,
+): number[] {
   const line = offsetPolyline(points, offset)
-  if (line.length < 2) return null
-  const positions: number[] = []
+  if (line.length < 2) return out
   const half = width / 2
   const push = (
     ax: number,
@@ -1336,13 +2192,13 @@ function ribbonGeometry(
     nx: number,
     nz: number,
   ) => {
-    positions.push(
-      ax + nx, 0, az + nz,
-      bx + nx, 0, bz + nz,
-      bx - nx, 0, bz - nz,
-      ax + nx, 0, az + nz,
-      bx - nx, 0, bz - nz,
-      ax - nx, 0, az - nz,
+    out.push(
+      ax + nx, y, az + nz,
+      bx + nx, y, bz + nz,
+      bx - nx, y, bz - nz,
+      ax + nx, y, az + nz,
+      bx - nx, y, bz - nz,
+      ax - nx, y, az - nz,
     )
   }
 
@@ -1354,14 +2210,47 @@ function ribbonGeometry(
     push(span.ax, span.az, span.bx, span.bz, -uz * half, ux * half)
   }
 
-  // Square off the corners of an unbroken road so perpendicular legs join without a notch. A dashed
-  // road needs no corner patch: its dashes already carry around the turn.
+  /*
+   * Patch the joints of an unbroken ribbon.
+   *
+   * Each span is mitre-free, so a bend leaves a wedge of missing ground on the outside of the turn.
+   * The old patch was an axis-aligned square, which was exactly right for a lattice that only ever
+   * bent at 90° and catastrophically wrong now that streets curve and run diagonally: it fired a
+   * square off at every vertex of every bend, which read as white starbursts across the basemap.
+   *
+   * A disc is the only join that is correct for every angle, and a rounded join is what a printed
+   * basemap draws anyway. Endpoints get one too, which closes junctions and the four outer corners
+   * of the city without a special case. A dashed ribbon gets none — its dashes carry around the turn
+   * on their own, and capping them would fill in the gaps that carry the meaning.
+   */
   if (dash === null) {
-    for (let i = 1; i < line.length - 1; i += 1) {
-      push(line[i].x - half, line[i].z, line[i].x + half, line[i].z, 0, half)
-    }
+    for (const point of line) pushDisc(out, point.x, point.z, half, y)
   }
+  return out
+}
 
+/** A flat disc as a triangle fan, used to round off the joints and ends of a ribbon. */
+function pushDisc(out: number[], x: number, z: number, radius: number, y: number, segments = 10) {
+  if (radius <= 0) return
+  const step = (Math.PI * 2) / segments
+  for (let i = 0; i < segments; i += 1) {
+    const a = i * step
+    const b = a + step
+    out.push(
+      x, y, z,
+      x + Math.cos(a) * radius, y, z + Math.sin(a) * radius,
+      x + Math.cos(b) * radius, y, z + Math.sin(b) * radius,
+    )
+  }
+}
+
+function ribbonGeometry(
+  points: ReadonlyArray<{ x: number; z: number }>,
+  width: number,
+  dash: DashPattern | null,
+  offset = 0,
+): THREE.BufferGeometry | null {
+  const positions = ribbonPositions(points, width, dash, offset)
   if (positions.length === 0) return null
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))

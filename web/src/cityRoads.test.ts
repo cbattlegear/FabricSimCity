@@ -124,6 +124,22 @@ describe('corridorKeys', () => {
   it('returns nothing for a polyline with no segments', () => {
     expect(corridorKeys([{ x: 4, z: 9 }])).toEqual([])
   })
+
+  it('gives every point on one bowed leg the same key, so two roads on it cannot share a lane', () => {
+    const pitch = { x: 55, z: 55 }
+    // Two roads running the same north-south street, sampled at different points of the same bend.
+    const left = corridorKeys([{ x: 8, z: 0 }, { x: 14, z: 40 }, { x: 9, z: 80 }], pitch)
+    const right = corridorKeys([{ x: 2, z: 10 }, { x: 13, z: 50 }, { x: 4, z: 90 }], pitch)
+    expect(new Set([...left, ...right])).toEqual(new Set(['x0']))
+    // Rounding raw coordinates instead, which is the default pitch, would have split them apart.
+    expect(new Set(corridorKeys([{ x: 8, z: 0 }, { x: 14, z: 40 }, { x: 9, z: 80 }])).size).toBe(2)
+  })
+
+  it('tells neighbouring corridors apart', () => {
+    const pitch = { x: 55, z: 55 }
+    expect(corridorKeys([{ x: 6, z: 0 }, { x: 6, z: 40 }], pitch)).toEqual(['x0'])
+    expect(corridorKeys([{ x: 61, z: 0 }, { x: 61, z: 40 }], pitch)).toEqual(['x1'])
+  })
 })
 
 describe('claimLane', () => {

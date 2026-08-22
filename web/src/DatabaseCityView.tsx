@@ -12,9 +12,8 @@ import type { LiveIncidentResponse } from './liveContracts'
 import type { LiveFeedConnectionState } from './liveIncidents'
 import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
 import { DatabaseCityViewport } from './DatabaseCityViewport'
-import type { CityLayerToggles } from './DatabaseCityScene'
 import { liveBlockingEdges, type LiveBlockingSummary } from './cityBlocking'
-import { planCity, type CityPlanOptions } from './cityPlan'
+import { neighborhoodSwatch, planCity, type CityPlanOptions } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
 import { CONGESTION_LABELS, gradeRoads, type RoadTraffic } from './cityTraffic'
 import { FACILITY_LABELS, projectFacilities, type Facility } from './cityInfrastructure'
@@ -54,9 +53,6 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get('object'))
   const [selectedRoadId, setSelectedRoadId] = useState<string | null>(null)
-  // Mirrors the viewport's Schema neighborhoods layer. The count line and the schema strip both
-  // describe that layer, so they follow it rather than announcing a grouping the map is not drawing.
-  const [showNeighborhoods, setShowNeighborhoods] = useState(false)
   const [addressTerm, setAddressTerm] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -122,10 +118,6 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     const url = new URL(window.location.href)
     url.searchParams.set('object', objectId)
     window.history.replaceState(null, '', url)
-  }, [])
-
-  const onLayersChange = useCallback((layers: CityLayerToggles) => {
-    setShowNeighborhoods(layers.districts)
   }, [])
 
   const selectRoad = useCallback((routeId: string | null) => {
@@ -544,7 +536,6 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
               facilities={facilities}
               facilityTraffic={facilityTraffic}
               blocking={blocking}
-              showNeighborhoods={showNeighborhoods}
               displayedSchemas={displayedSchemas}
               activePlanFamilyId={activePlan?.choice.familyId ?? null}
               mappingFamilyId={mappingFamilyId}
@@ -582,7 +573,6 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           roadLabels={roadLabels}
           liveStatus={liveStatus}
           incidents={incidents}
-          onLayersChange={onLayersChange}
         />
       )}
 
@@ -619,7 +609,6 @@ function LegendDrawer({
   facilities,
   facilityTraffic,
   blocking,
-  showNeighborhoods,
   displayedSchemas,
   activePlanFamilyId,
   mappingFamilyId,
@@ -638,7 +627,6 @@ function LegendDrawer({
   facilities: readonly Facility[]
   facilityTraffic: FacilityTraffic
   blocking: LiveBlockingSummary
-  showNeighborhoods: boolean
   displayedSchemas: ReadonlyArray<{ schemaId: string; name: string; neighborhoodOrdinal: number; objectCount: number }>
   activePlanFamilyId: string | null
   mappingFamilyId: string | null
@@ -676,22 +664,57 @@ function LegendDrawer({
         </p>
 
         <p className="mapping-note">
-          <strong>Where things stand encodes nothing.</strong> Every building has its own block, and
-          which block it gets is drawn from a generator seeded with the database id, so the same
-          database always produces the same city on every machine while two databases of identical
-          shape produce different ones. Infrastructure facilities are scattered across the grid at
-          least two blocks apart so they act as landmarks rather than one civic corner. Because
-          placement is seeded rather than sorted, neighbouring buildings are <em>not</em> related by
-          being neighbours, and a schema is a tint rather than a quarter. Street class, roof shapes,
-          windows, setbacks, crowns and sidewalks are decoration and encode nothing.
+          <strong>Neighbourhoods are real; addresses are not.</strong> Each schema holds one
+          contiguous quarter of the city, so two tables in the same schema are always near each
+          other and a building&apos;s neighbourhood is a catalogue fact you can check. Inside that
+          quarter nothing is sorted: which block a building gets is drawn from a generator seeded
+          with the database id, so neighbouring buildings are <em>not</em> related by being
+          neighbours, and how far apart two schemas sit is an accident of the seed rather than a
+          measure of how related they are. The same database always produces the same city on every
+          machine while two databases of identical shape produce different ones. A
+          neighbourhood&apos;s hue and the label across its ground name the schema and nothing more;
+          hues are handed out in catalogue order, so none is warmer, larger or busier than another.
+          A larger schema does claim more ground, but only roughly — borders land wherever two
+          neighbourhoods happen to meet, so read the counts beside each name rather than the area.
+          Infrastructure facilities are scattered at least two blocks apart so they act as landmarks
+          rather than one civic corner. Street class, roof shapes, windows, setbacks, crowns and
+          sidewalks are decoration and encode nothing.
         </p>
 
-        {showNeighborhoods && <div className="city-schema-strip" aria-label="Schema neighborhoods">
+        <p className="mapping-note">
+          <strong>The scenery is not evidence.</strong> The landscape this city sits in is drawn, not
+          measured. The river and its banks, the ground relief, every land-use area — parks,
+          woodland, orchards, plazas, parking, yards and open water — the trees, hedges, streetlights,
+          benches, parked cars and other street furniture, the architecture of the six infrastructure
+          facilities, and the whole golden-hour palette, sky and shadows are all generated from the
+          same database-id seed as the block layout. None of them is derived from any measurement, so
+          none of them can be read as one: a park is not idle space, a wooded edge is not a cold
+          table, and a district with few streets is not a sparse schema.
+        </p>
+
+        <p className="mapping-note">
+          <strong>The street plan is drawn too.</strong> This city is deliberately not a grid, and
+          none of what replaces the grid means anything. Where each junction sits, how wide each
+          block is, which streets are heavy arterials and how far apart they run, where the squares
+          open out, which pattern of streets fills each district, the curve of every road, the ring
+          boulevard and the avenues radiating from the squares — all of it comes from the seed. So do
+          the T-junctions and dead ends: roughly one junction in seven is left as a cul-de-sac and
+          most of the rest meet three streets rather than four, because that is the shape of a real
+          street network, not because anything about the database ended there. A big block is not a
+          big table, a dead end is not a table nothing reaches, a square is not a hotspot, and two
+          buildings on the same curve have nothing to do with each other. Everything that does carry
+          a quantity is listed above.
+        </p>
+
+        <div className="city-schema-strip" aria-label="Neighbourhoods">
           {displayedSchemas.map(schema => <div key={schema.schemaId}>
-            <strong>{schema.name}</strong>
-            <span>{schema.objectCount} objects · neighborhood {schema.neighborhoodOrdinal + 1}</span>
+            <strong>
+              <i className="legend-swatch" style={{ background: neighborhoodSwatch(schema.neighborhoodOrdinal) }} aria-hidden="true" />
+              {schema.name}
+            </strong>
+            <span>{schema.objectCount} objects</span>
           </div>)}
-        </div>}
+        </div>
 
         <section className="table-region" aria-labelledby="city-object-table">
           <div className="section-heading">

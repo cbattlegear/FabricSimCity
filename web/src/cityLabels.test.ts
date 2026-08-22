@@ -7,22 +7,32 @@ import {
   elideMiddle,
   labelAnchor,
   labelWorldWidth,
+  neighborhoodLabelText,
   LABEL_MAX_CHARS,
   LABEL_WORLD_HEIGHT,
+  NEIGHBORHOOD_LABEL_MAX_CHARS,
 } from './cityLabels'
 
 describe('buildingLabelText', () => {
-  it('qualifies a building label with its schema, which is what the district tint used to say', () => {
-    expect(buildingLabelText('Sales', 'Orders')).toBe('Sales.Orders')
+  it('names a building without its schema, because the neighbourhood it stands in already says that', () => {
+    expect(buildingLabelText('Orders')).toBe('Orders')
   })
 
-  it('falls back to the bare name when there is no schema to qualify with', () => {
-    expect(buildingLabelText('', 'Orders')).toBe('Orders')
-  })
-
-  it('elides a qualified name that would rasterize into an unreadably wide plate', () => {
-    const label = buildingLabelText('WarehouseStaging', 'FactInventorySnapshotDailyRollup')
+  it('elides a name that would rasterize into an unreadably wide plate', () => {
+    const label = buildingLabelText('FactInventorySnapshotDailyRollupExtended')
     expect([...label]).toHaveLength(LABEL_MAX_CHARS)
+    expect(label).toContain('…')
+  })
+})
+
+describe('neighborhoodLabelText', () => {
+  it('sets a schema name as a tracked uppercase place name, the way a basemap names a district', () => {
+    expect(neighborhoodLabelText('Sales')).toBe('S\u2009A\u2009L\u2009E\u2009S')
+  })
+
+  it('elides before tracking, so the letter spacing never pushes the plate past its budget', () => {
+    const label = neighborhoodLabelText('WarehouseStagingArchive')
+    expect([...label.replace(/\u2009/g, '')]).toHaveLength(NEIGHBORHOOD_LABEL_MAX_CHARS)
     expect(label).toContain('…')
   })
 })
