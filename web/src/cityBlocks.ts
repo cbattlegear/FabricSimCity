@@ -205,28 +205,45 @@ export function inset(ring: readonly Point[], distance: number): Point[] {
     lines.push({ x: a.x + nx * distance, z: a.z + nz * distance, nx, nz })
   }
 
-  const out: Point[] = []
+  const corners: Point[] = []
   for (let index = 0; index < count; index += 1) {
     const previous = lines[(index + count - 1) % count]
     const current = lines[index]
-    const point = intersectLines(previous, current)
-    if (point === null) continue
     const original = ring[index]
-    const drift = Math.hypot(point.x - original.x, point.z - original.z)
-    // A near-parallel pair meets far away; capping keeps a spike out of the block.
-    if (drift > distance * 6) {
-      out.push({
-        x: original.x + (current.nx + previous.nx) * distance * 0.5,
-        z: original.z + (current.nz + previous.nz) * distance * 0.5,
-      })
-      continue
-    }
-    out.push(point)
+    const point = intersectLines(previous, current)
+    const drift = point === null
+      ? Infinity
+      : Math.hypot(point.x - original.x, point.z - original.z)
+    // A near-parallel pair meets far away, or not at all; capping keeps a spike out of the block and
+    // keeps one corner per original vertex, which the direction check below relies on.
+    corners.push(point !== null && drift <= distance * 6 ? point : {
+      x: original.x + (current.nx + previous.nx) * distance * 0.5,
+      z: original.z + (current.nz + previous.nz) * distance * 0.5,
+    })
   }
 
-  const cleaned = dedupe(out)
+  /*
+   * A ring narrower than twice the setback turns inside out rather than vanishing: the offset of one
+   * side crosses the offset of the opposite side and the intersections trace a small polygon in the
+   * middle, which for a symmetric shape even keeps the original winding, so an area test alone does
+   * not catch it. Each offset edge is by construction parallel to the edge it came from, so an edge
+   * that has reversed direction is exactly the signature of that over-run.
+   *
+   * Only edges long enough for their direction to be meaningful are tested. A block boundary follows
+   * a curved street and is made of many very short segments whose direction is numerical noise.
+   */
+  for (let index = 0; index < count; index += 1) {
+    const next = (index + 1) % count
+    const originalX = ring[next].x - ring[index].x
+    const originalZ = ring[next].z - ring[index].z
+    if (Math.hypot(originalX, originalZ) < distance * 0.5) continue
+    const insetX = corners[next].x - corners[index].x
+    const insetZ = corners[next].z - corners[index].z
+    if (originalX * insetX + originalZ * insetZ < 0) return []
+  }
+
+  const cleaned = dedupe(corners)
   if (cleaned.length < 3) return []
-  // Inverted rings mean the block was thinner than the setback and has no buildable ground at all.
   if (signedArea(cleaned) <= 0) return []
   return cleaned
 }
