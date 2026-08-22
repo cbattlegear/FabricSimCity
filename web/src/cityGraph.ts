@@ -279,6 +279,110 @@ function pushInto(map: Map<number, number[]>, key: number, value: number): void 
 }
 
 /* ------------------------------------------------------------------ *
+ * Connecting what the tracer left stranded
+ * ------------------------------------------------------------------ */
+
+/**
+ * Joins every stranded island of streets to the main network with a link road.
+ *
+ * Tracing can leave a pocket of streets with no way in. It happens where a district's grain turns
+ * hard against its neighbour's: streets on both sides stop at the seam rather than crossing it, and
+ * if the gap is wider than the snap radius nothing reaches over. On the map it looks like nothing at
+ * all, which is the problem — the streets are drawn, the buildings on them are drawn, and only when
+ * a query route between two buildings comes back empty does it emerge that one of them cannot be
+ * reached from the other. Ribbons silently go missing.
+ *
+ * Every island is therefore linked to the main network across the shortest gap between them, which
+ * is what a real bypass or link road does and is only a longer-range version of the snapping the
+ * graph already does. Islands are joined smallest gap first, so a chain of pockets links through its
+ * neighbour rather than each reaching separately across the city.
+ *
+ * The alternative — discarding islands — would throw away their blocks, and with them the ground the
+ * buildings stand on, to fix a problem the reader cannot see.
+ */
+export function connectComponents(graph: PlanarGraph): PlanarGraph {
+  const components = findComponents(graph)
+  if (components.length <= 1) return graph
+
+  // Largest first: the biggest component is the city, and the rest are pockets to be attached to it.
+  components.sort((a, b) => b.length - a.length)
+  const main = new Set(components[0])
+  const pending = components.slice(1)
+  const edges = [...graph.edges]
+  const nodes = graph.nodes
+
+  while (pending.length > 0) {
+    let bestIsland = 0
+    let bestFrom = -1
+    let bestTo = -1
+    let bestDistance = Infinity
+    for (let index = 0; index < pending.length; index += 1) {
+      for (const fromId of pending[index]) {
+        const from = nodes.get(fromId)!
+        for (const toId of main) {
+          const to = nodes.get(toId)!
+          const distance = (from.x - to.x) ** 2 + (from.z - to.z) ** 2
+          if (distance < bestDistance) {
+            bestDistance = distance
+            bestFrom = fromId
+            bestTo = toId
+            bestIsland = index
+          }
+        }
+      }
+    }
+    if (bestFrom < 0) break
+
+    const from = nodes.get(bestFrom)!
+    const to = nodes.get(bestTo)!
+    edges.push({
+      id: edges.length,
+      fromId: bestFrom,
+      toId: bestTo,
+      points: [{ x: from.x, z: from.z }, { x: to.x, z: to.z }],
+      length: Math.hypot(from.x - to.x, from.z - to.z),
+      streamlineId: `link:${bestFrom}:${bestTo}`,
+      family: 'major',
+      centrality: 0,
+    })
+    for (const id of pending[bestIsland]) main.add(id)
+    pending.splice(bestIsland, 1)
+  }
+
+  const incident = new Map<number, number[]>()
+  for (const edge of edges) {
+    pushInto(incident, edge.fromId, edge.id)
+    pushInto(incident, edge.toId, edge.id)
+  }
+  return { nodes: graph.nodes, edges, incident }
+}
+
+/** Node ids grouped into connected components. */
+function findComponents(graph: PlanarGraph): number[][] {
+  const seen = new Set<number>()
+  const components: number[][] = []
+  for (const start of graph.nodes.keys()) {
+    if (seen.has(start)) continue
+    const component: number[] = []
+    const stack = [start]
+    seen.add(start)
+    while (stack.length > 0) {
+      const at = stack.pop()!
+      component.push(at)
+      for (const edgeId of graph.incident.get(at) ?? []) {
+        const edge = graph.edges[edgeId]
+        const next = edge.fromId === at ? edge.toId : edge.fromId
+        if (seen.has(next)) continue
+        seen.add(next)
+        stack.push(next)
+      }
+    }
+    components.push(component)
+  }
+  return components
+}
+
+/* ------------------------------------------------------------------ *
  * Breaking crossroads
  * ------------------------------------------------------------------ */
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { planField } from './cityField'
 import { traceStreamlines } from './cityStreamlines'
-import { breakCrossings, buildPlanarGraph, extractFaces, signedArea } from './cityGraph'
+import { breakCrossings, buildPlanarGraph, connectComponents, extractFaces, signedArea } from './cityGraph'
 import { buildBlocks, containsPoint, inset, squareCapacity } from './cityBlocks'
 import { classifyRoads, edgeBetweenness, RoadRouter, type RoadClass } from './cityRouting'
 
@@ -37,6 +37,9 @@ const GRAPH = breakCrossings(
 )
 const FACES = extractFaces(GRAPH)
 const FIELD = buildBlocks(GRAPH, FACES, { setback: 5, minCapacity: 10 })
+// Blocks come from the traced streets; routing additionally gets link roads into any stranded
+// pocket, which is why the two are taken from the graph at different stages.
+const ROUTING_GRAPH = connectComponents(GRAPH)
 
 const SQUARE = [
   { x: 0, z: 0 },
@@ -286,10 +289,72 @@ describe('classifyRoads', () => {
   })
 })
 
+describe('connectComponents', () => {
+  it('leaves an already connected network alone', () => {
+    const connected = connectComponents(ROUTING_GRAPH)
+    expect(connected.edges.length).toBe(ROUTING_GRAPH.edges.length)
+  })
+
+  /*
+   * The failure this exists to prevent is invisible on the map: a stranded pocket draws perfectly,
+   * and only a query route between two buildings coming back empty reveals that one cannot be
+   * reached from the other. So the check is reachability, not appearance.
+   */
+  it('makes every junction reachable from every other', () => {
+    const reached = new Set<number>()
+    const start = [...ROUTING_GRAPH.nodes.keys()][0]
+    const stack = [start]
+    reached.add(start)
+    while (stack.length > 0) {
+      const at = stack.pop()!
+      for (const edgeId of ROUTING_GRAPH.incident.get(at) ?? []) {
+        const edge = ROUTING_GRAPH.edges[edgeId]
+        const next = edge.fromId === at ? edge.toId : edge.fromId
+        if (reached.has(next)) continue
+        reached.add(next)
+        stack.push(next)
+      }
+    }
+    expect(reached.size).toBe(ROUTING_GRAPH.nodes.size)
+  })
+
+  it('keeps every junction and every street, and only adds', () => {
+    expect(ROUTING_GRAPH.nodes.size).toBe(GRAPH.nodes.size)
+    expect(ROUTING_GRAPH.edges.length).toBeGreaterThanOrEqual(GRAPH.edges.length)
+    for (let index = 0; index < GRAPH.edges.length; index += 1) {
+      expect(ROUTING_GRAPH.edges[index].streamlineId).toBe(GRAPH.edges[index].streamlineId)
+    }
+  })
+
+  it('joins two islands across their closest approach', () => {
+    // Two squares, far enough apart that nothing in the tracer would have bridged them.
+    const square = (ox: number): Point[][] => [
+      [{ x: ox, z: 0 }, { x: ox + 100, z: 0 }],
+      [{ x: ox + 100, z: 0 }, { x: ox + 100, z: 100 }],
+      [{ x: ox + 100, z: 100 }, { x: ox, z: 100 }],
+      [{ x: ox, z: 100 }, { x: ox, z: 0 }],
+    ]
+    const lines = [...square(0), ...square(400)].map((points, index) => ({
+      id: `s${index}`,
+      family: 'major' as const,
+      points,
+    }))
+    const graph = buildPlanarGraph(lines, { weldRadius: 1, snapRadius: 2, minStub: 1 })
+    const connected = connectComponents(graph)
+    expect(connected.edges.length).toBe(graph.edges.length + 1)
+
+    const link = connected.edges[connected.edges.length - 1]
+    const from = connected.nodes.get(link.fromId)!
+    const to = connected.nodes.get(link.toId)!
+    // The gap between the squares is 300; anything longer means it did not pick the closest pair.
+    expect(Math.hypot(from.x - to.x, from.z - to.z)).toBeCloseTo(300, 5)
+  })
+})
+
 describe('RoadRouter', () => {
-  const roads = classifyRoads(GRAPH)
-  const router = new RoadRouter(GRAPH, roads)
-  const nodeIds = [...GRAPH.nodes.keys()]
+  const roads = classifyRoads(ROUTING_GRAPH)
+  const router = new RoadRouter(ROUTING_GRAPH, roads)
+  const nodeIds = [...ROUTING_GRAPH.nodes.keys()]
 
   it('finds a route between arbitrary junctions', () => {
     let found = 0
@@ -309,7 +374,7 @@ describe('RoadRouter', () => {
     expect(route.nodeIds[route.nodeIds.length - 1]).toBe(to)
     expect(route.edgeIds.length).toBe(route.nodeIds.length - 1)
     for (let index = 0; index < route.edgeIds.length; index += 1) {
-      const edge = GRAPH.edges[route.edgeIds[index]]
+      const edge = ROUTING_GRAPH.edges[route.edgeIds[index]]
       const a = route.nodeIds[index]
       const b = route.nodeIds[index + 1]
       expect(edge.fromId === a && edge.toId === b || edge.fromId === b && edge.toId === a).toBe(true)
@@ -328,7 +393,9 @@ describe('RoadRouter', () => {
   })
 
   it('is deterministic', () => {
-    const twin = new RoadRouter(GRAPH, classifyRoads(GRAPH))
+    // Rebuilt from scratch, including the connectivity pass, so this covers that too.
+    const rebuilt = connectComponents(GRAPH)
+    const twin = new RoadRouter(rebuilt, classifyRoads(rebuilt))
     for (let index = 0; index < 40; index += 1) {
       const from = nodeIds[(index * 17) % nodeIds.length]
       const to = nodeIds[(index * 61 + 5) % nodeIds.length]
