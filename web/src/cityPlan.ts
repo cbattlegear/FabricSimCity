@@ -325,13 +325,26 @@ const BLOCK_SETBACK = 5
  *
  * A disc of streets yields blocks in proportion to its area, so radius grows with the square root of
  * the object count and the block count grows about linearly with it — the role the grid side played.
- * Tuned so the surviving blocks number roughly 1.5 to 2 times the objects: enough spare ground for
- * the civic facilities, the water and the gaps between neighbourhoods, short of a half-empty map.
+ *
+ * Traced blocks come out at about 1.34 separations squared apiece, so a disc of radius `k·√objects`
+ * holds roughly `2.3·k²` blocks per object. At the 1.75 this was first set to that is nine blocks per
+ * building: a map four-fifths empty, and four times the streets to trace, graph and grow
+ * neighbourhoods over for nothing. At 1.0 it is a little over two, which leaves the civic facilities,
+ * the water and the gaps between neighbourhoods their ground and still reads as a city with room
+ * around its edges.
  */
-const RADIUS_PER_ROOT_OBJECT = 1.75
+const RADIUS_PER_ROOT_OBJECT = 1.0
 
-/** Smallest city radius, in separations, so a handful of tables still gets a walkable town. */
-const RADIUS_FLOOR_STEPS = 7
+/**
+ * Smallest city radius, in separations, so a handful of tables still gets a walkable town.
+ *
+ * This has to sit above what the per-object term would give a small database, because the blocks a
+ * disc yields fall off with its area while the buildings that must stand on them do not: a nine-table
+ * city that loses a third of its ground has fewer blocks left than tables, and two buildings end up
+ * sharing a block. Nine separations keeps every city up to about seventy-five objects at least as
+ * roomy as it was when the per-object term was larger.
+ */
+const RADIUS_FLOOR_STEPS = 9
 
 /** How far past the field radius streamlines may run, so the network reaches the map edge. */
 const SPAN_SCALE = 1.1
@@ -1346,15 +1359,34 @@ function describeDistricts(
         centerX: (box.minX + box.maxX) / 2,
         centerZ: (box.minZ + box.maxZ) / 2,
         // The name goes over the middle of the claimed ground, not the middle of the box: an L-shaped
-        // territory's box centre can easily be a block the schema does not own.
-        labelX: centres.length > 0
-          ? average(centres.map(point => point.x))
-          : average(group.lots.map(lot => lot.x)),
-        labelZ: centres.length > 0
-          ? average(centres.map(point => point.z))
-          : average(group.lots.map(lot => lot.z)),
+        // territory's box centre can easily be a block the schema does not own. The mean of the
+        // claimed blocks has the same flaw for a crescent — its middle is the bay — so the label is
+        // then pulled to the owned block nearest that mean, which is on the neighbourhood by
+        // construction whatever shape it grew into.
+        ...labelPoint(centres, group.lots),
       }
     })
+}
+
+/** Where a neighbourhood's name is written: on owned ground nearest the middle of it. */
+function labelPoint(
+  centres: readonly Point[],
+  lots: ReadonlyArray<{ x: number; z: number }>,
+): { labelX: number; labelZ: number } {
+  if (centres.length === 0) {
+    return { labelX: average(lots.map(lot => lot.x)), labelZ: average(lots.map(lot => lot.z)) }
+  }
+  const meanX = average(centres.map(point => point.x))
+  const meanZ = average(centres.map(point => point.z))
+  let best = centres[0]
+  let bestDistance = Infinity
+  for (const centre of centres) {
+    const distance = (centre.x - meanX) ** 2 + (centre.z - meanZ) ** 2
+    if (distance >= bestDistance) continue
+    bestDistance = distance
+    best = centre
+  }
+  return { labelX: best.x, labelZ: best.z }
 }
 
 function average(values: readonly number[]): number {
