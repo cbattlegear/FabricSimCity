@@ -60,9 +60,9 @@ export function columnLabel(index: number): string {
 /**
  * A human-readable address for a world position, as `District · Block C4`.
  *
- * The block comes from the plan's own warp rather than from a division, because block spans vary and
- * the whole lattice is displaced — so `x / pitch` would name a block the map does not draw there. It
- * is a locator and carries no quantity claim.
+ * The block comes from the plan's own warp rather than from a division, because the blocks are traced
+ * from a tensor field and no two are the same size — so `x / pitch` would name a block the map does
+ * not draw there. It is a locator and carries no quantity claim.
  */
 export function blockAddress(plan: CityPlan, x: number, z: number, districtName?: string): string {
   const { col, row } = plan.warp.blockAt(x, z)

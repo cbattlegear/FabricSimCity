@@ -5,8 +5,8 @@ import { planField } from './cityField'
 import {
   breakCrossings,
   buildPlanarGraph,
+  connectComponents,
   extractFaces,
-  type GraphEdge,
   type GraphNode,
   type PlanarGraph,
 } from './cityGraph'
@@ -523,7 +523,7 @@ export function planCity(
     snapRadius: separation * SNAP_FRACTION,
     minStub: separation * STUB_FRACTION,
   }
-  const broken = breakCrossings(
+  let graph = breakCrossings(
     buildPlanarGraph(streamlines, graphOptions),
     {
       seed: numericSeed,
@@ -535,17 +535,23 @@ export function planCity(
     },
     graphOptions,
   )
-  // A bridge gap can leave a pocket of streets stranded across the river, and a route between two
-  // disconnected pockets has no answer. Keeping only the largest connected component guarantees the
-  // plan is one navigable city, at the cost of the odd outlying block that becomes scenery instead.
-  const graph = largestComponent(broken)
-
+  // Faces are recovered from the strictly planar graph, before any link road is added: a link road
+  // can cross an existing street, and walking a block's boundary relies on that planarity holding.
   const faces = extractFaces(graph)
   const minCapacity = Math.max(
     BLOCK_CAPACITY_FLOOR,
     Math.ceil(widestFootprint(objects)) + BLOCK_CAPACITY_HEADROOM,
   )
   const blockField = buildBlocks(graph, faces, { setback: BLOCK_SETBACK, minCapacity })
+
+  // Tracing can leave a pocket of streets with no way in, where one district's grain turns hard
+  // against its neighbour's and the seam gap outruns the snap radius. The pocket draws -- its streets
+  // and blocks are all there -- but a query ribbon that has to reach into it silently fails to route.
+  // connectComponents joins the pieces with the few shortest link roads that close the gaps. It runs
+  // after the faces are taken, because a link may cross an edge and a face walk needs planarity, and
+  // before anything routes, because the router and the traffic assignment need one navigable city. It
+  // only appends edges, so every node id, edge index and block built above stays valid.
+  graph = connectComponents(graph)
   const roads = classifyRoads(graph)
   const router = new RoadRouter(graph, roads)
   const warp = makeBlockWarp(blockField)
@@ -603,77 +609,6 @@ export function planCity(
     graph,
     roadProperties: roads,
   }
-}
-
-/**
- * The largest connected component of a planar graph, renumbered so edge ids are array indices again.
- *
- * The streamline graph can fall into several pieces — a bridge gap the river left, an island of short
- * streets the crossing-breaker could not attach — and a route between two pieces has no answer.
- * Keeping only the largest piece is what makes "every intersection reaches every other" true, which
- * the router and every wait lane rely on. Edges are renumbered because face extraction, block building
- * and routing all index `graph.edges` by edge id and would read the wrong edge from a sparse array.
- */
-function largestComponent(graph: PlanarGraph): PlanarGraph {
-  const parent = new Map<number, number>()
-  for (const id of graph.nodes.keys()) parent.set(id, id)
-  const find = (id: number): number => {
-    let root = id
-    while (parent.get(root) !== root) root = parent.get(root)!
-    // Path compression keeps the union-find flat, so the whole pass stays effectively linear.
-    let cursor = id
-    while (parent.get(cursor) !== root) {
-      const next = parent.get(cursor)!
-      parent.set(cursor, root)
-      cursor = next
-    }
-    return root
-  }
-  for (const edge of graph.edges) {
-    const from = find(edge.fromId)
-    const to = find(edge.toId)
-    if (from !== to) parent.set(from, to)
-  }
-
-  const sizes = new Map<number, number>()
-  for (const id of graph.nodes.keys()) {
-    const root = find(id)
-    sizes.set(root, (sizes.get(root) ?? 0) + 1)
-  }
-  let bestRoot = -1
-  let bestSize = -1
-  for (const [root, size] of sizes) {
-    // Tie broken by the lower root id, so the choice never depends on Map iteration order.
-    if (size > bestSize || (size === bestSize && root < bestRoot)) {
-      bestSize = size
-      bestRoot = root
-    }
-  }
-  if (bestRoot === -1) return graph
-
-  const edges: GraphEdge[] = []
-  const incident = new Map<number, number[]>()
-  const addIncident = (nodeId: number, edgeId: number) => {
-    const list = incident.get(nodeId)
-    if (list) list.push(edgeId)
-    else incident.set(nodeId, [edgeId])
-  }
-  for (const edge of graph.edges) {
-    if (find(edge.fromId) !== bestRoot) continue
-    const id = edges.length
-    edges.push({ ...edge, id })
-    addIncident(edge.fromId, id)
-    addIncident(edge.toId, id)
-  }
-
-  // Nodes are taken from the incident map rather than filtered from the component, so a kept node
-  // always has a street on it — the same invariant the graph builder's own finaliser guarantees.
-  const nodes = new Map<number, GraphNode>()
-  for (const nodeId of incident.keys()) {
-    const node = graph.nodes.get(nodeId)
-    if (node) nodes.set(nodeId, node)
-  }
-  return { nodes, edges, incident }
 }
 
 /**
