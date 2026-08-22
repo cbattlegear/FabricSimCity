@@ -144,17 +144,6 @@ export interface FieldElement {
   readonly theta: number
   readonly weight: number
   readonly decay: number
-  /**
-   * Distance from the element's centre at which it is strongest, instead of at the centre itself.
-   *
-   * A radial element peaked at its own centre is a whirlpool: its influence is strongest exactly
-   * where the streets are supposed to be most tangled, so the historic core comes out as the most
-   * perfectly ordered part of the city, which is the reverse of every real one. Real ring roads sit
-   * at a radius — an orbital, a boulevard on the line of the old walls — with an irregular core
-   * inside them that owes nothing to the ring. Peaking the element on a circle rather than a point
-   * reproduces that, and leaves the middle to the local district grain.
-   */
-  readonly ringRadius?: number
 }
 
 /**
@@ -199,11 +188,7 @@ export function sampleField(field: CityField, x: number, z: number): Tensor {
     const dx = x - element.x
     const dz = z - element.z
     const distanceSquared = dx * dx + dz * dz
-    // The square root is only paid for by elements that actually peak on a circle.
-    const spread = element.ringRadius === undefined
-      ? distanceSquared
-      : (Math.sqrt(distanceSquared) - element.ringRadius) ** 2
-    const falloff = Math.exp(-element.decay * spread)
+    const falloff = Math.exp(-element.decay * distanceSquared)
     if (falloff < FALLOFF_EPSILON) continue
 
     const raw = element.kind === 'radial'
@@ -358,10 +343,11 @@ export interface CityFieldOptions {
  * What produces that local grain in a real city is history: each district was laid out at a
  * different time, by different people, to different intentions, so each has its *own* orientation,
  * and the seams between them are where the odd junctions are. A field with many overlapping
- * district-scale elements reproduces exactly that — a patchwork of local grains — while a single
- * strong centre still organises the whole at the largest scale. Scaling the count with area keeps
- * the *size* of a district roughly constant, so a big city gets more districts rather than larger
- * ones.
+ * district-scale elements reproduces exactly that — a patchwork of local grains — and, as the
+ * comment in `planField` explains, that patchwork is left to organise the largest scale on its own,
+ * because every attempt to impose a centre on top of it drew a bullseye. Scaling the count with area
+ * keeps the *size* of a district roughly constant, so a big city gets more districts rather than
+ * larger ones.
  */
 const DISTRICTS_PER_UNIT_AREA = 26 / (Math.PI * 1000 * 1000)
 const DISTRICTS_MIN = 7
