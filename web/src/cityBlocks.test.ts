@@ -8,8 +8,8 @@ import { classifyRoads, edgeBetweenness, RoadRouter, type RoadClass } from './ci
 const SEPARATION = 62
 const GRAPH_OPTIONS = {
   weldRadius: SEPARATION * 0.12,
-  snapRadius: SEPARATION * 0.75,
-  minStub: SEPARATION * 0.35,
+  snapRadius: SEPARATION * 1.25,
+  minStub: SEPARATION * 0.6,
 }
 const radius = 700
 const LINES = traceStreamlines({
@@ -194,6 +194,62 @@ describe('edgeBetweenness', () => {
     const meanDangling = dangling.reduce((a, b) => a + b, 0) / dangling.length
     const meanThrough = through.reduce((a, b) => a + b, 0) / through.length
     expect(meanDangling).toBeLessThan(meanThrough * 0.25)
+  })
+
+  /*
+   * Above a few hundred junctions the sweep samples its sources instead of running from all of them,
+   * and the whole hierarchy rests on the result. What has to survive sampling is the *ordering* —
+   * the classifier only ever asks which band an edge falls in — so this checks the sampled ranking
+   * against the exact one on a graph large enough to trigger it. Spearman's rank correlation is the
+   * right measure precisely because it ignores the magnitudes the estimator is allowed to get wrong.
+   */
+  it('keeps the ranking when it samples its sources', () => {
+    const big = 1500
+    const lines = traceStreamlines({
+      field: planField({ seed: 'db:big', centreX: 0, centreZ: 0, radius: big }),
+      minX: -big * 1.1,
+      maxX: big * 1.1,
+      minZ: -big * 1.1,
+      maxZ: big * 1.1,
+      separation: SEPARATION,
+      edgeSeparationScale: 2.3,
+      minLength: 90,
+      maxStreamlines: 4000,
+    })
+    const graph = buildPlanarGraph(lines, GRAPH_OPTIONS)
+    expect(graph.nodes.size).toBeGreaterThan(320)
+
+    const sampled = edgeBetweenness(graph)
+    const exact = edgeBetweenness(graph, { maxSources: Number.POSITIVE_INFINITY })
+
+    const rank = (scores: Map<number, number>): Map<number, number> => {
+      const order = [...scores.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0])
+      return new Map(order.map(([edgeId], position) => [edgeId, position]))
+    }
+    const sampledRank = rank(sampled)
+    const exactRank = rank(exact)
+    const n = graph.edges.length
+    let sumSquares = 0
+    for (const edge of graph.edges) {
+      const difference = (sampledRank.get(edge.id) ?? 0) - (exactRank.get(edge.id) ?? 0)
+      sumSquares += difference * difference
+    }
+    const spearman = 1 - (6 * sumSquares) / (n * (n * n - 1))
+    expect(spearman).toBeGreaterThan(0.95)
+
+    // And the point of it all: the busiest streets are the same streets.
+    const top = (scores: Map<number, number>): Set<number> =>
+      new Set(
+        [...scores.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+          .slice(0, Math.round(n * 0.09))
+          .map(([edgeId]) => edgeId),
+      )
+    const sampledTop = top(sampled)
+    const exactTop = top(exact)
+    let shared = 0
+    for (const edgeId of sampledTop) if (exactTop.has(edgeId)) shared += 1
+    expect(shared / sampledTop.size).toBeGreaterThan(0.8)
   })
 })
 

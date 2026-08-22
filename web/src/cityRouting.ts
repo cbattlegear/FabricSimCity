@@ -96,6 +96,13 @@ const CLASS_SHARES: ReadonlyArray<{ roadClass: RoadClass; upTo: number }> = [
  */
 const MOTORWAY_MIN_EDGES = 60
 
+/**
+ * Above this many junctions the betweenness sweep samples its sources rather than running from
+ * every one. Three hundred and twenty sources is comfortably enough for a stable ranking — the
+ * estimator's error falls with the square root of the sample, and the bands are wide.
+ */
+const BETWEENNESS_MAX_SOURCES = 320
+
 export function classifyRoads(graph: PlanarGraph): Map<number, RoadProperties> {
   const betweenness = edgeBetweenness(graph)
   let peak = 0
@@ -156,9 +163,21 @@ export function classifyRoads(graph: PlanarGraph): Map<number, RoadProperties> {
  * arbitrary scale of the city and would rank a single long suburban road above the short busy streets
  * of a centre that everything actually passes through.
  *
- * `O(V·E)`, which for a city of a few hundred junctions runs in a handful of milliseconds.
+ * Exact betweenness is `O(V·E)`, and a six-thousand-table database draws a city with five thousand
+ * junctions, so the exact figure costs several seconds of a blocked main thread. Above
+ * `BETWEENNESS_MAX_SOURCES` junctions the sweep runs from a sample of sources and the totals are
+ * scaled back up, which is the standard estimator for this measure (Brandes and Pich, 2007). The
+ * approximation is very cheap here because the result is only ever used as a *ranking*: an edge
+ * needs to land in the right band of the hierarchy, not to carry a correct absolute figure, and the
+ * band boundaries are quantiles of the same sampled distribution. The sample is a fixed stride
+ * through the junctions rather than a random draw, so it is spread evenly and, more importantly,
+ * identical on every run — the same database must always draw the same city.
  */
-export function edgeBetweenness(graph: PlanarGraph): Map<number, number> {
+export function edgeBetweenness(
+  graph: PlanarGraph,
+  options: { maxSources?: number } = {},
+): Map<number, number> {
+  const maxSources = options.maxSources ?? BETWEENNESS_MAX_SOURCES
   const nodeIds = [...graph.nodes.keys()].sort((a, b) => a - b)
   const index = new Map<number, number>()
   nodeIds.forEach((id, position) => index.set(id, position))
@@ -167,13 +186,32 @@ export function edgeBetweenness(graph: PlanarGraph): Map<number, number> {
   for (const edge of graph.edges) scores.set(edge.id, 0)
   if (count < 2) return scores
 
-  const adjacency: Array<Array<{ to: number; edgeId: number }>> = nodeIds.map(() => [])
+  // Adjacency as a flat compressed row, so the inner loop touches three typed arrays and allocates
+  // nothing. The array-of-arrays this replaces cost more in allocation than the search did in work.
+  const degree = new Int32Array(count)
   for (const edge of graph.edges) {
     const from = index.get(edge.fromId)
     const to = index.get(edge.toId)
     if (from === undefined || to === undefined) continue
-    adjacency[from].push({ to, edgeId: edge.id })
-    adjacency[to].push({ to: from, edgeId: edge.id })
+    degree[from] += 1
+    degree[to] += 1
+  }
+  const offset = new Int32Array(count + 1)
+  for (let i = 0; i < count; i += 1) offset[i + 1] = offset[i] + degree[i]
+  const links = offset[count]
+  const linkTo = new Int32Array(links)
+  const linkEdge = new Int32Array(links)
+  const cursor = offset.slice(0, count)
+  for (const edge of graph.edges) {
+    const from = index.get(edge.fromId)
+    const to = index.get(edge.toId)
+    if (from === undefined || to === undefined) continue
+    linkTo[cursor[from]] = to
+    linkEdge[cursor[from]] = edge.id
+    cursor[from] += 1
+    linkTo[cursor[to]] = from
+    linkEdge[cursor[to]] = edge.id
+    cursor[to] += 1
   }
 
   const sigma = new Float64Array(count)
@@ -181,12 +219,22 @@ export function edgeBetweenness(graph: PlanarGraph): Map<number, number> {
   const distance = new Int32Array(count)
   const queue = new Int32Array(count)
   const stack = new Int32Array(count)
+  // A node's predecessors on shortest paths are always a subset of its neighbours, so they fit in
+  // the space the adjacency already reserved for it and the buffer can be reused for every source.
+  const predNode = new Int32Array(links)
+  const predEdge = new Int32Array(links)
+  const predCount = new Int32Array(count)
+  const totals = new Float64Array(graph.edges.length)
 
-  for (let source = 0; source < count; source += 1) {
-    const predecessors: Array<Array<{ from: number; edgeId: number }>> = adjacency.map(() => [])
+  const stride = count > maxSources ? Math.floor(count / maxSources) : 1
+  let sampled = 0
+
+  for (let source = 0; source < count; source += stride) {
+    sampled += 1
     sigma.fill(0)
     delta.fill(0)
     distance.fill(-1)
+    predCount.fill(0)
     sigma[source] = 1
     distance[source] = 0
     let tail = 0
@@ -199,31 +247,40 @@ export function edgeBetweenness(graph: PlanarGraph): Map<number, number> {
       read += 1
       stack[depth] = node
       depth += 1
-      for (const link of adjacency[node]) {
-        if (distance[link.to] < 0) {
-          distance[link.to] = distance[node] + 1
-          queue[tail] = link.to
+      const next = distance[node] + 1
+      for (let i = offset[node]; i < offset[node + 1]; i += 1) {
+        const to = linkTo[i]
+        if (distance[to] < 0) {
+          distance[to] = next
+          queue[tail] = to
           tail += 1
         }
-        if (distance[link.to] === distance[node] + 1) {
-          sigma[link.to] += sigma[node]
-          predecessors[link.to].push({ from: node, edgeId: link.edgeId })
+        if (distance[to] === next) {
+          sigma[to] += sigma[node]
+          const slot = offset[to] + predCount[to]
+          predNode[slot] = node
+          predEdge[slot] = linkEdge[i]
+          predCount[to] += 1
         }
       }
     }
     while (depth > 0) {
       depth -= 1
       const node = stack[depth]
-      for (const predecessor of predecessors[node]) {
-        const contribution = (sigma[predecessor.from] / sigma[node]) * (1 + delta[node])
-        delta[predecessor.from] += contribution
-        scores.set(predecessor.edgeId, (scores.get(predecessor.edgeId) ?? 0) + contribution)
+      const share = (1 + delta[node]) / sigma[node]
+      for (let i = offset[node]; i < offset[node] + predCount[node]; i += 1) {
+        const from = predNode[i]
+        const contribution = sigma[from] * share
+        delta[from] += contribution
+        totals[predEdge[i]] += contribution
       }
     }
   }
 
-  // Every pair was counted from both ends.
-  for (const [edgeId, value] of scores) scores.set(edgeId, value / 2)
+  // Every pair was counted from both ends. A sampled sweep saw `sampled` of the `count` sources, so
+  // scaling by the shortfall keeps the figures comparable with an exact run on a smaller city.
+  const scale = count / (sampled * 2)
+  for (const edge of graph.edges) scores.set(edge.id, totals[edge.id] * scale)
   return scores
 }
 
@@ -267,9 +324,28 @@ const U_TURN_PENALTY = 22
  * heading is part of the state and the penalty falls out naturally.
  */
 export class RoadRouter {
-  private readonly outgoing = new Map<number, number[]>()
-  private readonly properties: ReadonlyMap<number, RoadProperties>
   private readonly fastest: number
+
+  // Everything the inner loop needs, precomputed once per router and indexed by edge id. The search
+  // relaxes hundreds of thousands of edges on a large city, and doing this work per relaxation cost
+  // more than the search itself — `headingInto` in particular copied and reversed a whole polyline
+  // every time it was asked about an edge from the far end.
+  private readonly freeFlow: Float64Array
+  private readonly headIntoTo: Float64Array
+  private readonly headIntoFrom: Float64Array
+  private readonly headOutOfFrom: Float64Array
+  private readonly headOutOfTo: Float64Array
+  // Search scratch, reused between routes. `stamp` records which route last wrote each state, so a
+  // new search never has to clear arrays that are two entries per edge long.
+  private readonly cost: Float64Array
+  private readonly cameFrom: Int32Array
+  private readonly stamp: Int32Array
+  private readonly nodeIndex = new Map<number, number>()
+  private readonly nodeX: Float64Array
+  private readonly nodeZ: Float64Array
+  private readonly outOffset: Int32Array
+  private readonly outEdge: Int32Array
+  private generation = 0
 
   /**
    * @param delay Optional live multiplier on each street's travel time, one entry per edge id, for
@@ -284,11 +360,53 @@ export class RoadRouter {
     properties: ReadonlyMap<number, RoadProperties>,
     private readonly delay?: ReadonlyMap<number, number>,
   ) {
-    this.properties = properties
-    for (const [nodeId, edgeIds] of graph.incident) this.outgoing.set(nodeId, [...edgeIds])
     let fastest = 1
     for (const value of properties.values()) fastest = Math.max(fastest, value.speedLimit)
     this.fastest = fastest
+
+    const size = graph.edges.length
+    this.freeFlow = new Float64Array(size)
+    this.headIntoTo = new Float64Array(size)
+    this.headIntoFrom = new Float64Array(size)
+    this.headOutOfFrom = new Float64Array(size)
+    this.headOutOfTo = new Float64Array(size)
+    for (const edge of graph.edges) {
+      const speed = properties.get(edge.id)?.speedLimit ?? 1
+      this.freeFlow[edge.id] = edge.length / speed
+      const heading = headingsOf(edge)
+      this.headIntoTo[edge.id] = heading.intoTo
+      this.headOutOfTo[edge.id] = heading.outOfTo
+      this.headIntoFrom[edge.id] = heading.intoFrom
+      this.headOutOfFrom[edge.id] = heading.outOfFrom
+    }
+    this.cost = new Float64Array(size * 2)
+    this.cameFrom = new Int32Array(size * 2)
+    this.stamp = new Int32Array(size * 2)
+
+    // Junctions and their incident streets, flattened the same way, so that following the network
+    // costs an array index rather than two hash lookups per street considered.
+    const nodeIds = [...graph.nodes.keys()]
+    const nodeCount = nodeIds.length
+    this.nodeX = new Float64Array(nodeCount)
+    this.nodeZ = new Float64Array(nodeCount)
+    this.outOffset = new Int32Array(nodeCount + 1)
+    nodeIds.forEach((id, position) => {
+      this.nodeIndex.set(id, position)
+      const node = graph.nodes.get(id)!
+      this.nodeX[position] = node.x
+      this.nodeZ[position] = node.z
+      this.outOffset[position + 1] = (graph.incident.get(id)?.length ?? 0)
+    })
+    for (let i = 0; i < nodeCount; i += 1) this.outOffset[i + 1] += this.outOffset[i]
+    this.outEdge = new Int32Array(this.outOffset[nodeCount])
+    nodeIds.forEach((id, position) => {
+      const incident = graph.incident.get(id) ?? []
+      let slot = this.outOffset[position]
+      for (const edgeId of incident) {
+        this.outEdge[slot] = edgeId
+        slot += 1
+      }
+    })
   }
 
   route(fromNodeId: number, toNodeId: number): Route | null {
@@ -299,72 +417,75 @@ export class RoadRouter {
     }
 
     const target = this.graph.nodes.get(toNodeId)!
+    const targetX = target.x
+    const targetZ = target.z
+    const inverseSpeed = 1 / this.fastest
+    const edges = this.graph.edges
+    const { cost, cameFrom, stamp, nodeX, nodeZ, outOffset, outEdge, nodeIndex } = this
+    this.generation += 1
+    const generation = this.generation
+
     const heuristic = (nodeId: number): number => {
-      const node = this.graph.nodes.get(nodeId)!
-      return Math.hypot(node.x - target.x, node.z - target.z) / this.fastest
+      const at = nodeIndex.get(nodeId)!
+      return Math.hypot(nodeX[at] - targetX, nodeZ[at] - targetZ) * inverseSpeed
     }
 
     // A state is "arrived at `nodeId` along `edgeId`", keyed as edgeId*2 + direction.
-    const cost = new Map<number, number>()
-    const cameFrom = new Map<number, number>()
     const queue = new BinaryHeap()
 
-    for (const edgeId of this.outgoing.get(fromNodeId) ?? []) {
-      const edge = this.graph.edges[edgeId]
+    const start = nodeIndex.get(fromNodeId)!
+    for (let i = outOffset[start]; i < outOffset[start + 1]; i += 1) {
+      const edgeId = outEdge[i]
+      const edge = edges[edgeId]
       const far = edge.fromId === fromNodeId ? edge.toId : edge.fromId
-      const state = this.stateFor(edgeId, far)
-      const time = this.traversalTime(edge)
-      cost.set(state, time)
+      const state = edgeId * 2 + (edge.toId === far ? 1 : 0)
+      const time = this.traversalTime(edgeId)
+      cost[state] = time
+      cameFrom[state] = -1
+      stamp[state] = generation
       queue.push(state, time + heuristic(far))
     }
 
-    let goal: number | null = null
+    let goal = -1
     while (queue.size > 0) {
       const state = queue.pop()!
-      const { edgeId, headId } = this.decode(state)
+      const edgeId = state >> 1
+      const edge = edges[edgeId]
+      const headId = (state & 1) === 1 ? edge.toId : edge.fromId
       if (headId === toNodeId) {
         goal = state
         break
       }
-      const spent = cost.get(state)!
-      const edge = this.graph.edges[edgeId]
-      for (const nextId of this.outgoing.get(headId) ?? []) {
+      const spent = cost[state]
+      const incoming = edge.toId === headId ? this.headIntoTo[edgeId] : this.headIntoFrom[edgeId]
+      const head = nodeIndex.get(headId)!
+      for (let i = outOffset[head]; i < outOffset[head + 1]; i += 1) {
+        const nextId = outEdge[i]
         if (nextId === edgeId) continue
-        const next = this.graph.edges[nextId]
+        const next = edges[nextId]
         const far = next.fromId === headId ? next.toId : next.fromId
-        const nextState = this.stateFor(nextId, far)
-        const total = spent + this.traversalTime(next) + this.turnCost(edge, next, headId)
-        if (total >= (cost.get(nextState) ?? Infinity)) continue
-        cost.set(nextState, total)
-        cameFrom.set(nextState, state)
+        const nextState = nextId * 2 + (next.toId === far ? 1 : 0)
+        const leaving =
+          next.fromId === headId ? this.headOutOfFrom[nextId] : this.headOutOfTo[nextId]
+        const total = spent + this.traversalTime(nextId) + turnCost(incoming, leaving)
+        if (stamp[nextState] === generation && total >= cost[nextState]) continue
+        cost[nextState] = total
+        cameFrom[nextState] = state
+        stamp[nextState] = generation
         queue.push(nextState, total + heuristic(far))
       }
     }
-    if (goal === null) return null
+    if (goal < 0) return null
 
     const edgeIds: number[] = []
-    for (let state: number | undefined = goal; state !== undefined; state = cameFrom.get(state)) {
-      edgeIds.push(this.decode(state).edgeId)
-    }
+    for (let state = goal; state >= 0; state = cameFrom[state]) edgeIds.push(state >> 1)
     edgeIds.reverse()
-    return this.assemble(fromNodeId, edgeIds, cost.get(goal)!)
+    return this.assemble(fromNodeId, edgeIds, cost[goal])
   }
 
-  private stateFor(edgeId: number, headId: number): number {
-    const edge = this.graph.edges[edgeId]
-    return edgeId * 2 + (edge.toId === headId ? 1 : 0)
-  }
-
-  private decode(state: number): { edgeId: number; headId: number } {
-    const edgeId = state >> 1
-    const edge = this.graph.edges[edgeId]
-    return { edgeId, headId: (state & 1) === 1 ? edge.toId : edge.fromId }
-  }
-
-  private traversalTime(edge: GraphEdge): number {
-    const speed = this.properties.get(edge.id)?.speedLimit ?? 1
-    const congestion = Math.max(1, this.delay?.get(edge.id) ?? 1)
-    return (edge.length / speed) * congestion
+  private traversalTime(edgeId: number): number {
+    const congestion = this.delay === undefined ? 1 : Math.max(1, this.delay.get(edgeId) ?? 1)
+    return this.freeFlow[edgeId] * congestion
   }
 
   /**
@@ -375,12 +496,9 @@ export class RoadRouter {
    * turn it never makes while following a bend.
    */
   private turnCost(from: GraphEdge, to: GraphEdge, atId: number): number {
-    const incoming = headingInto(from, atId)
-    const outgoing = headingOutOf(to, atId)
-    let change = Math.abs(outgoing - incoming)
-    while (change > Math.PI) change = Math.abs(change - Math.PI * 2)
-    const uTurn = change > Math.PI * 0.78 ? U_TURN_PENALTY : 0
-    return (change / (Math.PI / 2)) * TURN_PENALTY + uTurn
+    const incoming = from.toId === atId ? this.headIntoTo[from.id] : this.headIntoFrom[from.id]
+    const outgoing = to.fromId === atId ? this.headOutOfFrom[to.id] : this.headOutOfTo[to.id]
+    return turnCost(incoming, outgoing)
   }
 
   private assemble(fromNodeId: number, edgeIds: readonly number[], travelTime: number): Route {
@@ -402,16 +520,35 @@ export class RoadRouter {
   }
 }
 
-function headingInto(edge: GraphEdge, atId: number): number {
-  const points = edge.toId === atId ? edge.points : [...edge.points].reverse()
-  const last = points[points.length - 1]
-  const previous = points[points.length - 2]
-  return Math.atan2(last.z - previous.z, last.x - previous.x)
+/**
+ * Charge for a change of heading, from the heading arriving at a junction to the one leaving it.
+ *
+ * Headings are taken from the *vertices next to the junction*, not from the far ends of the two
+ * streets: on curved roads those differ by tens of degrees, and a route would be charged for a turn
+ * it never makes while following a bend.
+ */
+function turnCost(incoming: number, outgoing: number): number {
+  let change = Math.abs(outgoing - incoming)
+  while (change > Math.PI) change = Math.abs(change - Math.PI * 2)
+  const uTurn = change > Math.PI * 0.78 ? U_TURN_PENALTY : 0
+  return (change / (Math.PI / 2)) * TURN_PENALTY + uTurn
 }
 
-function headingOutOf(edge: GraphEdge, atId: number): number {
-  const points = edge.fromId === atId ? edge.points : [...edge.points].reverse()
-  return Math.atan2(points[1].z - points[0].z, points[1].x - points[0].x)
+function headingsOf(edge: GraphEdge): {
+  intoTo: number
+  intoFrom: number
+  outOfFrom: number
+  outOfTo: number
+} {
+  const points = edge.points
+  const last = points[points.length - 1]
+  const penultimate = points[points.length - 2]
+  return {
+    intoTo: Math.atan2(last.z - penultimate.z, last.x - penultimate.x),
+    outOfTo: Math.atan2(penultimate.z - last.z, penultimate.x - last.x),
+    intoFrom: Math.atan2(points[0].z - points[1].z, points[0].x - points[1].x),
+    outOfFrom: Math.atan2(points[1].z - points[0].z, points[1].x - points[0].x),
+  }
 }
 
 /** Binary min-heap. A linear scan for the cheapest state makes routing quadratic and it shows. */
