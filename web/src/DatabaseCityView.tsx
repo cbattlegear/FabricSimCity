@@ -694,16 +694,19 @@ function LegendDrawer({
 
         <p className="mapping-note">
           <strong>The street plan is drawn too.</strong> This city is deliberately not a grid, and
-          none of what replaces the grid means anything. Where each junction sits, how wide each
-          block is, which streets are heavy arterials and how far apart they run, where the squares
-          open out, which pattern of streets fills each district, the curve of every road, the ring
+          none of what replaces the grid means anything. Where each junction sits, the shape and
+          width of every block, the class of each street from motorway down to service lane and the
+          speed limit that class carries, how far apart the arterials run, where the squares open
+          out, which pattern of streets fills each district, the curve of every road, the ring
           boulevard and the avenues radiating from the squares — all of it comes from the seed. So do
           the T-junctions and dead ends: roughly one junction in seven is left as a cul-de-sac and
           most of the rest meet three streets rather than four, because that is the shape of a real
-          street network, not because anything about the database ended there. A big block is not a
-          big table, a dead end is not a table nothing reaches, a square is not a hotspot, and two
-          buildings on the same curve have nothing to do with each other. Everything that does carry
-          a quantity is listed above.
+          street network, not because anything about the database ended there. Even the route a link
+          takes between two buildings is only the quickest drive those invented speed limits allow,
+          not a measured path. A big block is not a big table, a fast road is not a busy one, a dead
+          end is not a table nothing reaches, a square is not a hotspot, and two buildings on the same
+          curve have nothing to do with each other. Everything that does carry a quantity is listed
+          above.
         </p>
 
         <div className="city-schema-strip" aria-label="Neighbourhoods">
