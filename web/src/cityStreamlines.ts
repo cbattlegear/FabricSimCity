@@ -151,9 +151,12 @@ export function traceStreamlines(options: StreamlineOptions): Streamline[] {
     !(options.excluded?.(x, z) ?? false)
 
   const streamlines: Streamline[] = []
+  // The candidate grid is a function of the box alone, so both families share one copy of it.
+  const scan = gapScan(options, inside)
   for (const family of ['major', 'minor'] as const) {
     const index = new ProximityIndex(maxSeparation)
     const seeds: Point[] = initialSeeds(field, options, family)
+    let pending: readonly Point[] = scan
     let cursor = 0
     let traced = 0
 
@@ -198,9 +201,9 @@ export function traceStreamlines(options: StreamlineOptions): Streamline[] {
         for (const candidate of seedsAlong(simplified, separationAt)) seeds.push(candidate)
       }
 
-      const filled = gapSeeds(options, index, separationAt, inside)
-      if (filled.length === 0) break
-      for (const seed of filled) seeds.push(seed)
+      const before = seeds.length
+      pending = gapSeeds(pending, index, separationAt, seeds)
+      if (seeds.length === before) break
     }
   }
   return streamlines
@@ -226,15 +229,17 @@ const MAX_FILL_PASSES = 6
  * that grow from it do not inherit the scan's own regularity — an unjittered sweep leaves a faint
  * rectangular signature in the outskirts, which is precisely the artefact this whole module exists
  * to avoid.
+ *
+ * The candidate positions are laid out once and then *whittled down*, because a pass can only ever
+ * add streets: once a point is within a separation of one, no later pass can put it back out of
+ * reach. So the cells a pass rejects are exactly the cells the next pass has to consider, and the
+ * sweep after the first never looks at covered ground again. On a large city the first sweep tests
+ * some seventeen thousand cells and the five after it share a few hundred between them, where
+ * before each of the six paid the full price.
  */
-function gapSeeds(
-  options: StreamlineOptions,
-  index: ProximityIndex,
-  separationAt: (x: number, z: number) => number,
-  inside: (x: number, z: number) => boolean,
-): Point[] {
+function gapScan(options: StreamlineOptions, inside: (x: number, z: number) => boolean): Point[] {
   const step = options.separation * 0.75
-  const seeds: Point[] = []
+  const scan: Point[] = []
   let cell = 0
   for (let z = options.minZ; z <= options.maxZ; z += step) {
     for (let x = options.minX; x <= options.maxX; x += step) {
@@ -243,12 +248,28 @@ function gapSeeds(
       const jitterZ = (hashUnit(cell * 2) - 0.5) * step
       const px = x + jitterX
       const pz = z + jitterZ
+      // `inside` is a fixed predicate on position, so a point it rejects is rejected for good.
       if (!inside(px, pz)) continue
-      if (index.hasWithin(px, pz, separationAt(px, pz) * SEED_CLEARANCE)) continue
-      seeds.push({ x: px, z: pz })
+      scan.push({ x: px, z: pz })
     }
   }
-  return seeds
+  return scan
+}
+
+/** The subset of `pending` that is still further than a separation from every street traced so far. */
+function gapSeeds(
+  pending: readonly Point[],
+  index: ProximityIndex,
+  separationAt: (x: number, z: number) => number,
+  seeds: Point[],
+): Point[] {
+  const uncovered: Point[] = []
+  for (const point of pending) {
+    if (index.hasWithin(point.x, point.z, separationAt(point.x, point.z) * SEED_CLEARANCE)) continue
+    uncovered.push(point)
+    seeds.push(point)
+  }
+  return uncovered
 }
 
 function hashUnit(value: number): number {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { planField } from './cityField'
-import { traceStreamlines, type Point, type Streamline } from './cityStreamlines'
+import { ProximityIndex, traceStreamlines, type Point, type Streamline } from './cityStreamlines'
 
 const RADIUS = 700
 const SEPARATION = 62
@@ -139,5 +139,41 @@ describe('traceStreamlines', () => {
         expect(step).toBeGreaterThan(0)
       }
     }
+  })
+})
+
+
+describe('ProximityIndex', () => {
+  /*
+   * The gap sweep whittles one candidate list down over its passes instead of rescanning the map,
+   * and that is only sound because coverage never retreats: a point once within reach of a street
+   * stays within reach of it, however many streets are added afterwards. If `hasWithin` could ever
+   * go back to false, later passes would miss ground the earlier ones had already dismissed and the
+   * outskirts would quietly lose their streets.
+   */
+  it('never takes back a point it has already covered', () => {
+    const index = new ProximityIndex(40)
+    const queries: Point[] = []
+    for (let i = 0; i < 60; i += 1) {
+      queries.push({ x: ((i * 137) % 400) - 200, z: ((i * 89) % 400) - 200 })
+    }
+    const covered = new Set<number>()
+    for (let step = 0; step < 40; step += 1) {
+      index.add(((step * 211) % 400) - 200, ((step * 53) % 400) - 200)
+      queries.forEach((query, at) => {
+        const within = index.hasWithin(query.x, query.z, 45)
+        if (within) covered.add(at)
+        else expect(covered.has(at)).toBe(false)
+      })
+    }
+    // The test is only meaningful if points actually did get covered along the way.
+    expect(covered.size).toBeGreaterThan(0)
+  })
+
+  it('sweeps every bucket a radius wider than one cell can reach', () => {
+    const index = new ProximityIndex(10)
+    index.add(0, 0)
+    expect(index.hasWithin(35, 0, 40)).toBe(true)
+    expect(index.hasWithin(45, 0, 40)).toBe(false)
   })
 })
