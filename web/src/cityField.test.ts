@@ -44,6 +44,44 @@ describe('planField', () => {
   })
 })
 
+describe('sampleField', () => {
+  /*
+   * A large field is sampled through a spatial index that skips elements too far away to register.
+   * This is an optimisation only, so it has to be provably invisible: a field of one element is
+   * below the indexing threshold and takes the plain path, so summing those single-element samples
+   * reproduces what the indexed field must return.
+   *
+   * The noise warp is switched off because it rotates the blended result and so is not additive.
+   */
+  it('sums exactly the same contributions as an unindexed scan', () => {
+    // Big enough that the index actually engages; a small city stays on the plain path.
+    const planned = planField({ seed: 'db:sales', centreX: 0, centreZ: 0, radius: 2400 })
+    const field = { ...planned, noiseAmplitude: 0, boundaries: [] }
+    expect(field.elements.length).toBeGreaterThan(24)
+
+    for (let x = -2200; x <= 2200; x += 220) {
+      for (let z = -2200; z <= 2200; z += 220) {
+        let a = 0
+        let b = 0
+        for (const element of field.elements) {
+          const one = sampleField({ ...field, elements: [element] }, x, z)
+          a += one.a
+          b += one.b
+        }
+        const indexed = sampleField(field, x, z)
+        expect(indexed.a).toBeCloseTo(a, 9)
+        expect(indexed.b).toBeCloseTo(b, 9)
+      }
+    }
+  })
+
+  it('still answers outside the built-up area, where no element reaches', () => {
+    const far = sampleField(FIELD, 90_000, -90_000)
+    expect(Number.isFinite(far.a)).toBe(true)
+    expect(Number.isFinite(far.b)).toBe(true)
+  })
+})
+
 describe('eigenvector directions', () => {
   /*
    * The whole reason for using a tensor rather than a vector field is that the two street families
