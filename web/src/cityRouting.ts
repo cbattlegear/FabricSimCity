@@ -338,6 +338,8 @@ export class RoadRouter {
   // Search scratch, reused between routes. `stamp` records which route last wrote each state, so a
   // new search never has to clear arrays that are two entries per edge long.
   private readonly cost: Float64Array
+  private readonly graph: PlanarGraph
+  private readonly delay?: ReadonlyMap<number, number>
   private readonly cameFrom: Int32Array
   private readonly stamp: Int32Array
   private readonly nodeIndex = new Map<number, number>()
@@ -356,10 +358,12 @@ export class RoadRouter {
    *   and the search no longer guaranteed to find the quickest way.
    */
   constructor(
-    private readonly graph: PlanarGraph,
+    graph: PlanarGraph,
     properties: ReadonlyMap<number, RoadProperties>,
-    private readonly delay?: ReadonlyMap<number, number>,
+    delay?: ReadonlyMap<number, number>,
   ) {
+    this.graph = graph
+    this.delay = delay
     let fastest = 1
     for (const value of properties.values()) fastest = Math.max(fastest, value.speedLimit)
     this.fastest = fastest
@@ -488,19 +492,6 @@ export class RoadRouter {
     return this.freeFlow[edgeId] * congestion
   }
 
-  /**
-   * Charge for the change of heading between arriving on one street and leaving on the next.
-   *
-   * Headings are taken from the *vertices next to the junction*, not from the far ends of the two
-   * streets: on curved roads those differ by tens of degrees, and a route would be charged for a
-   * turn it never makes while following a bend.
-   */
-  private turnCost(from: GraphEdge, to: GraphEdge, atId: number): number {
-    const incoming = from.toId === atId ? this.headIntoTo[from.id] : this.headIntoFrom[from.id]
-    const outgoing = to.fromId === atId ? this.headOutOfFrom[to.id] : this.headOutOfTo[to.id]
-    return turnCost(incoming, outgoing)
-  }
-
   private assemble(fromNodeId: number, edgeIds: readonly number[], travelTime: number): Route {
     const nodeIds: number[] = [fromNodeId]
     const path: Point[] = []
@@ -534,6 +525,13 @@ function turnCost(incoming: number, outgoing: number): number {
   return (change / (Math.PI / 2)) * TURN_PENALTY + uTurn
 }
 
+/**
+ * The four headings a street can be entered or left by, measured at the *vertices next to each
+ * junction* rather than at the far ends of the street.
+ *
+ * On a curved road the two differ by tens of degrees, so taking the far end would charge a route for
+ * a turn it never makes while simply following a bend.
+ */
 function headingsOf(edge: GraphEdge): {
   intoTo: number
   intoFrom: number

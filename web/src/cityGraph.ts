@@ -777,7 +777,11 @@ export function intersect(
 class SegmentIndex {
   private readonly buckets = new Map<number, Array<{ line: number; segment: number; a: Point; b: Point }>>()
 
-  constructor(private readonly cellSize: number) {}
+  private readonly cellSize: number
+
+  constructor(cellSize: number) {
+    this.cellSize = cellSize
+  }
 
   add(line: number, segment: number, a: Point, b: Point): void {
     const entry = { line, segment, a, b }
@@ -857,7 +861,11 @@ class PointWelder {
   private readonly buckets = new Map<number, number[]>()
   private readonly stored: Point[] = []
 
-  constructor(private readonly radius: number) {}
+  private readonly radius: number
+
+  constructor(radius: number) {
+    this.radius = radius
+  }
 
   intern(point: Point): number {
     const span = 1

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { planField } from './cityField'
-import { traceStreamlines } from './cityStreamlines'
+import { traceStreamlines, type Streamline } from './cityStreamlines'
 import { breakCrossings, buildPlanarGraph, connectComponents, extractFaces, signedArea } from './cityGraph'
 import { buildBlocks, containsPoint, inset, squareCapacity } from './cityBlocks'
 import { classifyRoads, edgeBetweenness, RoadRouter, type RoadClass } from './cityRouting'
@@ -328,16 +328,18 @@ describe('connectComponents', () => {
 
   it('joins two islands across their closest approach', () => {
     // Two squares, far enough apart that nothing in the tracer would have bridged them.
-    const square = (ox: number): Point[][] => [
+    const square = (ox: number): Array<Array<{ x: number; z: number }>> => [
       [{ x: ox, z: 0 }, { x: ox + 100, z: 0 }],
       [{ x: ox + 100, z: 0 }, { x: ox + 100, z: 100 }],
       [{ x: ox + 100, z: 100 }, { x: ox, z: 100 }],
       [{ x: ox, z: 100 }, { x: ox, z: 0 }],
     ]
-    const lines = [...square(0), ...square(400)].map((points, index) => ({
+    const lines: Streamline[] = [...square(0), ...square(400)].map((points, index) => ({
       id: `s${index}`,
       family: 'major' as const,
       points,
+      length: 100,
+      centrality: 0.5,
     }))
     const graph = buildPlanarGraph(lines, { weldRadius: 1, snapRadius: 2, minStub: 1 })
     const connected = connectComponents(graph)

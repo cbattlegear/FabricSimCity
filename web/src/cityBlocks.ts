@@ -351,7 +351,10 @@ class BlockLookup {
   private readonly cells = new Map<string, number[]>()
   private readonly size: number
 
-  constructor(private readonly blocks: readonly CityBlock[]) {
+  private readonly blocks: readonly CityBlock[]
+
+  constructor(blocks: readonly CityBlock[]) {
+    this.blocks = blocks
     const mean = blocks.length === 0
       ? 1
       : blocks.reduce((total, block) => total + Math.sqrt(Math.max(block.area, 1)), 0) / blocks.length

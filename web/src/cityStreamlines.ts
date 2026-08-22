@@ -582,7 +582,11 @@ export class ProximityIndex {
   private readonly buckets = new Map<number, number[]>()
   private readonly coords: number[] = []
 
-  constructor(private readonly cellSize: number) {}
+  private readonly cellSize: number
+
+  constructor(cellSize: number) {
+    this.cellSize = cellSize
+  }
 
   add(x: number, z: number): void {
     const handle = this.coords.length / 2

@@ -171,7 +171,7 @@ describe('assignTraffic', () => {
     const nodes = nodesAcross(graph, 8)
 
     // Journeys all over town, of very different weights.
-    const demands = []
+    const demands: TravelDemand[] = []
     for (let index = 0; index < nodes.length; index += 1) {
       for (let other = index + 1; other < nodes.length; other += 1) {
         demands.push({
@@ -200,7 +200,7 @@ describe('assignTraffic', () => {
   it('sends the busiest journey down the quickest road it can find', () => {
     const { graph, properties } = city()
     const nodes = nodesAcross(graph, 8)
-    const demands = []
+    const demands: TravelDemand[] = []
     for (let index = 0; index + 1 < nodes.length; index += 1) {
       demands.push({
         key: `d${index}`,
@@ -262,7 +262,7 @@ describe('assignTraffic', () => {
       { key: 'real', fromNodeId: nodes[0], toNodeId: nodes[2], trips: 100 },
     ])
     expect(assignment.trips.map((trip) => trip.key)).toEqual(['real'])
-    expect(assignment.unroutable.sort()).toEqual(['absent', 'idle', 'loop'])
+    expect([...assignment.unroutable].sort()).toEqual(['absent', 'idle', 'loop'])
   })
 })
 
