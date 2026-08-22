@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
+import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, streetRoute, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
 import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
 import { type RoadTraffic } from './cityTraffic'
 import {
@@ -384,7 +384,7 @@ export function createDatabaseCityScene(
    * Street *class* is a plan property, not a measurement. What a road carries — executions, dash
    * confidence, congestion colour — is drawn in `roadGroup` and is untouched by any of this.
    */
-  const STREET_CLASSES: readonly StreetClass[] = ['arterial', 'boulevard', 'avenue', 'riverside', 'collector']
+  const STREET_CLASSES: readonly StreetClass[] = ['motorway', 'primary', 'secondary', 'tertiary', 'residential', 'service']
   /*
    * The ground layer is lit almost entirely by skylight.
    *
@@ -403,11 +403,12 @@ export function createDatabaseCityScene(
    * still, and the hierarchy stays legible through width rather than through value.
    */
   const CITY_STREET: Record<StreetClass, { fill: number; casing: number }> = {
-    arterial: { fill: 0x76767a, casing: 0x9a968c },
-    boulevard: { fill: 0x74747a, casing: 0x98948a },
-    avenue: { fill: 0x6f6f75, casing: 0x939086 },
-    riverside: { fill: 0x717176, casing: 0x969288 },
-    collector: { fill: 0x6a6a71, casing: 0x8d8a81 },
+    motorway: { fill: 0x78787c, casing: 0x9c988e },
+    primary: { fill: 0x747479, casing: 0x979389 },
+    secondary: { fill: 0x6f6f75, casing: 0x929086 },
+    tertiary: { fill: 0x6b6b71, casing: 0x8e8b82 },
+    residential: { fill: 0x66666d, casing: 0x89867e },
+    service: { fill: 0x616168, casing: 0x84817a },
   }
   const streetFill = Object.fromEntries(
     STREET_CLASSES.map(klass => [klass, new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].fill, roughness: 0.94 })]),
@@ -1109,9 +1110,9 @@ export function createDatabaseCityScene(
        */
       if (block.use === 'facility') continue
       const bucket = tileFor(block.use)
-      // The parcel is the block's own quadrilateral, pulled in off the kerb line so the carriageway
+      // The parcel is the block's own polygon, pulled in off the kerb line so the carriageway
       // stays on top of ground rather than of another parcel.
-      pushCornerQuad(
+      const vertices = pushPolygon(
         bucket.position,
         cityPlan.warp.blockCorners(block.col, block.row),
         LAND_LAYER[block.use] ?? -0.55,
@@ -1122,10 +1123,11 @@ export function createDatabaseCityScene(
        *
        * Vertex colour *multiplies* the material colour, so one seeded value near 1.0 breaks up a
        * large expanse of parkland in both palettes without needing a second material or a texture.
-       * Kept inside ±12% so it never reads as a category of its own.
+       * Kept inside ±12% so it never reads as a category of its own. One colour per vertex the fan
+       * emitted, however many sides the block has, or the colour buffer falls short of the positions.
        */
       const shade = 0.88 + ((block.seed % 97) / 97) * 0.24
-      for (let i = 0; i < 6; i += 1) bucket.color.push(shade, shade, shade)
+      for (let i = 0; i < vertices; i += 1) bucket.color.push(shade, shade, shade)
     }
 
     for (const [use, bucket] of tiles) {
@@ -1182,27 +1184,11 @@ export function createDatabaseCityScene(
       ribbonPositions(path, 0.5, null, 0, laneMark, -0.2)
     }
 
-    /*
-     * Close the four outer corners.
-     *
-     * Every street is drawn between two intersection *centres*, which tiles perfectly along a run
-     * and lets each crossing street cover the junction it passes through. At the four corners of
-     * the city there is no crossing street to pass through: both boundary arterials stop dead at
-     * the centre, leaving a quarter-junction of bare ground. It reads as a torn plate on the flat
-     * basemap, where the road is white against paper.
-     */
-    for (const cornerX of [cityPlan.bounds.minX, cityPlan.bounds.maxX]) {
-      for (const cornerZ of [cityPlan.bounds.minZ, cityPlan.bounds.maxZ]) {
-        pushQuad(bucket(casing, 'arterial'), cornerX, cornerZ, ARTERIAL_WIDTH / 2 + 3.2, ARTERIAL_WIDTH / 2 + 3.2, -0.3)
-        pushQuad(bucket(fill, 'arterial'), cornerX, cornerZ, ARTERIAL_WIDTH / 2, ARTERIAL_WIDTH / 2, -0.25)
-      }
-    }
-
-    // Casings first, so the wider ribbon of a minor street can never paint over an arterial's fill.
+    // Casings first, so the wider ribbon of a minor street can never paint over a wider street's fill.
     for (const [klass, positions] of casing) addMerged(groundGroup, positions, streetCasing[klass])
     for (const [klass, positions] of fill) addMerged(groundGroup, positions, streetFill[klass])
     addMerged(groundGroup, laneMark, materials.laneMark)
-    addMerged(groundGroup, deck, streetCasing.arterial)
+    addMerged(groundGroup, deck, streetCasing.motorway)
   }
 
   /**
@@ -1250,32 +1236,13 @@ export function createDatabaseCityScene(
    * face to an aerial camera, so the whole land cover disappears without an error, a warning, or a
    * missing draw call to notice.
    */
-  function pushQuad(out: number[], x: number, z: number, halfW: number, halfD: number, y: number) {
-    out.push(
-      x - halfW, y, z - halfD,
-      x - halfW, y, z + halfD,
-      x + halfW, y, z + halfD,
-      x - halfW, y, z - halfD,
-      x + halfW, y, z + halfD,
-      x + halfW, y, z - halfD,
-    )
-  }
-
-  /**
-   * The same quad, but from four given corners rather than a centre and half-extents.
-   *
-   * A block is no longer a rectangle: the lattice is warped, so every parcel is a quadrilateral at
-   * its own angle. Drawing it as an axis-aligned square would leave the ground square while the
-   * streets around it curve, which is precisely the tell the redesign exists to remove.
-   *
-   * Wound in the same order as {@link pushQuad}, which is counter-clockwise seen from above.
-   */
-  function pushCornerQuad(
+  function pushPolygon(
     out: number[],
     corners: readonly { x: number; z: number }[],
     y: number,
     inset: number,
-  ) {
+  ): number {
+    if (corners.length < 3) return 0
     let cx = 0
     let cz = 0
     for (const corner of corners) {
@@ -1286,15 +1253,24 @@ export function createDatabaseCityScene(
       const dx = cx - corner.x
       const dz = cz - corner.z
       const length = Math.hypot(dx, dz) || 1
-      // Never past the centre, or a small block turns inside out and renders as a bow tie.
+      // Never past the centre, or a thin block turns inside out and renders as a bow tie.
       const step = Math.min(inset, length * 0.45)
       return { x: corner.x + (dx / length) * step, z: corner.z + (dz / length) * step }
     })
-    const [nw, ne, se, sw] = pulled
-    out.push(
-      nw.x, y, nw.z, sw.x, y, sw.z, se.x, y, se.z,
-      nw.x, y, nw.z, se.x, y, se.z, ne.x, y, ne.z,
-    )
+    /*
+     * A block is a face of the street graph now, a polygon of any number of sides, so it is tiled as
+     * a fan from its centroid rather than split as a fixed quad. The block builder guarantees the
+     * centroid lies inside the polygon, so every fan triangle stays within the block. The fan is wound
+     * clockwise in the ground plane — the reverse of the polygon's own counter-clockwise order —
+     * because that is the winding whose normal faces an overhead camera, and a back-facing parcel
+     * vanishes silently just as a back-facing quad would.
+     */
+    for (let i = 0; i < pulled.length; i += 1) {
+      const a = pulled[i]
+      const b = pulled[(i + 1) % pulled.length]
+      out.push(cx, y, cz, b.x, y, b.z, a.x, y, a.z)
+    }
+    return pulled.length * 3
   }
 
   /** A river is a ribbon whose half-width changes along its length, so it cannot reuse the road path. */
@@ -1372,7 +1348,7 @@ export function createDatabaseCityScene(
       for (const block of district.blocks) {
         // Negative inset: the wash runs a little past the kerb so adjacent blocks of one
         // neighbourhood join into a single field of colour instead of a run of separate plates.
-        pushCornerQuad(positions, cityPlan.warp.blockCorners(block.col, block.row), -0.5, -0.5)
+        pushPolygon(positions, cityPlan.warp.blockCorners(block.col, block.row), -0.5, -0.5)
       }
       addMerged(districtGroup, positions, material)
     }
@@ -1523,7 +1499,6 @@ export function createDatabaseCityScene(
     // Widest first, so the heaviest traffic keeps the centre line and the light roads move aside.
     const ordered = [...roads].sort((left, right) => right.width - left.width || left.routeId.localeCompare(right.routeId))
     const corridorLanes = new Map<string, Set<number>>()
-    const pitch = streetPitch(cityPlan)
 
     for (const road of ordered) {
       const from = cityPlan.lots.get(road.fromObjectId)
@@ -1531,8 +1506,9 @@ export function createDatabaseCityScene(
       const to = cityPlan.lots.get(road.toId)
       // A cross-database reference leaves the city on a ramp through the nearest boundary.
       const target = to ? { x: to.accessX, z: to.accessZ } : rampPoint(cityPlan, from)
-      const points = streetPolyline(cityPlan, { x: from.accessX, z: from.accessZ }, target)
-      const corridors = corridorKeys(points, pitch)
+      const route = streetRoute(cityPlan, { x: from.accessX, z: from.accessZ }, target)
+      const points = route.points
+      const corridors = corridorKeys(route.nodeIds)
       const lane = claimLane(corridorLanes, corridors)
       const offset = laneOffset(lane)
       const centreline = offsetPolyline(points, offset)

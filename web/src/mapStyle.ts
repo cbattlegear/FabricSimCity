@@ -129,11 +129,12 @@ export const LANDUSE_CITY_COLORS = {
 
 /** Street hierarchy in the flat drawing. A map without a road hierarchy is a diagram. */
 export const MAP_STREET = {
-  arterial: { fill: MAP_PALETTE.arterialFill, casing: MAP_PALETTE.arterialCasing, width: 1 },
-  boulevard: { fill: MAP_PALETTE.arterialFill, casing: MAP_PALETTE.arterialCasing, width: 1 },
-  avenue: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.94 },
-  riverside: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.88 },
-  collector: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.86 },
+  motorway: { fill: MAP_PALETTE.arterialFill, casing: MAP_PALETTE.arterialCasing, width: 1 },
+  primary: { fill: MAP_PALETTE.arterialFill, casing: MAP_PALETTE.arterialCasing, width: 1 },
+  secondary: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.94 },
+  tertiary: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.9 },
+  residential: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.88 },
+  service: { fill: MAP_PALETTE.roadFill, casing: MAP_PALETTE.roadCasing, width: 0.86 },
 } as const
 
 /** Heights (y) used to stack the flat drawing without z-fighting. Ordered bottom to top. */

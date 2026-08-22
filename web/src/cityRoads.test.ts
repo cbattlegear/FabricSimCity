@@ -116,29 +116,27 @@ describe('laneOffset', () => {
 })
 
 describe('corridorKeys', () => {
-  it('names the street leg each segment runs along', () => {
-    expect(corridorKeys([{ x: 0, z: 0 }, { x: 0, z: 100 }, { x: 100, z: 100 }]))
-      .toEqual(['x0', 'z100'])
+  it('names each leg by the pair of intersections it joins', () => {
+    expect(corridorKeys(['a', 'b', 'c'])).toEqual(['a~b', 'b~c'])
   })
 
-  it('returns nothing for a polyline with no segments', () => {
-    expect(corridorKeys([{ x: 4, z: 9 }])).toEqual([])
+  it('returns nothing for a path with no legs', () => {
+    expect(corridorKeys(['solo'])).toEqual([])
+    expect(corridorKeys([])).toEqual([])
   })
 
-  it('gives every point on one bowed leg the same key, so two roads on it cannot share a lane', () => {
-    const pitch = { x: 55, z: 55 }
-    // Two roads running the same north-south street, sampled at different points of the same bend.
-    const left = corridorKeys([{ x: 8, z: 0 }, { x: 14, z: 40 }, { x: 9, z: 80 }], pitch)
-    const right = corridorKeys([{ x: 2, z: 10 }, { x: 13, z: 50 }, { x: 4, z: 90 }], pitch)
-    expect(new Set([...left, ...right])).toEqual(new Set(['x0']))
-    // Rounding raw coordinates instead, which is the default pitch, would have split them apart.
-    expect(new Set(corridorKeys([{ x: 8, z: 0 }, { x: 14, z: 40 }, { x: 9, z: 80 }])).size).toBe(2)
+  it('names a shared leg the same key whichever way each route drives it', () => {
+    // Two routes run the b–c street, one northbound and one southbound. The lane allocator can only
+    // nudge them apart if both resolve the shared leg to a single key regardless of travel direction.
+    const northbound = corridorKeys(['a', 'b', 'c'])
+    const southbound = corridorKeys(['d', 'c', 'b'])
+    expect(northbound).toContain('b~c')
+    expect(southbound).toContain('b~c')
   })
 
-  it('tells neighbouring corridors apart', () => {
-    const pitch = { x: 55, z: 55 }
-    expect(corridorKeys([{ x: 6, z: 0 }, { x: 6, z: 40 }], pitch)).toEqual(['x0'])
-    expect(corridorKeys([{ x: 61, z: 0 }, { x: 61, z: 40 }], pitch)).toEqual(['x1'])
+  it('tells neighbouring legs apart', () => {
+    expect(corridorKeys(['a', 'b'])).toEqual(['a~b'])
+    expect(corridorKeys(['b', 'e'])).toEqual(['b~e'])
   })
 })
 

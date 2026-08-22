@@ -1,52 +1,85 @@
 import { describe, expect, it } from 'vitest'
+import { planField } from './cityField'
+import { traceStreamlines } from './cityStreamlines'
+import { buildPlanarGraph, breakCrossings, extractFaces } from './cityGraph'
+import { buildBlocks, type CityBlockField } from './cityBlocks'
 import {
   DISTRICT_CHARACTERS,
   SCENERY_USES,
   blockKey,
+  planLandform,
   planTerrain,
   reliefAt,
   riverProximity,
   smoothPolyline,
+  waterBlocks,
   type TerrainInput,
 } from './cityTerrain'
 
 const CELL = 40
 const STREET = 15
-const MARGIN = 11
+const DISTRICTS = ['schema:dbo', 'schema:reporting', 'schema:archive']
 
-function input(overrides: Partial<TerrainInput> = {}): TerrainInput {
-  const blockCols = overrides.blockCols ?? 12
-  const blockRows = overrides.blockRows ?? 12
-  // A realistic scatter: roughly half the grid built, in a fixed pattern so the fixture is stable.
-  const occupied = new Set<string>()
-  for (let row = 0; row < blockRows; row += 1) {
-    for (let col = 0; col < blockCols; col += 1) {
-      if ((col * 7 + row * 13) % 5 < 2) occupied.add(blockKey(col, row))
-    }
-  }
-  const facilities = new Set([blockKey(1, 1), blockKey(blockCols - 2, blockRows - 2)])
-  for (const key of facilities) occupied.delete(key)
+/**
+ * Builds a real block field the way `cityPlan` does, because terrain now dresses the faces of the
+ * street graph rather than a lattice. The parameters mirror the planner's own so the fixture is a
+ * fair stand-in for a city the app would actually draw.
+ */
+function buildField(seed: string, radius: number, separation: number): CityBlockField {
+  const span = radius * 1.1
+  const field = planField({ seed, centreX: 0, centreZ: 0, radius })
+  const lines = traceStreamlines({
+    field,
+    minX: -span,
+    maxX: span,
+    minZ: -span,
+    maxZ: span,
+    separation,
+    edgeSeparationScale: 2.3,
+    minLength: separation * 1.45,
+    maxStreamlines: 700,
+  })
+  const opts = { weldRadius: separation * 0.12, snapRadius: separation * 0.75, minStub: separation * 0.35 }
+  const graph = breakCrossings(
+    buildPlanarGraph(lines, opts),
+    {
+      seed: 7,
+      targetCrossroadShare: 0.24,
+      protectLength: separation * 7,
+      maxRemovalShare: 0.3,
+      maxMergedBlocks: 3,
+      maxBlockArea: separation * separation * 7,
+    },
+    opts,
+  )
+  return buildBlocks(graph, extractFaces(graph), { setback: 5, minCapacity: 10 })
+}
 
-  return {
-    blockCols,
-    blockRows,
-    pitchX: CELL + STREET,
-    pitchZ: CELL + STREET,
-    cell: CELL,
-    streetWidth: STREET,
-    lotMargin: MARGIN,
-    occupied,
-    facilities,
-    districtIds: ['schema:dbo', 'schema:reporting', 'schema:archive'],
-    seed: 'db:sales',
-    ...overrides,
-  }
+/**
+ * A whole terrain input: a real field, its landform, and a stable scatter of built and facility
+ * blocks drawn only from ground the river does not reach, the same withholding `cityPlan` performs.
+ */
+function scene(
+  overrides: { seed?: string; radius?: number; separation?: number } = {},
+): TerrainInput {
+  const seed = overrides.seed ?? 'db:sales'
+  const radius = overrides.radius ?? 700
+  const separation = overrides.separation ?? 58
+  const span = radius * 1.1
+  const field = buildField(seed, radius, separation)
+  const landform = planLandform({ seed, minX: -span, maxX: span, minZ: -span, maxZ: span, streetWidth: STREET, cell: CELL })
+  const water = waterBlocks(field, landform.river)
+  const dry = field.blocks.filter(block => !water.has(block.id)).map(block => block.id)
+  // A fixed pattern so the fixture is stable: every third dry block built, two more given to civic use.
+  const occupied = new Set(dry.filter((_id, index) => index % 3 === 0))
+  const facilities = new Set(dry.filter((_id, index) => index % 3 === 1).slice(0, 2))
+  return { field, landform, occupied, facilities, water, districtIds: DISTRICTS, seed }
 }
 
 describe('planTerrain', () => {
   it('is a pure function of its input', () => {
-    const first = planTerrain(input())
-    const second = planTerrain(input())
+    const first = planTerrain(scene())
+    const second = planTerrain(scene())
     expect([...second.blocks.entries()]).toEqual([...first.blocks.entries()])
     expect(second.river).toEqual(first.river)
     expect([...second.characters.entries()]).toEqual([...first.characters.entries()])
@@ -54,41 +87,40 @@ describe('planTerrain', () => {
   })
 
   it('gives two different databases two different landscapes', () => {
-    const sales = planTerrain(input({ seed: 'db:sales' }))
-    const warehouse = planTerrain(input({ seed: 'db:warehouse' }))
+    const sales = planTerrain(scene({ seed: 'db:sales' }))
+    const warehouse = planTerrain(scene({ seed: 'db:warehouse' }))
     expect(warehouse.river).not.toEqual(sales.river)
   })
 
-  it('dresses every block in the grid exactly once', () => {
-    const terrain = planTerrain(input())
-    expect(terrain.blocks.size).toBe(12 * 12)
-    for (let row = 0; row < 12; row += 1) {
-      for (let col = 0; col < 12; col += 1) {
-        const block = terrain.blocks.get(blockKey(col, row))
-        expect(block).toBeDefined()
-        expect(block!.col).toBe(col)
-        expect(block!.row).toBe(row)
-      }
+  it('dresses every block in the field exactly once', () => {
+    const input = scene()
+    const terrain = planTerrain(input)
+    expect(terrain.blocks.size).toBe(input.field.blocks.length)
+    for (const block of input.field.blocks) {
+      const dressed = terrain.blocks.get(blockKey(block.id))
+      expect(dressed).toBeDefined()
+      // The block id rides in the legacy `col`; the row is gone, fixed at zero.
+      expect(dressed!.col).toBe(block.id)
+      expect(dressed!.row).toBe(0)
     }
   })
 
   it('never dresses a measured block as scenery', () => {
-    const options = input()
-    const terrain = planTerrain(options)
-    for (const key of options.occupied) expect(terrain.blocks.get(key)!.use).toBe('built')
-    for (const key of options.facilities) expect(terrain.blocks.get(key)!.use).toBe('facility')
+    const input = scene()
+    const terrain = planTerrain(input)
+    for (const id of input.occupied) expect(terrain.blocks.get(blockKey(id))!.use).toBe('built')
+    for (const id of input.facilities) expect(terrain.blocks.get(blockKey(id))!.use).toBe('facility')
     // And the converse: scenery only ever lands on ground the plan left empty.
     for (const block of terrain.blocks.values()) {
       if (SCENERY_USES.includes(block.use)) {
-        expect(options.occupied.has(block.key)).toBe(false)
-        expect(options.facilities.has(block.key)).toBe(false)
+        expect(input.occupied.has(block.col)).toBe(false)
+        expect(input.facilities.has(block.col)).toBe(false)
       }
     }
   })
 
   it('leaves every measured block at ground level so heights stay comparable', () => {
-    const options = input()
-    const terrain = planTerrain(options)
+    const terrain = planTerrain(scene())
     for (const block of terrain.blocks.values()) {
       if (block.use === 'built' || block.use === 'facility') expect(block.relief).toBe(0)
     }
@@ -97,7 +129,7 @@ describe('planTerrain', () => {
   })
 
   it('routes a river across a city large enough to hold one', () => {
-    const terrain = planTerrain(input())
+    const terrain = planTerrain(scene())
     expect(terrain.river.length).toBeGreaterThan(2)
     const first = terrain.river[0]
     const last = terrain.river[terrain.river.length - 1]
@@ -107,42 +139,54 @@ describe('planTerrain', () => {
   })
 
   it('leaves a small town dry rather than drowning it', () => {
-    const terrain = planTerrain(input({ blockCols: 4, blockRows: 4, occupied: new Set(), facilities: new Set() }))
+    const seed = 'db:sales'
+    const field = buildField(seed, 700, 58)
+    // A crossing under the minimum span gets no river at all, however large the field beneath it.
+    const landform = planLandform({ seed, minX: -120, maxX: 120, minZ: -120, maxZ: 120, streetWidth: STREET, cell: CELL })
+    const terrain = planTerrain({
+      field,
+      landform,
+      occupied: new Set(),
+      facilities: new Set(),
+      water: new Set(),
+      districtIds: DISTRICTS,
+      seed,
+    })
     expect(terrain.river).toEqual([])
     expect([...terrain.blocks.values()].every(block => block.use !== 'water')).toBe(true)
   })
 
   it('never floods a measured building', () => {
-    // The closest a building edge can be to the corridor the river runs along.
-    const clearance = STREET / 2 + MARGIN / 2
     for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops', 'db:telemetry']) {
-      const options = input({ seed })
-      const terrain = planTerrain(options)
-      if (terrain.river.length < 2) continue
-      for (const key of [...options.occupied, ...options.facilities]) {
-        const block = terrain.blocks.get(key)!
-        const near = riverProximity(terrain.river, block.x, block.z)
-        // Measured from the block centre, so the building's own half-cell is the first thing the
-        // water would have to cross.
-        expect(near.distance).toBeGreaterThan(near.halfWidth)
-        expect(near.distance).toBeGreaterThan(clearance)
+      const input = scene({ seed })
+      const terrain = planTerrain(input)
+      if (input.landform.river.length < 2) continue
+      // Water is withheld from placement, so no occupied or facility block is ever drawn as water.
+      for (const id of [...input.occupied, ...input.facilities]) {
+        expect(terrain.blocks.get(blockKey(id))!.use).not.toBe('water')
+      }
+      // And every block the river actually reaches is one placement was kept off, and is drawn as water.
+      for (const id of input.water) {
+        expect(input.occupied.has(id)).toBe(false)
+        expect(input.facilities.has(id)).toBe(false)
+        expect(terrain.blocks.get(blockKey(id))!.use).toBe('water')
       }
     }
   })
 
   it('gives every district a character without claiming anything about it', () => {
-    const terrain = planTerrain(input())
-    for (const districtId of ['schema:dbo', 'schema:reporting', 'schema:archive']) {
+    const terrain = planTerrain(scene())
+    for (const districtId of DISTRICTS) {
       expect(DISTRICT_CHARACTERS).toContain(terrain.characters.get(districtId))
     }
     // Stable across plans, because it is hashed from the id alone.
-    expect([...planTerrain(input()).characters.entries()]).toEqual([...terrain.characters.entries()])
+    expect([...planTerrain(scene()).characters.entries()]).toEqual([...terrain.characters.entries()])
   })
 })
 
 describe('reliefAt', () => {
   it('is continuous and bounded by its own amplitude', () => {
-    const terrain = planTerrain(input())
+    const terrain = planTerrain(scene())
     for (let step = 0; step < 40; step += 1) {
       const x = step * 37
       const z = step * 53
