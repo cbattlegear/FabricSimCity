@@ -217,6 +217,16 @@ export interface CityPlan {
    * measures.
    */
   readonly router: RoadRouter
+  /**
+   * The street graph the router and blocks were built from, and the road class of every edge.
+   *
+   * Carried on the plan so query traffic can be *assigned* to the network — loaded route by route so
+   * congested streets push later journeys onto parallel ways — without rebuilding the graph the plan
+   * already holds. Both are seed-derived scenery: assignment reads them to place ribbons and never
+   * writes back, so the same database always draws the same streets and the same road classes.
+   */
+  readonly graph: PlanarGraph
+  readonly roadProperties: ReadonlyMap<number, RoadProperties>
 }
 
 /** Options that make a plan reproducible and stable as bounded pages arrive. */
@@ -335,10 +345,19 @@ const MIN_STREAMLINE_STEPS = 1.45
 /** Ceiling on streamlines traced, so a very large database still plans in bounded time. */
 const MAX_STREAMLINES = 900
 
-/** Graph welding, snapping and stub tolerances, as fractions of the local separation. */
+/**
+ * Graph welding, snapping and stub tolerances, as fractions of the local separation.
+ *
+ * The snap radius is how far a dangling streamline end may reach to join the network. A tight reach
+ * left whole clusters of streets stranded as separate islands, and a route between two tables that
+ * happened to land on different islands then silently failed; a radius wider than the separation lets
+ * a stray end find the nearest way instead. The stub minimum is the shortest cul-de-sac worth keeping:
+ * below it a stub is a streamline that petered out in open ground rather than a street anyone drives,
+ * so trimming at a larger fraction clears the dead ends the wider snap would otherwise leave behind.
+ */
 const WELD_FRACTION = 0.12
-const SNAP_FRACTION = 0.75
-const STUB_FRACTION = 0.35
+const SNAP_FRACTION = 1.25
+const STUB_FRACTION = 0.6
 
 /**
  * How aggressively the crossing-breaker turns four-way junctions into staggered T-junctions.
@@ -581,6 +600,8 @@ export function planCity(
     facilities: facilitySites(facilityBlocks, cell),
     warp,
     router,
+    graph,
+    roadProperties: roads,
   }
 }
 
@@ -1479,11 +1500,11 @@ function streetGeometry(plan: CityPlan): Map<string, readonly Point[]> {
   return map
 }
 
-function intersectionId(col: number, row: number): string {
+export function intersectionId(col: number, row: number): string {
   return `x${col}:z${row}`
 }
 
-function dedupePoints(points: Array<{ x: number; z: number }>): Array<{ x: number; z: number }> {
+export function dedupePoints(points: Array<{ x: number; z: number }>): Array<{ x: number; z: number }> {
   const result: Array<{ x: number; z: number }> = []
   for (const point of points) {
     const last = result[result.length - 1]

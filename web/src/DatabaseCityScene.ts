@@ -4,6 +4,7 @@ import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, streetRoute, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
 import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
+import { assignQueryRoutes } from './cityQueryTraffic'
 import { type RoadTraffic } from './cityTraffic'
 import {
   claimLane,
@@ -1500,13 +1501,19 @@ export function createDatabaseCityScene(
     const ordered = [...roads].sort((left, right) => right.width - left.width || left.routeId.localeCompare(right.routeId))
     const corridorLanes = new Map<string, Set<number>>()
 
+    // Every on-map ribbon's path, spread across the network by loading the measured executions as
+    // demand. This only chooses the way each ribbon takes; its width, colour and pattern are the
+    // measured quantities set by `gradeRoads` and are applied unchanged below.
+    const assigned = assignQueryRoutes(cityPlan, roads)
+
     for (const road of ordered) {
       const from = cityPlan.lots.get(road.fromObjectId)
       if (!from) continue
       const to = cityPlan.lots.get(road.toId)
       // A cross-database reference leaves the city on a ramp through the nearest boundary.
       const target = to ? { x: to.accessX, z: to.accessZ } : rampPoint(cityPlan, from)
-      const route = streetRoute(cityPlan, { x: from.accessX, z: from.accessZ }, target)
+      const spread = to ? assigned.get(road.routeId) : undefined
+      const route = spread ?? streetRoute(cityPlan, { x: from.accessX, z: from.accessZ }, target)
       const points = route.points
       const corridors = corridorKeys(route.nodeIds)
       const lane = claimLane(corridorLanes, corridors)
