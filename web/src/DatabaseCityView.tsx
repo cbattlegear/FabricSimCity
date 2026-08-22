@@ -702,11 +702,13 @@ function LegendDrawer({
           the T-junctions and dead ends: roughly one junction in seven is left as a cul-de-sac and
           most of the rest meet three streets rather than four, because that is the shape of a real
           street network, not because anything about the database ended there. Even the route a link
-          takes between two buildings is only the quickest drive those invented speed limits allow,
-          not a measured path. A big block is not a big table, a fast road is not a busy one, a dead
-          end is not a table nothing reaches, a square is not a hotspot, and two buildings on the same
-          curve have nothing to do with each other. Everything that does carry a quantity is listed
-          above.
+          takes between two buildings — and the way the busiest links fan out onto parallel streets
+          rather than stack on the one quickest road — is only traffic modelled on those invented
+          speed limits: the executions a link carries are measured, but the path chosen to show them
+          and any congestion along it are not. A big block is not a big table, a fast road is not a
+          busy one, a dead end is not a table nothing reaches, a square is not a hotspot, and two
+          buildings on the same curve have nothing to do with each other. Everything that does carry a
+          quantity is listed above.
         </p>
 
         <div className="city-schema-strip" aria-label="Neighbourhoods">
