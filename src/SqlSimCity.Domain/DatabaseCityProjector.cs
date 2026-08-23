@@ -41,6 +41,12 @@ public sealed record DatabaseCityQueryEvidence(
     /// </summary>
     public IReadOnlyDictionary<string, string> WaitMillisecondsByCategory { get; init; } =
         ReadOnlyDictionary<string, string>.Empty;
+
+    /// <summary>
+    /// The same measured wait time spread across the objects the family's plans read, in proportion
+    /// to estimated plan cost. The split is modelled; only the total it divides is measured.
+    /// </summary>
+    public DatabaseCityWaitAttributionV1 WaitAttribution { get; init; } = DatabaseCityWaitAttributionV1.None;
 }
 
 public sealed record DatabaseCityWorkloadProjection(

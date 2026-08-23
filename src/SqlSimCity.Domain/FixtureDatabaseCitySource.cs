@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 using SqlSimCity.Contracts.V1;
+using SqlSimCity.Domain.DatabaseCity;
 
 namespace SqlSimCity.Domain;
 
@@ -270,6 +271,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                     rationale)
                 {
                     WaitMillisecondsByCategory = waitCategories,
+                    WaitAttribution = Apportion(index, "287"),
                 });
                 continue;
             }
@@ -288,9 +290,11 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                     rationale)
                 {
                     WaitMillisecondsByCategory = waitCategories,
+                    WaitAttribution = Apportion(index, (16 - index).ToString(CultureInfo.InvariantCulture)),
                 });
                 continue;
             }
+            var totalWait = (weight * 1_009L).ToString(CultureInfo.InvariantCulture);
             rows.Add(new DatabaseCityQueryEvidence(
                 $"family:sales:{index:D3}",
                 $"0xFAKE{index:D4}",
@@ -298,15 +302,59 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 (weight * 1_000_003L).ToString(CultureInfo.InvariantCulture),
                 (weight * 1_800_007L).ToString(CultureInfo.InvariantCulture),
                 (weight * 52_013L).ToString(CultureInfo.InvariantCulture),
-                (weight * 1_009L).ToString(CultureInfo.InvariantCulture),
+                totalWait,
                 objectIds,
                 confidence,
                 rationale)
             {
                 WaitMillisecondsByCategory = waitCategories,
+                WaitAttribution = Apportion(index, totalWait),
             });
         }
         return rows;
+    }
+
+    /// <summary>
+    /// Estimated plan cost shares per fixture family, in the shape a compiled plan's operator costs
+    /// would produce. These are invented, like every other number in this fixture -- but the division
+    /// they drive is not: it runs through the same <see cref="WaitApportionment"/> the connected
+    /// collector uses, so the offline demo exercises the production arithmetic rather than displaying
+    /// hand-written results.
+    ///
+    /// <para>
+    /// The set is chosen to make each behaviour visible without a live server. Family 6 reads three
+    /// tables with genuinely uneven cost, which is the case the whole feature exists for. Family 7
+    /// reads one local table and one in another database, and only the local share is published, so
+    /// the refusal to hand cross-database cost to a drawn building shows up as a large unattributed
+    /// remainder. Families 9 and above carry no shares at all -- the same deliberate gap their wait
+    /// categories leave -- so the "no compiled plan cost estimate was available" path stays
+    /// demonstrable offline rather than only asserted in a test.
+    /// </para>
+    /// </summary>
+    private static DatabaseCityWaitAttributionV1 Apportion(int index, string totalWaitMilliseconds)
+    {
+        ObjectCostShare[] shares = index switch
+        {
+            1 or 4 => [new ObjectCostShare("object:dbo:100", 1m)],
+            2 or 5 => [new ObjectCostShare("object:dbo:110", 1m)],
+            3 => [new ObjectCostShare("object:reporting:300", 1m)],
+            6 =>
+            [
+                new ObjectCostShare("object:dbo:110", 0.55m),
+                new ObjectCostShare("object:dbo:120", 0.30m),
+                new ObjectCostShare("object:dbo:100", 0.15m),
+            ],
+            7 => [new ObjectCostShare("object:dbo:110", 0.62m)],
+            _ => [],
+        };
+        if (shares.Length == 0)
+        {
+            return DatabaseCityWaitAttributionV1.None;
+        }
+        var rationale = index == 7
+            ? "Apportioned by estimated plan cost across 1 compiled plan. The remainder is cost the plan spent in another database, which is not this page's to place."
+            : $"Apportioned by estimated plan cost across 1 compiled plan reading {shares.Length} object(s) on this page.";
+        return WaitApportionment.Apportion(shares, totalWaitMilliseconds, 1, rationale);
     }
 
     /// <summary>
@@ -350,7 +398,10 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
         family.ObjectIds,
         family.Confidence,
         family.Rationale,
-        AttributedEvidence);
+        AttributedEvidence)
+    {
+        WaitAttribution = family.WaitAttribution,
+    };
 
     private static DatabaseCityIndexV1 Index(
         string objectId,

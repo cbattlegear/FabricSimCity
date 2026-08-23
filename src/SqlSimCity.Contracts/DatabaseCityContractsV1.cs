@@ -94,6 +94,46 @@ public sealed record DatabaseCityObjectV1(
 /// and never that the family waited for nothing. Categories are passed through unmapped and
 /// untranslated so a category this build does not recognise is still reported rather than dropped.
 /// </summary>
+/// <summary>
+/// One object's modelled share of a query family's measured wait time.
+/// <para>
+/// <see cref="WaitMilliseconds"/> is <em>not</em> a measurement of how long this object waited.
+/// Query Store measures one wait total per query and never says which table caused it. The split is
+/// <see cref="EstimatedCostShare"/>: the fraction of the compiled plan's <em>estimated</em> cost the
+/// optimizer placed on operators reading this object. Presenting it requires saying so.
+/// </para>
+/// </summary>
+public sealed record DatabaseCityObjectWaitShareV1(
+    string ObjectId,
+    decimal EstimatedCostShare,
+    string WaitMilliseconds);
+
+/// <summary>
+/// A query family's measured wait time apportioned across the objects its compiled plans read.
+/// <para>
+/// The parts and <see cref="UnattributedWaitMilliseconds"/> sum to exactly the family's
+/// <c>TotalWaitMilliseconds</c>, so the apportionment can always be checked against the measurement
+/// it came from. The unattributed part covers cost the plan spent on no object at all, plus every
+/// object the plan named that this page does not draw -- off-page, another database, or a reference
+/// the collector could not resolve. Folding that into the objects on screen would hand this page
+/// wait time that demonstrably belongs elsewhere.
+/// </para>
+/// <para>
+/// An empty <see cref="Objects"/> list means no apportionment was possible, never that no object
+/// waited.
+/// </para>
+/// </summary>
+public sealed record DatabaseCityWaitAttributionV1(
+    IReadOnlyList<DatabaseCityObjectWaitShareV1> Objects,
+    string UnattributedWaitMilliseconds,
+    int PlansRead,
+    string Rationale)
+{
+    public static readonly DatabaseCityWaitAttributionV1 None = new(
+        [], "0", 0,
+        "No compiled plan cost estimate was available for this family, so its wait time is not apportioned.");
+}
+
 public sealed record DatabaseCityQueryFamilyV1(
     string FamilyId,
     string QueryHash,
@@ -106,7 +146,14 @@ public sealed record DatabaseCityQueryFamilyV1(
     IReadOnlyList<string> ObjectIds,
     QueryAttributionConfidence Confidence,
     string Rationale,
-    EvidenceV1 Evidence);
+    EvidenceV1 Evidence)
+{
+    /// <summary>
+    /// The family's measured wait time spread across the objects its plans read, in proportion to
+    /// estimated plan cost. Modelled, not measured; see <see cref="DatabaseCityWaitAttributionV1"/>.
+    /// </summary>
+    public DatabaseCityWaitAttributionV1 WaitAttribution { get; init; } = DatabaseCityWaitAttributionV1.None;
+}
 
 public sealed record DatabaseCityWorkloadAggregateV1(
     string? FamilyCount,
