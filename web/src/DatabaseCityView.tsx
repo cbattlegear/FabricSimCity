@@ -23,11 +23,26 @@ import { FACILITY_LABELS, projectFacilities, type Facility, type FacilityKind } 
 import { projectFacilityTraffic, type FacilityTraffic } from './cityFacilityTraffic'
 import { AddressBook } from './AddressPanel'
 import { buildAddressBook, type AddressEntry } from './addressBook'
+import { CityLoadingScreen } from './CityLoadingScreen'
 import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
 import { projectIncidents } from './cityIncidents'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
 type Metric = (typeof metrics)[number]
+
+/**
+ * Resolves once the browser has actually put the current render on screen.
+ *
+ * Two frames, not one. A state change only queues a render; the frame callback after that render is
+ * the first moment its pixels exist. Anything scheduled before that point is invisible if the main
+ * thread then blocks, which is exactly the situation this is used to avoid.
+ */
+function nextPaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'function') return Promise.resolve()
+  return new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
 
 type Props = {
   databaseId: string
@@ -70,6 +85,14 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const [loading, setLoading] = useState(true)
   /** True while pages after the first are still being walked in the background. */
   const [backfilling, setBackfilling] = useState(false)
+  /**
+   * True while the whole database is being laid out at once.
+   *
+   * Its own flag rather than a variant of `loading` because the map is already on screen by then,
+   * and the layout it is about to run blocks the main thread for as long as it takes. Nothing can be
+   * painted once that starts, so the screen that covers it has to be up a frame early.
+   */
+  const [relayouting, setRelayouting] = useState(false)
   /** Objects fetched so far, tracked separately so progress can move while the layout is held. */
   const [loadedCount, setLoadedCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -99,6 +122,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     requests.current.add(controller)
     setLoading(true)
     setBackfilling(false)
+    setRelayouting(false)
     setLoadedCount(0)
     setError(null)
     setPage(null)
@@ -147,8 +171,19 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
          * schema's buildings by footprint, so a mid-walk publish visibly reshuffles blocks. Holding
          * the pages and publishing once means the city is drawn twice however large the database is:
          * the first page, then the whole thing.
+         *
+         * That second draw is the expensive one — a large database traces its whole street network
+         * here — and it runs synchronously, so the browser cannot paint again until it finishes.
+         * Raising the loading screen and waiting for it to actually reach the glass before starting
+         * is the only way it is ever seen; set it in the same tick and the user gets a frozen map
+         * instead.
          */
-        if (merged && pages > 1) publish(merged)
+        if (merged && pages > 1) {
+          setRelayouting(true)
+          await nextPaint()
+          if (controller.signal.aborted) return
+          publish(merged)
+        }
       } catch (reason) {
         if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason))
       } finally {
@@ -156,6 +191,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
         if (!controller.signal.aborted) {
           setLoading(false)
           setBackfilling(false)
+          setRelayouting(false)
         }
       }
     })()
@@ -595,7 +631,12 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                 </select>
               </label>
               {backfilling && (
-                <p className="load-progress" role="status">
+                /*
+                 * Not a live region any more. The loading screen is up for the whole backfill and its
+                 * progressbar already announces the same count; leaving `role="status"` here made a
+                 * long walk fire up to eighty announcements of a number nobody asked to hear.
+                 */
+                <p className="load-progress">
                   Loading the rest of the city… {loadedCount.toLocaleString()} of{' '}
                   {Number(page?.totalObjects ?? loadedCount).toLocaleString()} objects placed.
                 </p>
@@ -635,10 +676,26 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
 
   return (
     <MapShell sidebar={sidebar}>
-      {loading && !page && (
-        <section className="stage-message loading" role="status">
-          <span className="loading-mark" aria-hidden="true" /> Loading bounded database evidence…
-        </section>
+      {/*
+        * Up for the whole walk, not just its ends.
+        *
+        * The obvious wiring — cover the first fetch, uncover, then cover the final layout — puts the
+        * screen on twice with a partly-built city flashing between them, and wastes the measured bar
+        * entirely: it would appear at an unknown total, vanish, and come back at 100%. Holding it
+        * across the backfill instead gives the bar the one job it has, filling from the first page to
+        * the last, and the status line carries the handover to the layout pass.
+        */}
+      {((loading && !page) || backfilling || relayouting) && (
+        <CityLoadingScreen
+          title={databaseName}
+          status={
+            relayouting
+              ? 'Laying out the whole city — streets, blocks and lots'
+              : 'Reading bounded pages of the database catalogue'
+          }
+          loaded={loadedCount}
+          total={page?.totalObjects != null ? Number(page.totalObjects) : null}
+        />
       )}
       {error && <section className="stage-message error" role="alert">{error}</section>}
 
