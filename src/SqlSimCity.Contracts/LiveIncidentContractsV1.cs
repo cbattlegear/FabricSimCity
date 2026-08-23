@@ -77,6 +77,15 @@ public enum LockResourceKind
     Metadata,
     Database,
     AllocationUnit,
+
+    /// <summary>
+    /// An <c>XACT</c> lock: a lock taken on a transaction id (TID) rather than on any row, key or
+    /// object. Introduced by optimized locking (SQL Server 2025 / Azure SQL Database, Managed
+    /// Instance and Fabric SQL), where a writer holds one <c>X</c> lock on its own TID for the life
+    /// of the transaction and waiters queue on that TID with an <c>S</c> lock, instead of each row
+    /// or key lock being held to commit.
+    /// </summary>
+    Transaction,
     Unrecognized,
 }
 
@@ -118,6 +127,14 @@ public sealed record LockResourceV1(
 {
     /// <summary>The <c>hobt_id</c> named by a KEY/HOBT/PAGE-style resource, when the text carries one.</summary>
     public long? HobtId { get; init; }
+
+    /// <summary>
+    /// The transaction id (TID) named by an <c>XACT</c> resource under optimized locking. Preserved
+    /// because it is the one identifier such a wait does carry: it joins to
+    /// <c>sys.dm_tran_locks.request_owner_id</c> and to the blocker's own transaction, which is how
+    /// a reader gets from the wait to the statement responsible for it.
+    /// </summary>
+    public long? TransactionId { get; init; }
 }
 
 /// <summary>One waiting task, or one blocked/blocking request, preserving <c>blocking_session_id</c> verbatim plus its decoded sentinel meaning.</summary>

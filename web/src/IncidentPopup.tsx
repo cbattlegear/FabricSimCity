@@ -89,7 +89,7 @@ export function IncidentSummary({
         <small>{offPageCount} resolved lock wait(s) name an object outside this bounded page.</small>
       )}
       {unresolved.length > 0 && (
-        <small>{unresolved.length} lock wait(s) could not name an object: {unresolved[0].reason}</small>
+        <small>{unresolved.length} lock wait(s) name no object: {unresolved[0].reason}</small>
       )}
     </div>
   )

@@ -120,6 +120,90 @@ public sealed class LockResourceParserTests
         Assert.Contains("SOMETHINGNEW", parsed.Reason, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Optimized locking replaces held row/key locks with a single lock on the writer's transaction
+    /// id, so an XACT wait is a normal, fully understood outcome on SQL Server 2025 and Azure SQL --
+    /// not a form this parser failed to recognise.
+    /// </summary>
+    [Fact]
+    public void ParseReadsOptimizedLockingTransactionLocksAsNotObjectScoped()
+    {
+        var parsed = LockResourceParser.Parse("XACT: 7:1299696");
+
+        Assert.NotNull(parsed);
+        Assert.Equal(LockResourceKind.Transaction, parsed!.Kind);
+        Assert.Equal(LockResolutionStatus.NotObjectScoped, parsed.Status);
+        Assert.Equal(7, parsed.DatabaseId);
+        Assert.Equal(1299696, parsed.TransactionId);
+        Assert.Null(parsed.ObjectId);
+        Assert.Null(parsed.HobtId);
+    }
+
+    /// <summary>
+    /// The exact regression this fixes: the reason must explain optimized locking rather than
+    /// reporting the engine's own vocabulary as unfamiliar.
+    /// </summary>
+    [Fact]
+    public void ParseExplainsWhyATransactionLockNamesNoObject()
+    {
+        var parsed = LockResourceParser.Parse("XACT: 7:1299696");
+
+        Assert.NotNull(parsed);
+        Assert.DoesNotContain("not a lock-resource form", parsed!.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("optimized locking", parsed.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("transaction id", parsed.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// <c>sys.dm_tran_locks.resource_description</c> reports the transaction id on its own, because
+    /// that view carries the database in a separate column.
+    /// </summary>
+    [Fact]
+    public void ParseReadsATransactionLockThatCarriesNoDatabaseId()
+    {
+        var parsed = LockResourceParser.Parse("XACT: 1299696");
+
+        Assert.NotNull(parsed);
+        Assert.Equal(LockResourceKind.Transaction, parsed!.Kind);
+        Assert.Equal(LockResolutionStatus.NotObjectScoped, parsed.Status);
+        Assert.Equal(1299696, parsed.TransactionId);
+        Assert.Null(parsed.DatabaseId);
+    }
+
+    /// <summary>A leading zero is a placeholder; no database has id 0, so none is claimed.</summary>
+    [Fact]
+    public void ParseDoesNotClaimDatabaseZeroForATransactionLock()
+    {
+        var parsed = LockResourceParser.Parse("XACT: 0:1299696");
+
+        Assert.NotNull(parsed);
+        Assert.Null(parsed!.DatabaseId);
+        Assert.Equal(1299696, parsed.TransactionId);
+    }
+
+    [Fact]
+    public void ParseIsCaseInsensitiveOnTheTransactionPrefix()
+    {
+        var parsed = LockResourceParser.Parse("xact: 7:1299696");
+
+        Assert.NotNull(parsed);
+        Assert.Equal(LockResourceKind.Transaction, parsed!.Kind);
+        Assert.Equal(1299696, parsed.TransactionId);
+    }
+
+    /// <summary>
+    /// A transaction lock is never sent for hobt resolution: there is no object id to find, so a
+    /// lookup would burn a bounded probe on a question the resource cannot answer.
+    /// </summary>
+    [Fact]
+    public void ParseNeverAsksForALookupOnATransactionLock()
+    {
+        var parsed = LockResourceParser.Parse("XACT: 7:1299696");
+
+        Assert.NotNull(parsed);
+        Assert.NotEqual(LockResolutionStatus.RequiresLookup, parsed!.Status);
+    }
+
     [Fact]
     public void ParseReportsTextWithNoKindPrefixAsUnrecognized()
     {

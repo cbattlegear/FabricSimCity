@@ -42,6 +42,13 @@ export type LockResourceKind =
   | 'Metadata'
   | 'Database'
   | 'AllocationUnit'
+  /**
+   * `XACT` — a lock on a transaction id rather than on any object. Optimized locking (SQL Server
+   * 2025, Azure SQL Database, Managed Instance, Fabric SQL) has a writer hold one lock on its own
+   * transaction instead of holding every row and key lock until commit, so waiters queue on that
+   * transaction. Understood in full, and names no object by design.
+   */
+  | 'Transaction'
   | 'Unrecognized'
 
 export type LockResolutionStatus =
