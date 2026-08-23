@@ -62,6 +62,15 @@ export interface DatabaseCityObject {
   usedBytes: string | null
   sizeStatus: MeasurementStatus
   sizeReason: string | null
+  /**
+   * Where the collector put this object in its stable ordering.
+   *
+   * `neighborhoodOrdinal` is the schema's position among the database's schemas. `objectOrdinal` is
+   * the object's position among **every object in the database**, not within its own schema — the one
+   * meaning both collectors can honour (#49). Both state an order and nothing else: nothing that
+   * sizes the city may be derived from an ordinal, because an ordinal is not a count. `x`/`z` are
+   * legacy lattice coordinates the city no longer reads.
+   */
   layout: { neighborhoodOrdinal: number; objectOrdinal: number; x: number; z: number }
   indexes: DatabaseCityIndex[]
   directActivity: DatabaseCityDirectActivity

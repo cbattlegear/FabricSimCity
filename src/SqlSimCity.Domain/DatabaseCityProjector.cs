@@ -81,7 +81,12 @@ public static class DatabaseCityProjector
         var schemaLayoutOrdinals = orderedSchemas
             .Select((schema, index) => (schema.SchemaId, Ordinal: schema.LayoutOrdinal ?? index))
             .ToDictionary(value => value.SchemaId, value => value.Ordinal, StringComparer.Ordinal);
-        var objectOrdinals = new Dictionary<string, int>(StringComparer.Ordinal);
+        // One counter for the whole database, not one per schema. The connected collector numbers
+        // objects across the database, so counting within a schema here gave the same field two
+        // different meanings depending on which collector filled it (#49). Database-wide is the one
+        // that both can honour: a schema cannot know its own objects' positions until every schema
+        // has been read, but a collector paging the database always can.
+        var runningObjectOrdinal = 0;
 
         return objects
             .OrderBy(item => item.SchemaId, StringComparer.Ordinal)
@@ -92,8 +97,7 @@ public static class DatabaseCityProjector
                     !schemaNames.TryGetValue(item.SchemaId, out var schemaName))
                     throw new ArgumentException($"Object {item.ObjectId} references unknown schema {item.SchemaId}.", nameof(objects));
 
-                var sequentialObjectOrdinal = objectOrdinals.GetValueOrDefault(item.SchemaId);
-                objectOrdinals[item.SchemaId] = sequentialObjectOrdinal + 1;
+                var sequentialObjectOrdinal = runningObjectOrdinal++;
                 var objectOrdinal = item.LayoutOrdinal ?? sequentialObjectOrdinal;
                 neighborhoodOrdinal = schemaLayoutOrdinals[item.SchemaId];
                 var sizeKnown = item.ReservedPages8KiB is not null && item.UsedPages8KiB is not null;

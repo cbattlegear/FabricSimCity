@@ -99,6 +99,226 @@
   color: #f5c9bf;
 }
 
+/*
+ * The loading screen, in the shape city builders have used since the nineties: a bar, a count, and a
+ * deadpan line about work nobody is doing.
+ *
+ * Two rules hold it together. Everything that moves is animated with `transform` or `opacity` alone,
+ * because the layout pass this screen exists to cover blocks the main thread outright — a bar
+ * animated by `width`, or by JavaScript, would freeze at precisely the moment it needs to prove the
+ * app is still alive, while a compositor animation keeps running. And the measured parts (the bar,
+ * the skyline, the count) are visually separated from the invented part (the saying), which is the
+ * map's own evidence boundary applied to the one screen with nothing to measure.
+ */
+.city-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(125% 95% at 50% 32%, #11212e 0%, #0a1119 56%, #070b11 100%);
+}
+
+.city-loading-panel {
+  width: min(560px, 100%);
+  padding: 26px 28px 18px;
+  border: 1px solid #24384a;
+  border-radius: 12px;
+  background: linear-gradient(#0e1926, #0b131d);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  text-align: center;
+}
+
+.city-loading-eyebrow {
+  margin: 0 0 18px;
+  color: #6f8ba0;
+  font-size: 0.71rem;
+  font-weight: 600;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+}
+
+.city-loading-eyebrow strong {
+  color: #cfe3f2;
+  letter-spacing: 0.05em;
+}
+
+/*
+ * A skyline drawn in gradients rather than fetched as an image — the same technique as the product
+ * mark, and for the same reason: this app makes no third-party requests, and a loading screen that
+ * waits on an asset is a joke told at its own expense.
+ *
+ * The shape is declared once as a mask and painted twice, dim by the container and lit by the child,
+ * which is why the geometry carries no colour of its own. Putting the colour in the gradients and
+ * overriding it per element does not work: a custom property substitutes its own `var()`s where it
+ * is *defined*, so the child inherits a value that has already resolved to the parent's ink and the
+ * lit copy comes out invisible. Masking separates the two cleanly — one shape, two backgrounds.
+ *
+ * The lit copy is clipped to the measured progress, so the city lights up from the left as it loads.
+ */
+.city-loading-skyline {
+  --lit: 0%;
+  --skyline:
+    linear-gradient(#000, #000) 0 26px / 26px 18px no-repeat,
+    linear-gradient(#000, #000) 28px 14px / 18px 30px no-repeat,
+    linear-gradient(#000, #000) 48px 32px / 22px 12px no-repeat,
+    linear-gradient(#000, #000) 72px 6px / 16px 38px no-repeat,
+    linear-gradient(#000, #000) 90px 22px / 28px 22px no-repeat,
+    linear-gradient(#000, #000) 120px 12px / 20px 32px no-repeat,
+    linear-gradient(#000, #000) 142px 30px / 24px 14px no-repeat,
+    linear-gradient(#000, #000) 168px 4px / 18px 40px no-repeat,
+    linear-gradient(#000, #000) 188px 18px / 30px 26px no-repeat,
+    linear-gradient(#000, #000) 220px 28px / 16px 16px no-repeat,
+    linear-gradient(#000, #000) 238px 10px / 26px 34px no-repeat,
+    linear-gradient(#000, #000) 266px 24px / 20px 20px no-repeat,
+    linear-gradient(#000, #000) 288px 14px / 24px 30px no-repeat,
+    linear-gradient(#000, #000) 314px 32px / 18px 12px no-repeat,
+    linear-gradient(#000, #000) 334px 20px / 28px 24px no-repeat,
+    linear-gradient(#000, #000) 364px 8px / 20px 36px no-repeat,
+    linear-gradient(#000, #000) 386px 28px / 22px 16px no-repeat;
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  height: 44px;
+  margin: 0 auto 18px;
+  overflow: hidden;
+  background-color: #1c2c3b;
+  -webkit-mask: var(--skyline);
+  mask: var(--skyline);
+}
+
+.city-loading-skyline-lit {
+  position: absolute;
+  inset: 0;
+  background-color: #63d9b6;
+  /* Clipped from the right by whatever is not yet built, so the inset is the remainder of progress. */
+  clip-path: inset(0 calc(100% - var(--lit)) 0 0);
+  -webkit-mask: var(--skyline);
+  mask: var(--skyline);
+  transition: clip-path 420ms ease-out;
+}
+
+.city-loading-saying {
+  /* Held open for two lines so a longer saying cannot shunt the bar down the panel as it cycles. */
+  min-height: 2.7em;
+  margin: 0 0 16px;
+  color: #8be7ce;
+  font-size: 1.01rem;
+  line-height: 1.35;
+  text-wrap: balance;
+  animation: city-loading-say 340ms ease-out;
+}
+
+.city-loading-bar {
+  position: relative;
+  height: 16px;
+  padding: 2px;
+  margin: 0 0 14px;
+  border: 1px solid #24384a;
+  border-radius: 3px;
+  background: #080f16;
+  overflow: hidden;
+}
+
+/*
+ * The sweep is the part that survives a blocked main thread. It is pure `transform`, so the
+ * compositor keeps it moving through the seconds when no JavaScript can run and nothing repaints.
+ */
+.city-loading-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  background: linear-gradient(90deg, transparent, rgba(190, 255, 235, 0.2), transparent);
+  transform: translateX(-120%);
+  animation: city-loading-sweep 1900ms ease-in-out infinite;
+}
+
+/*
+ * Clipped rather than resized. A `width` transition would thrash layout on every page merge, and
+ * `scaleX` would stretch the segment pitch so the chunks changed size as the bar filled; clipping
+ * moves an edge across a fixed pattern, which is what a segmented bar actually does.
+ */
+.city-loading-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(90deg, #7ce8ca 0 9px, rgba(124, 232, 202, 0.16) 9px 12px);
+  clip-path: inset(0 calc(100% - var(--filled)) 0 0);
+  transition: clip-path 420ms ease-out;
+}
+
+/*
+ * Before the first page lands there is no total, so there is no honest percentage. A dim full-width
+ * bar was the first attempt and it was a lie: at a glance it reads as a completed bar. So the
+ * unknown state is a narrow band that traverses an otherwise empty trough — the one shape that
+ * cannot be mistaken for an amount. It travels by `transform`, so it too survives a blocked thread.
+ */
+.city-loading-fill.is-unknown {
+  width: 34%;
+  background: repeating-linear-gradient(90deg, #7ce8ca 0 9px, rgba(124, 232, 202, 0.16) 9px 12px);
+  clip-path: none;
+  transition: none;
+  animation: city-loading-drift 1600ms cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.city-loading-status {
+  margin: 0 0 4px;
+  color: #cfe3f2;
+  font-size: 0.82rem;
+}
+
+.city-loading-count {
+  margin: 0 0 14px;
+  color: #9fb6c8;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.city-loading-disclosure {
+  margin: 0;
+  padding-top: 11px;
+  border-top: 1px solid #1a2733;
+  color: #7d94a8;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+@keyframes city-loading-sweep { to { transform: translateX(360%); } }
+@keyframes city-loading-drift {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(295%); }
+}
+@keyframes city-loading-say { from { opacity: 0; transform: translateY(3px); } }
+
+/*
+ * Reduced motion keeps the screen still. The sayings still cycle — they are the status text, not an
+ * effect — but nothing slides, sweeps or fades to deliver them.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .city-loading-bar::after,
+  .city-loading-fill.is-unknown,
+  .city-loading-saying {
+    animation: none;
+  }
+
+  .city-loading-fill,
+  .city-loading-skyline-lit {
+    transition: none;
+  }
+
+  /*
+   * A stationary band would read as a percentage, and there is no percentage yet. An empty trough is
+   * the honest still frame for an unknown total; the count line says what is actually happening.
+   */
+  .city-loading-fill.is-unknown {
+    display: none;
+  }
+}
+
 .sidebar-empty {
   margin: 0;
   padding: 18px 16px;

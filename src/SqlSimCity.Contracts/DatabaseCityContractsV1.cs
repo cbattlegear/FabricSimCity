@@ -6,6 +6,23 @@ public enum DatabaseIndexKind { Heap, Clustered, Nonclustered, Columnstore, Othe
 public enum QueryAttributionConfidence { Confirmed, Probable, Unknown }
 public enum DatabaseCityRouteKind { ObjectReference, CrossDatabaseReference }
 
+/// <summary>
+/// Where an object sits in the collector's stable ordering, so a city can be laid out the same way
+/// on every collection and every page.
+/// </summary>
+/// <param name="NeighborhoodOrdinal">
+/// The object's schema's position among the database's schemas, ordered by schema id.
+/// </param>
+/// <param name="ObjectOrdinal">
+/// The object's position among <b>every object in the database</b>, ordered by schema id then object
+/// id — not its position within its own schema. Database-wide is the only meaning both collectors can
+/// honour, because one pages the database without knowing where a schema begins; reading it as a
+/// per-schema index made the five-hundredth object look like a schema holding five hundred and one
+/// (#49). Nothing that sizes the city may be derived from it: an ordinal states an order, not a count.
+/// </param>
+/// <param name="X">Legacy lattice coordinate derived from the ordinals. The city is no longer a
+/// lattice and does not read these; they change whenever the ordinals do.</param>
+/// <param name="Z">See <paramref name="X"/>.</param>
 public sealed record DatabaseCityLayoutV1(
     int NeighborhoodOrdinal,
     int ObjectOrdinal,
