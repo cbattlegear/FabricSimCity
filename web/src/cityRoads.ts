@@ -30,26 +30,20 @@ export function laneOffset(lane: number): number {
 }
 
 /**
- * Identifies the street leg each segment runs along, so two roads sharing that leg can be told
- * apart.
+ * The street legs a route runs along, one key per leg, so two routes sharing a leg can be told apart.
  *
- * `pitch` is the spacing of the street corridors, and passing it is what makes this work on a curved
- * road. Keyed on the raw coordinate — which is what a default pitch of 1 still does — two roads
- * sharing one bowed street get different keys at every point along the bend, both claim lane 0, and
- * they draw straight through each other. Quantising to the corridor grain instead maps every point
- * on a leg to the same key, because a street's centre line is never allowed to wander more than half
- * a pitch from the lattice line it belongs to.
+ * A leg is named by the unordered pair of intersections it joins. The lattice could map a point back
+ * to the grid line it belonged to, but an organic street bows away from any such line, so two routes
+ * sharing one bent leg used to quantise to a different key at every step, both claim lane 0, and draw
+ * straight through each other. The intersection pair is the same whichever way either route drives the
+ * leg, so a shared leg always collides in the lane map and the routes are nudged apart.
  */
-export function corridorKeys(
-  points: readonly Point[],
-  pitch: { readonly x: number; readonly z: number } = { x: 1, z: 1 },
-): string[] {
+export function corridorKeys(nodeIds: readonly string[]): string[] {
   const keys: string[] = []
-  for (let i = 1; i < points.length; i += 1) {
-    const a = points[i - 1]
-    const b = points[i]
-    if (Math.abs(a.x - b.x) < Math.abs(a.z - b.z)) keys.push(`x${Math.round(a.x / pitch.x)}`)
-    else keys.push(`z${Math.round(a.z / pitch.z)}`)
+  for (let i = 1; i < nodeIds.length; i += 1) {
+    const a = nodeIds[i - 1]
+    const b = nodeIds[i]
+    keys.push(a < b ? `${a}~${b}` : `${b}~${a}`)
   }
   return keys
 }

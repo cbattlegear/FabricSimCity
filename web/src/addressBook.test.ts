@@ -124,27 +124,31 @@ describe('columnLabel', () => {
 describe('blockAddress', () => {
   it('names the block a position stands on, and prefixes the district when there is one', () => {
     const plan = samplePlan()
-    expect(blockAddress(plan, 0, 0)).toBe('Block A1')
-    expect(blockAddress(plan, 0, 0, 'dbo')).toBe('dbo · Block A1')
+    // A block is a face of the street graph now, so the letter is the block's own id and the row is
+    // fixed at one; the address is whatever the plan's warp says stands at that point.
+    const { col } = plan.warp.blockAt(0, 0)
+    const expected = `Block ${columnLabel(col)}1`
+    expect(blockAddress(plan, 0, 0)).toBe(expected)
+    expect(blockAddress(plan, 0, 0, 'dbo')).toBe(`dbo · ${expected}`)
   })
 
-  it('advances one block per block, on ground whose spacing is no longer uniform', () => {
+  it('gives each block its own letter, with the row fixed at one now the grid is gone', () => {
     const plan = samplePlan()
-    // Block spans vary and the whole lattice is displaced, so the address is checked against the
-    // centre of the block it should name rather than against a multiple of a pitch.
-    const centre = (col: number, row: number) => plan.warp.blockCenter(col, row)
-    const at = (col: number, row: number) => {
-      const point = centre(col, row)
-      return blockAddress(plan, point.x, point.z)
+    const ids = [...new Set([...plan.lots.values()].map(lot => lot.blockCol))]
+    expect(ids.length).toBeGreaterThan(1)
+    for (const id of ids) {
+      const centre = plan.warp.blockCenter(id, 0)
+      const { col, row } = plan.warp.blockAt(centre.x, centre.z)
+      // Row is no longer a coordinate — every block sits on row zero and reads as one.
+      expect(row).toBe(0)
+      expect(blockAddress(plan, centre.x, centre.z)).toBe(`Block ${columnLabel(col)}1`)
     }
-    expect(at(1, 0)).toBe('Block B1')
-    expect(at(0, 1)).toBe('Block A2')
-    expect(at(2, 3)).toBe('Block C4')
   })
 
-  it('never produces a negative block for a position left of the origin', () => {
+  it('never produces a negative block for a position far outside the city', () => {
     const plan = samplePlan()
-    expect(blockAddress(plan, -50, -50)).toBe('Block A1')
+    // The nearest block is named rather than a negative one invented, so the label is always valid.
+    expect(blockAddress(plan, -9999, -9999)).toMatch(/^Block [A-Z]+1$/)
   })
 })
 

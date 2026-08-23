@@ -1,6 +1,7 @@
-import { mulberry32, seededIndex } from './citySeed'
+import { mulberry32 } from './citySeed'
 import { stableHash } from './atlasLayout'
-import type { CityWarp } from './cityWarp'
+import type { CityBlockField } from './cityBlocks'
+import type { Point } from './cityStreamlines'
 
 /**
  * Landform and land use for one database city.
@@ -8,25 +9,26 @@ import type { CityWarp } from './cityWarp'
  * **Evidence boundary — read this first.** Nothing in this file is measured, and nothing in it may
  * ever become measured. The river, the hills, the parks, the woodland, the plazas and the
  * neighbourhood characters are *scenery*: deterministic decoration derived from the database's own
- * id, exactly like the scatter in `cityPlan`. They exist because a map with nothing but buildings and
- * a square lattice reads as graph paper, and a map you cannot navigate by is a map nobody reads.
+ * id, exactly like the block shapes in `cityPlan`. They exist because a map with nothing but
+ * buildings reads as a spreadsheet, and a map you cannot navigate by is a map nobody reads.
  *
  * The rule that keeps that honest is simple and absolute: **scenery is never derived from a
  * measurement.** A park does not mean a table is small. A river does not mean a schema is cold. A
  * commercial neighbourhood does not mean anything about the objects standing in it. Because the
- * inputs are only the seed and the grid geometry, no measurement *can* leak into the scenery, and no
- * reader can back one out of it. The legend says so in as many words.
+ * inputs are only the seed and the seeded block geometry, no measurement *can* leak into the scenery,
+ * and no reader can back one out of it. The legend says so in as many words.
  *
  * The two things scenery must never do are also enforced here rather than left to convention:
  *
- * - **It never floods a building.** The river is routed along street corridors, never through
- *   occupied blocks, so no lot is ever under water and no building is ever hidden by decoration.
- * - **It never tilts a measurement.** Relief is clamped to zero anywhere near a built or occupied
- *   block, so every building still stands on y = 0 and two buildings' heights stay directly
+ * - **It never floods a building.** The river is traced before the streets are, and every block its
+ *   channel reaches is withheld from placement in `cityPlan`, so no lot is ever put on water and no
+ *   building is ever hidden by decoration.
+ * - **It never tilts a measurement.** Relief is clamped to zero on any block carrying a building or a
+ *   facility, so every building still stands on y = 0 and two buildings' heights stay directly
  *   comparable by eye. Hills happen out at the edges, where there is nothing to distort.
  */
 
-export type Point = { x: number; z: number }
+export type { Point }
 
 /**
  * What occupies a block.
@@ -75,6 +77,7 @@ export const DISTRICT_CHARACTERS: readonly DistrictCharacter[] = [
 ]
 
 export interface TerrainBlock {
+  /** The block's id. Named `col` so consumers written for the lattice keep working; `row` is 0. */
   readonly col: number
   readonly row: number
   readonly key: string
@@ -99,7 +102,7 @@ export interface RiverNode {
 
 export interface CityTerrain {
   readonly blocks: ReadonlyMap<string, TerrainBlock>
-  /** Smoothed river centreline, or empty when the grid was too small to route one. */
+  /** Smoothed river centreline, or empty when the city was too small to route one. */
   readonly river: readonly RiverNode[]
   /** Schema id to the neighbourhood character its buildings are dressed in. */
   readonly characters: ReadonlyMap<string, DistrictCharacter>
@@ -121,80 +124,105 @@ interface ReliefWave {
   readonly weight: number
 }
 
-/** Everything terrain needs from the plan, kept minimal so it can be unit-tested on its own. */
-export interface TerrainInput {
-  readonly blockCols: number
-  readonly blockRows: number
-  readonly pitchX: number
-  readonly pitchZ: number
-  readonly cell: number
-  readonly streetWidth: number
-  /** Clear ground between a building's edge and its lot boundary, doubled. See `LOT_MARGIN`. */
-  readonly lotMargin: number
-  /** `col-row` keys carrying a building. */
-  readonly occupied: ReadonlySet<string>
-  /** `col-row` keys carrying a civic facility. */
-  readonly facilities: ReadonlySet<string>
-  /** `col-row` keys drawn into a public square. */
-  readonly plazas?: ReadonlySet<string>
-  readonly districtIds: readonly string[]
-  readonly seed: string
-  /**
-   * The lattice lines carrying arterials, so land use is decided at the same scale — and on the same
-   * irregular rhythm — as the street network. Without it a park is one block wide and the map reads
-   * as confetti.
-   */
-  readonly arterialCols?: readonly number[]
-  readonly arterialRows?: readonly number[]
-  /**
-   * Where the junctions really are.
-   *
-   * Terrain is drawn on the same warped ground as everything else, so a river that follows a street
-   * corridor has to follow the corridor's actual path rather than a straight lattice line.
-   */
-  readonly warp?: CityWarp
+/**
+ * The landform: the relief field and the river, both of which have to exist before the streets do.
+ *
+ * The streets are traced to avoid the water, so the water cannot be read off the finished street
+ * network the way it was on the lattice — it has to be laid down first and handed to the street
+ * generator as ground to keep out of. That is the whole reason landform is split from the rest of the
+ * terrain: this half runs first, the block dressing runs last.
+ */
+export interface Landform {
+  readonly relief: ReliefField
+  readonly river: readonly RiverNode[]
 }
 
-/** Base half-width of the river, as a fraction of the street corridor it runs along. */
+/** Everything {@link planLandform} needs, kept minimal so it can be unit-tested on its own. */
+export interface LandformInput {
+  readonly seed: string
+  readonly minX: number
+  readonly maxX: number
+  readonly minZ: number
+  readonly maxZ: number
+  /** Carriageway width, which the river's narrowest reach is sized against. */
+  readonly streetWidth: number
+  /** Block cell size, which the river's widest reach is sized against. */
+  readonly cell: number
+}
+
+/** Everything the block-dressing half of terrain needs. Pure in its input. */
+export interface TerrainInput {
+  readonly field: CityBlockField
+  readonly landform: Landform
+  /** Block ids carrying a building. */
+  readonly occupied: ReadonlySet<number>
+  /** Block ids carrying a civic facility. */
+  readonly facilities: ReadonlySet<number>
+  /** Block ids the river channel reaches, which are drawn as open water. */
+  readonly water: ReadonlySet<number>
+  readonly districtIds: readonly string[]
+  readonly seed: string
+}
+
+/** Base half-width of the river, as a fraction of the street corridor it runs beside. */
 const RIVER_BASE_HALF_WIDTH = 0.62
 
-/** How far the river may widen into an adjacent empty block, as a fraction of the cell. */
+/** How far the river may widen in the open country at the city edge, as a fraction of the cell. */
 const RIVER_MAX_WIDENING = 0.46
 
-/** Smallest grid that gets a river at all. Below this the water swallows too much of a small town. */
-const MIN_RIVER_GRID = 6
+/**
+ * Smallest city, as a multiple of the cell, that gets a river at all. Below this the water swallows
+ * too much of a small town for it still to read as a town.
+ */
+const MIN_RIVER_SPAN_CELLS = 10
 
-/** Points generated per lattice leg when smoothing the river. Enough to read as a curve, not a cost. */
+/** Steps taken across the city while tracing the channel, and points smoothed in per step. */
+const RIVER_TRACE_STEPS = 44
 const RIVER_SAMPLES_PER_LEG = 6
 
-export function blockKey(col: number, row: number): string {
-  return `${col}-${row}`
+/** How far, as a fraction of the crossing width, the channel may slew toward lower ground per step. */
+const RIVER_SLEW_FRACTION = 0.05
+
+/** Perpendicular offsets tried each step when the channel looks for lower ground, either side of straight. */
+const RIVER_PROBE = 3
+
+/** Coarse regions the empty ground is dressed in, across the widest span of the city. */
+const REGION_BUCKETS = 6
+
+export function blockKey(id: number): string {
+  return `${id}`
 }
 
 /**
- * Builds the whole landform and land-use layer for a city.
+ * Builds the relief field and the river.
  *
- * Pure in its input: the same `TerrainInput` always produces an identical `CityTerrain`, which is
- * what lets the same database render byte-identically anywhere.
+ * Runs before the streets, because the street generator is told to keep out of the water. Pure in its
+ * input: the same {@link LandformInput} always produces an identical landform, which is part of what
+ * lets the same database render byte-identically anywhere.
  */
-export function planTerrain(input: TerrainInput): CityTerrain {
-  // A generator of its own, seeded from the database id with a distinct salt. Terrain must not
+export function planLandform(input: LandformInput): Landform {
+  // A generator of its own, seeded from the database id with a distinct salt. Landform must not
   // consume from the placement stream, or adding a river would move every building in the city.
   const rng = mulberry32(stableHash(`${input.seed}::terrain`))
   const relief = buildRelief(rng)
-  const river = routeRiver(input, relief, rng)
-  const blocks = classifyBlocks(input, river, relief, rng)
-  const characters = assignCharacters(input.districtIds)
+  const river = traceRiver(input, relief, rng)
+  return { relief, river }
+}
 
+/**
+ * Builds the block-dressing layer once the streets, blocks and placement are all known.
+ *
+ * Pure in its input: the same {@link TerrainInput} always produces an identical {@link CityTerrain}.
+ */
+export function planTerrain(input: TerrainInput): CityTerrain {
+  const blocks = classifyBlocks(input)
+  const characters = assignCharacters(input.districtIds)
   return {
     blocks,
-    river,
+    river: input.landform.river,
     characters,
-    relief,
-    bounds: {
-      maxX: input.warp?.maxX ?? input.blockCols * input.pitchX,
-      maxZ: input.warp?.maxZ ?? input.blockRows * input.pitchZ,
-    },
+    relief: input.landform.relief,
+    bounds: { maxX: input.field.maxX, maxZ: input.field.maxZ },
   }
 }
 
@@ -231,159 +259,81 @@ export function reliefAt(field: ReliefField, x: number, z: number): number {
 }
 
 /**
- * Routes the river along the street lattice, following the lowest ground it can find.
+ * Traces the river across the city, following the lowest ground it can find.
  *
- * Running the river down street corridors rather than across blocks is what guarantees it never
- * floods a lot: corridors are the one part of the grid that is known to be free of buildings. It also
- * means every street that crosses the river is a real street that still connects, so the crossing
- * becomes a bridge rather than a hole in the road network.
- *
- * Dijkstra with a cost that rewards low ground produces a meander rather than a straight cut, and the
- * deterministic tie-break keeps the same seed on the same path forever.
+ * The lattice version ran the river down street corridors, because those were the one part of the
+ * grid known to be free of buildings. There is no lattice to run down any more, and the streets do
+ * not even exist yet, so instead the channel is traced first and the streets are kept out of it: it
+ * steps across the city one span at a time and slews toward whichever neighbouring ground is lowest,
+ * which produces a meander rather than a straight cut. The deterministic search — fixed probe order,
+ * strict improvement only — keeps the same seed on the same channel forever.
  */
-function routeRiver(input: TerrainInput, relief: ReliefField, rng: () => number): RiverNode[] {
-  const { blockCols, blockRows, pitchX, pitchZ } = input
-  // Where the junctions actually are, so the river follows the corridor it was routed down rather
-  // than a straight line between two lattice coordinates that no street runs along.
-  const at = (col: number, row: number): Point =>
-    input.warp?.node(col, row) ?? { x: col * pitchX, z: row * pitchZ }
-  if (blockCols < MIN_RIVER_GRID || blockRows < MIN_RIVER_GRID) return []
+function traceRiver(input: LandformInput, relief: ReliefField, rng: () => number): RiverNode[] {
+  const width = input.maxX - input.minX
+  const depth = input.maxZ - input.minZ
+  if (Math.min(width, depth) < input.cell * MIN_RIVER_SPAN_CELLS) return []
 
   // West-to-east or north-to-south, so a city is not always crossed the same way.
   const eastWest = rng() < 0.5
-  const spanRows = blockRows + 1
-  const spanCols = blockCols + 1
+  const alongMin = eastWest ? input.minX : input.minZ
+  const alongMax = eastWest ? input.maxX : input.maxZ
+  const crossSpan = eastWest ? depth : width
+  const crossOrigin = eastWest ? input.minZ : input.minX
   // Entry and exit are kept off the extreme edge so the river reads as crossing the city, not as
   // tracing its boundary.
-  const inset = 1
-  const startIndex = inset + seededIndex(rng, Math.max(1, (eastWest ? spanRows : spanCols) - inset * 2))
-  const endIndex = inset + seededIndex(rng, Math.max(1, (eastWest ? spanRows : spanCols) - inset * 2))
+  const crossMin = crossOrigin + crossSpan * 0.14
+  const crossMax = crossOrigin + crossSpan * 0.86
+  const maxSlew = crossSpan * RIVER_SLEW_FRACTION
 
-  const startNode = eastWest ? { col: 0, row: startIndex } : { col: startIndex, row: 0 }
-  const endNode = eastWest ? { col: blockCols, row: endIndex } : { col: endIndex, row: blockRows }
+  const pointOf = (along: number, cross: number): Point =>
+    eastWest ? { x: along, z: cross } : { x: cross, z: along }
 
-  const nodeId = (col: number, row: number) => `${col}:${row}`
-  const inBounds = (col: number, row: number) =>
-    col >= 0 && col <= blockCols && row >= 0 && row <= blockRows
-
-  // Low ground is cheap, high ground is dear, so the path settles into a valley.
-  const nodeCost = (col: number, row: number) => {
-    const point = at(col, row)
-    const height = reliefAt(relief, point.x, point.z)
-    return 1 + (height + relief.amplitude) / (relief.amplitude * 2 + 1e-6)
-  }
-
-  const distance = new Map<string, number>([[nodeId(startNode.col, startNode.row), 0]])
-  const previous = new Map<string, { col: number; row: number }>()
-  const visited = new Set<string>()
-  const frontier = new Map<string, { col: number; row: number }>([
-    [nodeId(startNode.col, startNode.row), startNode],
-  ])
-
-  while (frontier.size > 0) {
-    let currentId: string | null = null
-    let current: { col: number; row: number } | null = null
-    let best = Number.POSITIVE_INFINITY
-    for (const id of [...frontier.keys()].sort()) {
-      const value = distance.get(id) ?? Number.POSITIVE_INFINITY
-      if (value < best) {
-        best = value
-        currentId = id
-        current = frontier.get(id) ?? null
+  let cross = crossMin + rng() * (crossMax - crossMin)
+  const raw: Point[] = [pointOf(alongMin, cross)]
+  for (let step = 1; step <= RIVER_TRACE_STEPS; step += 1) {
+    const along = alongMin + ((alongMax - alongMin) * step) / RIVER_TRACE_STEPS
+    let bestCross = cross
+    let bestHeight = Infinity
+    for (let probe = -RIVER_PROBE; probe <= RIVER_PROBE; probe += 1) {
+      const candidate = clamp(cross + (probe / RIVER_PROBE) * maxSlew, crossMin, crossMax)
+      const here = pointOf(along, candidate)
+      const height = reliefAt(relief, here.x, here.z)
+      if (height < bestHeight - 1e-9) {
+        bestHeight = height
+        bestCross = candidate
       }
     }
-    if (currentId === null || current === null) break
-    frontier.delete(currentId)
-    visited.add(currentId)
-    if (current.col === endNode.col && current.row === endNode.row) break
-
-    const steps = [
-      { col: current.col + 1, row: current.row },
-      { col: current.col - 1, row: current.row },
-      { col: current.col, row: current.row + 1 },
-      { col: current.col, row: current.row - 1 },
-    ]
-    for (const step of steps) {
-      if (!inBounds(step.col, step.row)) continue
-      const stepId = nodeId(step.col, step.row)
-      if (visited.has(stepId)) continue
-      const legLength = step.col === current.col ? pitchZ : pitchX
-      const candidate = best + (legLength / 100) * nodeCost(step.col, step.row)
-      if (candidate < (distance.get(stepId) ?? Number.POSITIVE_INFINITY)) {
-        distance.set(stepId, candidate)
-        previous.set(stepId, current)
-        frontier.set(stepId, step)
-      }
-    }
+    cross = bestCross
+    raw.push(pointOf(along, cross))
   }
 
-  const endId = nodeId(endNode.col, endNode.row)
-  if (!visited.has(endId)) return []
-
-  const lattice: Array<{ col: number; row: number }> = [endNode]
-  let cursor = endNode
-  while (!(cursor.col === startNode.col && cursor.row === startNode.row)) {
-    const parent = previous.get(nodeId(cursor.col, cursor.row))
-    if (!parent) return []
-    lattice.push(parent)
-    cursor = parent
-  }
-  lattice.reverse()
-
-  const corridor = lattice.map(node => at(node.col, node.row))
-  const smoothed = smoothPolyline(corridor, RIVER_SAMPLES_PER_LEG)
+  const smoothed = smoothPolyline(raw, RIVER_SAMPLES_PER_LEG)
   return widenRiver(smoothed, input)
 }
 
 /**
- * Gives every sample its own half-width, widening wherever the neighbouring blocks are empty.
+ * Gives every sample its own half-width, swelling toward the edge of the city.
  *
- * A river of constant width reads as a canal. Letting it swell into open ground and pinch between
- * buildings is what makes it read as water that was there before the city was.
- *
- * The pinch is also the guarantee behind "never flood a building". A block sizes its cell as
- * `footprint + LOT_MARGIN`, so the closest a building edge can ever be to the corridor centre line is
- * `streetWidth / 2 + lotMargin / 2`. Where any neighbouring block is built the half-width is capped
- * just inside that, so no seed can ever put water under a measured footprint.
+ * A river of constant width reads as a canal. A real river is pinched where a town has built up
+ * against it and broad out in the open country beyond, so the half-width grows with distance from the
+ * centre. The pinch downtown is also what keeps the water off the dense core; the blocks the channel
+ * still reaches are withheld from placement, so no width can ever put water under a measured footprint.
  */
-function widenRiver(points: readonly Point[], input: TerrainInput): RiverNode[] {
+function widenRiver(points: readonly Point[], input: LandformInput): RiverNode[] {
   const base = input.streetWidth * RIVER_BASE_HALF_WIDTH
   const room = input.cell * RIVER_MAX_WIDENING
-  const builtLimit = input.streetWidth / 2 + input.lotMargin * BUILT_BANK_CLEARANCE
+  const centreX = (input.minX + input.maxX) / 2
+  const centreZ = (input.minZ + input.maxZ) / 2
+  const halfSpan = Math.max(1, Math.max(input.maxX - input.minX, input.maxZ - input.minZ) / 2)
   return points.map(point => {
-    // Which block a sample sits in is no longer a division: the spans are irregular and the whole
-    // lattice is displaced, so the warp is asked.
-    const { col, row } = input.warp
-      ? input.warp.nearestNode(point.x, point.z)
-      : {
-          col: Math.floor(point.x / input.pitchX),
-          row: Math.floor(point.z / input.pitchZ),
-        }
-    let open = 0
-    let total = 0
-    for (const dc of [0, -1]) {
-      for (const dr of [0, -1]) {
-        const key = blockKey(col + dc, row + dr)
-        total += 1
-        if (!input.occupied.has(key) && !input.facilities.has(key)) open += 1
-      }
-    }
-    const openness = total === 0 ? 0 : open / total
-    const wanted = base + room * openness
-    const halfWidth = openness === 1 ? wanted : Math.min(wanted, builtLimit)
-    return { x: point.x, z: point.z, halfWidth }
+    const edge = clamp01((Math.hypot(point.x - centreX, point.z - centreZ) / halfSpan - 0.2) / 0.8)
+    return { x: point.x, z: point.z, halfWidth: base + room * edge }
   })
 }
 
 /**
- * How much of the lot margin the water may take on a bank that carries a building, as a fraction.
- * Below 0.5 by a clear margin, because 0.5 is exactly the building edge.
- */
-const BUILT_BANK_CLEARANCE = 0.4
-
-/**
- * Catmull-Rom through the lattice corners, which is what turns a staircase of right angles into a
- * meander. The endpoints are duplicated so the curve starts and ends exactly where the corridor does.
+ * Catmull-Rom through the traced corners, which is what turns a run of straight steps into a meander.
+ * The endpoints are duplicated so the curve starts and ends exactly where the trace does.
  */
 export function smoothPolyline(points: readonly Point[], samplesPerLeg: number): Point[] {
   if (points.length < 3) return points.map(point => ({ x: point.x, z: point.z }))
@@ -448,59 +398,98 @@ export function riverProximity(
   return { distance: best, halfWidth, tangent }
 }
 
+/**
+ * The blocks the river channel reaches, whose centre the water covers.
+ *
+ * These are withheld from placement in `cityPlan` before a single building is assigned, which is the
+ * mechanism behind "never floods a building": a lot is never even offered a block the river runs
+ * through. Called once and shared, so the placement pool and the drawn water can never disagree.
+ */
+export function waterBlocks(field: CityBlockField, river: readonly RiverNode[]): Set<number> {
+  const ids = new Set<number>()
+  if (river.length < 2) return ids
+  for (const block of field.blocks) {
+    const { distance, halfWidth } = riverProximity(river, block.centroid.x, block.centroid.z)
+    if (distance < halfWidth) ids.add(block.id)
+  }
+  return ids
+}
+
+/**
+ * A test that a world point is in the river, for keeping the streets out of the water.
+ *
+ * The channel is excluded from the street tracer everywhere except in periodic gaps, and a street
+ * that crosses at a gap becomes a bridge. The gaps matter: excluding the whole channel would sever
+ * the two banks into separate networks, and a river you cannot cross is worse than one you can see
+ * streets running into. So the exclusion opens a crossable window every `bridgeSpacing`, wide enough
+ * (`bridgeGap`) that several streets get across and both banks stay one reachable city.
+ */
+export function riverExclusion(
+  river: readonly RiverNode[],
+  bridgeSpacing: number,
+  bridgeGap: number,
+): (x: number, z: number) => boolean {
+  if (river.length < 2 || bridgeSpacing <= 0) return () => false
+  const cumulative = [0]
+  for (let index = 1; index < river.length; index += 1) {
+    cumulative.push(cumulative[index - 1] + Math.hypot(river[index].x - river[index - 1].x, river[index].z - river[index - 1].z))
+  }
+  return (x, z) => {
+    let best = Number.POSITIVE_INFINITY
+    let halfWidth = 0
+    let arc = 0
+    for (let index = 1; index < river.length; index += 1) {
+      const a = river[index - 1]
+      const b = river[index]
+      const dx = b.x - a.x
+      const dz = b.z - a.z
+      const lengthSquared = dx * dx + dz * dz
+      const t = lengthSquared < 1e-9 ? 0 : clamp01(((x - a.x) * dx + (z - a.z) * dz) / lengthSquared)
+      const distance = Math.hypot(x - (a.x + dx * t), z - (a.z + dz * t))
+      if (distance < best) {
+        best = distance
+        halfWidth = a.halfWidth + (b.halfWidth - a.halfWidth) * t
+        arc = cumulative[index - 1] + t * Math.sqrt(lengthSquared)
+      }
+    }
+    if (best >= halfWidth) return false
+    return ((arc % bridgeSpacing) + bridgeSpacing) % bridgeSpacing > bridgeGap
+  }
+}
+
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return value < min ? min : value > max ? max : value
 }
 
 /**
  * Dresses every block.
  *
  * Occupied blocks keep what the plan put there. Empty blocks — and there are a lot of them, since the
- * grid deliberately runs about half empty so the scatter has room — get a land use chosen from where
- * they sit: drowned or bankside near the river, wooded and hilly out at the edges, paved and civic
- * near the centre, and ordinary green everywhere else.
+ * city deliberately holds more blocks than objects so the neighbourhoods have room to breathe — get a
+ * land use chosen from where they sit: drowned or bankside near the river, wooded and hilly out at the
+ * edges, paved and civic near the centre, and ordinary green everywhere else.
  */
-function classifyBlocks(
-  input: TerrainInput,
-  river: readonly RiverNode[],
-  relief: ReliefField,
-  rng: () => number,
-): Map<string, TerrainBlock> {
-  const { blockCols, blockRows, pitchX, pitchZ, cell, streetWidth } = input
+function classifyBlocks(input: TerrainInput): Map<string, TerrainBlock> {
+  const { field, landform } = input
   const blocks = new Map<string, TerrainBlock>()
-  const centreCol = (blockCols - 1) / 2
-  const centreRow = (blockRows - 1) / 2
-  const maxRadius = Math.max(1, Math.hypot(centreCol, centreRow))
+  const regionGrid = Math.max(1, Math.max(field.maxX - field.minX, field.maxZ - field.minZ) / REGION_BUCKETS)
 
-  // Draw the whole scatter stream up front, in a fixed grid order, so a block's dressing never
-  // depends on how many blocks happened to be classified before it.
-  const draws: number[] = []
-  for (let index = 0; index < blockCols * blockRows; index += 1) draws.push(rng())
-
-  // Land use is decided a whole arterial cell at a time, then let go of at the edges. A park that
-  // covers one block is noise; a park that covers a cell is a place, and the blocks that break ranks
-  // along its boundary are what stop it looking stamped out.
-  //
-  // The cells are the irregular ones the arterials cut, so no two parks are the same size or shape.
-  const arterialCols = input.arterialCols ?? [0, blockCols]
-  const arterialRows = input.arterialRows ?? [0, blockRows]
-  const cellIndex = (lines: readonly number[], at: number) => {
-    for (let index = lines.length - 2; index >= 0; index -= 1) if (at >= lines[index]) return index
-    return 0
-  }
+  // Land use is decided a whole coarse region at a time, then let go of at its edges. A park that
+  // covers one block is noise; a park that covers a region is a place, and the blocks that break
+  // ranks along its boundary are what stop it looking stamped out. The region a block belongs to is a
+  // coarse bucket of its centre, so nearby blocks share a region without any lattice to align to.
   const regions = new Map<string, LandUse>()
-  const regionAt = (col: number, row: number): LandUse | null => {
-    if (arterialCols.length < 2 || arterialRows.length < 2) return null
-    const cellCol = cellIndex(arterialCols, col)
-    const cellRow = cellIndex(arterialRows, row)
-    const key = `${cellCol}:${cellRow}`
+  const regionAt = (block: { centroid: Point; centrality: number }): LandUse => {
+    const bucketX = Math.floor((block.centroid.x - field.minX) / regionGrid)
+    const bucketZ = Math.floor((block.centroid.z - field.minZ) / regionGrid)
+    const key = `${bucketX}:${bucketZ}`
     const cached = regions.get(key)
     if (cached !== undefined) return cached
-    const centre = {
-      col: (arterialCols[cellCol] + arterialCols[cellCol + 1] - 1) / 2,
-      row: (arterialRows[cellRow] + arterialRows[cellRow + 1] - 1) / 2,
-    }
-    const radius = Math.hypot(centre.col - centreCol, centre.row - centreRow) / maxRadius
+    const radius = block.centrality
     const draw = mulberry32(stableHash(`${input.seed}::region::${key}`))()
     const use: LandUse =
       radius > 0.72
@@ -526,44 +515,39 @@ function classifyBlocks(
     return use
   }
 
-  for (let row = 0; row < blockRows; row += 1) {
-    for (let col = 0; col < blockCols; col += 1) {
-      const key = blockKey(col, row)
-      const centre = input.warp
-        ? input.warp.blockCenter(col, row)
-        : { x: col * pitchX + streetWidth / 2 + cell / 2, z: row * pitchZ + streetWidth / 2 + cell / 2 }
-      const x = centre.x
-      const z = centre.z
-      const draw = draws[row * blockCols + col]
-      const radius = Math.hypot(col - centreCol, row - centreRow) / maxRadius
-      const built = input.occupied.has(key)
-      const facility = input.facilities.has(key)
-      const plaza = input.plazas?.has(key) ?? false
+  for (const block of field.blocks) {
+    const key = blockKey(block.id)
+    const x = block.centroid.x
+    const z = block.centroid.z
+    const radius = block.centrality
+    const built = input.occupied.has(block.id)
+    const facility = input.facilities.has(block.id)
+    const water = input.water.has(block.id)
+    const draw = mulberry32(stableHash(`${input.seed}::block::${block.id}`))()
 
-      // Relief is held at zero across the built core and only allowed to rise toward the edge, so no
-      // building is ever tilted or lifted relative to its neighbours. Held at a literal zero rather
-      // than a multiplication, so a negative slope cannot leave a measured block sitting at -0.
-      const reliefRamp = built || facility ? 0 : clamp01(Math.max(0, radius - 0.55) / 0.45)
-      const height = reliefRamp === 0 ? 0 : reliefAt(relief, x, z) * reliefRamp
+    // Relief is held at zero on any built or occupied block and only allowed to rise toward the edge,
+    // so no building is ever tilted or lifted relative to its neighbours. Held at a literal zero
+    // rather than a multiplication, so a negative slope cannot leave a measured block sitting at -0.
+    const reliefRamp = built || facility ? 0 : clamp01(Math.max(0, radius - 0.55) / 0.45)
+    const height = reliefRamp === 0 ? 0 : reliefAt(landform.relief, x, z) * reliefRamp
 
-      blocks.set(key, {
-        col,
-        row,
-        key,
-        use: built
-          ? 'built'
-          : facility
-            ? 'facility'
-            : plaza
-              ? 'plaza'
-              : sceneryFor(river, x, z, cell, radius, draw, regionAt(col, row)),
-        x,
-        z,
-        size: cell,
-        seed: stableHash(`${input.seed}::block::${key}`),
-        relief: height,
-      })
-    }
+    blocks.set(key, {
+      col: block.id,
+      row: 0,
+      key,
+      use: built
+        ? 'built'
+        : facility
+          ? 'facility'
+          : water
+            ? 'water'
+            : sceneryFor(landform.river, x, z, block.capacity, radius, draw, regionAt(block)),
+      x,
+      z,
+      size: block.capacity,
+      seed: stableHash(`${input.seed}::block::${block.id}`),
+      relief: height,
+    })
   }
   return blocks
 }
@@ -571,10 +555,10 @@ function classifyBlocks(
 /**
  * Picks the scenery for one empty block.
  *
- * The ordering matters and is deliberate: water wins over everything because a block the river runs
- * through is water whatever else it might have been, then the bankside strip, then the land use of
- * the surrounding cell, and only where a block breaks ranks does it fall through to its own position
- * in the city. That last case is what gives a region a ragged edge instead of a stamped one.
+ * The ordering matters and is deliberate: the bankside strip near the water comes first, then the
+ * land use of the surrounding region, and only where a block breaks ranks does it fall through to its
+ * own position in the city. That last case is what gives a region a ragged edge instead of a stamped
+ * one. Water itself is decided before this is called, from the shared channel set.
  */
 function sceneryFor(
   river: readonly RiverNode[],
@@ -583,15 +567,14 @@ function sceneryFor(
   cell: number,
   radius: number,
   draw: number,
-  region: LandUse | null = null,
+  region: LandUse,
 ): LandUse {
   if (river.length > 1) {
     const { distance, halfWidth } = riverProximity(river, x, z)
-    if (distance < halfWidth + cell * 0.18) return 'water'
     if (distance < halfWidth + cell * 1.25) return draw < 0.72 ? 'greenway' : 'park'
   }
 
-  if (region !== null && draw < 0.84) return region
+  if (draw < 0.84) return region
 
   // Out at the edge the city thins into countryside; in the middle it hardens into paving.
   if (radius > 0.78) return draw < 0.55 ? 'woodland' : draw < 0.82 ? 'orchard' : 'park'
