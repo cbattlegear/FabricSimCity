@@ -477,11 +477,23 @@ export function planCity(
   const ordered = orderObjects(objects)
   const sizes = schemaSizes(ordered, options.schemas)
   const slots = globalSlots(ordered, sizes)
+  /*
+   * How many buildings the city has to have room for.
+   *
+   * Read from the database's own total, never from what has loaded. This is the one number the
+   * street network is sized from, so it has to be the same on every page or the streets retrace
+   * themselves under a city that is already on screen — and every building moves with them.
+   *
+   * Slot indices deliberately do not get a vote. A slot is a global ordinal handed out by the
+   * collector, and the connected collector numbers objects across the whole database rather than
+   * within a schema, so adding a schema's offset to one produces indices far past the object count
+   * — and different ones on every page. Letting those size the city is what made a second page
+   * redraw it. Nothing needs them to: the only place a slot is still read wraps it into the blocks
+   * that exist.
+   */
   const capacity = Math.max(
     parseCount(options.totalObjects) ?? 0,
     ordered.length,
-    // A slot index past the end would wrap and collide, so the city always covers the highest one.
-    ...[...slots.values()].map(slot => slot + 1),
   )
 
   /*

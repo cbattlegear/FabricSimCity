@@ -13,6 +13,7 @@ import type { LiveFeedConnectionState } from './liveIncidents'
 import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
 import { DatabaseCityViewport } from './DatabaseCityViewport'
 import { liveBlockingEdges, type LiveBlockingSummary } from './cityBlocking'
+import { mergeCityPage } from './cityPaging'
 import { neighborhoodSwatch, planCity, type CityPlanOptions } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
 import { assignWorkloadTraffic } from './cityWorkloadTraffic'
@@ -48,6 +49,16 @@ type PlanChoice = {
   executionCount: string
 }
 
+/**
+ * How many object pages the view will walk on its own before handing back to the button.
+ *
+ * A stop exists so that opening a very large database cannot turn into an unbounded burst of
+ * requests at a live instance. At the API's 50-object ceiling this covers a 4,000-object database,
+ * which is past the point where every table is legible on one map anyway; beyond it the manual
+ * "load more" control comes back and the user decides whether to keep going.
+ */
+const AUTO_PAGE_LIMIT = 80
+
 export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, onViewModeChange, banners }: Props) {
   const [metric, setMetric] = useState<Metric>('cpu')
   const [page, setPage] = useState<DatabaseCityPage | null>(null)
@@ -57,6 +68,10 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const [selectedRoadId, setSelectedRoadId] = useState<string | null>(null)
   const [addressTerm, setAddressTerm] = useState('')
   const [loading, setLoading] = useState(true)
+  /** True while pages after the first are still being walked in the background. */
+  const [backfilling, setBackfilling] = useState(false)
+  /** Objects fetched so far, tracked separately so progress can move while the layout is held. */
+  const [loadedCount, setLoadedCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<LiveIncidentResponse | null>(null)
   const [feedState, setFeedState] = useState<LiveFeedConnectionState>('disconnected')
@@ -71,31 +86,79 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const headingRef = useRef<HTMLHeadingElement>(null)
   const roadInvokerRef = useRef<HTMLElement | null>(null)
 
+  /** Hands a merged page to the map. Every consumer reads one accumulated page, never a raw one. */
+  const publish = useCallback((value: DatabaseCityPage) => {
+    setPage(value)
+    setObjects(value.objects)
+  }, [])
+
   useEffect(() => {
     for (const request of requests.current) request.abort()
     requests.current.clear()
     const controller = new AbortController()
     requests.current.add(controller)
     setLoading(true)
+    setBackfilling(false)
+    setLoadedCount(0)
     setError(null)
     setPage(null)
     setObjects([])
-    void fetchDatabaseCity(databaseId, metric, null, controller.signal)
-      .then(value => {
-        setPage(value)
-        setObjects(value.objects)
-        setSelectedId(current =>
-          current && value.objects.some(object => object.objectId === current)
-            ? current
-            : value.objects[0]?.objectId ?? null)
-      })
-      .catch(reason => {
+    /*
+     * Walk the cursor to the end rather than stopping at the first page.
+     *
+     * Object inventory arrives in bounded pages, and the view used to draw the first one and wait
+     * for a click. That is the wrong default: a city is a database, and a database that had loaded
+     * 24 of its 75 tables was missing two thirds of its buildings. Everything keyed on a building
+     * silently lost those objects with it — most visibly the query paths, where a stop on a table
+     * that had simply not been fetched yet reported itself as unplaceable and the route line
+     * skipped straight over it.
+     *
+     * Pages are still requested one at a time, so the bound the API is defending is untouched; the
+     * only change is who asks for the next one. Each page is merged as it lands, so the city draws
+     * from the first response and fills in behind it instead of blocking on the whole walk.
+     */
+    void (async () => {
+      let token: string | null = null
+      let pages = 0
+      let merged: DatabaseCityPage | null = null
+      try {
+        do {
+          const value = await fetchDatabaseCity(databaseId, metric, token, controller.signal)
+          if (controller.signal.aborted) return
+          pages += 1
+          merged = merged ? mergeCityPage(merged, value) : value
+          token = value.nextPageToken ?? null
+          if (pages === 1) {
+            // The first page is enough to draw and interact with. The rest backfills behind it.
+            publish(merged)
+            setSelectedId(current =>
+              current && merged!.objects.some(object => object.objectId === current)
+                ? current
+                : merged!.objects[0]?.objectId ?? null)
+            setLoading(false)
+            setBackfilling(Boolean(token))
+          }
+          setLoadedCount(merged.objects.length)
+        } while (token && pages < AUTO_PAGE_LIMIT)
+        /*
+         * One re-layout at the end rather than one per page.
+         *
+         * Every published page re-plans the city, and a schema gaining a member re-ranks that
+         * schema's buildings by footprint, so a mid-walk publish visibly reshuffles blocks. Holding
+         * the pages and publishing once means the city is drawn twice however large the database is:
+         * the first page, then the whole thing.
+         */
+        if (merged && pages > 1) publish(merged)
+      } catch (reason) {
         if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason))
-      })
-      .finally(() => {
+      } finally {
         requests.current.delete(controller)
-        if (!controller.signal.aborted) setLoading(false)
-      })
+        if (!controller.signal.aborted) {
+          setLoading(false)
+          setBackfilling(false)
+        }
+      }
+    })()
     return () => {
       controller.abort()
       requests.current.delete(controller)
@@ -278,17 +341,15 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
 
   const loadMore = () => {
     if (!page?.nextPageToken) return
+    const current = page
     const controller = new AbortController()
     requests.current.add(controller)
     setLoading(true)
-    void fetchDatabaseCity(databaseId, metric, page.nextPageToken, controller.signal)
+    void fetchDatabaseCity(databaseId, metric, current.nextPageToken, controller.signal)
       .then(next => {
-        setObjects(current => {
-          const byId = new Map(current.map(object => [object.objectId, object]))
-          for (const object of next.objects) byId.set(object.objectId, object)
-          return [...byId.values()]
-        })
-        setPage(next)
+        const merged = mergeCityPage(current, next)
+        publish(merged)
+        setLoadedCount(merged.objects.length)
       })
       .catch(reason => {
         if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(String(reason))
@@ -533,7 +594,13 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                   {metrics.map(value => <option key={value}>{value}</option>)}
                 </select>
               </label>
-              {page?.nextPageToken && (
+              {backfilling && (
+                <p className="load-progress" role="status">
+                  Loading the rest of the city… {loadedCount.toLocaleString()} of{' '}
+                  {Number(page?.totalObjects ?? loadedCount).toLocaleString()} objects placed.
+                </p>
+              )}
+              {!backfilling && page?.nextPageToken && (
                 <button type="button" className="load-more" onClick={loadMore}>
                   Load next bounded object page
                 </button>
@@ -681,7 +748,11 @@ function LegendDrawer({
           neither divided between those buildings nor counted inside any of their own totals.
           Unknown size or unavailable activity uses fixed wireframe geometry and makes no quantity
           claim. Ground labels name each building and facility and carry identity only — a label
-          never restates or qualifies a measurement.
+          never restates or qualifies a measurement. Names are set in a few sizes and appear as you
+          zoom in, largest first, so the busiest ground is not lettered all at once; that ordering
+          follows building height but is clamped into a range narrower than a factor of two, so it is
+          a reading order and not a quantity. Footprint and height remain the only things that state
+          how large a table is.
         </p>
 
         <p className="mapping-note">

@@ -22,9 +22,11 @@ import { facilityShell, facilitySlots } from './cityFacilityShells'
 import { LANDMARK_ASSETS, loadCityAssets, type AssetRole, type CityAssets, type SceneryAsset } from './cityAssets'
 import {
   buildingLabelText,
+  buildingLabelWorldHeight,
   createCityLabels,
   elideMiddle,
   labelAnchor,
+  minimumLegibleWorldHeight,
   neighborhoodLabelHeight,
   neighborhoodLabelText,
   LABEL_MAX_CHARS,
@@ -165,6 +167,11 @@ export function createDatabaseCityScene(
   controls.enableDamping = !reducedMotion
   controls.dampingFactor = 0.08
   controls.screenSpacePanning = false
+  /*
+   * Placeholder clamps only. Both ends are recomputed by `applyZoomRange()` from the size of the
+   * city and the field of view currently in effect — see the note there for why a fixed pair of
+   * distances cannot work across the two view modes.
+   */
   controls.minDistance = 24
   controls.maxDistance = 4000
   // Never let the camera drop below the horizon: a city viewed from underground is disorienting.
@@ -531,6 +538,21 @@ export function createDatabaseCityScene(
   const DEFAULT_AZIMUTH = 0.595
   let cityAzimuth = DEFAULT_AZIMUTH
 
+  /**
+   * How much further out than a whole-city framing you may pull the camera.
+   *
+   * Enough to get clear air around the city and see its outline against the ground, without letting
+   * it shrink to a smudge in the middle of an empty viewport.
+   */
+  const ZOOM_OUT_HEADROOM = 2.4
+  /**
+   * Ground span, in world units, still visible when zoomed all the way in.
+   *
+   * About one lot: close enough to read a single building's facade and its address label, and short
+   * of the point where the camera slips inside the massing and the city turns into wallpaper.
+   */
+  const MIN_VISIBLE_SPAN = 26
+
   /** POI pins, drawn in map mode only. A flat plate needs a marker to be findable. */
   const poiGroup = new THREE.Group()
   poiGroup.visible = false
@@ -707,6 +729,10 @@ export function createDatabaseCityScene(
       Math.sin(polar) * Math.cos(azimuth))
     camera.position.copy(controls.target).addScaledVector(direction, scaled)
     setDepthRange(scaled)
+    // The lens just changed, so every distance limit expressed through it changed with it. Widen
+    // the clamps before update() runs, or the freshly-scaled distance is clamped back to the old
+    // lens's ceiling — which is exactly what pinned map mode at a fixed, far-too-close zoom.
+    applyZoomRange()
     controls.update()
     requestRender()
   }
@@ -809,6 +835,9 @@ export function createDatabaseCityScene(
   /**
    * Applies the layer toggles to group visibility. Facility labels nest inside the label group, so
    * they need both their own layer and the infrastructure layer to be on.
+   *
+   * Individual names are additionally hidden when they would be too small to read; that is
+   * per-sprite and lives in {@link applyLabelLegibility}.
    */
   const applyLayers = () => {
     roadGroup.visible = layers.paths
@@ -823,6 +852,30 @@ export function createDatabaseCityScene(
   }
   applyLayers()
 
+  /**
+   * Hides building and facility names that would project too small to read.
+   *
+   * Names are dropped rather than drawn tiny, which is ordinary cartographic practice: a basemap
+   * sheds street names as you zoom out instead of shrinking them into illegibility. Because larger
+   * tables are lettered larger, they survive to a wider zoom than small ones, so zooming in reveals
+   * names roughly in order of size instead of switching all seventy-five on at once. Neighbourhood
+   * names are drawn several times larger again and hold the wide view on their own.
+   */
+  const applyLabelLegibility = (viewportHeightPx: number) => {
+    const distance = camera.position.distanceTo(controls.target)
+    // Every label shares a camera, so the projection factor is computed once and each sprite only
+    // has to compare its own height against it. Rendering is on demand, so this runs when the
+    // camera moves rather than continuously.
+    const minimumWorldHeight = minimumLegibleWorldHeight(distance, camera.fov, viewportHeightPx)
+    for (const sprite of buildingLabelGroup.children) {
+      const height = (sprite.userData.labelWorldHeight as number | undefined) ?? LABEL_WORLD_HEIGHT
+      sprite.visible = height >= minimumWorldHeight
+    }
+    for (const sprite of facilityLabelGroup.children) {
+      sprite.visible = LABEL_WORLD_HEIGHT >= minimumWorldHeight
+    }
+  }
+
   const draw = () => {
     const width = Math.max(canvas.clientWidth, 1)
     const height = Math.max(canvas.clientHeight, 1)
@@ -832,6 +885,7 @@ export function createDatabaseCityScene(
       camera.aspect = width / height
       camera.updateProjectionMatrix()
     }
+    applyLabelLegibility(height)
     // The sky follows the camera across the plan but stays pinned to the ground plane in height, so
     // its horizon is the city's horizon. Centring it on the camera instead puts the horizon at eye
     // level, which from an aerial view means the whole background is the *under* side of the dome.
@@ -1396,10 +1450,17 @@ export function createDatabaseCityScene(
 
   /** Places a label on the pavement in front of a building, in world space so it never rotates with the lot. */
   function addBuildingLabel(object: DatabaseCityObject, lot: CityLot) {
-    const sprite = labelFactory.make(buildingLabelText(object.name))
+    // Larger tables are lettered larger, so their names survive to a wider zoom than a small
+    // table's. The height is kept on the sprite because that is what the legibility test reads.
+    const worldHeight = buildingLabelWorldHeight(lot.height)
+    const sprite = labelFactory.make(buildingLabelText(object.name), {
+      variant: 'building',
+      worldHeight,
+    })
     if (!sprite) return
     const anchor = labelAnchor(lot.x, lot.z, lot.accessX, lot.accessZ, (lot.footprint ?? 11) / 2 + 3)
-    sprite.position.set(anchor.x, LABEL_WORLD_HEIGHT / 2 + 0.7, anchor.z)
+    sprite.position.set(anchor.x, worldHeight / 2 + 0.7, anchor.z)
+    sprite.userData.labelWorldHeight = worldHeight
     buildingLabelGroup.add(sprite)
   }
 
@@ -1851,6 +1912,56 @@ export function createDatabaseCityScene(
     selectionGroup.add(knob)
   }
 
+  /**
+   * Camera distance that fits `box` across the viewport at the field of view currently in effect.
+   *
+   * Framing and the zoom clamps both read from this, so "as far out as you can go" is always
+   * expressed in the same units as "framed". That matters because the two view modes look through
+   * very different lenses: the flat basemap fakes a parallel projection with a 13° field of view,
+   * which needs roughly 3.7x the distance of the 46° oblique lens to cover the same ground.
+   */
+  function fitDistance(box: THREE.Box3): number {
+    const aspect = Math.max(canvas.clientWidth, 1) / Math.max(canvas.clientHeight, 1)
+    const vFov = THREE.MathUtils.degToRad(camera.fov)
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect)
+    const size = box.getSize(new THREE.Vector3())
+    // Distance that fits `span` in the smaller of the two view angles, plus a margin for the
+    // oblique view and the floating HUD panels along the edges.
+    const span = Math.max(size.x, size.z, 90)
+    return Math.max(
+      span / (2 * Math.tan(hFov / 2)),
+      span / (2 * Math.tan(vFov / 2)),
+      size.y / (2 * Math.tan(vFov / 2)),
+    ) * 1.16
+  }
+
+  /*
+   * Zoom limits, derived rather than fixed.
+   *
+   * These used to be two constants — 24 and 4000 world units — and both ends were wrong for the
+   * same reason: a distance means nothing on its own, only a distance *through a given lens* does.
+   * Switching to map mode multiplies the orbit distance by the ratio of the two fields of view to
+   * hold the apparent size steady, so a city framed at 2,400 units obliquely needs ~8,800 flat. A
+   * 4,000-unit ceiling clamped that on arrival: the map snapped to roughly twice the intended
+   * magnification and then refused to zoom back out, because it was already sitting on the stop.
+   * The same fixed ceiling also meant a large database could never be framed at all.
+   *
+   * So both ends are expressed as things you can see instead. The far stop is a whole-city framing
+   * plus headroom; the near stop is the distance at which about one lot fills the view. Both are
+   * recomputed whenever the city, the lens or the viewport changes.
+   */
+  function applyZoomRange() {
+    const box = cityBox()
+    if (box.isEmpty()) return
+    const out = fitDistance(box) * ZOOM_OUT_HEADROOM
+    const span = plan ? Math.max(plan.cell, MIN_VISIBLE_SPAN) : MIN_VISIBLE_SPAN
+    const near = span / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2))
+    // A city smaller than one lot is not a thing, but guard the ordering anyway: OrbitControls
+    // behaves badly if the near stop ever crosses the far one.
+    controls.minDistance = Math.min(near, out)
+    controls.maxDistance = out
+  }
+
   function frame(box: THREE.Box3) {
     if (box.isEmpty()) return
     // Sync the aspect first: frame() can run before the first draw(), and framing against a stale
@@ -1860,16 +1971,10 @@ export function createDatabaseCityScene(
     camera.aspect = width / height
     const center = box.getCenter(new THREE.Vector3())
     const size = box.getSize(new THREE.Vector3())
-    // Distance that fits `span` in the smaller of the two view angles, plus a margin for the
-    // oblique view and the floating HUD panels along the edges.
-    const vFov = THREE.MathUtils.degToRad(camera.fov)
-    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect)
-    const span = Math.max(size.x, size.z, 90)
-    const distance = Math.max(
-      span / (2 * Math.tan(hFov / 2)),
-      span / (2 * Math.tan(vFov / 2)),
-      size.y / (2 * Math.tan(vFov / 2)),
-    ) * 1.16
+    const distance = fitDistance(box)
+    // The clamps are what the framing has to live inside, so widen them to the new lens and city
+    // before placing the camera — otherwise controls.update() below drags it straight back in.
+    applyZoomRange()
     controls.target.set(center.x, size.y * 0.12, center.z)
     // Framing has to respect the mode: dropping the camera to an oblique angle while the controls are
     // locked flat would snap back on the next update and reset your heading on the way.
@@ -1983,7 +2088,11 @@ export function createDatabaseCityScene(
   canvas.addEventListener('pointercancel', cancelPointer)
   canvas.addEventListener('pointermove', trackHover)
   canvas.addEventListener('pointerleave', clearHover)
-  const resize = new ResizeObserver(() => requestRender())
+  // A narrower viewport needs more distance to hold the same city, so the far stop moves with it.
+  const resize = new ResizeObserver(() => {
+    applyZoomRange()
+    requestRender()
+  })
   resize.observe(canvas)
   draw()
 
@@ -2020,6 +2129,9 @@ export function createDatabaseCityScene(
       buildRoute(currentRoute)
       buildIncidents(currentIncidents)
       applySelection()
+      // A re-plan can resize the city, and the zoom stops are measured against its bounds. Refresh
+      // them on every update, not just the first, so a city that grows stays reachable.
+      applyZoomRange()
       // Fit-to-bounds runs once. Re-framing on every update would yank the viewpoint on each live
       // tick. It is not latched until the canvas has a real size, so the first frame is never
       // computed against a zero-height layout.

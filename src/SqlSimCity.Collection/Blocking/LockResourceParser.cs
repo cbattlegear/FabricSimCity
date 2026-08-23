@@ -24,6 +24,11 @@ namespace SqlSimCity.Collection.Blocking;
 /// <item><c>DATABASE</c>, <c>FILE</c>, <c>APPLICATION</c>, <c>METADATA</c>, and <c>EXTENT</c> locks
 /// are not on a user object at all, so they are reported
 /// <see cref="LockResolutionStatus.NotObjectScoped"/>.</item>
+/// <item><c>XACT: db:tid</c> is a lock on a transaction id, taken by optimized locking in place of
+/// holding row and key locks until commit. It is understood in full and names no object, so it is
+/// also <see cref="LockResolutionStatus.NotObjectScoped"/> -- see
+/// <see href="https://learn.microsoft.com/sql/relational-databases/performance/optimized-locking">Optimized
+/// locking</see>.</item>
 /// <item>Anything else stays <see cref="LockResourceKind.Unrecognized"/> rather than being coerced
 /// into a plausible-looking shape.</item>
 /// </list>
@@ -35,6 +40,14 @@ public static class LockResourceParser
 
     private const string PageReason =
         "A page/row lock names a physical location (file:page[:slot]). Mapping that to an object needs sys.dm_db_page_info or an allocation scan, which is too costly for a realtime probe, so no object is claimed.";
+
+    /// <summary>
+    /// Why an <c>XACT</c> wait names no building. Written for the reader looking at the map and
+    /// wondering where the pin went: it says what is actually happening, and where the table can be
+    /// found instead, rather than reporting the engine's vocabulary as unfamiliar.
+    /// </summary>
+    private const string TransactionReason =
+        "This wait is on a transaction id, not on a table. The database has optimized locking enabled, so the blocker holds a single lock on its own transaction and row locks are released as each row is modified -- the wait itself names no object. The blocking session's own statement names the tables involved.";
 
     /// <summary>
     /// Parses <paramref name="rawResource"/>. Returns null for null/whitespace input, because "the
@@ -71,6 +84,7 @@ public static class LockResourceParser
             "DATABASE" => NotObjectScoped(raw, body, LockResourceKind.Database, "A database lock is database-wide, not on a user object."),
             "APPLICATION" => NotObjectScoped(raw, body, LockResourceKind.Application, "An application lock is a user-defined name taken with sp_getapplock; it is not a database object."),
             "METADATA" => NotObjectScoped(raw, body, LockResourceKind.Metadata, "A metadata lock is on a catalog subresource, not on a user object."),
+            "XACT" => ParseTransaction(raw, body),
             _ => Unrecognized(raw, $"'{prefix}' is not a lock-resource form this build understands, so nothing is claimed about it."),
         };
     }
@@ -236,6 +250,51 @@ public static class LockResourceParser
             null,
             LockResolutionStatus.NotObjectScoped,
             reason);
+    }
+
+    /// <summary>
+    /// Reads an <c>XACT</c> resource -- a lock on a transaction id, which optimized locking uses in
+    /// place of holding row and key locks to the end of a transaction.
+    ///
+    /// This is <see cref="LockResolutionStatus.NotObjectScoped"/> rather than
+    /// <see cref="LockResourceKind.Unrecognized"/>: the form is understood completely, and what it
+    /// states is that the waiter is queued behind another *transaction*, not behind a row of any
+    /// particular table. Reporting it as unrecognised claimed a gap in this parser that does not
+    /// exist, and inviting a lookup would be worse -- there is no object id to find, because under
+    /// TID locking the row and page locks that would have named one are released as each row is
+    /// modified rather than held until commit.
+    ///
+    /// The text is accepted in both shapes the engine writes it. <c>wait_resource</c> prefixes the
+    /// database id (<c>XACT: 7:1299696</c>); <c>sys.dm_tran_locks.resource_description</c> carries
+    /// the transaction id alone, because that view reports the database in its own column. The
+    /// transaction id is the last numeric component either way.
+    /// </summary>
+    private static LockResourceV1 ParseTransaction(string raw, string body)
+    {
+        var parts = Split(body);
+        var transactionId = parts.Length >= 2 ? ParseLong(parts, 1) : ParseLong(parts, 0);
+        // A leading 0 is a placeholder, not database 0 -- no database has id 0, so recording one
+        // would invent a fact the text never stated.
+        var databaseId = parts.Length >= 2 ? ParseInt(parts, 0) : null;
+        if (databaseId is <= 0)
+        {
+            databaseId = null;
+        }
+
+        return new LockResourceV1(
+            raw,
+            LockResourceKind.Transaction,
+            databaseId,
+            null,
+            null,
+            null,
+            null,
+            null,
+            LockResolutionStatus.NotObjectScoped,
+            TransactionReason)
+        {
+            TransactionId = transactionId,
+        };
     }
 
     private static LockResourceV1 Unrecognized(string raw, string reason) => new(

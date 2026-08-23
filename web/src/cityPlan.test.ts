@@ -241,6 +241,63 @@ describe('planCity placement', () => {
     expect([...withMorePages.facilities.entries()]).toEqual([...planned.facilities.entries()])
   })
 
+  it('sizes the city from the database total, not from collector-assigned slot ordinals', () => {
+    /*
+     * The connected collector numbers `layout.objectOrdinal` across the whole database, in object-id
+     * order, while the fixture numbers it within each schema. The layout adds a schema offset to
+     * that ordinal to get a slot, so against a real instance the slots ran far past the object count
+     * — and landed somewhere different on every page, because the offsets are built from per-page
+     * schema counts. When those slots were allowed to size the city, a seventy-five table database
+     * asked for hundreds of block columns and re-planned its whole street network the moment a
+     * second page arrived.
+     *
+     * The city is sized from `totalObjects` alone, so a global ordinal cannot inflate or move it.
+     */
+    const perSchema = largeCity()
+    const global = perSchema.map((item, index) => ({
+      ...item,
+      layout: { ...item.layout, objectOrdinal: index },
+    }))
+
+    const fromPerSchema = planCity(perSchema, largeOptions())
+    const fromGlobal = planCity(global, largeOptions())
+
+    expect(fromGlobal.blockCols).toBe(fromPerSchema.blockCols)
+    expect(fromGlobal.streets.map(street => street.id))
+      .toEqual(fromPerSchema.streets.map(street => street.id))
+    expect(fromGlobal.lots.size).toBe(perSchema.length)
+  })
+
+  it('keeps the street network identical while pages with per-page schema counts arrive', () => {
+    // `page.schemas` counts only that page's objects, so the counts a plan sees genuinely change as
+    // pages land, and the collector's object ordinals are database-global. The streets must not
+    // notice either: they are sized from the database total alone.
+    const all = largeCity().map((item, index) => ({
+      ...item,
+      layout: { ...item.layout, objectOrdinal: index },
+    }))
+    const firstPage = all.slice(0, 50)
+    const countsFor = (objects: readonly DatabaseCityObject[]): DatabaseCitySchema[] => {
+      const counts = new Map<string, number>()
+      for (const item of objects) counts.set(item.schemaId, (counts.get(item.schemaId) ?? 0) + 1)
+      return [...counts.entries()].map(([schemaId, count]) => ({
+        schemaId,
+        name: schemaId,
+        neighborhoodOrdinal: Number(schemaId.slice(-1)),
+        objectCount: String(count),
+        evidence,
+      }))
+    }
+
+    const partial = planCity(firstPage, { ...largeOptions(), schemas: countsFor(firstPage) })
+    const complete = planCity(all, { ...largeOptions(), schemas: countsFor(all.slice(50)) })
+
+    expect(complete.streets.map(street => street.id))
+      .toEqual(partial.streets.map(street => street.id))
+    expect(complete.blockCols).toBe(partial.blockCols)
+    expect(complete.lots.size).toBe(all.length)
+  })
+
   it('never overlaps two lots', () => {
     const plan = planCity(sampleCity(), options())
     const lots = [...plan.lots.values()]

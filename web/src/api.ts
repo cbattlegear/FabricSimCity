@@ -261,12 +261,21 @@ export const fetchQueryStoreStatus = (signal?: AbortSignal) =>
 export const fetchDatabaseCitySummaries = (signal?: AbortSignal) =>
   fetchJson<DatabaseCitySummarySnapshot>('/api/v1/database-city', signal)
 
+/**
+ * Objects requested per city page.
+ *
+ * The API refuses anything above 50 — object inventory is a bounded probe, and the ceiling is the
+ * server's promise about how much work one request can ask a live instance for. Sitting on that
+ * ceiling is what keeps the number of round trips needed to load a whole city down.
+ */
+export const CITY_PAGE_SIZE = 50
+
 export const fetchDatabaseCity = (
   databaseId: string,
   metric: string,
   pageToken?: string | null,
   signal?: AbortSignal,
 ) => fetchJson<DatabaseCityPage>(
-  `/api/v1/database-city/${encodeURIComponent(databaseId)}?metric=${encodeURIComponent(metric)}&pageSize=24${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`,
+  `/api/v1/database-city/${encodeURIComponent(databaseId)}?metric=${encodeURIComponent(metric)}&pageSize=${CITY_PAGE_SIZE}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`,
   signal,
 )
