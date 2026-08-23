@@ -2,23 +2,34 @@ import type { NormalizedShowplan, ShowplanNode, ShowplanObjectReference } from '
 import type { DatabaseCityObject } from './databaseCityContracts'
 import type { CityPlan } from './cityPlan'
 import { streetPolyline } from './cityPlan'
-import { FACILITY_LABELS, type FacilityKind, type FacilitySite } from './cityInfrastructure'
+import { FACILITY_LABELS, type FacilityKind } from './cityInfrastructure'
+import { planCostSplit } from './planCost'
 
 /**
  * Turns a compiled query plan into a driving route through the city.
  *
- * Every operator in the plan becomes exactly one stop -- nothing is silently dropped, including
- * operators whose object reference cannot be matched to a loaded building. The traversal is
- * **post-order** (children before parents) because that is the direction data flows through a
- * showplan tree: the leaves fetch rows and the root returns them.
+ * A route visits **buildings**. Nothing else is a place.
+ *
+ * It used to visit the civic wait facilities too, so a two-table join was drawn as a detour: read
+ * Orders, drive across town to the Memory Grant Office, drive back for Customers. No query does that.
+ * A hash join is not somewhere the query *goes*; it is work done on rows that two tables produced, and
+ * the honest place to draw it is at the tables it drew from. So every operator still appears — nothing
+ * is dropped — but an operator that names no object is folded onto the stop whose subtree it consumed
+ * from, and the resource it wanted is recorded on it rather than becoming a place of its own.
+ *
+ * What is left is the journey a query actually makes: table to table, in the order rows flow.
+ *
+ * The facilities are still on the map and still measure something real — which *resource* the
+ * instance waited on — but that is a different question from which *table* was involved, and mixing
+ * the two into one path made neither legible.
  *
  * This describes the plan's *compiled shape*, never live operator progress. Callers must surface
  * {@link NormalizedShowplan.runtimeOverlayCaveat} verbatim next to the route.
  */
 
-export type StopKind = 'building' | 'facility' | 'offmap'
+export type StopKind = 'building' | 'offmap'
 
-/** Physical operators that request a memory grant. They stop at the Memory Grant Office. */
+/** Physical operators that request a memory grant. */
 export const MEMORY_GRANT_OPERATORS: ReadonlySet<string> = new Set([
   'Sort',
   'Hash Match',
@@ -26,7 +37,7 @@ export const MEMORY_GRANT_OPERATORS: ReadonlySet<string> = new Set([
   'Window Aggregate',
 ])
 
-/** Spools materialize into tempdb rather than a query memory grant, so they stop at tempdb Works. */
+/** Spools materialize into tempdb rather than a query memory grant. */
 export const TEMPDB_OPERATORS: ReadonlySet<string> = new Set([
   'Table Spool',
   'Index Spool',
@@ -34,28 +45,46 @@ export const TEMPDB_OPERATORS: ReadonlySet<string> = new Set([
   'Window Spool',
 ])
 
-export interface RouteStop {
-  /** 1-based position along the route, matching the numbered map pins. */
-  readonly ordinal: number
+/** One operator, at the stop where its work belongs. */
+export interface RouteOperation {
   readonly nodeId: number
-  readonly kind: StopKind
-  readonly label: string
-  /** Set for `building` stops. */
-  readonly objectId: string | null
-  /** Set when the operator named a specific index; the matching annex is highlighted. */
-  readonly indexName: string | null
-  /** Set for `facility` stops. */
-  readonly facility: FacilityKind | null
-  readonly x: number | null
-  readonly z: number | null
   readonly physicalOperation: string
   readonly logicalOperation: string
   readonly estimatedRows: number | null
   readonly estimatedCpuCost: number | null
   readonly estimatedIoCost: number | null
+  /** True when this operator itself named the object; false when its work was folded onto the stop. */
+  readonly readsHere: boolean
+  /** The resource this operator leans on. Answers "which facility", not "where does it drive". */
+  readonly resource: FacilityKind
+  /** Set when the operator named a specific index. */
+  readonly indexName: string | null
+  readonly instruction: string
+  readonly warnings: readonly string[]
+}
+
+export interface RouteStop {
+  /** 1-based position along the route, matching the numbered map pins. */
+  readonly ordinal: number
+  readonly kind: StopKind
+  readonly label: string
+  /** Set for `building` stops. */
+  readonly objectId: string | null
+  /** Every index the plan named at this stop, in first-seen order. */
+  readonly indexNames: readonly string[]
+  readonly x: number | null
+  readonly z: number | null
+  /** The operators whose work happens here, in the order rows flow. Never empty. */
+  readonly operations: readonly RouteOperation[]
+  /**
+   * Share of the plan's estimated cost that fell to this stop, 0..1.
+   *
+   * The optimizer's arithmetic about work it expected to do — not a measurement of work done.
+   */
+  readonly estimatedCostShare: number
   /** Turn-by-turn line shown in the route panel. */
   readonly instruction: string
-  /** Present on `offmap` stops: why this operator has no place on the map. */
+  /** Present on `offmap` stops: why this object has no place on the map. */
   readonly unresolvedReason: string | null
   readonly warnings: readonly string[]
 }
@@ -67,6 +96,13 @@ export interface CityRoute {
   readonly polyline: ReadonlyArray<{ x: number; z: number }>
   /** Stops that could not be placed on the map, surfaced rather than hidden. */
   readonly offMapStops: readonly RouteStop[]
+  /**
+   * Operators belonging to no table at all — compute over constants, a final Select, plan-level work.
+   * Listed rather than dropped, and given no place on the map because they have none.
+   */
+  readonly unplacedOperations: readonly RouteOperation[]
+  /** Share of the plan's estimated cost that reached no building, 0..1. */
+  readonly estimatedCostUnattributed: number
   /** Copied verbatim from the plan; never paraphrased. */
   readonly runtimeOverlayCaveat: string
 }
@@ -74,7 +110,6 @@ export interface CityRoute {
 export interface RouteContext {
   readonly plan: CityPlan
   readonly objects: readonly DatabaseCityObject[]
-  readonly facilities: ReadonlyMap<FacilityKind, FacilitySite>
   /** Name of the database this city page was loaded for, used to detect cross-database references. */
   readonly databaseName: string
 }
@@ -146,7 +181,12 @@ export function matchObject(
   )
 }
 
-/** Selects the facility a non-object operator visits, or null when it is pure compute. */
+/**
+ * The resource an operator leans on: which civic facility would see its wait, if it waited.
+ *
+ * This is a property recorded *on* the operator, at the table where its work happens. It is no longer
+ * a destination — an operator does not travel to a facility.
+ */
 export function facilityForOperator(node: ShowplanNode): FacilityKind {
   if (MEMORY_GRANT_OPERATORS.has(node.physicalOperation)) return 'memory'
   if (TEMPDB_OPERATORS.has(node.physicalOperation)) return 'tempdb'
@@ -154,122 +194,255 @@ export function facilityForOperator(node: ShowplanNode): FacilityKind {
   return 'cpu'
 }
 
-/**
- * Builds the ordered stop list. Precedence per operator: a resolvable object reference wins (the work
- * happens at that building), then memory/tempdb/storage facilities, then the CPU Scheduler Yard.
- */
-export function planStops(showplan: NormalizedShowplan, context: RouteContext): RouteStop[] {
-  const stops: RouteStop[] = []
-  let ordinal = 0
-  for (const node of operatorSequence(showplan.nodes)) {
-    ordinal += 1
-    stops.push(stopFor(node, ordinal, showplan, context))
-  }
-  return stops
+interface StopKey {
+  /** Stable identity: an objectId for a placed building, or a described reference for an off-map one. */
+  readonly key: string
+  readonly kind: StopKind
+  readonly object: DatabaseCityObject | null
+  readonly reference: ShowplanObjectReference
 }
 
-function stopFor(
+function ownCost(node: ShowplanNode): number {
+  return (node.estimatedCpuCost ?? 0) + (node.estimatedIoCost ?? 0)
+}
+
+/**
+ * Builds the ordered stop list: one stop per table the plan reads, in the order rows flow.
+ *
+ * An operator that names no object is attached to the heaviest object beneath it — the table its rows
+ * mostly came from. That keeps a join with the input it is really about, rather than stranding it or
+ * giving it a place of its own.
+ */
+export function planStops(showplan: NormalizedShowplan, context: RouteContext): RouteStop[] {
+  return buildStops(showplan, context).stops
+}
+
+interface Built {
+  readonly stops: RouteStop[]
+  readonly unplaced: RouteOperation[]
+}
+
+function buildStops(showplan: NormalizedShowplan, context: RouteContext): Built {
+  const sequence = operatorSequence(showplan.nodes)
+  if (sequence.length === 0) return { stops: [], unplaced: [] }
+
+  const byId = new Map<number, ShowplanNode>()
+  for (const node of showplan.nodes) byId.set(node.nodeId, node)
+  const children = new Map<number, number[]>()
+  for (const node of showplan.nodes) {
+    const parent = node.parentNodeId
+    if (parent === null || parent === node.nodeId || !byId.has(parent)) continue
+    const bucket = children.get(parent)
+    if (bucket) bucket.push(node.nodeId)
+    else children.set(parent, [node.nodeId])
+  }
+
+  const keyOf = new Map<number, StopKey>()
+  const keys = new Map<string, StopKey>()
+  for (const node of showplan.nodes) {
+    if (node.objectReference === null) continue
+    const matched = matchObject(node.objectReference, context.objects, context.databaseName)
+    const key = matched ? matched.objectId : `offmap:${describeReference(node.objectReference)}`
+    const existing = keys.get(key)
+    const entry: StopKey = existing ?? {
+      key,
+      kind: matched ? 'building' : 'offmap',
+      object: matched,
+      reference: node.objectReference,
+    }
+    keys.set(key, entry)
+    keyOf.set(node.nodeId, entry)
+  }
+
+  // Heaviest table beneath each operator, computed children-first so a parent can read its children's
+  // answers. Weight is own cost, or a count of reads when a plan reports no cost at all.
+  const owner = new Map<number, StopKey | null>()
+  const weight = new Map<number, Map<string, number>>()
+  for (const node of sequence) {
+    const totals = new Map<string, number>()
+    for (const childId of children.get(node.nodeId) ?? []) {
+      for (const [key, value] of weight.get(childId) ?? []) {
+        totals.set(key, (totals.get(key) ?? 0) + value)
+      }
+    }
+    const own = keyOf.get(node.nodeId)
+    if (own) totals.set(own.key, (totals.get(own.key) ?? 0) + Math.max(ownCost(node), 1e-9))
+    weight.set(node.nodeId, totals)
+
+    if (own) {
+      owner.set(node.nodeId, own)
+      continue
+    }
+    let best: string | null = null
+    let bestValue = -1
+    for (const [key, value] of totals) {
+      // Ties resolve by key so the fold never depends on map insertion order.
+      if (value > bestValue || (value === bestValue && best !== null && key < best)) {
+        bestValue = value
+        best = key
+      }
+    }
+    owner.set(node.nodeId, best === null ? null : keys.get(best) ?? null)
+  }
+
+  const split = planCostSplit(showplan)
+  const shareByKey = new Map<string, number>()
+  if (split.total > 0) {
+    for (const entry of split.objects) {
+      // Two index-keyed references to one table resolve to one building, so their shares merge here.
+      const matched = matchObject(entry.reference, context.objects, context.databaseName)
+      const key = matched ? matched.objectId : `offmap:${describeReference(entry.reference)}`
+      shareByKey.set(key, (shareByKey.get(key) ?? 0) + entry.cost / split.total)
+    }
+  }
+
+  const collected = new Map<string, RouteOperation[]>()
+  const order: string[] = []
+  const unplaced: RouteOperation[] = []
+  for (const node of sequence) {
+    const stopKey = owner.get(node.nodeId) ?? null
+    const operation = operationFor(node, stopKey, showplan, context)
+    if (stopKey === null) {
+      unplaced.push(operation)
+      continue
+    }
+    const bucket = collected.get(stopKey.key)
+    if (bucket) bucket.push(operation)
+    else {
+      collected.set(stopKey.key, [operation])
+      order.push(stopKey.key)
+    }
+  }
+
+  const stops: RouteStop[] = []
+  order.forEach((key, index) => {
+    const entry = keys.get(key)!
+    const operations = collected.get(key)!
+    const indexNames: string[] = []
+    for (const operation of operations) {
+      if (operation.indexName !== null && !indexNames.includes(operation.indexName)) {
+        indexNames.push(operation.indexName)
+      }
+    }
+    const warnings = operations.flatMap(operation => operation.warnings)
+    const lot = entry.object ? context.plan.lots.get(entry.object.objectId) : undefined
+    const label = entry.object
+      ? `${entry.object.schemaName}.${entry.object.name}`
+      : describeReference(entry.reference)
+    stops.push({
+      ordinal: index + 1,
+      kind: entry.kind,
+      label,
+      objectId: entry.object?.objectId ?? null,
+      indexNames,
+      x: lot?.accessX ?? null,
+      z: lot?.accessZ ?? null,
+      operations,
+      estimatedCostShare: shareByKey.get(key) ?? 0,
+      instruction: stopInstruction(label, entry.kind, operations, indexNames),
+      unresolvedReason:
+        entry.kind === 'offmap' ? unresolvedReason(entry.reference, context.databaseName) : null,
+      warnings,
+    })
+  })
+
+  return { stops, unplaced }
+}
+
+function operationFor(
   node: ShowplanNode,
-  ordinal: number,
+  stopKey: StopKey | null,
   showplan: NormalizedShowplan,
   context: RouteContext,
-): RouteStop {
-  const warnings = node.warnings.map(warning =>
-    warning.detail === null ? warning.kind : `${warning.kind}: ${warning.detail}`,
-  )
-  const base = {
-    ordinal,
+): RouteOperation {
+  const resource = facilityForOperator(node)
+  const readsHere = node.objectReference !== null
+  const indexName = node.objectReference === null ? null : unquote(node.objectReference.index)
+  return {
     nodeId: node.nodeId,
     physicalOperation: node.physicalOperation,
     logicalOperation: node.logicalOperation,
     estimatedRows: node.estimatedRows,
     estimatedCpuCost: node.estimatedCpuCost,
     estimatedIoCost: node.estimatedIoCost,
-    warnings,
-  }
-
-  if (node.objectReference !== null) {
-    const matched = matchObject(node.objectReference, context.objects, context.databaseName)
-    if (matched) {
-      const lot = context.plan.lots.get(matched.objectId)
-      const indexName = unquote(node.objectReference.index)
-      const label = `${matched.schemaName}.${matched.name}`
-      return {
-        ...base,
-        kind: 'building',
-        label,
-        objectId: matched.objectId,
-        indexName,
-        facility: null,
-        x: lot?.accessX ?? null,
-        z: lot?.accessZ ?? null,
-        instruction:
-          `${node.physicalOperation} at ${label}` +
-          (indexName === null ? '' : ` using ${indexName}`) +
-          (node.estimatedRows === null ? '' : `, estimating ${formatRows(node.estimatedRows)} row(s)`),
-        unresolvedReason: null,
-      }
-    }
-    return {
-      ...base,
-      kind: 'offmap',
-      label: describeReference(node.objectReference),
-      objectId: null,
-      indexName: unquote(node.objectReference.index),
-      facility: null,
-      x: null,
-      z: null,
-      instruction: `${node.physicalOperation} at ${describeReference(node.objectReference)} (off this map)`,
-      unresolvedReason: unresolvedReason(node.objectReference, context.databaseName),
-    }
-  }
-
-  const kind = facilityForOperator(node)
-  const site = context.facilities.get(kind)
-  return {
-    ...base,
-    kind: 'facility',
-    label: FACILITY_LABELS[kind],
-    objectId: null,
-    indexName: null,
-    facility: kind,
-    x: site?.x ?? null,
-    z: site?.z ?? null,
-    instruction: facilityInstruction(node, kind, showplan),
-    unresolvedReason:
-      site === undefined ? `The ${FACILITY_LABELS[kind]} is not present on this map.` : null,
+    readsHere,
+    resource,
+    indexName,
+    instruction: operationInstruction(node, stopKey, resource, indexName, showplan, context),
+    warnings: node.warnings.map(warning =>
+      warning.detail === null ? warning.kind : `${warning.kind}: ${warning.detail}`,
+    ),
   }
 }
 
-function facilityInstruction(
+function operationInstruction(
   node: ShowplanNode,
-  kind: FacilityKind,
+  stopKey: StopKey | null,
+  resource: FacilityKind,
+  indexName: string | null,
   showplan: NormalizedShowplan,
+  context: RouteContext,
 ): string {
-  const rows = node.estimatedRows === null ? '' : `, estimating ${formatRows(node.estimatedRows)} row(s)`
-  switch (kind) {
+  const rows =
+    node.estimatedRows === null ? '' : `, estimating ${formatRows(node.estimatedRows)} row(s)`
+
+  if (node.objectReference !== null) {
+    const matched = matchObject(node.objectReference, context.objects, context.databaseName)
+    const label = matched
+      ? `${matched.schemaName}.${matched.name}`
+      : `${describeReference(node.objectReference)} (off this map)`
+    return (
+      `${node.physicalOperation} at ${label}` +
+      (indexName === null ? '' : ` using ${indexName}`) +
+      rows
+    )
+  }
+
+  const where = stopKey === null ? '' : ` on rows from ${stopLabel(stopKey)}`
+  switch (resource) {
     case 'memory': {
       const requested =
         showplan.serialDesiredMemoryKiB === null
           ? 'an unreported grant'
           : `${formatRows(showplan.serialDesiredMemoryKiB)} KiB (plan-level serial desired memory)`
-      return `${node.physicalOperation} stops at the ${FACILITY_LABELS.memory}, requesting ${requested}${rows}`
+      return `${node.physicalOperation}${where}, wanting ${requested} from the ${FACILITY_LABELS.memory}${rows}`
     }
     case 'tempdb':
-      return `${node.physicalOperation} materializes at ${FACILITY_LABELS.tempdb}${rows}`
+      return `${node.physicalOperation}${where}, materializing through ${FACILITY_LABELS.tempdb}${rows}`
     case 'storage':
       return (
-        `${node.physicalOperation} pulls from the ${FACILITY_LABELS.storage}` +
+        `${node.physicalOperation}${where}, reading through the ${FACILITY_LABELS.storage}` +
         (node.estimatedIoCost === null ? '' : `, estimated I/O cost ${node.estimatedIoCost}`) +
         rows
       )
     default:
       return (
-        `${node.physicalOperation} runs at the ${FACILITY_LABELS.cpu}` +
+        `${node.physicalOperation}${where}` +
         (node.estimatedCpuCost === null ? '' : `, estimated CPU cost ${node.estimatedCpuCost}`) +
         rows
       )
   }
+}
+
+function stopLabel(stopKey: StopKey): string {
+  return stopKey.object
+    ? `${stopKey.object.schemaName}.${stopKey.object.name}`
+    : describeReference(stopKey.reference)
+}
+
+function stopInstruction(
+  label: string,
+  kind: StopKind,
+  operations: readonly RouteOperation[],
+  indexNames: readonly string[],
+): string {
+  const reads = operations.filter(operation => operation.readsHere)
+  const lead = reads.length > 0 ? reads[0].physicalOperation : operations[0].physicalOperation
+  const place = kind === 'offmap' ? `${label} (off this map)` : label
+  const using = indexNames.length === 0 ? '' : ` using ${indexNames.join(', ')}`
+  const extra = operations.length - 1
+  const also = extra <= 0 ? '' : `, then ${extra} more operation${extra === 1 ? '' : 's'} here`
+  return `${lead} at ${place}${using}${also}`
 }
 
 function describeReference(reference: ShowplanObjectReference): string {
@@ -307,12 +480,18 @@ export function routeThroughStreets(
 }
 
 export function buildCityRoute(showplan: NormalizedShowplan, context: RouteContext): CityRoute {
-  const stops = planStops(showplan, context)
+  const { stops, unplaced } = buildStops(showplan, context)
+  const split = planCostSplit(showplan)
+  let placedShare = 0
+  for (const stop of stops) if (stop.kind === 'building') placedShare += stop.estimatedCostShare
   return {
     planId: showplan.planId,
     stops,
     polyline: routeThroughStreets(stops, context.plan),
     offMapStops: stops.filter(stop => stop.kind === 'offmap'),
+    unplacedOperations: unplaced,
+    estimatedCostUnattributed:
+      split.total > 0 ? Math.max(0, Math.min(1, 1 - placedShare)) : 0,
     runtimeOverlayCaveat: showplan.runtimeOverlayCaveat,
   }
 }

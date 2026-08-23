@@ -15,6 +15,40 @@ First MVP release candidate. There is no tagged release yet.
 
 ### Added
 
+- **The traffic map, and waits placed on the tables that caused them.** The map's default road layer
+  used to be one ribbon per pair of co-referenced tables — the join graph, not the traffic — and
+  selecting a plan drew a route that detoured through the six civic facilities, so a query appeared to
+  drive to the CPU Scheduler Yard and back between reading two tables. Neither matched what a query
+  actually does. Three changes:
+
+  1. **Routes stop only at tables.** Operators that name no object fold onto the heaviest table in
+     their own subtree; operators reaching no on-page table at all are listed separately as unplaced
+     rather than attached to a nearby building. Each stop lists the operators that happen there and,
+     per operator, the resource it leans on — so the facility classification survives as a *property
+     of the operation* instead of a destination on the route.
+  2. **Waits are attributed to tables by estimated plan cost.** A family's measured wait total is
+     apportioned across the tables its plans read, in proportion to each table's share of the plan's
+     estimated cost (`PlanCostAttribution`, `WaitApportionment`, mirrored for the browser in
+     `web/src/planCost.ts`). The apportionment is exact — fixed point at 1e9 with largest-remainder
+     allocation — so the parts and the remainder reconstruct the measured total byte-for-byte.
+  3. **The default map layer is aggregate street load.** Every ranked family is driven through its
+     tables and each street accumulates the executions and apportioned wait of the families crossing
+     it. Per-query ribbons move to an opt-in `paths` layer.
+
+  **This does not weaken the rule above.** `attributedExposure` and `sharedExposure` are untouched and
+  keep their exact previous meaning: Query Store totals are still never divided, because Query Store
+  says nothing about which table caused what. The estimated *plan* does — every `RelOp` carries
+  `EstimateCPU`, `EstimateIO` and an object reference — so this is a third, separate evidence class
+  built on a different source, living in its own contract field, its own UI section and its own legend
+  paragraph, each stating *modelled, not measured*. Cost the plan spent off-page, cross-database or on
+  pure computation is never handed to a building; it is reported as unplaced. Summing a building's
+  estimated wait with its attributed exposure is meaningless, and nothing in the UI invites it.
+
+  Traffic is shown as **two channels, not one number**: width is executions, colour is apportioned
+  wait milliseconds per execution. A count and a duration have no common unit, and blending them into
+  a single "traffic level" would require inventing an exchange rate between an execution and a
+  millisecond.
+
 - **Shared Query Store exposure** ([#40]). The strict attribution rule is unchanged — an object is
   credited with totals only when a ranked family names it and nothing else — but on a normalized
   schema that condition is close to unreachable, so a join-heavy database rendered with no exposure

@@ -5,7 +5,8 @@ import type { DatabaseCityObject } from './databaseCityContracts'
 import { ARTERIAL_WIDTH, planCity, streetPitch, streetPolyline, streetPolylineThrough, streetRoute, type CityLot, type CityPlan, type CityPlanOptions, type StreetClass } from './cityPlan'
 import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
 import { assignQueryRoutes } from './cityQueryTraffic'
-import { type RoadTraffic } from './cityTraffic'
+import { roadWidth, type RoadTraffic } from './cityTraffic'
+import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import {
   claimLane,
   corridorKeys,
@@ -44,6 +45,12 @@ import type { IncidentMarker } from './cityIncidents'
 
 export type CityLayerToggles = {
   traffic: boolean
+  /**
+   * The individual co-reference ribbons. Off by default: a map covered in one ribbon per pair of
+   * tables is a picture of the workload's shape, not of its traffic, and the two read as noise
+   * together. Turn it on to see which tables are named together; leave it off to read the streets.
+   */
+  paths: boolean
   waitLanes: boolean
   infrastructure: boolean
   route: boolean
@@ -80,6 +87,8 @@ export type DatabaseCitySceneController = {
   setObjects(objects: readonly DatabaseCityObject[], planOptions?: CityPlanOptions): void
   /** Roads are graded outside the scene so the map and the HUD read the same numbers. */
   setRoads(roads: readonly RoadTraffic[]): void
+  /** The aggregate street-load layer built from the workload's executions and apportioned waits. */
+  setTraffic(traffic: WorkloadTraffic): void
   setFacilities(facilities: readonly Facility[]): void
   /** Measured wait lanes from buildings to the facility their workload queued at. */
   setFacilityLanes(
@@ -649,7 +658,8 @@ export function createDatabaseCityScene(
     // Trees and street furniture are a golden-hour effect. A printed basemap draws land cover, not
     // individual shrubs, and instancing thousands of them under a flat camera buys nothing.
     sceneryGroup.visible = !flat
-    roadCasingGroup.visible = flat
+    roadCasingGroup.visible = flat && layers.paths
+    flatMode = flat
 
     // A very narrow field of view from far away is parallel projection for every practical purpose,
     // and it keeps one camera, one raycaster, and one set of controls for both modes.
@@ -708,6 +718,8 @@ export function createDatabaseCityScene(
   const districtGroup = new THREE.Group()
   const buildingGroup = new THREE.Group()
   const roadGroup = new THREE.Group()
+  /** Streets carrying workload traffic, drawn once per street rather than once per query pair. */
+  const trafficGroup = new THREE.Group()
   /** Wider ribbons drawn beneath the road fill. Map mode only — casings are a basemap idiom. */
   const roadCasingGroup = new THREE.Group()
   roadCasingGroup.visible = false
@@ -729,6 +741,7 @@ export function createDatabaseCityScene(
     sceneryGroup,
     districtGroup,
     roadCasingGroup,
+    trafficGroup,
     roadGroup,
     roadHighlightGroup,
     laneGroup,
@@ -749,6 +762,7 @@ export function createDatabaseCityScene(
   let plan: CityPlan | null = null
   let facilitySites: ReadonlyMap<FacilityKind, FacilitySite> = new Map<FacilityKind, FacilitySite>()
   let currentRoads: readonly RoadTraffic[] = []
+  let currentTraffic: WorkloadTraffic | null = null
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
   let currentIncidents: readonly IncidentMarker[] = []
@@ -758,12 +772,14 @@ export function createDatabaseCityScene(
   let selectedRoadId: string | null = null
   let hoveredRoadId: string | null = null
   let framedOnce = false
+  let flatMode = false
   let disposed = false
   let assets: CityAssets | null = null
   let animationHandle = 0
   let renderRequested = false
   const layers: CityLayerToggles = {
     traffic: true,
+    paths: false,
     waitLanes: true,
     infrastructure: true,
     route: true,
@@ -795,9 +811,11 @@ export function createDatabaseCityScene(
    * they need both their own layer and the infrastructure layer to be on.
    */
   const applyLayers = () => {
-    roadGroup.visible = layers.traffic
+    roadGroup.visible = layers.paths
+    roadCasingGroup.visible = layers.paths && flatMode
+    trafficGroup.visible = layers.traffic
     laneGroup.visible = layers.waitLanes
-    roadHighlightGroup.visible = layers.traffic
+    roadHighlightGroup.visible = layers.traffic || layers.paths
     infrastructureGroup.visible = layers.infrastructure
     routeGroup.visible = layers.route
     labelGroup.visible = layers.labels
@@ -1488,6 +1506,33 @@ export function createDatabaseCityScene(
   }
 
   /**
+   * Draws the workload's traffic on the streets that carry it.
+   *
+   * One ribbon per street, not one per query. Width comes from the executions routed over it and
+   * colour from the waiting those executions carried, so a wide dark-red street is one that a lot of
+   * queries use and wait on — which is the thing you want to see standing back from a city.
+   */
+  function buildTraffic(traffic: WorkloadTraffic) {
+    clearGroup(trafficGroup)
+    if (traffic.streets.size === 0) return
+
+    // Widest first so a heavy street keeps the top of the stack where two overlap at a junction.
+    const ordered = [...traffic.streets.values()].sort(
+      (left, right) => right.executions - left.executions || left.edgeId - right.edgeId,
+    )
+    for (const street of ordered) {
+      if (street.points.length < 2) continue
+      const width = roadWidth(street.executions)
+      const ribbon = ribbonGeometry(street.points, width, null)
+      if (!ribbon) continue
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(street.color, false))
+      mesh.position.y = 0.045
+      mesh.renderOrder = 1
+      trafficGroup.add(mesh)
+    }
+  }
+
+  /**
    * Draws every graded road. Roads that share a street leg are pushed into their own lane so a
    * busy corridor reads as several distinct routes instead of one stack of overlapping ribbons.
    */
@@ -1969,6 +2014,7 @@ export function createDatabaseCityScene(
       buildNeighborhoodLabels(plan)
       buildBuildings(objects, plan)
       buildRoads(currentRoads, plan)
+      if (currentTraffic) buildTraffic(currentTraffic)
       buildFacilityLanes(currentLanes, currentSharedLanes)
       buildInfrastructure(currentFacilities)
       buildRoute(currentRoute)
@@ -1986,6 +2032,11 @@ export function createDatabaseCityScene(
     setRoads(roads) {
       currentRoads = roads
       if (plan) buildRoads(roads, plan)
+      requestRender()
+    },
+    setTraffic(traffic) {
+      currentTraffic = traffic
+      buildTraffic(traffic)
       requestRender()
     },
     setFacilities(facilities) {

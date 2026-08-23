@@ -4,6 +4,7 @@ using System.Numerics;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
+using SqlSimCity.Domain.DatabaseCity;
 
 namespace SqlSimCity.Collection.DatabaseCity;
 
@@ -158,6 +159,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         var offPage = new SortedSet<string>(StringComparer.Ordinal);
         var crossDatabase = new SortedSet<string>(StringComparer.Ordinal);
         var unresolved = new SortedSet<string>(StringComparer.Ordinal);
+        var costs = new PlanCostAccumulator();
         var hydrated = 0;
         var skipped = 0;
         var unreadable = 0;
@@ -211,6 +213,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             local.UnionWith(planLocal);
             crossDatabase.UnionWith(planRemote);
             routes.AddPlan(planLocal, planRemote);
+            costs.AddPlan(PlanCostAttribution.Split(showplan), index, plan.RuntimeCounted);
         }
 
         var objectIds = local.Concat(crossDatabase).ToArray();
@@ -232,6 +235,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
                 rationale)
             {
                 WaitMillisecondsByCategory = waits,
+                WaitAttribution = costs.Build(counters.TotalWaitMilliseconds),
             },
             hydrated,
             // Totals belong to one building only when the plans named that building and nothing
@@ -489,6 +493,114 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
     private enum ReferenceKind { Unresolvable, OnPage, OffPage, CrossDatabase }
 
     private readonly record struct ResolvedReference(ReferenceKind Kind, string? Value);
+
+    /// <summary>
+    /// Collects estimated plan cost shares across a family's hydrated plans, so the family's single
+    /// measured wait total can be divided between the buildings its plans actually read.
+    /// <para>
+    /// Only shares that resolved to an object <em>on this page</em> are published. Cost the plan
+    /// placed on an off-page object, another database, a reference that would not resolve, or on no
+    /// object at all is counted into the remainder instead. That is the same refusal the strict
+    /// attribution rule makes: a page must never absorb time that demonstrably belongs somewhere it
+    /// is not drawing.
+    /// </para>
+    /// </summary>
+    private sealed class PlanCostAccumulator
+    {
+        private readonly List<PlanShares> _plans = [];
+
+        public void AddPlan(PlanCostSplit split, PageObjectIndex index, bool runtimeCounted)
+        {
+            if (!split.HasCost) return;
+
+            var shares = new SortedDictionary<string, decimal>(StringComparer.Ordinal);
+            var elsewhere = 0m;
+            foreach (var entry in split.Objects)
+            {
+                var share = entry.Cost / split.TotalCost;
+                if (index.Resolve(entry.Reference) is { Kind: ReferenceKind.OnPage, Value: { } objectId })
+                    shares[objectId] = shares.GetValueOrDefault(objectId) + share;
+                else
+                    elsewhere += share;
+            }
+
+            _plans.Add(new PlanShares(
+                runtimeCounted, shares, elsewhere, split.UnattributedCost / split.TotalCost));
+        }
+
+        public DatabaseCityWaitAttributionV1 Build(string totalWaitMilliseconds)
+        {
+            if (_plans.Count == 0) return DatabaseCityWaitAttributionV1.None;
+
+            // A plan whose runtime Query Store never counted contributed none of the time being
+            // divided, so it does not get to shape the division while a counted plan is available.
+            var counted = _plans.Where(plan => plan.RuntimeCounted).ToArray();
+            var used = counted.Length > 0 ? counted : _plans.ToArray();
+
+            var totals = new SortedDictionary<string, decimal>(StringComparer.Ordinal);
+            var elsewhere = 0m;
+            var nowhere = 0m;
+            foreach (var plan in used)
+            {
+                foreach (var (objectId, share) in plan.Shares)
+                    totals[objectId] = totals.GetValueOrDefault(objectId) + share;
+                elsewhere += plan.Elsewhere;
+                nowhere += plan.Nowhere;
+            }
+
+            // Plans are averaged rather than summed: each describes the whole query, so summing them
+            // would claim the query cost once per compiled plan Query Store happens to retain.
+            var divisor = used.Length;
+            var shares = totals
+                .Select(entry => new ObjectCostShare(entry.Key, entry.Value / divisor))
+                .ToArray();
+
+            return WaitApportionment.Apportion(
+                shares,
+                totalWaitMilliseconds,
+                divisor,
+                Describe(shares, elsewhere / divisor, nowhere / divisor, divisor, counted.Length > 0));
+        }
+
+        private static string Describe(
+            ObjectCostShare[] shares,
+            decimal elsewhere,
+            decimal nowhere,
+            int plans,
+            bool runtimeCounted)
+        {
+            var onPage = shares.Aggregate(0m, (sum, share) => sum + share.Share);
+            var source = runtimeCounted
+                ? $"{Plans(plans)} whose runtime Query Store counted"
+                : $"{Plans(plans)}, none of whose runtime Query Store counted";
+            var parts = new List<string>(4)
+            {
+                shares.Length == 0
+                    ? $"Estimated cost from {source} placed nothing on any object this page draws, so none of this family's measured wait time is apportioned to a building."
+                    : $"Estimated cost from {source} places {Percent(onPage)} of this query's cost on {shares.Length.ToString(CultureInfo.InvariantCulture)} building(s) here, and its measured wait milliseconds are divided in that proportion.",
+            };
+
+            if (elsewhere > 0m)
+                parts.Add($"{Percent(elsewhere)} of the estimated cost falls on objects this page does not draw and is left unapportioned.");
+            if (nowhere > 0m)
+                parts.Add($"{Percent(nowhere)} is operator work over no object at all and is left unapportioned.");
+
+            parts.Add("The optimizer's cost estimate is a model of the work, not a measurement of where the waiting happened.");
+            return string.Join(" ", parts);
+        }
+
+        private static string Percent(decimal share) =>
+            (share * 100m).ToString("0.#", CultureInfo.InvariantCulture) + "%";
+
+        private static string Plans(int count) =>
+            count == 1 ? "1 compiled plan" : $"{count.ToString(CultureInfo.InvariantCulture)} compiled plans";
+
+        private sealed record PlanShares(
+            bool RuntimeCounted,
+            SortedDictionary<string, decimal> Shares,
+            decimal Elsewhere,
+            decimal Nowhere);
+    }
 
     private sealed class ExposureTotals
     {

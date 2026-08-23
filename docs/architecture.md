@@ -141,6 +141,44 @@ Without shared exposure a normalized schema renders almost entirely blank, becau
 and they come on-page. The strict attribution rule is deliberately unchanged; shared exposure is what
 makes that strictness survivable on a real workload.
 
+#### Estimated wait attribution — a third, clearly-labelled class
+
+Attributed and shared exposure both refuse to divide a query-level total, because *Query Store* holds
+nothing that says which table caused what. The **estimated execution plan does**: every `RelOp`
+carries `EstimateCPU` and `EstimateIO`, and most carry an `<Object>` reference. That is the
+optimizer's own arithmetic about the work it expected each table to require.
+
+So there is a third class, and it is never allowed to impersonate the first two:
+
+- **Estimated wait attribution** takes a family's *measured* wait milliseconds and apportions them
+  across the tables its plans read, in proportion to each table's share of the plan's estimated cost.
+  The milliseconds are real; the split is a model.
+
+`PlanCostAttribution` computes the shares and `WaitApportionment` performs the division. Three rules
+govern the split, and `web/src/planCost.ts` mirrors them exactly for the browser:
+
+1. An operator's own cost is `EstimateCPU + EstimateIO`, never `EstimatedTotalSubtreeCost` — subtree
+   cost is cumulative, so summing it double-counts every child at every ancestor. Subtree cost is used
+   only as a fallback, as parent-minus-children, when no operator in the plan reports CPU or IO.
+2. Cost on an operator that names no object is pushed **down** onto the objects in its subtree,
+   proportional to the weight they already carry. The unattributed pool takes its proportional share
+   of that pushdown too.
+3. A subtree containing no object reference leaves its cost unattributed. It is never nudged onto a
+   neighbour.
+
+Only shares for objects the page actually draws are published. Cost spent on an off-page table,
+another database, an unresolvable reference, or pure computation stays in
+`UnattributedWaitMilliseconds`. The apportionment is exact: fixed-point at 1e9 with largest-remainder
+allocation, so the parts plus the remainder reconstruct the measured total byte-for-byte, for any
+`BigInteger`. Ties break on object id and the unattributed bucket always sorts last, so the result is
+reproducible.
+
+`attributedExposure` and `sharedExposure` are untouched by any of this and keep their exact previous
+meaning. The estimated class lives in its own contract field (`DatabaseCityQueryFamilyV1.WaitAttribution`),
+its own UI section, and its own legend paragraph, all of which say *modelled, not measured* in those
+words. Summing a building's estimated wait with its attributed exposure is meaningless and the UI
+never invites it.
+
 The city is laid out as a real street plan rather than a bar chart. `web/src/cityPlan.ts` traces a
 street network — see [the landscape section](#the-landscape-around-the-evidence) — recovers the city
 blocks it encloses, and hands those blocks out using a seeded generator (`web/src/citySeed.ts`), so a
@@ -216,9 +254,17 @@ from an object's stable id and carries no data claim; the in-app legend states t
 | Road width | executions of query families naming both endpoints |
 | Road colour | captured wait share, graded low/medium/high, upgraded only by a resolved live lock |
 | Route line pattern | co-reference confidence (confirmed / probable / unknown) |
+| Street traffic width | executions of every query family whose journey runs along that street |
+| Street traffic colour | apportioned wait milliseconds per execution on that street |
 | Wait-lane width | captured Query Store wait milliseconds from one building to one facility |
 | Wait-lane colour | which facility the lane ends at |
 | Wait-lane pattern | attribution confidence of the contributing query families |
+
+The two street-traffic rows are the only entries in this table whose *placement* is modelled. The
+executions and the wait milliseconds are both measured, but which street carries them depends on an
+invented street plan and which table a wait belongs to comes from the plan's cost estimate. Every
+surface that shows them says so; see
+[estimated wait attribution](#estimated-wait-attribution--a-third-clearly-labelled-class).
 
 Building *archetype* (house, rowhouse, midrise, tower, skyscraper, civic hall, vacant parcel) is
 chosen from exact reserved-page thresholds compared as `BigInt`, because page counts are lossless
@@ -474,20 +520,66 @@ confirmed, probable, and unknown; they do not imply row direction or row flow.
 
 #### Query plan routes
 
-Selecting a Query Store plan draws a GPS-style route through the city (`web/src/cityRoute.ts`). The
-normalized showplan's operator tree is walked in post-order, and each operator becomes a stop:
+Selecting a Query Store plan draws a GPS-style route through the city (`web/src/cityRoute.ts`).
+**Every stop is a table.** A query does not drive to a wait facility and come back; it reads tables,
+and the waiting happens while it does. Routing through the six civic facilities made the itinerary
+read as a detour between real destinations, which is not what a plan does, so it was removed.
 
-1. a resolvable object reference becomes that building;
-2. otherwise a memory-consuming operator stops at the Memory Grant Office;
-3. otherwise a tempdb-spilling operator stops at tempdb Works;
-4. otherwise a non-zero `EstimatedIoCost` stops at the Storage Depot;
-5. otherwise the operator stops at the CPU Scheduler Yard.
+The normalized showplan's operator tree is walked in post-order and each operator is assigned to a
+building:
+
+1. an operator with a resolvable object reference belongs to that building;
+2. an operator naming no object folds onto the **heaviest table in its own subtree**, measured by
+   estimated own cost, with ties broken on a stable key so the result is deterministic;
+3. an operator whose subtree contains no on-page table at all becomes an *unplaced operation*, listed
+   separately rather than attached to whichever building happened to be nearby.
+
+Stop order is the order tables are first reached in that walk. Each stop carries the operators that
+happen there, its share of the plan's estimated cost, and — for each operator — the resource it
+leans on, drawn from the same `facilityForOperator` classification as before. The facility is now a
+**property of the operation** rather than a destination on the route.
 
 Consecutive stops are joined by a shortest path over the street graph, so the route follows roads.
 An object reference that names something outside the loaded bounded page becomes an explicit off-map
-stop with a reason; it is never silently dropped, and the panel reports "N of M stops placed on this
-map". The route is a compiled plan shape and carries the plan's `runtimeOverlayCaveat` verbatim: it
-is never actual operator progress.
+stop with a reason; it keeps its place in the itinerary so the sequence stays whole, but the drawn
+line skips it and the panel says so. The route is a compiled plan shape and carries the plan's
+`runtimeOverlayCaveat` verbatim: it is never actual operator progress.
+
+#### The traffic map
+
+A single plan's route answers "what does *this* query do". Standing back from the city, the question
+is "what does the *workload* do", and one ribbon per pair of co-referenced tables answers neither —
+it draws the join graph, not the traffic.
+
+So `web/src/cityWorkloadTraffic.ts` builds the default view: every ranked query family is driven
+through the tables its plans read, ordered from its highest cost share outward by nearest neighbour,
+and each street it uses accumulates that family's captured executions and its apportioned wait
+milliseconds. Two channels come out of it, and they are deliberately **not** blended:
+
+- **Width** is executions — a count.
+- **Colour** is apportioned wait milliseconds *per execution* — a duration per unit of work.
+
+A count and a duration have no honest common unit. Combining them into one "traffic level" scalar
+would require inventing an exchange rate between an execution and a millisecond, so the map shows
+both and lets the eye do the join: wide and dark red is a street a lot of queries use and wait on.
+The grade cut points (5 ms/execution for medium, 50 for high) are invented thresholds on a measured
+ratio, exactly as the existing `MEDIUM_WAIT_SHARE`/`HIGH_WAIT_SHARE` road grades are. A street with
+no apportioned wait grades `unknown`, never `low`, because zero attributed wait is an absence of
+evidence rather than evidence of speed.
+
+Accumulation follows each family's **modal route** — the same path the map draws — rather than the
+assignment's spread flow, so the numerator, the denominator and the drawn line all agree. A family's
+apportioned wait is spread across the legs of its journey by adjacency: the two end stops have one
+adjacent leg each and give it their share whole, an interior stop has two and splits its share evenly
+between them. Summed over the legs that returns the family's apportioned total exactly, which is the
+same reconciliation rule the per-building apportionment obeys; charging each leg half of both its
+endpoints instead would have quietly discarded the outer halves of the first and last stop.
+
+Both channels are then **per-traversal intensities**, not divisible shares: a street is charged the
+whole executions and the whole leg wait of every journey crossing it, the way a traffic count on a
+road is the count on that road rather than a slice of a city total. Summing either channel across
+streets is meaningless; dividing one by the other on a single street is the only use they are put to.
+Per-query co-reference ribbons remain available on an opt-in `paths` layer.
 
 The camera is a full orbit/pan/zoom control with keyboard equivalents (arrows pan, `+`/`-` zoom,
 `[`/`]` rotate, `Home` resets). Fit-to-bounds runs on first load and on an explicit reset only, so

@@ -236,7 +236,10 @@ public sealed class ConnectedDatabaseCitySource(
         family.ObjectIds,
         family.Confidence,
         family.Rationale,
-        evidence);
+        evidence)
+    {
+        WaitAttribution = family.WaitAttribution,
+    };
 
     /// <summary>
     /// The attribution join publishes an entry for every on-page object a ranked family named, so

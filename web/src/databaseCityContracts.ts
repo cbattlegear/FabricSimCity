@@ -76,6 +76,36 @@ export interface DatabaseCitySchema {
   evidence: Evidence
 }
 
+/**
+ * One object's modelled share of a query family's measured wait time.
+ *
+ * `waitMilliseconds` is **not** a measurement of how long this object waited. Query Store measures
+ * one wait total per query and never says which table caused it. The split is `estimatedCostShare`:
+ * the fraction of the compiled plan's *estimated* cost the optimizer placed on operators reading
+ * this object. Anything drawn from it has to say so.
+ */
+export interface DatabaseCityObjectWaitShare {
+  objectId: string
+  estimatedCostShare: number
+  waitMilliseconds: string
+}
+
+/**
+ * A family's measured wait time apportioned across the objects its compiled plans read.
+ *
+ * The parts and `unattributedWaitMilliseconds` sum to exactly `totalWaitMilliseconds`, so the split
+ * can always be added back up and checked against the measurement it came from. The unattributed
+ * part covers cost the plan spent on no object at all, plus every object the plan named that this
+ * page does not draw. An empty `objects` list means no apportionment was possible, never that
+ * nothing waited.
+ */
+export interface DatabaseCityWaitAttribution {
+  objects: DatabaseCityObjectWaitShare[]
+  unattributedWaitMilliseconds: string
+  plansRead: number
+  rationale: string
+}
+
 export interface DatabaseCityQueryFamily {
   familyId: string
   queryHash: string
@@ -94,6 +124,12 @@ export interface DatabaseCityQueryFamily {
   confidence: QueryAttributionConfidence
   rationale: string
   evidence: Evidence
+  /**
+   * The same wait total spread over the objects the family's plans read, in proportion to estimated
+   * plan cost. Optional because a page collected before the split existed carries no attribution;
+   * absent means "not apportioned", never "nothing waited".
+   */
+  waitAttribution?: DatabaseCityWaitAttribution | null
 }
 
 export interface DatabaseCityWorkloadAggregate {
