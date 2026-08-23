@@ -1,6 +1,6 @@
 import { stableHash } from './atlasLayout'
 import { makeBlockWarp, type CityWarp } from './cityBlockWarp'
-import { buildBlocks, type CityBlock } from './cityBlocks'
+import { buildBlocks, type CityBlock, type CityBlockField } from './cityBlocks'
 import { planField } from './cityField'
 import {
   breakCrossings,
@@ -21,6 +21,7 @@ import {
   riverProximity,
   waterBlocks,
   type CityTerrain,
+  type Landform,
   type RiverNode,
 } from './cityTerrain'
 import type { DatabaseCityObject, DatabaseCitySchema } from './databaseCityContracts'
@@ -326,14 +327,22 @@ const BLOCK_SETBACK = 5
  * A disc of streets yields blocks in proportion to its area, so radius grows with the square root of
  * the object count and the block count grows about linearly with it — the role the grid side played.
  *
- * Traced blocks come out at about 1.34 separations squared apiece, so a disc of radius `k·√objects`
- * holds roughly `2.3·k²` blocks per object. At the 1.75 this was first set to that is nine blocks per
- * building: a map four-fifths empty, and four times the streets to trace, graph and grow
- * neighbourhoods over for nothing. At 1.0 it is a little over two, which leaves the civic facilities,
- * the water and the gaps between neighbourhoods their ground and still reads as a city with room
- * around its edges.
+ * The constant is the number of blocks each building gets to choose from, and it has to be comfortably
+ * above one. Below one there is not enough ground in the city for its own tables: the surplus
+ * buildings are put on a block another building already holds, and because a lot is placed at its
+ * block's centroid they are drawn at exactly the same point, one hidden inside the other. A table you
+ * cannot see is a table whose evidence is lost.
+ *
+ * Measured rather than estimated, because the estimate was wrong. A traced block was assumed to cost
+ * about 1.34 separations squared, which put this at two blocks per building. Counting the blocks that
+ * actually survive — after the water, the civic facilities and every face too small to hold the widest
+ * building are taken out — gives **0.63 blocks per building at 1.0**, so more than a third of every
+ * city was stacked invisibly. 1.75 is the value that estimate was originally reduced *from*, and it
+ * measures at about 1.9 blocks per building: enough ground for every table, with roughly a third of
+ * the city left open for the parks, yards and vacant parcels the map draws — and for the tables the
+ * database has not created yet.
  */
-const RADIUS_PER_ROOT_OBJECT = 1.0
+const RADIUS_PER_ROOT_OBJECT = 1.75
 
 /**
  * Smallest city radius, in separations, so a handful of tables still gets a walkable town.
@@ -345,6 +354,102 @@ const RADIUS_PER_ROOT_OBJECT = 1.0
  * roomy as it was when the per-object term was larger.
  */
 const RADIUS_FLOOR_STEPS = 9
+
+/**
+ * How much a database has to grow before its city is rebuilt.
+ *
+ * The street network is traced from the database's shape, so any quantity that feeds it makes the
+ * whole city a function of that quantity: at 1.0 the radius moved on every single added table, and
+ * past the point where the floor above stops winning, adding one table retraced every street and
+ * moved every building (#47). A city you have to relearn on every deployment is not a map.
+ *
+ * So the city is not sized from the database, it is sized from the next rung of a ladder above it,
+ * and it only rebuilds when the database climbs a rung. A quarter more room per rung is small enough
+ * that the city is never wildly bigger than the database in it, and large enough that a database has
+ * to grow by a quarter -- not by one table -- before the ground moves.
+ *
+ * This is the whole trade. Growth cannot be both continuous and stable: either every table redraws
+ * the map a little, or the map holds still and redraws rarely. A map has to hold still.
+ */
+const GROWTH_RATIO = 1.25
+
+/**
+ * The rung every city starts on, matched to {@link RADIUS_FLOOR_STEPS}.
+ *
+ * The radius floor holds every city below about twenty objects at one size, so the ladder starts
+ * exactly where the floor stops winning. Below this the city was already stable and the ladder would
+ * only make it coarser for nothing.
+ */
+const GROWTH_FLOOR_OBJECTS = 20
+
+/**
+ * The rung a *neighbourhood* starts on.
+ *
+ * Far lower than the city's, because a schema's share of the ground is relative and quantising
+ * destroys exactly that. A floor of eight would hand a one-table schema and an eight-table schema
+ * identical territory, which reads as a map that has stopped telling the truth about which schema is
+ * the large one — worse than the churn it prevents. Three is low enough that schemas stay ranked by
+ * size from the smallest database upward, and still spares a schema of one or two tables from having
+ * its borders redrawn the moment it gains another.
+ */
+const GROWTH_FLOOR_SCHEMA = 3
+
+/**
+ * How much a *schema* has to grow before its neighbourhood is widened.
+ *
+ * Coarser than the city's ladder, because a neighbourhood is the one thing the city ladder cannot
+ * hold still on its own: widening one schema's territory hands it blocks that were vacant, and the
+ * buildings already inside it choose their ground from the blocks the neighbourhood holds. So a
+ * schema crossing a rung shuffles that schema — never the city, and never another schema, now that
+ * quotas no longer divide a fixed pool between them.
+ *
+ * At half again per rung, and with half again more blocks than tables in each neighbourhood, a schema
+ * runs out of vacant plots at about the same time it earns more ground. That is the point: the
+ * territory is widened when the schema genuinely needs it rather than on a fixed cadence.
+ */
+const SCHEMA_GROWTH_RATIO = 1.5
+
+/**
+ * How coarsely the largest building's footprint is read, in world units.
+ *
+ * The block spacing and the minimum block size are both derived from the widest building, so reading
+ * that width exactly makes the entire street network a function of the largest table's page count --
+ * and tables gain pages constantly. Rounding up to a step of this size means the city holds still
+ * unless its largest table grows by roughly forty times, which is a genuinely different database.
+ *
+ * Only ever rounded *up*: a block must still hold the widest building it is asked to hold.
+ */
+const FOOTPRINT_STEP = 4
+
+/**
+ * The next rung at or above `count`.
+ *
+ * Walked rather than solved with a logarithm, because `Math.log` lands a hair either side of an
+ * exact rung and would put a database sitting precisely on one onto the rung above -- so the city
+ * would depend on floating-point noise. The `+ 1` floor keeps the ladder strictly increasing at
+ * small counts where a quarter of the value rounds to nothing.
+ */
+export function plannedCount(count: number, floor: number, ratio: number = GROWTH_RATIO): number {
+  const wanted = Number.isFinite(count) ? Math.max(0, Math.ceil(count)) : 0
+  let planned = Math.max(1, floor)
+  while (planned < wanted) planned = Math.max(planned + 1, Math.round(planned * ratio))
+  return planned
+}
+
+/**
+ * The widest building the city is planned around, rounded up to {@link FOOTPRINT_STEP}.
+ *
+ * Read from the loaded objects, because no page states the widest object in the database. Rounding
+ * absorbs both a table gaining pages and most of the difference between one page and the next; a
+ * later page carrying a far larger table than anything seen so far can still step the city up a
+ * rung, which is the honest limit of planning from a bounded page.
+ */
+function plannedFootprint(objects: readonly DatabaseCityObject[]): number {
+  return Math.max(
+    UNKNOWN_FOOTPRINT,
+    Math.ceil(widestFootprint(objects) / FOOTPRINT_STEP) * FOOTPRINT_STEP,
+  )
+}
 
 /** How far past the field radius streamlines may run, so the network reaches the map edge. */
 const SPAN_SCALE = 1.1
@@ -472,11 +577,11 @@ export function planCity(
 ): CityPlan {
   const seed = options.seed ?? 'sqlsimcity'
   const numericSeed = stableHash(seed)
-  const cell = chooseCell(objects)
+  const widest = plannedFootprint(objects)
+  const cell = chooseCell(widest)
 
   const ordered = orderObjects(objects)
   const sizes = schemaSizes(ordered, options.schemas)
-  const slots = globalSlots(ordered, sizes)
   /*
    * How many buildings the city has to have room for.
    *
@@ -488,12 +593,15 @@ export function planCity(
    * collector, and the connected collector numbers objects across the whole database rather than
    * within a schema, so adding a schema's offset to one produces indices far past the object count
    * — and different ones on every page. Letting those size the city is what made a second page
-   * redraw it. Nothing needs them to: the only place a slot is still read wraps it into the blocks
-   * that exist.
+   * redraw it. Nothing needs them to: nothing in the plan reads a collector ordinal any more.
+   *
+   * Then rounded up to the next rung of the growth ladder, so the city is sized from a database of
+   * roughly this shape rather than from this exact database. That is what lets a table be added
+   * without the streets being retraced under the buildings already standing on them.
    */
-  const capacity = Math.max(
-    parseCount(options.totalObjects) ?? 0,
-    ordered.length,
+  const capacity = plannedCount(
+    Math.max(parseCount(options.totalObjects) ?? 0, ordered.length),
+    GROWTH_FLOOR_OBJECTS,
   )
 
   /*
@@ -504,7 +612,144 @@ export function planCity(
    * largest building, and how far the city has to reach to hold them all. Nothing about which objects
    * have loaded touches them, which is what keeps an appended page from redrawing the streets under a
    * city that is already on screen.
+   *
+   * Because that is true, it is also worth not doing twice. A city is replanned every time a page of
+   * objects arrives — up to eighty times while a large database loads — and tracing the network is by
+   * far the most expensive thing here. Keyed on exactly the inputs it reads, the groundwork is traced
+   * on the first page and reused by every page after it, so the stability the ladder promises is what
+   * makes the loading fast rather than something paid for with time.
+   *
+   * The key names every argument the trace reads, `widest` included, even though `cell` is derived
+   * from `widest` and currently determines it. That derivation runs through a `MIN_CELL` clamp, so two
+   * different widths would collide onto one key the moment the clamp ever bound — and a collision here
+   * does not degrade the cache, it serves a city ground that was cut for a different building size.
+   * Naming it costs no hit rate, because it only ever moves when `cell` does.
    */
+  const groundwork = cityGroundwork(
+    [
+      seed,
+      cell,
+      capacity,
+      widest,
+      sizes.map(size => `${size.schemaId}:${size.count}`).join(','),
+    ].join('|'),
+    () => traceGroundwork(seed, numericSeed, cell, capacity, widest, sizes),
+  )
+  const {
+    landform,
+    graph,
+    blockField,
+    roads,
+    router,
+    warp,
+    intersections,
+    streets,
+    water,
+    facilityBlocks,
+    facilityIds,
+    neighbourhoodPool,
+    territories,
+  } = groundwork
+
+  const lots = new Map<string, CityLot>()
+  const occupied = new Set<number>()
+  placeBuildings(ordered, territories, neighbourhoodPool, lots, occupied)
+
+  // Districts describe territory as block references, the shape `describeDistricts` and every chrome
+  // consumer already read, so the schema-to-ground mapping survives the move off the lattice.
+  const territoryRefs = new Map<string, BlockRef[]>()
+  for (const [schemaId, claimed] of territories) {
+    territoryRefs.set(schemaId, claimed.map(block => ({ col: block.id, row: 0 })))
+  }
+  const districts = describeDistricts(ordered, lots, territoryRefs, warp)
+  const terrain = planTerrain({
+    field: blockField,
+    landform,
+    occupied,
+    facilities: facilityIds,
+    water,
+    districtIds: districts.map(district => district.districtId),
+    seed,
+  })
+
+  return {
+    cell,
+    streetWidth: STREET_WIDTH,
+    blockCols: blockField.blocks.length,
+    blockRows: 1,
+    districts,
+    lots,
+    intersections,
+    streets,
+    bounds: cityBounds(warp),
+    terrain,
+    facilities: facilitySites(facilityBlocks, cell),
+    warp,
+    router,
+    graph,
+    roadProperties: roads,
+  }
+}
+
+/**
+ * Everything about a city that the database's *contents* cannot change: the land, the streets, the
+ * blocks they cut and the neighbourhood each block belongs to.
+ *
+ * Held separately from the plan because it is both the expensive half and the stable half. Which
+ * objects have loaded decides only which of these blocks has a building on it.
+ */
+interface CityGroundwork {
+  readonly landform: Landform
+  readonly graph: PlanarGraph
+  readonly blockField: CityBlockField
+  readonly roads: ReadonlyMap<number, RoadProperties>
+  readonly router: RoadRouter
+  readonly warp: CityWarp
+  readonly intersections: Map<string, CityIntersection>
+  readonly streets: CityStreet[]
+  readonly water: ReadonlySet<number>
+  readonly facilityBlocks: CityBlock[]
+  readonly facilityIds: Set<number>
+  readonly neighbourhoodPool: CityBlock[]
+  readonly territories: Map<string, CityBlock[]>
+}
+
+/**
+ * How many traced networks to keep.
+ *
+ * One would serve a single database loading its pages, which is the case that matters. A few more
+ * costs little and covers moving between databases in the atlas and back, where retracing a city the
+ * user has already seen is the most visible stall there is.
+ */
+const GROUNDWORK_CACHE_LIMIT = 4
+
+const groundworkCache = new Map<string, CityGroundwork>()
+
+function cityGroundwork(key: string, trace: () => CityGroundwork): CityGroundwork {
+  const cached = groundworkCache.get(key)
+  if (cached) {
+    // Re-inserted so the most recently used city is the last one evicted.
+    groundworkCache.delete(key)
+    groundworkCache.set(key, cached)
+    return cached
+  }
+  const traced = trace()
+  groundworkCache.set(key, traced)
+  for (const oldest of groundworkCache.keys()) {
+    if (groundworkCache.size <= GROUNDWORK_CACHE_LIMIT) break
+    groundworkCache.delete(oldest)
+  }
+  return traced
+}
+
+function traceGroundwork(
+  seed: string,
+  numericSeed: number,
+  cell: number,
+  capacity: number,
+  widest: number,
+  sizes: readonly SchemaSize[],
+): CityGroundwork {
   const separation = Math.max(SEPARATION_FLOOR, cell * SEPARATION_PER_CELL)
   const radius = Math.max(
     separation * RADIUS_FLOOR_STEPS,
@@ -563,10 +808,7 @@ export function planCity(
   // Faces are recovered from the strictly planar graph, before any link road is added: a link road
   // can cross an existing street, and walking a block's boundary relies on that planarity holding.
   const faces = extractFaces(graph)
-  const minCapacity = Math.max(
-    BLOCK_CAPACITY_FLOOR,
-    Math.ceil(widestFootprint(objects)) + BLOCK_CAPACITY_HEADROOM,
-  )
+  const minCapacity = Math.max(BLOCK_CAPACITY_FLOOR, Math.ceil(widest) + BLOCK_CAPACITY_HEADROOM)
   const blockField = buildBlocks(graph, faces, { setback: BLOCK_SETBACK, minCapacity })
 
   // Tracing can leave a pocket of streets with no way in, where one district's grain turns hard
@@ -596,43 +838,20 @@ export function planCity(
   const neighbourhoodPool = dry.filter(block => !facilityIds.has(block.id))
   const territories = planNeighborhoods(neighbourhoodPool, sizes, seed, separation)
 
-  const lots = new Map<string, CityLot>()
-  const occupied = new Set<number>()
-  placeBuildings(ordered, territories, neighbourhoodPool, slots, lots, occupied)
-
-  // Districts describe territory as block references, the shape `describeDistricts` and every chrome
-  // consumer already read, so the schema-to-ground mapping survives the move off the lattice.
-  const territoryRefs = new Map<string, BlockRef[]>()
-  for (const [schemaId, claimed] of territories) {
-    territoryRefs.set(schemaId, claimed.map(block => ({ col: block.id, row: 0 })))
-  }
-  const districts = describeDistricts(ordered, lots, territoryRefs, warp)
-  const terrain = planTerrain({
-    field: blockField,
-    landform,
-    occupied,
-    facilities: facilityIds,
-    water,
-    districtIds: districts.map(district => district.districtId),
-    seed,
-  })
-
   return {
-    cell,
-    streetWidth: STREET_WIDTH,
-    blockCols: blockField.blocks.length,
-    blockRows: 1,
-    districts,
-    lots,
+    landform,
+    graph,
+    blockField,
+    roads,
+    router,
+    warp,
     intersections,
     streets,
-    bounds: cityBounds(warp),
-    terrain,
-    facilities: facilitySites(facilityBlocks, cell),
-    warp,
-    router,
-    graph,
-    roadProperties: roads,
+    water,
+    facilityBlocks,
+    facilityIds,
+    neighbourhoodPool,
+    territories,
   }
 }
 
@@ -706,18 +925,33 @@ function streetId(edgeId: number): string {
  * Stands every loaded object on a block: its own schema's ground where it has some, the city-wide
  * fallback where a schema was walled in before it claimed any.
  *
- * Within a schema the objects are matched to blocks by size rank — the widest footprint to the block
- * with the largest capacity — so a big table gets ground that fits and its building never overhangs
- * the road. The ranking is over the *loaded* objects, so a building can move to a neighbouring block
- * within its own neighbourhood when a larger sibling loads; the neighbourhood it sits in is claimed
- * from the full schema count and does not move. Correctness of the evidence is untouched either way:
- * a building's footprint, height and archetype are its own, wherever it stands.
+ * Two orders meet here, and both are append-only, which is the whole of the stability guarantee.
+ *
+ * Tables arrive in **catalogue order** — by the object id SQL Server issues increasing, compared as a
+ * number rather than as text, so a table created later sorts after every table already there. Blocks
+ * are offered in the order their neighbourhood **claimed** them, which region growth produces outward
+ * from the neighbourhood's seed. Each arrival takes the first block still vacant.
+ *
+ * So a building's block depends only on the tables that arrived before it — never on how many blocks
+ * the neighbourhood has, nor on how large its neighbours are. A new table can only take ground no
+ * earlier table wanted, and widening a neighbourhood only appends blocks past everything already
+ * spoken for. The old rule ranked tables by footprint and blocks by capacity, which had exactly the
+ * opposite property: a new large table sorted to the front and renumbered every building behind it
+ * (#47, #50).
+ *
+ * Matching a big table to a roomy block is given up to get this, and costs nothing that was load
+ * bearing: planning already drops every block too small to hold the widest building in the city, so
+ * no building can overhang its kerb wherever it stands. What is gained instead is a city that reads
+ * as one: claim order runs outward from each neighbourhood's centre, so the oldest tables hold the
+ * old town and each new one takes a plot further out, the way a town actually grows.
+ *
+ * Dropping a table is the one case that still moves buildings: its block falls vacant and the next
+ * table along takes it. Only tables *after* the dropped one can move, never the ones before.
  */
 function placeBuildings(
   ordered: readonly DatabaseCityObject[],
   territories: ReadonlyMap<string, CityBlock[]>,
   fallback: readonly CityBlock[],
-  slots: ReadonlyMap<string, number>,
   lots: Map<string, CityLot>,
   occupied: Set<number>,
 ): void {
@@ -729,29 +963,24 @@ function placeBuildings(
   }
 
   for (const [schemaId, members] of bySchema) {
-    const claimed = [...(territories.get(schemaId) ?? [])].sort(
-      (left, right) => right.capacity - left.capacity || left.id - right.id,
+    const claimed = territories.get(schemaId) ?? []
+    const ground = claimed.length > 0 ? claimed : fallback
+    if (ground.length === 0) continue
+    const arrivals = [...members].sort((left, right) =>
+      compareCreationOrder(left.objectId, right.objectId),
     )
-    const ranked = [...members].sort(
-      (left, right) =>
-        (buildingFootprint(right.reservedPages8KiB) ?? UNKNOWN_FOOTPRINT) -
-          (buildingFootprint(left.reservedPages8KiB) ?? UNKNOWN_FOOTPRINT) ||
-        objectOrdinal(left) - objectOrdinal(right) ||
-        compareOrdinal(left.objectId, right.objectId),
-    )
-    ranked.forEach((object, index) => {
-      const block =
-        claimed.length > 0
-          ? claimed[index % claimed.length]
-          : fallback.length > 0
-            ? fallback[(slots.get(object.objectId) ?? 0) % fallback.length]
-            : null
-      if (!block) return
+
+    arrivals.forEach((object, index) => {
+      // A neighbourhood with fewer blocks than tables cannot give every building its own ground.
+      // Doubling up keeps the building on the map, which matters more than it standing alone —
+      // planning sizes the city so this does not arise, but a building is never dropped.
+      const block = index < ground.length ? ground[index] : ground[index % ground.length]
       lots.set(object.objectId, placeLot(object, block))
       occupied.add(block.id)
     })
   }
 }
+
 
 /** The widest building the database asks for, so a block can be required to hold it. */
 function widestFootprint(objects: readonly DatabaseCityObject[]): number {
@@ -911,14 +1140,22 @@ export interface BlockRef {
   readonly row: number
 }
 
-/** Stable object order: neighbourhood, then object ordinal, then id. Never row arrival order. */
+/**
+ * Stable object order: neighbourhood, then object ordinal, then catalogue order. Never row arrival
+ * order.
+ *
+ * The last tiebreak compares object ids as {@link compareCreationOrder} does, numerically rather than
+ * as text, for the same reason placement does: it only fires when two objects report the same
+ * ordinal, and when it fires it should fall back on which table came first, not on which id happens
+ * to start with a smaller digit.
+ */
 function orderObjects(objects: readonly DatabaseCityObject[]): DatabaseCityObject[] {
   return [...objects].sort(
     (left, right) =>
       left.layout.neighborhoodOrdinal - right.layout.neighborhoodOrdinal ||
       compareOrdinal(left.schemaId, right.schemaId) ||
       left.layout.objectOrdinal - right.layout.objectOrdinal ||
-      compareOrdinal(left.objectId, right.objectId),
+      compareCreationOrder(left.objectId, right.objectId),
   )
 }
 
@@ -928,47 +1165,11 @@ function parseCount(value: string | number | null | undefined): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null
 }
 
-/**
- * A page-independent slot index for every object.
- *
- * The backend numbers objects *within* a schema, so an object ordinal alone is not a position in the
- * city. Adding the running total of every earlier schema's full object count turns it into one, and
- * because every page carries the complete schema list with complete counts, that sum is the same on
- * page one as it is on page nine. This is what actually delivers the promise that appending a page
- * moves nothing: an object's block is a function of its own identity, not of who else is loaded.
- *
- * Only used now for the blockless fallback and for sizing the grid; a located object takes its block
- * from its own schema's neighbourhood instead.
- */
-function globalSlots(
-  ordered: readonly DatabaseCityObject[],
-  counts: readonly SchemaSize[],
-): Map<string, number> {
-  const offsets = new Map<string, number>()
-  let running = 0
-  for (const entry of counts) {
-    offsets.set(entry.schemaId, running)
-    running += entry.count
-  }
-
-  const slots = new Map<string, number>()
-  for (const object of ordered) {
-    slots.set(object.objectId, (offsets.get(object.schemaId) ?? 0) + objectOrdinal(object))
-  }
-  return slots
-}
-
 /** How many objects a schema holds in total, and where it sits in neighbourhood order. */
 interface SchemaSize {
   readonly schemaId: string
   readonly ordinal: number
   readonly count: number
-}
-
-/** An object's index within its own schema, floored and clamped so it can only address a real block. */
-function objectOrdinal(object: DatabaseCityObject): number {
-  const ordinal = Math.floor(object.layout.objectOrdinal)
-  return Number.isFinite(ordinal) && ordinal > 0 ? ordinal : 0
 }
 
 /**
@@ -978,6 +1179,11 @@ function objectOrdinal(object: DatabaseCityObject): number {
  * every page and is therefore what a neighbourhood can be sized from without moving as pages load.
  * A schema the list did not mention, or one whose count is short of what actually arrived, is
  * widened to fit rather than allowed to overlap the next schema.
+ *
+ * Widened by *counting what arrived*, never by reading an object's collector ordinal as though it
+ * were a position within its schema. The connected collector numbers objects across the whole
+ * database, so that reading turned the five-hundredth object into a schema of five hundred and one
+ * and handed its neighbourhood a fifth of the city (#49).
  */
 function schemaSizes(
   ordered: readonly DatabaseCityObject[],
@@ -993,9 +1199,14 @@ function schemaSizes(
       })
     }
   }
+
+  const loaded = new Map<string, number>()
+  for (const object of ordered) {
+    loaded.set(object.schemaId, (loaded.get(object.schemaId) ?? 0) + 1)
+  }
   for (const object of ordered) {
     const existing = counts.get(object.schemaId)
-    const observed = objectOrdinal(object) + 1
+    const observed = loaded.get(object.schemaId) ?? 1
     if (!existing) {
       counts.set(object.schemaId, { ordinal: object.layout.neighborhoodOrdinal, count: observed })
     } else if (observed > existing.count) {
@@ -1011,11 +1222,12 @@ function schemaSizes(
 /**
  * Ground a neighbourhood claims per object it holds.
  *
- * Above 1 so a neighbourhood has gaps in it — front gardens, corner parks, the odd empty plot — which
- * is what stops a schema reading as a solid slab of buildings. Below {@link GRID_SLACK}, which is the
- * airiness of the grid as a whole, because the difference between the two is the open country that
- * separates one neighbourhood from the next. That separation is the whole point: a schema you can see
- * the edge of is a schema you can navigate by.
+ * Above 1 so a neighbourhood has gaps in it — front gardens, corner parks, the odd empty plot, and
+ * the ground the next table to be created will stand on — which is what stops a schema reading as a
+ * solid slab of buildings. Below {@link RADIUS_PER_ROOT_OBJECT}, which is the airiness of the city as
+ * a whole, because the difference between the two is the open country that separates one
+ * neighbourhood from the next. That separation is the whole point: a schema you can see the edge of
+ * is a schema you can navigate by.
  */
 const NEIGHBORHOOD_SLACK = 1.5
 
@@ -1140,22 +1352,29 @@ function planNeighborhoods(
 /**
  * How many blocks each neighbourhood may claim.
  *
- * Proportional to the schema's share of the database, floored at the number of objects it actually
- * holds so every table has somewhere to stand, and capped so the quotas together never promise more
- * ground than the city has.
+ * Sized from the schema's own rung of the growth ladder rather than its exact object count, for the
+ * same reason the city is: a border that moves whenever one table is added takes every building near
+ * it along. A neighbourhood therefore claims ground for a schema of roughly its size, which leaves
+ * it visibly empty plots to grow into — that is what a new table moves onto.
+ *
+ * Deliberately *not* scaled to fit the ground available. Dividing a fixed pool between the schemas
+ * would make every schema's quota a function of every other schema's size, so one schema gaining a
+ * table would narrow all its neighbours — the coupling that redrew a city on a single `CREATE TABLE`.
+ * Each schema instead asks for what it needs on its own, and the region growth that honours these
+ * quotas simply stops when the ground runs out: schemas claim in interleaved rounds, so a starved
+ * city still shares its blocks out rather than letting the first schema take everything.
  */
 function neighborhoodQuotas(schemas: readonly SchemaSize[], available: number): number[] {
-  const floors = schemas.map(schema => Math.min(schema.count, available))
-  const committed = floors.reduce((sum, value) => sum + value, 0)
-  const spare = Math.max(0, available - committed)
-  const total = schemas.reduce((sum, schema) => sum + schema.count, 0)
-  if (total === 0) return schemas.map(() => Math.floor(available / schemas.length))
-
-  return schemas.map((schema, index) => {
-    const wanted = Math.round(schema.count * NEIGHBORHOOD_SLACK) - floors[index]
-    const share = Math.floor(spare * (schema.count / total))
-    return floors[index] + Math.max(0, Math.min(wanted, share))
-  })
+  if (schemas.length === 0) return []
+  return schemas.map(schema =>
+    Math.min(
+      available,
+      Math.max(
+        schema.count,
+        Math.round(plannedCount(schema.count, GROWTH_FLOOR_SCHEMA, SCHEMA_GROWTH_RATIO) * NEIGHBORHOOD_SLACK),
+      ),
+    ),
+  )
 }
 
 /**
@@ -1413,8 +1632,8 @@ function average(values: readonly number[]): number {
  * even the tightest block still clears the largest footprint. The logarithmic footprint mapping bounds
  * the spread, so one very large table cannot make the whole city sparse.
  */
-function chooseCell(objects: readonly DatabaseCityObject[]): number {
-  return Math.max(MIN_CELL, Math.ceil(widestFootprint(objects) + LOT_MARGIN))
+function chooseCell(widest: number): number {
+  return Math.max(MIN_CELL, Math.ceil(widest + LOT_MARGIN))
 }
 
 function placeLot(object: DatabaseCityObject, block: CityBlock): CityLot {
@@ -1506,5 +1725,67 @@ function pageCount(value: string | null): number | null {
 
 function compareOrdinal(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
+}
+
+/**
+ * Catalogue order for two object ids: the order SQL Server created the objects in, as closely as an
+ * id can state it.
+ *
+ * Not a string comparison, which is the trap. An object id carries its `sys.objects.object_id`
+ * unpadded — `sales/object/9`, `sales/object/1234567` — and compared as text the shorter number wins
+ * on its first digit, so object 9 sorts *after* object 1234567. Placement hands out blocks in this
+ * order and relies on a newly created table sorting last; under a plain string compare a new table
+ * would land in the middle instead and push every building after it along, which is the whole bug
+ * this order exists to fix (#47, #50).
+ *
+ * So runs of digits are compared as numbers and everything else as text. Runs are compared by length
+ * before value, which orders them numerically without parsing an id of any length into a number.
+ *
+ * This is catalogue order, not a timeline: SQL Server allocates object ids increasing, but it can
+ * reuse the id of a dropped object, so two tables' relative order is a fact about the catalogue
+ * rather than a claim about when they were created.
+ */
+function compareCreationOrder(left: string, right: string): number {
+  let leftAt = 0
+  let rightAt = 0
+  while (leftAt < left.length && rightAt < right.length) {
+    const leftDigit = isDigit(left, leftAt)
+    if (leftDigit !== isDigit(right, rightAt)) break
+
+    if (!leftDigit) {
+      if (left[leftAt] !== right[rightAt]) return left[leftAt] < right[rightAt] ? -1 : 1
+      leftAt += 1
+      rightAt += 1
+      continue
+    }
+
+    // Leading zeros carry no value, so `object/007` and `object/7` compare equal here and fall
+    // through to the length tiebreak below rather than ordering by how they were written.
+    let leftStart = leftAt
+    let rightStart = rightAt
+    while (left[leftStart] === '0' && isDigit(left, leftStart + 1)) leftStart += 1
+    while (right[rightStart] === '0' && isDigit(right, rightStart + 1)) rightStart += 1
+    let leftEnd = leftStart
+    let rightEnd = rightStart
+    while (isDigit(left, leftEnd)) leftEnd += 1
+    while (isDigit(right, rightEnd)) rightEnd += 1
+
+    const leftRun = left.slice(leftStart, leftEnd)
+    const rightRun = right.slice(rightStart, rightEnd)
+    if (leftRun.length !== rightRun.length) return leftRun.length < rightRun.length ? -1 : 1
+    if (leftRun !== rightRun) return leftRun < rightRun ? -1 : 1
+    leftAt = leftEnd
+    rightAt = rightEnd
+  }
+
+  if (leftAt >= left.length && rightAt >= right.length) return compareOrdinal(left, right)
+  if (leftAt >= left.length) return -1
+  if (rightAt >= right.length) return 1
+  return left[leftAt] < right[rightAt] ? -1 : 1
+}
+
+function isDigit(value: string, at: number): boolean {
+  const code = value.charCodeAt(at)
+  return code >= 48 && code <= 57
 }
 

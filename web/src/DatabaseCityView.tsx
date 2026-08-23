@@ -759,18 +759,34 @@ function LegendDrawer({
           <strong>Neighbourhoods are real; addresses are not.</strong> Each schema holds one
           contiguous quarter of the city, so two tables in the same schema are always near each
           other and a building&apos;s neighbourhood is a catalogue fact you can check. Inside that
-          quarter nothing is sorted: which block a building gets is drawn from a generator seeded
-          with the database id, so neighbouring buildings are <em>not</em> related by being
-          neighbours, and how far apart two schemas sit is an accident of the seed rather than a
-          measure of how related they are. The same database always produces the same city on every
-          machine while two databases of identical shape produce different ones. A
-          neighbourhood&apos;s hue and the label across its ground name the schema and nothing more;
-          hues are handed out in catalogue order, so none is warmer, larger or busier than another.
-          A larger schema does claim more ground, but only roughly — borders land wherever two
-          neighbourhoods happen to meet, so read the counts beside each name rather than the area.
-          Infrastructure facilities are scattered at least two blocks apart so they act as landmarks
-          rather than one civic corner. Street class, roof shapes, windows, setbacks, crowns and
-          sidewalks are decoration and encode nothing.
+          quarter, buildings fill outward from the middle in catalogue order, so a building nearer
+          the centre of its neighbourhood was created before one on the fringe — an order, and the
+          only thing a position states. Nothing else about a block is sorted: how roomy it is, which
+          street it fronts and which buildings surround it are drawn from a generator seeded with the
+          database id, so neighbouring buildings are <em>not</em> related by being neighbours, and how
+          far apart two schemas sit is an accident of the seed rather than a measure of how related
+          they are. The same database always produces the same city on every machine while two
+          databases of identical shape produce different ones. A neighbourhood&apos;s hue and the
+          label across its ground name the schema and nothing more; hues are handed out in catalogue
+          order, so none is warmer, larger or busier than another. A larger schema does claim more
+          ground, but only roughly — borders land wherever two neighbourhoods happen to meet, so read
+          the counts beside each name rather than the area. Infrastructure facilities are scattered at
+          least two blocks apart so they act as landmarks rather than one civic corner. Street class,
+          roof shapes, windows, setbacks, crowns and sidewalks are decoration and encode nothing.
+        </p>
+
+        <p className="mapping-note">
+          <strong>The city has room it is not using.</strong> A map is only useful if it is the same
+          map tomorrow, so this city is not sized from the database exactly — it is sized from the
+          next rung of a ladder above it, roughly a quarter larger, and each neighbourhood is given
+          about half again the ground its schema currently needs. Create a table and it takes one of
+          those empty plots: it appears on the fringe of its own schema&apos;s quarter and every
+          building already standing stays exactly where it is. Drop a table and its plot falls vacant,
+          and the table created after it moves up into the gap. The city is only rebuilt when the
+          database outgrows its rung, and then it is genuinely redrawn — the same database will not
+          look the same after it has grown by a quarter. So the open ground is not a measurement:
+          empty plots are not unused space, idle capacity, dropped tables or room the database has
+          reserved. They are simply the map leaving itself somewhere to put the next table.
         </p>
 
         <p className="mapping-note">
