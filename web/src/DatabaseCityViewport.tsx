@@ -60,13 +60,21 @@ const KEY_ACTIONS: Record<string, CameraNudge> = {
 }
 
 const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string]> = [
+/**
+ * The layer checkboxes, with the hint each one carries on hover. Only layers whose behaviour is not
+ * fully described by their own name need one.
+ */
+const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string, string?]> = [
   ['traffic', 'Traffic'],
   ['paths', 'Query paths'],
   ['waitLanes', 'Wait lanes'],
   ['infrastructure', 'Infrastructure'],
   ['route', 'Query route'],
-  ['labels', 'Labels'],
+  [
+    'labels',
+    'Labels',
+    'Neighbourhood names are always drawn. Building and facility names appear as you zoom in — largest tables first — rather than being drawn too small to read.',
+  ],
 ]
 
 function swatch(color: number): string {
@@ -258,8 +266,8 @@ export function DatabaseCityViewport({
       <div className="hud hud-top-right">
         <fieldset className="hud-layers">
           <legend>Layers</legend>
-          {LAYER_LABELS.map(([key, label]) => (
-            <label key={key}>
+          {LAYER_LABELS.map(([key, label, hint]) => (
+            <label key={key} title={hint}>
               <input type="checkbox" checked={layers[key]} onChange={() => toggle(key)} />
               {label}
             </label>

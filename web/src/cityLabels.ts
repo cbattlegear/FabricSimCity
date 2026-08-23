@@ -28,10 +28,139 @@ const PAD_X = 20
 const PAD_Y = 12
 /**
  * Height of a label in world units. Labels are size-attenuated, so they still shrink with distance;
- * this sets how large they are at a given range. Sized so a name stays readable from the default
- * framing, where a label competes with towers several times its height for attention.
+ * this sets how large they are at a given range.
+ *
+ * The previous 6.2 was measured and found illegible: at the framing the city opens on, a label
+ * projected to about 3.6 screen pixels, of which only ~70% is glyph — roughly two and a half pixels
+ * of type. It read as grit under the buildings rather than as a name. At 11 the same label lands
+ * near 16 pixels by the time the camera is close enough to be reading streets, which is about 11
+ * pixels of cap height and genuinely readable.
+ *
+ * Making labels bigger only helps if they also stop being drawn once they are too small to read;
+ * see {@link LABEL_MIN_LEGIBLE_PX}. Bigger type with no declutter would just make the wide view a
+ * denser mat of unreadable plates.
  */
-export const LABEL_WORLD_HEIGHT = 6.2
+export const LABEL_WORLD_HEIGHT = 11
+
+/**
+ * Height of the largest building labels.
+ *
+ * A basemap does not set every place name at one size: a city is lettered larger than a hamlet, so
+ * the reader sees the important names first and the rest as they zoom in. The same idea here, keyed
+ * to the height the building was already given from its measured page count.
+ *
+ * Deliberately a narrow range. Label *width* scales with height, so a name set much larger than this
+ * would sprawl across several lots and start naming the wrong ground. The point is a legible
+ * hierarchy, not a dramatic one.
+ */
+export const LABEL_WORLD_HEIGHT_MAX = 16
+
+/**
+ * The building heights the label scale is stretched between.
+ *
+ * `buildingHeight` in `cityPlan` is `log2(1 + usedPages) * 4.8`, so these are about 32 pages (a
+ * small table) and about 6,000 pages (a large one). Both ends are clamped: the scale is a coarse
+ * three-or-four-step hierarchy for reading order, and clamping keeps one enormous table from
+ * flattening every other name into the same size.
+ */
+const LABEL_SCALE_MIN_BUILDING_HEIGHT = 24
+const LABEL_SCALE_MAX_BUILDING_HEIGHT = 60
+
+/**
+ * Label height for one building, from the height that building was already given.
+ *
+ * This is a *decoration derived from a measurement*, not a measurement: it is clamped at both ends
+ * and spans well under a factor of two, so no page count can be read back off a label. Building
+ * height and footprint remain the only things that state a table's size. A building whose size was
+ * never measured gets the baseline height, so an unmeasured table is never lettered as though it
+ * were a small one.
+ */
+export function buildingLabelWorldHeight(buildingHeight: number | null): number {
+  if (buildingHeight === null || !Number.isFinite(buildingHeight) || buildingHeight <= 0) {
+    return LABEL_WORLD_HEIGHT
+  }
+  const span = LABEL_SCALE_MAX_BUILDING_HEIGHT - LABEL_SCALE_MIN_BUILDING_HEIGHT
+  const t = Math.min(1, Math.max(0, (buildingHeight - LABEL_SCALE_MIN_BUILDING_HEIGHT) / span))
+  return LABEL_WORLD_HEIGHT + (LABEL_WORLD_HEIGHT_MAX - LABEL_WORLD_HEIGHT) * t
+}
+
+/**
+ * Projected sprite height, in CSS pixels, below which a building or facility name is not drawn.
+ *
+ * A label is padded top and bottom ({@link FONT_PX} of glyph inside `FONT_PX + 2 * PAD_Y` of
+ * texture), so only about 70% of a sprite's height is actually letterform. 16 pixels of sprite is
+ * therefore around 11 pixels of cap height — the point where a name is read rather than guessed at.
+ *
+ * Below that the label is hidden outright instead of being drawn smaller. This is ordinary
+ * cartographic practice: a basemap drops street names as you zoom out rather than shrinking them
+ * into illegibility, so what survives at each scale is the tier that can still be read. Here that
+ * leaves neighbourhood names — drawn several times larger — holding the wide view on their own,
+ * with building and facility names arriving as you come down to street level.
+ */
+export const LABEL_MIN_LEGIBLE_PX = 16
+
+/**
+ * Height, in CSS pixels, that a sprite of `worldHeight` projects to under a perspective camera.
+ *
+ * Pure so the legibility threshold can be tested without a GPU: `three` applies exactly this
+ * relation for a size-attenuated sprite, since the sprite is scaled in world units and the vertical
+ * frustum span at `distance` is `2 * distance * tan(fov / 2)`.
+ *
+ * Returns 0 for degenerate input rather than `NaN`/`Infinity`, so a caller comparing against a
+ * threshold treats "cannot say" as "not legible" instead of drawing something it never measured.
+ */
+export function labelPixelHeight(
+  worldHeight: number,
+  distance: number,
+  fovDegrees: number,
+  viewportHeightPx: number,
+): number {
+  if (!(worldHeight > 0) || !(distance > 0) || !(fovDegrees > 0) || !(viewportHeightPx > 0)) return 0
+  if (fovDegrees >= 180) return 0
+  const span = 2 * distance * Math.tan((fovDegrees * Math.PI) / 360)
+  if (!(span > 0)) return 0
+  return (worldHeight / span) * viewportHeightPx
+}
+
+/**
+ * The smallest world height that still projects to {@link LABEL_MIN_LEGIBLE_PX} at this range.
+ *
+ * The inverse of {@link labelPixelHeight}, so a caller with many labels and one camera can compute
+ * a single threshold and compare each label's own height against it, instead of projecting every
+ * label separately. Returns `Infinity` for degenerate input, which hides every label rather than
+ * showing labels whose size was never established.
+ */
+export function minimumLegibleWorldHeight(
+  distance: number,
+  fovDegrees: number,
+  viewportHeightPx: number,
+  minimumPx: number = LABEL_MIN_LEGIBLE_PX,
+): number {
+  if (!(distance > 0) || !(fovDegrees > 0) || fovDegrees >= 180 || !(viewportHeightPx > 0)) {
+    return Number.POSITIVE_INFINITY
+  }
+  const span = 2 * distance * Math.tan((fovDegrees * Math.PI) / 360)
+  if (!(span > 0)) return Number.POSITIVE_INFINITY
+  return (minimumPx / viewportHeightPx) * span
+}
+
+/**
+ * Whether a label at this range is large enough to be worth drawing.
+ *
+ * Expressed in projected pixels rather than in world distance so it holds across both lenses the
+ * city is viewed through: map mode fakes a parallel projection with a 13° lens and a proportionally
+ * larger orbit distance, so a raw distance cutoff would fire at completely different apparent sizes
+ * in the two modes while this fires at the same one.
+ */
+export function isLabelLegible(
+  worldHeight: number,
+  distance: number,
+  fovDegrees: number,
+  viewportHeightPx: number,
+  minimumPx: number = LABEL_MIN_LEGIBLE_PX,
+): boolean {
+  return labelPixelHeight(worldHeight, distance, fovDegrees, viewportHeightPx) >= minimumPx
+}
 /**
  * Longest label drawn before the middle is elided. A wide texture costs both memory and legibility,
  * and the full name is always available in the evidence tables and the detail panel.

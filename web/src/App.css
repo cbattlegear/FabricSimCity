@@ -166,6 +166,13 @@
   color: #eaf2f8;
 }
 
+.sidebar-metric .load-progress {
+  margin: 0;
+  color: #8fa5b7;
+  font-size: .72rem;
+  line-height: 1.45;
+}
+
 .sidebar-title { display: flex; align-items: flex-start; gap: 10px; }
 .sidebar-title h1 { margin: 0; font-size: 1.12rem; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .sidebar-title p { margin: 3px 0 0; color: #8fa5b7; font-size: 0.73rem; }
