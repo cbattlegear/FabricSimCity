@@ -10,6 +10,7 @@ import { CONGESTION_COLORS, CONGESTION_LABELS, type RoadTraffic } from './cityTr
 import { LANE_COLORS, type FacilityTraffic } from './cityFacilityTraffic'
 import { FACILITY_LABELS, type Facility, type FacilityKind } from './cityInfrastructure'
 import type { CityRoute } from './cityRoute'
+import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import type { CityPlanOptions } from './cityPlan'
 import type { MapViewMode } from './mapStyle'
 import type { IncidentProjection } from './cityIncidents'
@@ -25,6 +26,8 @@ type Props = {
   /** Flat basemap or oblique 3D city. Both draw the same plan and the same measurements. */
   viewMode: MapViewMode
   roads: readonly RoadTraffic[]
+  /** Aggregate street load built from the workload's executions and apportioned waits. */
+  traffic: WorkloadTraffic
   facilities: readonly Facility[]
   facilityTraffic: FacilityTraffic
   route: CityRoute | null
@@ -59,6 +62,7 @@ const KEY_ACTIONS: Record<string, CameraNudge> = {
 const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
 const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string]> = [
   ['traffic', 'Traffic'],
+  ['paths', 'Query paths'],
   ['waitLanes', 'Wait lanes'],
   ['infrastructure', 'Infrastructure'],
   ['route', 'Query route'],
@@ -74,6 +78,7 @@ export function DatabaseCityViewport({
   planOptions,
   viewMode,
   roads,
+  traffic,
   facilities,
   facilityTraffic,
   route,
@@ -96,6 +101,7 @@ export function DatabaseCityViewport({
   const [popupAt, setPopupAt] = useState<{ x: number; y: number } | null>(null)
   const [layers, setLayers] = useState<CityLayerToggles>({
     traffic: true,
+    paths: false,
     waitLanes: true,
     infrastructure: true,
     route: true,
@@ -126,6 +132,7 @@ export function DatabaseCityViewport({
 
   useEffect(() => sceneRef.current?.setObjects(objects, planOptions), [objects, planOptions])
   useEffect(() => sceneRef.current?.setRoads(roads), [roads])
+  useEffect(() => sceneRef.current?.setTraffic(traffic), [traffic])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
   useEffect(
     () => sceneRef.current?.setFacilityLanes(facilityTraffic.lanes, facilityTraffic.sharedLanes),

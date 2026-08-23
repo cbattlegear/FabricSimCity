@@ -15,8 +15,10 @@ import { DatabaseCityViewport } from './DatabaseCityViewport'
 import { liveBlockingEdges, type LiveBlockingSummary } from './cityBlocking'
 import { neighborhoodSwatch, planCity, type CityPlanOptions } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
+import { assignWorkloadTraffic } from './cityWorkloadTraffic'
+import { attributedWaits, type WaitAttributionTotals } from './cityWaitAttribution'
 import { CONGESTION_LABELS, gradeRoads, type RoadTraffic } from './cityTraffic'
-import { FACILITY_LABELS, projectFacilities, type Facility } from './cityInfrastructure'
+import { FACILITY_LABELS, projectFacilities, type Facility, type FacilityKind } from './cityInfrastructure'
 import { projectFacilityTraffic, type FacilityTraffic } from './cityFacilityTraffic'
 import { AddressBook } from './AddressPanel'
 import { buildAddressBook, type AddressEntry } from './addressBook'
@@ -254,10 +256,25 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     return buildCityRoute(activePlan.showplan, {
       plan: cityPlan,
       objects: visibleObjects,
-      facilities: cityPlan.facilities,
       databaseName,
     })
   }, [activePlan, cityPlan, visibleObjects, databaseName])
+
+  /**
+   * The traffic map: every ranked family driven through the tables its plans read, once per captured
+   * execution, accumulated onto the streets. This is what the map shows standing back, in place of one
+   * ribbon per pair of tables — a picture of the workload's shape rather than of its traffic.
+   */
+  const workloadTraffic = useMemo(
+    () => assignWorkloadTraffic(cityPlan, families),
+    [cityPlan, families],
+  )
+
+  /** Measured wait time apportioned to each building by its plans' estimated cost share. */
+  const waitAttribution = useMemo(
+    () => attributedWaits(families, new Set(visibleObjects.map(object => object.objectId))),
+    [families, visibleObjects],
+  )
 
   const loadMore = () => {
     if (!page?.nextPageToken) return
@@ -535,6 +552,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
               roads={roads}
               facilities={facilities}
               facilityTraffic={facilityTraffic}
+              waitAttribution={waitAttribution}
               blocking={blocking}
               displayedSchemas={displayedSchemas}
               activePlanFamilyId={activePlan?.choice.familyId ?? null}
@@ -563,6 +581,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           planOptions={planOptions}
           viewMode={viewMode}
           roads={roads}
+          traffic={workloadTraffic}
           facilities={facilities}
           facilityTraffic={facilityTraffic}
           route={route}
@@ -608,6 +627,7 @@ function LegendDrawer({
   roads,
   facilities,
   facilityTraffic,
+  waitAttribution,
   blocking,
   displayedSchemas,
   activePlanFamilyId,
@@ -626,6 +646,7 @@ function LegendDrawer({
   roads: readonly RoadTraffic[]
   facilities: readonly Facility[]
   facilityTraffic: FacilityTraffic
+  waitAttribution: WaitAttributionTotals
   blocking: LiveBlockingSummary
   displayedSchemas: ReadonlyArray<{ schemaId: string; name: string; neighborhoodOrdinal: number; objectCount: number }>
   activePlanFamilyId: string | null
@@ -701,14 +722,33 @@ function LegendDrawer({
           boulevard and the avenues radiating from the squares — all of it comes from the seed. So do
           the T-junctions and dead ends: roughly one junction in seven is left as a cul-de-sac and
           most of the rest meet three streets rather than four, because that is the shape of a real
-          street network, not because anything about the database ended there. Even the route a link
-          takes between two buildings — and the way the busiest links fan out onto parallel streets
-          rather than stack on the one quickest road — is only traffic modelled on those invented
-          speed limits: the executions a link carries are measured, but the path chosen to show them
-          and any congestion along it are not. A big block is not a big table, a fast road is not a
-          busy one, a dead end is not a table nothing reaches, a square is not a hotspot, and two
-          buildings on the same curve have nothing to do with each other. Everything that does carry a
-          quantity is listed above.
+          street network, not because anything about the database ended there. A big block is not a
+          big table, a fast road is not a busy one, a dead end is not a table nothing reaches, a
+          square is not a hotspot, and two buildings on the same curve have nothing to do with each
+          other.
+        </p>
+
+        <p className="mapping-note">
+          <strong>The traffic is measured; the streets carrying it are not.</strong> A street&apos;s
+          width is the captured executions of every query family whose journey runs along it, and its
+          colour is the waiting those executions carried, in milliseconds per execution. Both numbers
+          come from Query Store. What is invented is the geography: SQL Server has no streets, so the
+          route each family takes between the tables it reads is modelled on those seeded speed
+          limits, and the busiest families fan out onto parallel streets rather than stacking on one
+          road. Read a red street as &ldquo;queries that touch these tables wait a lot&rdquo;, never as
+          &ldquo;this stretch of road is slow&rdquo;.
+        </p>
+
+        <p className="mapping-note">
+          <strong>Which table a wait belongs to is an estimate.</strong> Query Store measures one wait
+          total per query family and says nothing about which of the tables it read did the waiting.
+          To place that time on buildings, it is divided by the share of the compiled plan&apos;s
+          <em> estimated</em> cost each table accounts for — the optimizer&apos;s own arithmetic about
+          work it expected to do. The milliseconds are real and the division is reproducible, but it
+          is a model, not a measurement, and it is kept separate from the strict attributed exposure
+          above, which is only ever assigned when a family named one object and nothing else. Cost the
+          plan spent on tables this page does not draw, or on no table at all, is never handed to a
+          building; it is reported as unplaced.
         </p>
 
         <div className="city-schema-strip" aria-label="Neighbourhoods">
@@ -776,6 +816,8 @@ function LegendDrawer({
         </section>
 
         <FacilityTrafficTable traffic={facilityTraffic} objects={objects} />
+
+        <WaitAttributionTable totals={waitAttribution} objects={objects} />
 
         <section className="city-workload" aria-labelledby="city-workload-title">
           <div className="section-heading">
@@ -868,6 +910,67 @@ function familyMatches(family: QueryFamilySummary, term: string): boolean {
     family.familyId.toLocaleLowerCase().includes(term) ||
     family.queryHash.toLocaleLowerCase().includes(term) ||
     (family.text.normalizedText ?? '').toLocaleLowerCase().includes(term)
+  )
+}
+
+/**
+ * Where the waiting is modelled to have happened. Kept deliberately apart from the facility lanes
+ * above, which report each family's captured total whole: this table is the one place a query-level
+ * measurement is divided, and the caption says on what basis and what that costs in certainty.
+ */
+function WaitAttributionTable({
+  totals,
+  objects,
+}: {
+  totals: WaitAttributionTotals
+  objects: readonly DatabaseCityObject[]
+}) {
+  const nameOf = (objectId: string) => {
+    const object = objects.find(item => item.objectId === objectId)
+    return object ? `${object.schemaName}.${object.name}` : objectId
+  }
+  const rows = [...totals.byObject.values()]
+    .filter(entry => entry.milliseconds > 0n)
+    .sort((a, b) => (b.milliseconds === a.milliseconds
+      ? a.objectId.localeCompare(b.objectId)
+      : b.milliseconds > a.milliseconds ? 1 : -1))
+  return (
+    <section className="city-wait-attribution" aria-labelledby="city-wait-attribution-title">
+      <div className="section-heading">
+        <div>
+          <h2 id="city-wait-attribution-title">Waiting placed on buildings — modelled</h2>
+          <p>Measured Query Store wait time divided by each table&apos;s estimated plan cost share</p>
+        </div>
+      </div>
+      <p className="hud-note">{totals.note}</p>
+      {rows.length > 0 && <div className="table-scroll"><table>
+        <caption>
+          Every millisecond below was measured, but the decision to put it on <em>this</em> building
+          rather than another the same query read is the optimizer&apos;s cost estimate, not an
+          observation. Treat the ordering as a strong hint about where to look and the exact figures
+          as approximate. These numbers are not part of attributed exposure and must not be added to
+          it.
+        </caption>
+        <thead><tr>
+          <th>Building</th><th>Apportioned wait (ms)</th><th>Query families</th>
+        </tr></thead>
+        <tbody>{rows.map(entry => <tr key={entry.objectId}>
+          <th scope="row">{nameOf(entry.objectId)}</th>
+          <td>{entry.milliseconds.toLocaleString()}</td>
+          <td>{entry.familyIds.join(' · ')}</td>
+        </tr>)}</tbody>
+      </table></div>}
+      {totals.unattributed > 0n && <div className="source-note">
+        <strong>Wait time no building was given</strong>
+        <p>
+          {totals.unattributed.toLocaleString()} ms of the {totals.measured.toLocaleString()} ms
+          measured across these families sat on plan operators that name no table on this page —
+          off-page or cross-database reads, sorts, aggregates and other pure computation, or plans
+          that reported no cost at all. It is reported here rather than pushed onto whichever
+          building happened to be nearby.
+        </p>
+      </div>}
+    </section>
   )
 }
 
@@ -970,6 +1073,21 @@ function FacilityTrafficTable({
   )
 }
 
+function formatShare(share: number): string {
+  if (!Number.isFinite(share) || share <= 0) return '—'
+  const percent = share * 100
+  return percent < 0.1 ? '<0.1%' : `${percent.toFixed(percent < 10 ? 1 : 0)}%`
+}
+
+const RESOURCE_TAGS: Readonly<Record<FacilityKind, string>> = {
+  cpu: 'CPU',
+  memory: 'memory grant',
+  storage: 'I/O',
+  tempdb: 'tempdb',
+  log: 'log',
+  lock: 'locks',
+}
+
 function RoutePanel({
   route,
   plan,
@@ -979,39 +1097,78 @@ function RoutePanel({
   plan: { choice: PlanChoice; showplan: NormalizedShowplan }
   onClear: () => void
 }) {
+  const placed = route.stops.length - route.offMapStops.length
   return (
     <aside className="hud-slideover" aria-labelledby="city-route-title">
       <div className="detail-title">
-        <h2 id="city-route-title">Route through the city</h2>
+        <h2 id="city-route-title">This query&rsquo;s route</h2>
         <button type="button" onClick={onClear}>Clear</button>
       </div>
       <p className="hud-note">
-        Plan {plan.choice.planId} · {route.stops.length - route.offMapStops.length} of {route.stops.length} stops
-        placed on this map
+        Plan {plan.choice.planId} · {placed} of {route.stops.length} table
+        {route.stops.length === 1 ? '' : 's'} placed on this map
         {route.offMapStops.length > 0 ? ` · ${route.offMapStops.length} off-map` : ''}
       </p>
       <ol className="route-directions">
         {route.stops.map(stop => (
           <li key={stop.ordinal} className={`stop-${stop.kind}`}>
-            <strong>{stop.physicalOperation}</strong>
-            <span>{stop.label}</span>
-            <small>{stop.instruction}</small>
+            <strong>
+              <span className="route-stop-ordinal" aria-hidden="true">{stop.ordinal}</span>
+              {stop.label}
+            </strong>
+            <span className="route-stop-share">
+              {formatShare(stop.estimatedCostShare)} of estimated plan cost
+            </span>
+            {stop.kind === 'offmap' && (
+              <small className="is-warning">
+                Not on this map — {stop.unresolvedReason ?? 'this object is outside the loaded page'}
+              </small>
+            )}
+            <ul className="route-stop-ops">
+              {stop.operations.map(operation => (
+                <li key={operation.nodeId} className={operation.readsHere ? 'reads-here' : undefined}>
+                  <code>{operation.physicalOperation}</code>
+                  <span className="route-op-resource">{RESOURCE_TAGS[operation.resource]}</span>
+                  <small>{operation.instruction}</small>
+                </li>
+              ))}
+            </ul>
             {stop.warnings.length > 0 && <small className="is-warning">⚠ {stop.warnings.join(' · ')}</small>}
           </li>
         ))}
       </ol>
-      {route.offMapStops.length > 0 && (
+      {route.unplacedOperations.length > 0 && (
         <div className="source-note">
-          <strong>Off-map stops</strong>
+          <strong>Belongs to no table</strong>
           <ul>
-            {route.offMapStops.map(stop => (
-              <li key={stop.ordinal}>
-                {stop.physicalOperation} — {stop.unresolvedReason ?? stop.instruction}
-              </li>
+            {route.unplacedOperations.map(operation => (
+              <li key={operation.nodeId}>{operation.instruction}</li>
             ))}
           </ul>
         </div>
       )}
+      {route.offMapStops.length > 0 && (
+        <div className="source-note">
+          <strong>{route.offMapStops.length} stop{route.offMapStops.length === 1 ? '' : 's'} could
+            not be drawn</strong>
+          <p>
+            The itinerary above lists them in place so the sequence stays whole, but the line on the
+            map skips them: it joins the stops either side, which is shorter than the journey the
+            query actually makes.
+          </p>
+        </div>
+      )}
+      <div className="source-note">
+        <strong>The stops are where the tables are; the split between them is estimated</strong>
+        <p>
+          A query does not drive to a wait facility, so this route stops only at tables. Every operator
+          still appears, listed at the table whose rows it worked on, and the share beside each stop is
+          the optimizer&rsquo;s estimated cost — what it expected to do, not what it measured.
+          {route.estimatedCostUnattributed > 0.001
+            ? ` ${formatShare(route.estimatedCostUnattributed)} of the estimate reached no building on this map.`
+            : ''}
+        </p>
+      </div>
       <div className="source-note">
         <strong>Compiled plan shape only</strong>
         <p>{route.runtimeOverlayCaveat}</p>

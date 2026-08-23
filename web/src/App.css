@@ -429,14 +429,34 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .hud-slideover dl > div { display: flex; gap: 10px; justify-content: space-between; border-bottom: 1px solid #1f2c38; padding-bottom: 5px; }
 .hud-slideover dt { color: #93a8ba; font-size: .68rem; }
 .hud-slideover dd { margin: 0; color: #e2eaf0; font: .7rem ui-monospace, Consolas, monospace; text-align: right; }
-.route-directions { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
-.route-directions li { display: grid; gap: 2px; }
-.route-directions strong { color: #8be7ce; font-size: .74rem; }
+.route-directions { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.route-directions li { display: grid; gap: 3px; }
+.route-directions strong { display: flex; gap: 8px; align-items: baseline; color: #8be7ce; font-size: .74rem; }
 .route-directions span { color: #e2eaf0; font-size: .7rem; }
 .route-directions small { color: #93a8ba; font-size: .66rem; line-height: 1.45; }
 .route-directions small.is-warning { color: #efc16e; }
-.route-directions li.stop-facility strong { color: #efc16e; }
 .route-directions li.stop-offmap strong { color: #f2b3ad; }
+
+/* The ordinal is drawn rather than left to the list marker: off-map stops keep their place in the
+   sequence, so the number has to be the route's, not the browser's running count. */
+.route-stop-ordinal {
+  flex: none; width: 17px; height: 17px; display: grid; place-content: center;
+  border: 1px solid #3b4b5b; border-radius: 50%; background: #14202c;
+  color: #93a8ba; font: .62rem/1 ui-monospace, Consolas, monospace;
+}
+.stop-offmap .route-stop-ordinal { border-style: dashed; border-color: #7a3b34; color: #d99b93; }
+.route-stop-share { color: #93a8ba !important; font: .64rem ui-monospace, Consolas, monospace; }
+
+.route-stop-ops { list-style: none; margin: 4px 0 0 8px; padding: 0 0 0 9px; border-left: 1px solid #253340; display: grid; gap: 5px; }
+.route-stop-ops li { display: grid; grid-template-columns: auto auto; gap: 3px 7px; justify-content: start; align-items: baseline; }
+.route-stop-ops code { color: #dbe5ed; font-size: .67rem; }
+.route-stop-ops small { grid-column: 1 / -1; }
+.route-stop-ops li.reads-here code { color: #8be7ce; }
+.route-op-resource { color: #a9b9c7 !important; font: .58rem ui-monospace, Consolas, monospace; letter-spacing: .05em; text-transform: uppercase; padding: 1px 5px; border: 1px solid #2f3f4e; border-radius: 9px; }
+
+.city-wait-attribution { margin-top: 24px; }
+.city-wait-attribution .hud-note { padding: 0 20px; }
+.city-wait-attribution .source-note { margin: 0 20px 14px; }
 
 .evidence-tables { margin-top: 24px; border: 1px solid #293847; background: #0b121a; }
 .evidence-tables > summary { padding: 13px 18px; color: #dbe5ed; font: .78rem/1 ui-monospace, Consolas, monospace; letter-spacing: .06em; cursor: pointer; }

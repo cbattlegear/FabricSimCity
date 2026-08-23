@@ -101,7 +101,6 @@ function context(overrides: Partial<RouteContext> = {}): RouteContext {
   return {
     plan,
     objects,
-    facilities: plan.facilities,
     databaseName: 'sales',
     ...overrides,
   }
@@ -176,28 +175,28 @@ describe('unquote and matchObject', () => {
 })
 
 describe('facilityForOperator', () => {
-  it('sends memory-granting operators to the Memory Grant Office', () => {
+  it('marks memory-granting operators as leaning on the Memory Grant Office', () => {
     expect(facilityForOperator(node({ nodeId: 1, physicalOperation: 'Sort' }))).toBe('memory')
     expect(facilityForOperator(node({ nodeId: 1, physicalOperation: 'Hash Match' }))).toBe('memory')
   })
 
-  it('sends spools to tempdb Works', () => {
+  it('marks spools as leaning on tempdb Works', () => {
     expect(facilityForOperator(node({ nodeId: 1, physicalOperation: 'Table Spool' }))).toBe('tempdb')
   })
 
-  it('sends I/O-costed operators to the Storage & I/O Depot', () => {
+  it('marks I/O-costed operators as leaning on the Storage & I/O Depot', () => {
     expect(
       facilityForOperator(node({ nodeId: 1, physicalOperation: 'Remote Scan', estimatedIoCost: 0.5 })),
     ).toBe('storage')
   })
 
-  it('sends pure compute to the CPU Scheduler Yard', () => {
+  it('marks pure compute as leaning on the CPU Scheduler Yard', () => {
     expect(facilityForOperator(node({ nodeId: 1, physicalOperation: 'Compute Scalar' }))).toBe('cpu')
   })
 })
 
 describe('planStops', () => {
-  it('emits exactly one stop per operator, numbered from one', () => {
+  it('stops at every table the plan reads, and at nothing else', () => {
     const stops = planStops(
       showplan([
         node({ nodeId: 0, physicalOperation: 'Hash Match', parentNodeId: null }),
@@ -216,9 +215,73 @@ describe('planStops', () => {
       ]),
       context(),
     )
-    expect(stops).toHaveLength(3)
-    expect(stops.map(s => s.ordinal)).toEqual([1, 2, 3])
-    expect(stops.map(s => s.nodeId)).toEqual([1, 2, 0])
+    expect(stops).toHaveLength(2)
+    expect(stops.map(s => s.ordinal)).toEqual([1, 2])
+    expect(stops.map(s => s.objectId)).toEqual(['object:dbo:1', 'object:dbo:2'])
+    for (const stop of stops) expect(stop.kind).toBe('building')
+  })
+
+  it('drops no operator: a join is listed at the table it drew from', () => {
+    const route = buildCityRoute(
+      showplan([
+        node({ nodeId: 0, physicalOperation: 'Hash Match', estimatedCpuCost: 4, estimatedIoCost: 0 }),
+        node({
+          nodeId: 1,
+          parentNodeId: 0,
+          physicalOperation: 'Clustered Index Seek',
+          estimatedCpuCost: 9,
+          estimatedIoCost: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+        }),
+        node({
+          nodeId: 2,
+          parentNodeId: 0,
+          physicalOperation: 'Index Scan',
+          estimatedCpuCost: 1,
+          estimatedIoCost: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[OrderHeader]', index: null },
+        }),
+      ]),
+      context(),
+    )
+    const listed = route.stops.flatMap(stop => stop.operations.map(op => op.nodeId))
+    expect(listed.concat(route.unplacedOperations.map(op => op.nodeId)).sort()).toEqual([0, 1, 2])
+    // The join folds onto the heavier of its two inputs rather than becoming a place of its own.
+    const customer = route.stops.find(stop => stop.objectId === 'object:dbo:1')!
+    expect(customer.operations.map(op => op.physicalOperation)).toContain('Hash Match')
+  })
+
+  it('never emits a facility stop, so the route does not detour to the CPU yard', () => {
+    const route = buildCityRoute(
+      showplan([
+        node({ nodeId: 0, physicalOperation: 'Sort' }),
+        node({
+          nodeId: 1,
+          parentNodeId: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+        }),
+      ]),
+      context(),
+    )
+    for (const stop of route.stops) expect(['building', 'offmap']).toContain(stop.kind)
+    expect(route.stops.every(stop => stop.objectId !== null || stop.kind === 'offmap')).toBe(true)
+  })
+
+  it('records the resource an operator leans on without giving it a place', () => {
+    const route = buildCityRoute(
+      showplan([
+        node({ nodeId: 0, physicalOperation: 'Sort' }),
+        node({
+          nodeId: 1,
+          parentNodeId: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+        }),
+      ]),
+      context(),
+    )
+    const sort = route.stops[0].operations.find(op => op.physicalOperation === 'Sort')!
+    expect(sort.resource).toBe('memory')
+    expect(sort.readsHere).toBe(false)
   })
 
   it('places a matched object at its building access point and names the index', () => {
@@ -237,12 +300,36 @@ describe('planStops', () => {
     const lot = ctx.plan.lots.get('object:dbo:1')
     expect(stop.kind).toBe('building')
     expect(stop.objectId).toBe('object:dbo:1')
-    expect(stop.indexName).toBe('PK_Customer')
+    expect(stop.indexNames).toEqual(['PK_Customer'])
     expect(stop.x).toBe(lot?.accessX)
     expect(stop.z).toBe(lot?.accessZ)
     expect(stop.instruction).toContain('dbo.Customer')
     expect(stop.instruction).toContain('PK_Customer')
-    expect(stop.instruction).toContain('100')
+    expect(stop.operations[0].instruction).toContain('100')
+  })
+
+  it('merges two reads of one table into a single stop', () => {
+    const stops = planStops(
+      showplan([
+        node({ nodeId: 0, physicalOperation: 'Nested Loops' }),
+        node({
+          nodeId: 1,
+          parentNodeId: 0,
+          physicalOperation: 'Index Seek',
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: '[IX_A]' },
+        }),
+        node({
+          nodeId: 2,
+          parentNodeId: 0,
+          physicalOperation: 'Key Lookup',
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: '[PK_Customer]' },
+        }),
+      ]),
+      context(),
+    )
+    expect(stops).toHaveLength(1)
+    expect(stops[0].indexNames).toEqual(['IX_A', 'PK_Customer'])
+    expect(stops[0].operations).toHaveLength(3)
   })
 
   it('reports an unmatched reference as an off-map stop with a reason, never dropping it', () => {
@@ -276,34 +363,118 @@ describe('planStops', () => {
     expect(stop.unresolvedReason).toContain('not in the currently loaded page')
   })
 
-  it('carries the plan-level memory grant onto the Memory Grant Office stop', () => {
-    const [stop] = planStops(
-      showplan([node({ nodeId: 0, physicalOperation: 'Sort' })], { serialDesiredMemoryKiB: 4096 }),
+  it('carries the plan-level memory grant onto the operation that wanted it', () => {
+    const route = buildCityRoute(
+      showplan(
+        [
+          node({ nodeId: 0, physicalOperation: 'Sort' }),
+          node({
+            nodeId: 1,
+            parentNodeId: 0,
+            objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+          }),
+        ],
+        { serialDesiredMemoryKiB: 4096 },
+      ),
       context(),
     )
-    expect(stop.facility).toBe('memory')
-    expect(stop.instruction).toContain('4,096 KiB')
+    const sort = route.stops[0].operations.find(op => op.physicalOperation === 'Sort')!
+    expect(sort.instruction).toContain('4,096 KiB')
   })
 
   it('says the grant is unreported rather than inventing a number', () => {
-    const [stop] = planStops(
-      showplan([node({ nodeId: 0, physicalOperation: 'Sort' })], { serialDesiredMemoryKiB: null }),
+    const route = buildCityRoute(
+      showplan(
+        [
+          node({ nodeId: 0, physicalOperation: 'Sort' }),
+          node({
+            nodeId: 1,
+            parentNodeId: 0,
+            objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+          }),
+        ],
+        { serialDesiredMemoryKiB: null },
+      ),
       context(),
     )
-    expect(stop.instruction).toContain('unreported')
+    const sort = route.stops[0].operations.find(op => op.physicalOperation === 'Sort')!
+    expect(sort.instruction).toContain('unreported')
   })
 
-  it('surfaces operator warnings', () => {
+  it('lists an operator belonging to no table rather than dropping or placing it', () => {
+    const route = buildCityRoute(
+      showplan([node({ nodeId: 0, physicalOperation: 'Compute Scalar' })]),
+      context(),
+    )
+    expect(route.stops).toHaveLength(0)
+    expect(route.unplacedOperations.map(op => op.nodeId)).toEqual([0])
+  })
+
+  it('surfaces operator warnings on the stop the operator belongs to', () => {
     const [stop] = planStops(
       showplan([
+        node({ nodeId: 0, physicalOperation: 'Sort' }),
         node({
-          nodeId: 0,
+          nodeId: 1,
+          parentNodeId: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
           warnings: [{ kind: 'SpillToTempDb', detail: 'level 2' }, { kind: 'NoJoinPredicate', detail: null }],
         }),
       ]),
       context(),
     )
     expect(stop.warnings).toEqual(['SpillToTempDb: level 2', 'NoJoinPredicate'])
+  })
+
+  it('splits the estimated cost across its stops without exceeding the whole', () => {
+    const route = buildCityRoute(
+      showplan([
+        node({ nodeId: 0, physicalOperation: 'Hash Match', estimatedCpuCost: 2, estimatedIoCost: 0 }),
+        node({
+          nodeId: 1,
+          parentNodeId: 0,
+          estimatedCpuCost: 6,
+          estimatedIoCost: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+        }),
+        node({
+          nodeId: 2,
+          parentNodeId: 0,
+          estimatedCpuCost: 2,
+          estimatedIoCost: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[OrderHeader]', index: null },
+        }),
+      ]),
+      context(),
+    )
+    const total = route.stops.reduce((sum, stop) => sum + stop.estimatedCostShare, 0)
+    expect(total).toBeCloseTo(1, 6)
+    expect(route.estimatedCostUnattributed).toBeCloseTo(0, 6)
+    expect(route.stops.find(s => s.objectId === 'object:dbo:1')!.estimatedCostShare).toBeCloseTo(0.75, 6)
+  })
+
+  it('reports the estimated cost that reached no building on this map', () => {
+    const route = buildCityRoute(
+      showplan([
+        node({ nodeId: 0, physicalOperation: 'Concatenation', estimatedCpuCost: 0, estimatedIoCost: 0 }),
+        node({
+          nodeId: 1,
+          parentNodeId: 0,
+          estimatedCpuCost: 5,
+          estimatedIoCost: 0,
+          objectReference: { database: null, schema: '[dbo]', table: '[Customer]', index: null },
+        }),
+        node({
+          nodeId: 2,
+          parentNodeId: 0,
+          estimatedCpuCost: 5,
+          estimatedIoCost: 0,
+          objectReference: { database: '[warehouse]', schema: '[dbo]', table: '[Fact]', index: null },
+        }),
+      ]),
+      context(),
+    )
+    expect(route.estimatedCostUnattributed).toBeCloseTo(0.5, 6)
   })
 })
 
