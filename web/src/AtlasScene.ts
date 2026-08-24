@@ -1,13 +1,26 @@
 import * as THREE from 'three'
 import { isFreshLive } from './atlas'
 import { CityActivation } from './atlasActivation'
-import { cityGeometrySignature, planAtlasCity, type AtlasCityPlan } from './atlasCity'
+import {
+  cityGeometrySignature,
+  planAtlasCity,
+  regionalRoadPath,
+  type AtlasCityPlan,
+  type AtlasPoint,
+} from './atlasCity'
 import { buildAtlasCityGeometry, PAD_HEIGHT, type AtlasCityGeometry } from './atlasCityBuildings'
 import { fitDistance, MAP_VIEW_DIRECTION, MIN_FRAME_EXTENT, VIEW_DIRECTION } from './atlasFraming'
 import { AtlasLayoutReservations, stableHash } from './atlasLayout'
+import {
+  planAtlasTerrain,
+  RIVER_BANK_WIDTH,
+  RIVER_WIDTH,
+  type AtlasTerrain,
+} from './atlasTerrain'
 import { createCityLabels, databaseLabelText, labelAnchor, type CityLabels } from './cityLabels'
 import type { AtlasSnapshot, DatabaseAtlasItem, EdgeConfidence } from './contracts'
-import { MAP_PALETTE, type MapViewMode } from './mapStyle'
+import { polygonPositions, ribbonPositions } from './mapRibbon'
+import { LANDUSE_CITY_COLORS, LANDUSE_MAP_COLORS, MAP_PALETTE, type MapViewMode } from './mapStyle'
 
 /**
  * The server atlas: one small city per database on a shared grid.
@@ -32,6 +45,20 @@ export const ATLAS_LABEL_WORLD_HEIGHT = 11
 
 /** Gap between a city's plot edge and its label plate. */
 const LABEL_KERB = 7
+
+/** Painted width of a regional road, and of the casing under it. Confidence is what these encode. */
+const HIGHWAY_FILL_WIDTH = 3.4
+const HIGHWAY_CASING_WIDTH = 5.4
+
+/**
+ * The dusk beyond the last town.
+ *
+ * Both the clear colour and the fog colour in 3D, which is the whole trick: with the two matched, the
+ * landscape fades into the sky at the horizon instead of ending at a hard edge with a void behind it.
+ * The database city one level down already sits under a dusk sky, and an atlas lit differently from
+ * the city it zooms into is two drawings rather than two altitudes over one place.
+ */
+const ATLAS_SKY = 0x2b3a45
 
 type AtlasSceneCallbacks = {
   onHover: (databaseId: string | null) => void
@@ -78,7 +105,10 @@ export class AtlasScene {
   private readonly frameExtents = new THREE.Vector3(MIN_FRAME_EXTENT, MIN_FRAME_EXTENT, MIN_FRAME_EXTENT)
   private readonly nightLights: THREE.Object3D[]
   private readonly ambientLight: THREE.AmbientLight
-  private readonly grid: THREE.GridHelper
+  /** The fixed regional landscape. Seeded once, never refitted, and never derived from a measurement. */
+  private readonly terrainPlan: AtlasTerrain = planAtlasTerrain()
+  private terrain: THREE.Group | null = null
+  private readonly terrainDisposables: Array<THREE.BufferGeometry | THREE.Material> = []
 
   constructor(canvas: HTMLCanvasElement, callbacks: AtlasSceneCallbacks) {
     this.canvas = canvas
@@ -86,12 +116,18 @@ export class AtlasScene {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
-    this.renderer.setClearColor(0x080c12, 1)
+    this.renderer.setClearColor(ATLAS_SKY, 1)
     this.frameCenter.set(0, 0, 0)
 
-    this.scene.add(new THREE.HemisphereLight(0xc9e9ff, 0x17202a, 1.7))
-    const key = new THREE.DirectionalLight(0xfff4d4, 2.8)
-    key.position.set(-80, 160, 100)
+    /*
+     * Golden hour, the same hour the database city stands in. A warm low key light against a cool sky
+     * fill is what gives a skyline a lit face and a shaded one; lit flat, a town is a grey mass and
+     * the whole point of the 3D view -- that you can see the shape of a place -- is lost.
+     */
+    this.scene.fog = new THREE.Fog(ATLAS_SKY, 520, 1150)
+    this.scene.add(new THREE.HemisphereLight(0xa8cbe4, 0x35392a, 1.05))
+    const key = new THREE.DirectionalLight(0xffd39a, 3.1)
+    key.position.set(-160, 130, 120)
     this.scene.add(key)
     this.nightLights = [this.scene.children[0], key]
     // Intensity π, not 1: three.js resolves ambient light through the Lambert BRDF, which divides by
@@ -101,9 +137,7 @@ export class AtlasScene {
     this.ambientLight.visible = false
     this.scene.add(this.ambientLight)
 
-    this.grid = new THREE.GridHelper(1240, 62, 0x38516a, 0x1a2735)
-    this.grid.position.y = -0.2
-    this.scene.add(this.grid)
+    this.buildTerrain()
 
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(canvas)
@@ -120,6 +154,7 @@ export class AtlasScene {
     this.clearAtlasObjects()
     this.contentBounds.makeEmpty()
     const centers = new Map<string, THREE.Vector3>()
+    const plans = new Map<string, AtlasCityPlan>()
     const liveSignatures = new Set<string>()
 
     const layout = this.layout.place(snapshot.databases.map(database => database.databaseId))
@@ -128,7 +163,9 @@ export class AtlasScene {
       if (!position) continue
       const center = new THREE.Vector3(position.x, 0, position.z)
       centers.set(database.databaseId, center)
-      liveSignatures.add(this.addDatabase(database, center, snapshot.generatedAt))
+      const placed = this.addDatabase(database, center, snapshot.generatedAt)
+      plans.set(database.databaseId, placed.plan)
+      liveSignatures.add(placed.signature)
     }
 
     for (const [signature, geometry] of this.geometryCache) {
@@ -140,7 +177,15 @@ export class AtlasScene {
     for (const edge of snapshot.edges) {
       const from = centers.get(edge.fromDatabaseId)
       const to = centers.get(edge.toDatabaseId)
-      if (from && to) this.addEdge(from, to, edge.confidence)
+      if (!from || !to) continue
+      this.addEdge(
+        from,
+        to,
+        plans.get(edge.fromDatabaseId),
+        plans.get(edge.toDatabaseId),
+        edge.confidence,
+        `${edge.fromDatabaseId}->${edge.toDatabaseId}`,
+      )
     }
 
     this.frameContent()
@@ -169,14 +214,94 @@ export class AtlasScene {
     if (mode === this.viewMode) return
     this.viewMode = mode
     const flat = mode === 'map'
-    this.renderer.setClearColor(flat ? MAP_PALETTE.ground : 0x080c12, 1)
+    this.renderer.setClearColor(flat ? MAP_PALETTE.ground : ATLAS_SKY, 1)
     for (const light of this.nightLights) light.visible = !flat
     this.ambientLight.visible = flat
-    this.grid.visible = !flat
+    // Fog is what stops the far edge of the landscape reading as a cliff into empty space. The flat
+    // drawing is a printed sheet seen straight down, and a printed sheet has no haze.
+    this.scene.fog = flat ? null : new THREE.Fog(ATLAS_SKY, 520, 1150)
+    this.buildTerrain()
     if (this.lastSnapshot) this.setSnapshot(this.lastSnapshot)
     else this.placeCamera()
     this.setSelected(this.lastSelectedId)
     this.render()
+  }
+
+  /**
+   * Draws the regional landscape for the current view mode: ground, water, woodland, and the river.
+   *
+   * Rebuilt on a mode switch rather than recoloured, for the same reason the cities are: the atlas
+   * holds one landscape, a rebuild is a handful of buffers, and a material indirection would be more
+   * code to say less. Kept entirely outside the per-snapshot object list, because the ground does not
+   * change when a database does.
+   */
+  private buildTerrain(): void {
+    if (this.terrain) {
+      this.scene.remove(this.terrain)
+      for (const disposable of this.terrainDisposables) disposable.dispose()
+      this.terrainDisposables.length = 0
+      this.terrain = null
+    }
+
+    const flat = this.viewMode === 'map'
+    const cover = flat ? LANDUSE_MAP_COLORS : LANDUSE_CITY_COLORS
+    const group = new THREE.Group()
+
+    const addFlatMesh = (positions: number[], color: number, opacity = 1): void => {
+      if (positions.length === 0) return
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+      const material = new THREE.MeshBasicMaterial({
+        color,
+        transparent: opacity < 1,
+        opacity,
+        depthWrite: false,
+        // Double-sided because the winding of a fan-triangulated blob depends on which way its
+        // outline happened to be wound, and a silently back-face-culled landscape is a blank sheet.
+        side: THREE.DoubleSide,
+      })
+      this.terrainDisposables.push(geometry, material)
+      group.add(new THREE.Mesh(geometry, material))
+    }
+
+    const reach = this.terrainPlan.extent * 1.35
+    const ground = new THREE.PlaneGeometry(reach * 2, reach * 2)
+    ground.rotateX(-Math.PI / 2)
+    ground.translate(0, -0.6, 0)
+    const groundMaterial = new THREE.MeshBasicMaterial({
+      color: flat ? MAP_PALETTE.ground : 0x5c6a49,
+    })
+    this.terrainDisposables.push(ground, groundMaterial)
+    group.add(new THREE.Mesh(ground, groundMaterial))
+
+    // One buffer per cover class, not one per patch: a hundred blobs is a hundred draw calls
+    // otherwise, and the atlas already has cities to spend its budget on.
+    const byKind = new Map<string, number[]>()
+    const waterRim: number[] = []
+    for (const patch of this.terrainPlan.patches) {
+      const positions = byKind.get(patch.kind) ?? []
+      polygonPositions(patch.points, -0.45, positions)
+      byKind.set(patch.kind, positions)
+      // A darker rim is what makes a lake read as a lake rather than as a blue smear — the same
+      // treatment the river bank gets, and the same one the database city gives its water.
+      if (patch.kind === 'water') polygonPositions(expand(patch.points, 1.07), -0.5, waterRim)
+    }
+    addFlatMesh(waterRim, flat ? MAP_PALETTE.waterEdge : 0x2b6580)
+    for (const [kind, positions] of byKind) {
+      addFlatMesh(positions, cover[kind as keyof typeof cover] ?? cover.park, flat ? 1 : 0.95)
+    }
+
+    addFlatMesh(
+      ribbonPositions(this.terrainPlan.river, RIVER_BANK_WIDTH, null, 0, [], -0.3),
+      flat ? MAP_PALETTE.waterEdge : 0x2b6580,
+    )
+    addFlatMesh(
+      ribbonPositions(this.terrainPlan.river, RIVER_WIDTH, null, 0, [], -0.15),
+      cover.water,
+    )
+
+    this.terrain = group
+    this.scene.add(group)
   }
 
   dispose(): void {
@@ -190,12 +315,18 @@ export class AtlasScene {
     this.clearAtlasObjects()
     for (const geometry of this.geometryCache.values()) disposeCityGeometry(geometry)
     this.geometryCache.clear()
+    for (const disposable of this.terrainDisposables) disposable.dispose()
+    this.terrainDisposables.length = 0
     this.labels.dispose()
     this.renderer.dispose()
   }
 
-  /** Places one database's city and returns the cache signature its geometry was built under. */
-  private addDatabase(database: DatabaseAtlasItem, center: THREE.Vector3, generatedAt: string): string {
+  /** Places one database's city and returns its plan plus the cache signature its geometry was built under. */
+  private addDatabase(
+    database: DatabaseAtlasItem,
+    center: THREE.Vector3,
+    generatedAt: string,
+  ): { plan: AtlasCityPlan; signature: string } {
     const plan = planAtlasCity(database)
     const signature = cityGeometrySignature(plan)
     let geometry = this.geometryCache.get(signature)
@@ -249,17 +380,24 @@ export class AtlasScene {
       this.addCityMesh(geometry.trim, trimMaterial, center, database.databaseId, false)
     }
 
-    if (geometry.streets) {
-      const streetMaterial = new THREE.LineBasicMaterial({
-        color: flat ? MAP_PALETTE.roadCasing : 0x8fb4d4,
-        transparent: true,
-        opacity: flat ? 0.9 : 0.42,
-      })
-      const streets = new THREE.LineSegments(geometry.streets, streetMaterial)
-      streets.position.copy(center)
-      streets.userData.atlasObject = true
-      this.disposables.push(streetMaterial)
-      this.scene.add(streets)
+    if (geometry.streetCasing || geometry.streetFill) {
+      const flatStreets = this.viewMode === 'map'
+      const layers: Array<[THREE.BufferGeometry | null, number]> = [
+        [geometry.streetCasing, flat ? MAP_PALETTE.roadCasing : 0x2c3a46],
+        [geometry.streetFill, flat ? MAP_PALETTE.roadFill : 0x8ea6ba],
+      ]
+      for (const [streetGeometry, color] of layers) {
+        if (!streetGeometry) continue
+        const material = new THREE.MeshBasicMaterial({ color })
+        const mesh = new THREE.Mesh(streetGeometry, material)
+        mesh.position.copy(center)
+        // Squashed with the buildings in the flat drawing, so roads stay under the massing rather
+        // than floating over it in a straight-down view.
+        if (flatStreets) mesh.scale.y = 0.02
+        mesh.userData.atlasObject = true
+        this.disposables.push(material)
+        this.scene.add(mesh)
+      }
     }
 
     this.cityMaterials.set(database.databaseId, materials)
@@ -270,7 +408,7 @@ export class AtlasScene {
     if (isFreshLive(database, generatedAt)) {
       this.addBeacon(center, PAD_HEIGHT + (plan.towerHeight ?? 0), database.databaseId)
     }
-    return signature
+    return { plan, signature }
   }
 
   private addCityMesh(
@@ -298,7 +436,8 @@ export class AtlasScene {
   private addLabel(database: DatabaseAtlasItem, plan: AtlasCityPlan, center: THREE.Vector3): void {
     const sprite = this.labels.make(databaseLabelText(database.name))
     if (!sprite) return
-    const anchor = labelAnchor(center.x, center.z, center.x, center.z + 1, plan.side / 2 + LABEL_KERB)
+    const reach = (plan.sizeKnown ? plan.radius.max : plan.side / 2) + LABEL_KERB
+    const anchor = labelAnchor(center.x, center.z, center.x, center.z + 1, reach)
     sprite.position.set(anchor.x, PAD_HEIGHT + ATLAS_LABEL_WORLD_HEIGHT / 2, anchor.z)
     sprite.userData.atlasObject = true
     this.scene.add(sprite)
@@ -337,23 +476,57 @@ export class AtlasScene {
     this.beacons.push({ mesh: beacon, phase: (stableHash(databaseId) % 1000) / 100 })
   }
 
-  private addEdge(from: THREE.Vector3, to: THREE.Vector3, confidence: EdgeConfidence): void {
-    const points = [from.clone().setY(PAD_HEIGHT + 0.4), to.clone().setY(PAD_HEIGHT + 0.4)]
-    const geometry = new THREE.BufferGeometry().setFromPoints(points)
-    const material = confidence === 'Confirmed'
-      ? new THREE.LineBasicMaterial({ color: 0xe8edf2, transparent: true, opacity: 0.8 })
-      : new THREE.LineDashedMaterial({
-          color: confidence === 'Probable' ? 0xffc96b : 0x9aa7b4,
-          dashSize: confidence === 'Probable' ? 8 : 1.5,
-          gapSize: confidence === 'Probable' ? 5 : 7,
-          transparent: true,
-          opacity: 0.9,
-        })
-    const line = new THREE.Line(geometry, material)
-    line.computeLineDistances()
-    line.userData.atlasObject = true
-    this.disposables.push(geometry, material)
-    this.scene.add(line)
+  /**
+   * Draws the road between two databases that reference each other.
+   *
+   * Was a one-pixel straight line between two town centres, which is a node-and-edge diagram: it ran
+   * *through* both towns and arrived nowhere in particular. It is now a road — a bowed centreline
+   * between the two towns' nearest gateways, drawn as a casing and a fill exactly like every other
+   * road on either surface, ending where a street begins.
+   *
+   * The measurement is untouched: confidence is still the only thing encoded, still by the same three
+   * treatments, and the bow is seeded from the pair of database ids so a given reference draws the
+   * same road every time.
+   */
+  private addEdge(
+    from: THREE.Vector3,
+    to: THREE.Vector3,
+    fromPlan: AtlasCityPlan | undefined,
+    toPlan: AtlasCityPlan | undefined,
+    confidence: EdgeConfidence,
+    seedKey: string,
+  ): void {
+    const points = regionalRoadPath(from, fromPlan, to, toPlan, seedKey)
+    if (points.length < 2) return
+
+    const flat = this.viewMode === 'map'
+    const dash =
+      confidence === 'Confirmed' ? null : confidence === 'Probable' ? { on: 11, off: 6 } : { on: 4, off: 9 }
+    const fill =
+      confidence === 'Confirmed'
+        ? (flat ? MAP_PALETTE.arterialFill : 0xe8edf2)
+        : confidence === 'Probable'
+          ? 0xf0b44e
+          : 0x9aa7b4
+    const casing = flat ? MAP_PALETTE.arterialCasing : 0x1b2530
+    const y = PAD_HEIGHT * (flat ? 0.02 : 1) - 0.05
+
+    // The casing of a dashed road is dashed too, or the gaps fill in and the confidence is lost.
+    const layers: Array<[number, number, number]> = [
+      [HIGHWAY_CASING_WIDTH, casing, 0],
+      [HIGHWAY_FILL_WIDTH, fill, 0.02],
+    ]
+    for (const [width, color, lift] of layers) {
+      const positions = ribbonPositions(points, width, dash, 0, [], y + lift)
+      if (positions.length === 0) continue
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+      const material = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
+      const mesh = new THREE.Mesh(geometry, material)
+      mesh.userData.atlasObject = true
+      this.disposables.push(geometry, material)
+      this.scene.add(mesh)
+    }
   }
 
   private clearAtlasObjects(): void {
@@ -439,7 +612,7 @@ export class AtlasScene {
    * the camera back for nothing.
    */
   private expandContentBounds(center: THREE.Vector3, plan: AtlasCityPlan): void {
-    const reach = plan.side / 2
+    const reach = plan.sizeKnown ? plan.radius.max : plan.side / 2
     const top = PAD_HEIGHT + (plan.towerHeight ?? 0)
     this.contentBounds.expandByPoint(new THREE.Vector3(center.x - reach, 0, center.z - reach))
     this.contentBounds.expandByPoint(new THREE.Vector3(center.x + reach, top, center.z + reach))
@@ -496,10 +669,29 @@ function disposeCityGeometry(geometry: AtlasCityGeometry): void {
   geometry.pad.dispose()
   geometry.massing?.dispose()
   geometry.trim?.dispose()
-  geometry.streets?.dispose()
+  geometry.streetCasing?.dispose()
+  geometry.streetFill?.dispose()
 }
 
 function colorFor(databaseId: string): number {
   const palette = [0x39c6a3, 0x45a7e6, 0xe9a84c, 0xb48be8, 0x57bd70, 0xde6f73, 0x7bb7b2, 0xd58cb7]
   return palette[stableHash(databaseId) % palette.length] ?? 0x45a7e6
 }
+
+/** A closed outline grown about its own centroid, for drawing a rim under a filled shape. */
+function expand(points: readonly AtlasPoint[], factor: number): AtlasPoint[] {
+  let cx = 0
+  let cz = 0
+  for (const point of points) {
+    cx += point.x
+    cz += point.z
+  }
+  cx /= points.length
+  cz /= points.length
+  return points.map(point => ({
+    x: cx + (point.x - cx) * factor,
+    z: cz + (point.z - cz) * factor,
+  }))
+}
+
+

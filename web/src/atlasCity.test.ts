@@ -3,14 +3,18 @@ import { databaseHeight, databaseSide } from './atlas'
 import {
   cityColumns,
   cityGeometrySignature,
+  gatewayToward,
   LOT_PITCH,
   MAX_COLUMNS,
+  outlineRadiusAt,
   planAtlasCity,
+  regionalRoadPath,
   skylineProfile,
-  STREET_RATIO,
+  townOutline,
   UNKNOWN_SIDE,
   VACANT_HEIGHT,
 } from './atlasCity'
+import { pointInPolygon, polygonArea } from './mapRibbon'
 import type { ByteMeasurement, DatabaseAtlasItem, Evidence } from './contracts'
 
 const observed = '2026-08-17T16:59:52Z'
@@ -81,12 +85,42 @@ describe('cityColumns', () => {
 
 describe('skylineProfile', () => {
   it('normalizes so exactly one tower reaches the full encoded height', () => {
-    for (const columns of [1, 2, 5, MAX_COLUMNS]) {
-      const profile = skylineProfile(columns, index => index * 7919 + 13)
-      expect(profile).toHaveLength(columns * columns)
+    for (const count of [1, 4, 25, MAX_COLUMNS ** 2]) {
+      const rings = Array.from({ length: count }, (_, index) => index / Math.max(count - 1, 1))
+      const profile = skylineProfile(rings, index => index * 7919 + 13)
+      expect(profile).toHaveLength(count)
       expect(Math.max(...profile)).toBeCloseTo(1, 12)
       expect(Math.min(...profile)).toBeGreaterThan(0)
     }
+  })
+
+  it('falls away from downtown toward the edge, whatever shape the edge is', () => {
+    const flat = skylineProfile([0, 0.5, 1], () => 500)
+    expect(flat[0]).toBeGreaterThan(flat[1])
+    expect(flat[1]).toBeGreaterThan(flat[2])
+  })
+})
+
+describe('townOutline', () => {
+  it('encloses exactly the area the allocated size paid for, however irregular it is', () => {
+    for (const side of [12, 26, 47.5, 96]) {
+      const outline = townOutline(side, 'target/database/area')
+      expect(polygonArea(outline)).toBeCloseTo(side * side, 6)
+    }
+  })
+
+  it('is not a circle, so two towns are told apart by their shape', () => {
+    const outline = townOutline(60, 'target/database/shape')
+    const radii = outline.map(point => Math.hypot(point.x, point.z))
+    expect(Math.max(...radii) / Math.min(...radii)).toBeGreaterThan(1.15)
+    expect(Math.min(...radii)).toBeGreaterThan(0)
+  })
+
+  it('draws a different town for a different database and the same one for the same', () => {
+    expect(townOutline(60, 'target/database/left')).not.toEqual(
+      townOutline(60, 'target/database/right'),
+    )
+    expect(townOutline(60, 'target/database/left')).toEqual(townOutline(60, 'target/database/left'))
   })
 })
 
@@ -135,7 +169,10 @@ describe('planAtlasCity', () => {
     const large = planAtlasCity(database(sixtyFourGiB, oneGiB, 'target/database/large'))
 
     expect(large.columns).toBeGreaterThan(small.columns)
-    expect(large.lots.length).toBe(large.columns ** 2)
+    // Block pitch is a single constant, so lot count tracks ground area rather than being a second
+    // encoding of its own. The outline is irregular, so this is a proportion rather than a square.
+    const areaRatio = (large.side * large.side) / (small.side * small.side)
+    expect(large.lots.length / small.lots.length).toBeGreaterThan(areaRatio * 0.6)
   })
 
   it('keeps zero used bytes at zero height, exactly as the database city does', () => {
@@ -146,19 +183,46 @@ describe('planAtlasCity', () => {
     expect(plan.lots.every(lot => lot.kind === 'tower')).toBe(true)
   })
 
-  it('keeps every lot and its street inside the plot the allocated size paid for', () => {
+  it('encloses exactly the ground the allocated size paid for, in an irregular outline', () => {
     const plan = planAtlasCity(database(sixtyFourGiB, oneGiB))
-    const half = plan.side / 2
-    const cell = plan.side / plan.columns
 
-    for (const lot of plan.lots) {
-      expect(Math.abs(lot.x) + lot.footprint / 2).toBeLessThanOrEqual(half + 1e-9)
-      expect(Math.abs(lot.z) + lot.footprint / 2).toBeLessThanOrEqual(half + 1e-9)
-      expect(lot.footprint).toBeCloseTo(cell * (1 - STREET_RATIO), 10)
+    expect(polygonArea(plan.outline)).toBeCloseTo(plan.side * plan.side, 6)
+    expect(plan.radius.max).toBeGreaterThan(plan.radius.min)
+  })
+
+  it('keeps every building and every street inside the town it belongs to', () => {
+    for (const item of [
+      database(oneGiB, oneGiB, 'target/database/tiny'),
+      database(sixtyFourGiB, oneGiB, 'target/database/mid'),
+      database('34359738368', oneGiB, 'target/database/big'),
+    ]) {
+      const plan = planAtlasCity(item)
+      expect(plan.lots.length).toBeGreaterThan(0)
+
+      for (const lot of plan.lots) {
+        const half = lot.footprint / 2
+        for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+          expect(pointInPolygon(plan.outline, lot.x + dx * half, lot.z + dz * half)).toBe(true)
+        }
+      }
+      for (const street of plan.streets) {
+        for (const point of street.points) {
+          expect(Math.hypot(point.x, point.z)).toBeLessThanOrEqual(plan.radius.max + 1e-9)
+        }
+      }
     }
-    for (const street of plan.streets) {
-      expect(Math.abs(street.x1)).toBeLessThanOrEqual(half + 1e-9)
-      expect(Math.abs(street.z2)).toBeLessThanOrEqual(half + 1e-9)
+  })
+
+  it('gives every town a ring road and radials that reach its edge, so roads arrive on a street', () => {
+    const plan = planAtlasCity(database(sixtyFourGiB, oneGiB))
+
+    expect(plan.streets.filter(street => street.kind === 'ring')).toHaveLength(1)
+    expect(plan.streets.filter(street => street.kind === 'radial').length).toBeGreaterThanOrEqual(3)
+    expect(plan.gateways.length).toBe(plan.streets.filter(s => s.kind === 'radial').length)
+    for (const gateway of plan.gateways) {
+      const reach = outlineRadiusAt(plan.outline, Math.atan2(gateway.z, gateway.x))
+      expect(Math.hypot(gateway.x, gateway.z)).toBeLessThanOrEqual(reach + 1e-6)
+      expect(Math.hypot(gateway.x, gateway.z)).toBeGreaterThan(reach * 0.5)
     }
   })
 
@@ -195,5 +259,63 @@ describe('cityGeometrySignature', () => {
 
     expect(cityGeometrySignature(planAtlasCity(refreshed)))
       .toBe(cityGeometrySignature(planAtlasCity(item)))
+  })
+})
+
+describe('regionalRoadPath', () => {
+  const from = { x: 0, z: 0 }
+  const to = { x: 300, z: 120 }
+  const a = planAtlasCity(database(sixtyFourGiB, oneGiB, 'target/database/a'))
+  const b = planAtlasCity(database(sixtyFourGiB, oneGiB, 'target/database/b'))
+
+  it('leaves and arrives at town edges rather than running through their centres', () => {
+    const path = regionalRoadPath(from, a, to, b, 'a->b')
+    const startOffset = Math.hypot(path[0].x - from.x, path[0].z - from.z)
+    const endOffset = Math.hypot(path[path.length - 1].x - to.x, path[path.length - 1].z - to.z)
+
+    expect(startOffset).toBeGreaterThan(a.radius.min * 0.5)
+    expect(endOffset).toBeGreaterThan(b.radius.min * 0.5)
+  })
+
+  it('draws the same road every time, so a refresh does not move the map', () => {
+    expect(regionalRoadPath(from, a, to, b, 'a->b'))
+      .toEqual(regionalRoadPath(from, a, to, b, 'a->b'))
+  })
+
+  it('bows, so a sheet of roads does not read as a wire diagram', () => {
+    const path = regionalRoadPath(from, a, to, b, 'a->b')
+    const start = path[0]
+    const end = path[path.length - 1]
+    const dx = end.x - start.x
+    const dz = end.z - start.z
+    const length = Math.hypot(dx, dz)
+    const worst = Math.max(
+      ...path.map(p => Math.abs(((p.x - start.x) * dz - (p.z - start.z) * dx) / length)),
+    )
+
+    expect(worst).toBeGreaterThan(0.5)
+  })
+
+  it('draws nothing between two towns at the same place', () => {
+    expect(regionalRoadPath(from, a, from, a, 'a->a')).toEqual([])
+  })
+})
+
+describe('gatewayToward', () => {
+  it('picks the gateway facing the direction of travel', () => {
+    const plan = planAtlasCity(database(sixtyFourGiB, oneGiB))
+    const center = { x: 10, z: -4 }
+    const east = gatewayToward(center, plan, { x: 500, z: -4 })
+    const west = gatewayToward(center, plan, { x: -500, z: -4 })
+
+    expect(east.x).toBeGreaterThan(center.x)
+    expect(west.x).toBeLessThan(center.x)
+  })
+
+  it('keeps the centre for a town with no measured size, which has no edge to arrive at', () => {
+    const plan = planAtlasCity(database(null, null))
+    const center = { x: 3, z: 7 }
+
+    expect(gatewayToward(center, plan, { x: 400, z: 7 }).x).toBeGreaterThanOrEqual(center.x)
   })
 })
