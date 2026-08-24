@@ -5,10 +5,12 @@ import {
   buildingLabelWorldHeight,
   createCityLabels,
   databaseLabelText,
+  declutterLabels,
   elideMiddle,
   isLabelLegible,
   labelAnchor,
   labelPixelHeight,
+  labelScreenScale,
   labelWorldWidth,
   minimumLegibleWorldHeight,
   neighborhoodLabelText,
@@ -17,7 +19,10 @@ import {
   LABEL_WORLD_HEIGHT,
   LABEL_WORLD_HEIGHT_MAX,
   NEIGHBORHOOD_LABEL_MAX_CHARS,
+  NEIGHBORHOOD_LABEL_MAX_GROWTH,
+  NEIGHBORHOOD_LABEL_MIN_PX,
   NEIGHBORHOOD_LABEL_WORLD_HEIGHT,
+  type LabelBox,
 } from './cityLabels'
 
 describe('buildingLabelText', () => {
@@ -369,5 +374,121 @@ describe('labelAnchor', () => {
 
   it('stays at the centre when the access point coincides, rather than dividing by zero', () => {
     expect(labelAnchor(12, -4, 12, -4, 6)).toEqual({ x: 12, z: -4 })
+  })
+})
+
+/**
+ * A phone puts the whole city in a 490-pixel-tall canvas. Measured there, every building name was
+ * correctly dropped as illegible and the neighbourhood names that were supposed to hold that view
+ * projected at about five pixels -- so the map had no readable text on it at all.
+ */
+describe('labelScreenScale', () => {
+  const PHONE_H = 490
+  const DESKTOP_H = 1115
+
+  it('leaves a label alone once it is already large enough', () => {
+    expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 400, 46, DESKTOP_H)).toBe(1)
+    expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 1, 46, PHONE_H)).toBe(1)
+  })
+
+  it('never shrinks a label, however close the camera gets', () => {
+    for (const distance of [1, 10, 100, 500, 2000, 8000]) {
+      expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, distance, 46, PHONE_H))
+        .toBeGreaterThanOrEqual(1)
+    }
+  })
+
+  it('grows a name that would project below the floor to exactly the floor', () => {
+    const distance = 2600
+    const before = labelPixelHeight(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, distance, 46, PHONE_H)
+    expect(before).toBeLessThan(NEIGHBORHOOD_LABEL_MIN_PX)
+    const scale = labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, distance, 46, PHONE_H)
+    expect(before * scale).toBeCloseTo(NEIGHBORHOOD_LABEL_MIN_PX)
+  })
+
+  /**
+   * Growing a name does not give it more ground to sit on, so the growth is bounded and whatever
+   * still collides is dropped by declutterLabels rather than written over its neighbour.
+   */
+  it('stops growing at the cap however far out the camera goes', () => {
+    for (const distance of [10_000, 100_000, 1e9]) {
+      expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, distance, 46, PHONE_H))
+        .toBeLessThanOrEqual(NEIGHBORHOOD_LABEL_MAX_GROWTH)
+    }
+  })
+
+  it('holds the same apparent size across both lenses the city is viewed through', () => {
+    // Map mode fakes a parallel projection with a 13-degree lens and a proportionally longer orbit.
+    const scale = Math.tan((46 * Math.PI) / 360) / Math.tan((13 * Math.PI) / 360)
+    const oblique = labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 2600, 46, PHONE_H)
+    const flat = labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 2600 * scale, 13, PHONE_H)
+    expect(flat).toBeCloseTo(oblique, 5)
+  })
+
+  it('leaves the label at its authored size rather than scaling by a number it never established', () => {
+    expect(labelScreenScale(0, 2600, 46, PHONE_H)).toBe(1)
+    expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 0, 46, PHONE_H)).toBe(1)
+    expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 2600, 46, 0)).toBe(1)
+    expect(labelScreenScale(NEIGHBORHOOD_LABEL_WORLD_HEIGHT, 2600, 180, PHONE_H)).toBe(1)
+  })
+
+  it('sets the neighbourhood floor below the threshold that drops a building name', () => {
+    // Spaced capitals with a halo hold together a size smaller than mixed case on a plate does.
+    expect(NEIGHBORHOOD_LABEL_MIN_PX).toBeLessThan(LABEL_MIN_LEGIBLE_PX)
+    expect(NEIGHBORHOOD_LABEL_MIN_PX).toBeGreaterThanOrEqual(12)
+  })
+})
+
+describe('declutterLabels', () => {
+  const box = (over: Partial<LabelBox> & { id: string }): LabelBox =>
+    ({ x: 0, y: 0, width: 100, height: 20, priority: 1, ...over })
+
+  it('keeps every label when none of them touch', () => {
+    const kept = declutterLabels([
+      box({ id: 'a', x: 0, y: 0 }),
+      box({ id: 'b', x: 400, y: 0 }),
+      box({ id: 'c', x: 0, y: 300 }),
+    ])
+    expect([...kept].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('drops the smaller territory when two names would be written over each other', () => {
+    const kept = declutterLabels([
+      box({ id: 'small', x: 10, y: 0, priority: 34 }),
+      box({ id: 'large', x: 0, y: 0, priority: 75 }),
+    ])
+    expect(kept.has('large')).toBe(true)
+    expect(kept.has('small')).toBe(false)
+  })
+
+  /** A name that flickers as the view is nudged is worse than one that is simply absent. */
+  it('is deterministic when priorities tie', () => {
+    const boxes = [box({ id: 'b', x: 0 }), box({ id: 'a', x: 5 }), box({ id: 'c', x: 10 })]
+    const first = declutterLabels(boxes)
+    const reordered = declutterLabels([...boxes].reverse())
+    expect([...first].sort()).toEqual([...reordered].sort())
+    expect(first.has('a')).toBe(true)
+  })
+
+  it('ignores a label that is off-screen or has no measured size', () => {
+    const kept = declutterLabels([
+      box({ id: 'off', x: 9999, visible: false }),
+      box({ id: 'unmeasured', x: 400, width: 0 }),
+      box({ id: 'real', x: 0 }),
+    ])
+    expect([...kept]).toEqual(['real'])
+  })
+
+  /** Names may approach each other; only real overlap of the letterforms costs one of them. */
+  it('lets labels sit shoulder to shoulder without dropping either', () => {
+    const kept = declutterLabels([
+      box({ id: 'left', x: 0, width: 100 }),
+      box({ id: 'right', x: 96, width: 100 }),
+    ])
+    expect(kept.size).toBe(2)
+  })
+
+  it('returns nothing for nothing, rather than throwing', () => {
+    expect(declutterLabels([]).size).toBe(0)
   })
 })

@@ -50,6 +50,45 @@ export interface IncidentProjection {
   readonly reason: string
 }
 
+/**
+ * Blocked waiters the probe saw but the map could not put a pin on: their object is outside this
+ * bounded page, or their lock resource named no object at all.
+ */
+export function incidentUnpinnedCount(projection: IncidentProjection): number {
+  return projection.offPageCount + projection.unresolved.length
+}
+
+/**
+ * What a folded, one-line summary of this projection says.
+ *
+ * On a narrow viewport this string may be the entire blocking probe a reader ever sees, so it has to
+ * carry the finding rather than just name the panel. The case that matters is an empty marker list
+ * with a non-zero unpinned count: the probe *did* see blocked waiters, the map just could not place
+ * them. Calling that "No blocks" would turn a partial answer into an all-clear, which is exactly the
+ * claim this codebase refuses to make.
+ */
+export function incidentSummaryLabel(projection: IncidentProjection): string {
+  if (!projection.probeReported) return 'Not observed'
+  if (projection.markers.length > 0) return `${projection.markers.length} blocked`
+  const unpinned = incidentUnpinnedCount(projection)
+  if (unpinned > 0) return `${unpinned} off-map`
+  return 'No blocks'
+}
+
+/** The tone class for {@link incidentSummaryLabel}: alert for pins, unknown for anything unclaimed. */
+export function incidentSummaryTone(projection: IncidentProjection): 'is-alert' | 'is-unknown' | '' {
+  if (!projection.probeReported) return 'is-unknown'
+  if (projection.markers.length > 0) return 'is-alert'
+  return incidentUnpinnedCount(projection) > 0 ? 'is-unknown' : ''
+}
+
+/** True when this projection has something to say that a reader should not have to tap to find. */
+export function incidentDemandsAttention(projection: IncidentProjection): boolean {
+  return !projection.probeReported
+    || projection.markers.length > 0
+    || incidentUnpinnedCount(projection) > 0
+}
+
 const NOT_OBSERVED: IncidentProjection = {
   markers: [],
   offPageCount: 0,
