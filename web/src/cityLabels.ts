@@ -203,6 +203,108 @@ export function neighborhoodLabelText(schemaName: string): string {
 export const NEIGHBORHOOD_LABEL_MAX_CHARS = 16
 
 /**
+ * Projected height, in CSS pixels, that a neighbourhood name is grown to when it would otherwise
+ * project smaller.
+ *
+ * Below {@link LABEL_MIN_LEGIBLE_PX} a building name is dropped, because a building name has a
+ * neighbourhood name above it to fall back on. A neighbourhood name has nothing above it: it is the
+ * tier that holds the wide view, so if it goes illegible the map has no readable text left at all.
+ * Measured on a 390-point phone, the whole-city view projected these at about five pixels — the map
+ * still looked like a map and could not be read as one.
+ *
+ * Slightly under the building threshold on purpose. These are set in spaced capitals with a halo
+ * rather than on a plate, and spaced capitals hold together a size smaller than mixed case does.
+ */
+export const NEIGHBORHOOD_LABEL_MIN_PX = 13
+
+/**
+ * Largest multiple of its authored size a neighbourhood name may be grown to.
+ *
+ * Growing a name keeps it readable but does not give it any more ground to sit on, so past some
+ * point names start writing over each other. The cap bounds that, and {@link declutterLabels}
+ * handles whatever still collides. 3 is what a whole-city view on a phone asks for; past that the
+ * camera is far enough out that dropping the name is the more honest answer.
+ */
+export const NEIGHBORHOOD_LABEL_MAX_GROWTH = 3
+
+/**
+ * Multiplier that keeps a label at or above `minimumPx` on screen, within {@link
+ * NEIGHBORHOOD_LABEL_MAX_GROWTH}.
+ *
+ * Returns 1 whenever the label is already large enough, so zooming in never shrinks a name — this
+ * only ever adds size at the wide end. Returns 1 for degenerate input too, leaving the label at its
+ * authored size rather than scaling it by a number that was never established.
+ */
+export function labelScreenScale(
+  worldHeight: number,
+  distance: number,
+  fovDegrees: number,
+  viewportHeightPx: number,
+  minimumPx: number = NEIGHBORHOOD_LABEL_MIN_PX,
+  maxGrowth: number = NEIGHBORHOOD_LABEL_MAX_GROWTH,
+): number {
+  const projected = labelPixelHeight(worldHeight, distance, fovDegrees, viewportHeightPx)
+  if (!(projected > 0) || !(minimumPx > 0)) return 1
+  if (projected >= minimumPx) return 1
+  return Math.min(Math.max(1, maxGrowth), minimumPx / projected)
+}
+
+/** A label's projected footprint on screen, in CSS pixels, for {@link declutterLabels}. */
+export type LabelBox = {
+  /** Identifies the label to the caller. Nothing here interprets it. */
+  id: string
+  /** Screen centre, in CSS pixels from the top-left of the canvas. */
+  x: number
+  y: number
+  width: number
+  height: number
+  /**
+   * Which label wins a collision. Higher survives; ties break on `id` so the same city always drops
+   * the same names. Neighbourhood names use their authored world height, so the name of the larger
+   * territory is the one that stays.
+   */
+  priority: number
+  /** False for a label that is off-screen or already below its legibility floor. */
+  visible?: boolean
+}
+
+/**
+ * Keeps the labels that fit and drops the ones that would be written over.
+ *
+ * Two names on top of each other are worse than one name, because the reader cannot tell which
+ * letters belong to which place. So this is a greedy pass in priority order — the standard approach
+ * for area labels — where each name is kept only if its box is clear of every name already kept.
+ *
+ * Boxes are inset before testing, so names are allowed to *approach* each other; only real overlap
+ * of the letterforms drops one. Pure and deterministic: the same camera over the same city always
+ * drops the same names, which matters because a name that flickers as you nudge the view is worse
+ * than one that is simply absent.
+ */
+export function declutterLabels(boxes: readonly LabelBox[], padding = -0.12): Set<string> {
+  const kept: LabelBox[] = []
+  const keptIds = new Set<string>()
+  const ordered = [...boxes]
+    .filter((box) => box.visible !== false && box.width > 0 && box.height > 0)
+    .sort((a, b) => (b.priority - a.priority) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  for (const box of ordered) {
+    const insetX = box.width * padding
+    const insetY = box.height * padding
+    const halfW = box.width / 2 + insetX
+    const halfH = box.height / 2 + insetY
+    const clash = kept.some((other) => {
+      const otherHalfW = other.width / 2 + other.width * padding
+      const otherHalfH = other.height / 2 + other.height * padding
+      return Math.abs(other.x - box.x) < halfW + otherHalfW
+        && Math.abs(other.y - box.y) < halfH + otherHalfH
+    })
+    if (clash) continue
+    kept.push(box)
+    keptIds.add(box.id)
+  }
+  return keptIds
+}
+
+/**
  * Height of a neighbourhood name in world units, before it is scaled to the territory.
  *
  * A place name has to outrank the labels of the things standing in it, or it is just one more tag in

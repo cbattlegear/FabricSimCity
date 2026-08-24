@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { SEVERITY_LABELS, projectIncidents } from './cityIncidents'
+import {
+  SEVERITY_LABELS,
+  incidentDemandsAttention,
+  incidentSummaryLabel,
+  incidentSummaryTone,
+  incidentUnpinnedCount,
+  projectIncidents,
+} from './cityIncidents'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import type { LiveIncidentSnapshot, LockResource } from './liveContracts'
 
@@ -379,5 +386,72 @@ describe('incident popups are reachable without a pointer', () => {
   it('keeps the qualification text even when markers are listed', () => {
     expect(popup).toContain('<small>{reason}</small>')
     expect(popup).toContain("<span className=\"is-unknown\">Blocking not observed</span>")
+  })
+})
+describe('incident summary wording · a folded chip may be the whole probe', () => {
+  const base = {
+    markers: [],
+    offPageCount: 0,
+    unresolved: [],
+    probeReported: true,
+    reason: 'r',
+  } as const
+
+  it('says "Not observed" when the probe never reported, never "No blocks"', () => {
+    const p = { ...base, probeReported: false }
+    expect(incidentSummaryLabel(p)).toBe('Not observed')
+    expect(incidentSummaryTone(p)).toBe('is-unknown')
+    expect(incidentDemandsAttention(p)).toBe(true)
+  })
+
+  it('states the pin count when waiters were placed', () => {
+    const p = { ...base, markers: [{ id: 'a' }, { id: 'b' }] as never }
+    expect(incidentSummaryLabel(p)).toBe('2 blocked')
+    expect(incidentSummaryTone(p)).toBe('is-alert')
+    expect(incidentDemandsAttention(p)).toBe(true)
+  })
+
+  it('never says "No blocks" over an off-page waiter the probe did see', () => {
+    const p = { ...base, offPageCount: 3 }
+    expect(incidentSummaryLabel(p)).toBe('3 off-map')
+    expect(incidentSummaryTone(p)).toBe('is-unknown')
+    expect(incidentDemandsAttention(p)).toBe(true)
+  })
+
+  it('counts an unresolvable lock resource as unpinned, not as absent', () => {
+    const p = { ...base, unresolved: [{ rawResource: 'PAGE: 7:1:40', reason: 'page lock' }] }
+    expect(incidentSummaryLabel(p)).toBe('1 off-map')
+    expect(incidentDemandsAttention(p)).toBe(true)
+  })
+
+  it('adds off-page and unresolvable together', () => {
+    const p = {
+      ...base,
+      offPageCount: 2,
+      unresolved: [{ rawResource: 'XACT: 7:99', reason: 'transaction' }],
+    }
+    expect(incidentUnpinnedCount(p)).toBe(3)
+    expect(incidentSummaryLabel(p)).toBe('3 off-map')
+  })
+
+  it('only says "No blocks" when the probe reported and nothing at all was found', () => {
+    expect(incidentSummaryLabel(base)).toBe('No blocks')
+    expect(incidentSummaryTone(base)).toBe('')
+    expect(incidentDemandsAttention(base)).toBe(false)
+  })
+
+  it('words a real off-page projection from projectIncidents, not just a hand-built one', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        requests: [{
+          sessionId: 51,
+          lockResource: lock({ objectId: 999, schemaName: 'dbo', objectName: 'NotLoaded' }),
+          blockingSessionId: 60,
+        }],
+      }),
+      objects)
+    expect(projection.markers).toEqual([])
+    expect(incidentSummaryLabel(projection)).toBe('1 off-map')
+    expect(incidentDemandsAttention(projection)).toBe(true)
   })
 })

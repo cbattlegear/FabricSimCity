@@ -13,8 +13,15 @@ import type { CityRoute } from './cityRoute'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import type { CityPlanOptions } from './cityPlan'
 import type { MapViewMode } from './mapStyle'
-import type { IncidentProjection } from './cityIncidents'
+import {
+  incidentDemandsAttention,
+  incidentSummaryLabel,
+  incidentSummaryTone,
+  type IncidentProjection,
+} from './cityIncidents'
+import type { LiveFeedConnectionState } from './liveIncidents'
 import { IncidentPopup, IncidentSummary } from './IncidentPopup'
+import { MapTray, useNarrowViewport, type TrayItem } from './MapTray'
 
 type Props = {
   objects: readonly DatabaseCityObject[]
@@ -42,6 +49,14 @@ type Props = {
   /** Rendered into the right HUD slot: object detail or turn-by-turn directions. */
   panel?: ReactNode
   liveStatus?: ReactNode
+  /**
+   * The live feed's own connection state, so the folded tray chip can say it.
+   *
+   * `liveStatus` is an opaque node, and a chip that reads "Feed" whether the feed is connected or
+   * dead would hide the qualifier on every live number the map draws. This is the one fact the chip
+   * needs in order not to do that.
+   */
+  feedState?: LiveFeedConnectionState
   /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
 }
@@ -60,6 +75,12 @@ const KEY_ACTIONS: Record<string, CameraNudge> = {
 }
 
 const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+
+/**
+ * The folded incident chip. Its wording lives in {@link incidentSummaryLabel} beside the projection
+ * it describes, because on a phone this chip may be the whole blocking probe a reader sees, and what
+ * it is allowed to claim is a property of the evidence rather than of the layout.
+ */
 /**
  * The layer checkboxes, with the hint each one carries on hover. Only layers whose behaviour is not
  * fully described by their own name need one.
@@ -73,7 +94,7 @@ const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string, stri
   [
     'labels',
     'Labels',
-    'Neighbourhood names are always drawn. Building and facility names appear as you zoom in — largest tables first — rather than being drawn too small to read.',
+    'Neighbourhood names are grown as you zoom out so they stay readable; where two would be written over each other, the smaller neighbourhood’s name is dropped. Building and facility names appear as you zoom in — largest tables first — rather than being drawn too small to read.',
   ],
 ]
 
@@ -98,6 +119,7 @@ export function DatabaseCityViewport({
   finder,
   panel,
   liveStatus,
+  feedState,
   incidents,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -218,6 +240,8 @@ export function DatabaseCityViewport({
   const toggle = (key: keyof CityLayerToggles) =>
     setLayers(current => ({ ...current, [key]: !current[key] }))
 
+  const narrow = useNarrowViewport()
+
   // Only facilities that actually received a lane are given a legend swatch, so the legend never
   // advertises a colour for traffic that was not measured.
   const laneFacilities: FacilityKind[] = [
@@ -229,6 +253,140 @@ export function DatabaseCityViewport({
 
   const hoverLabel = hoveredRoadId === null ? null : roadLabels.get(hoveredRoadId) ?? null
   const openIncident = incidents?.markers.find(marker => marker.id === openIncidentId) ?? null
+
+  /*
+   * One legend, two homes. Wide, it lives bottom-left where a map legend belongs, folded behind its
+   * own summary. Narrow, there is no bottom-left worth the name, so it moves into the tray -- and
+   * the tray chip is already the disclosure, so the legend opens with it rather than asking for a
+   * second tap. It used to be `display: none` under 900px, which meant the phone drawing disclosed
+   * nothing about what its own colours and widths meant.
+   */
+  const legend = (
+    <details className="hud-legend" open={narrow || undefined}>
+      <summary>Legend · what encodes evidence</summary>
+      <ul className="legend-encoded">
+        <li>
+          <i className="legend-swatch legend-footprint" /> Footprint — log₂ of exact reserved 8-KiB pages
+        </li>
+        <li>
+          <i className="legend-swatch legend-height" /> Height — log₂ of exact used 8-KiB pages
+        </li>
+        <li>
+          <i className="legend-swatch legend-attributed" /> Solid amber roof cap — Query Store CPU measured for this object alone
+        </li>
+        <li>
+          <i className="legend-swatch legend-shared" /> Outlined amber cap — CPU of queries that also named other tables; not additive across buildings
+        </li>
+        <li>
+          <i className="legend-swatch legend-direct" /> Index annex width — direct DMV operations
+        </li>
+        <li>
+          <i className="legend-swatch legend-route" /> Road width — captured executions naming both endpoints
+        </li>
+        {(['low', 'medium', 'high', 'unknown'] as const).map(grade => (
+          <li key={grade}>
+            <i className="legend-swatch" style={{ background: swatch(CONGESTION_COLORS[grade]) }} />
+            Road colour — {CONGESTION_LABELS[grade].toLowerCase()}
+          </li>
+        ))}
+        <li>
+          <i className="legend-swatch legend-solid" /> Unbroken road — confirmed reference
+        </li>
+        <li>
+          <i className="legend-swatch legend-dashed" /> Long dashes — probable reference
+        </li>
+        <li>
+          <i className="legend-swatch legend-sparse" /> Short dashes — inferred reference
+        </li>
+        <li>
+          <i className="legend-swatch legend-lane" /> Wait lane width — captured Query Store wait
+          milliseconds from that building to that facility
+        </li>
+        {laneFacilities.map(kind => (
+          <li key={kind}>
+            <i className="legend-swatch" style={{ background: swatch(LANE_COLORS[kind]) }} />
+            Wait lane colour — queued at the {FACILITY_LABELS[kind]}
+          </li>
+        ))}
+        <li>
+          <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
+        </li>
+      </ul>
+      <p className="legend-caveat">
+        A building with no wait lane is not idle: it means no ranked query family carried Query
+        Store wait-category evidence naming it. A lane that threads through several buildings
+        before reaching a facility is a shared lane: it carries one multi-object family&apos;s whole
+        wait total, drawn once along the objects it names, and belongs to none of them
+        individually. {facilityTraffic.note}
+        {facilityTraffic.unmapped.length > 0 &&
+          ` ${facilityTraffic.unmapped.length} captured wait category/categories have no facility` +
+          ' on this map and are listed in the evidence tables rather than folded into one.'}
+      </p>
+      <p className="legend-decoration">
+        Roofs, windows, doors, chimneys, setbacks, crowns, and sidewalks are decoration. They are
+        seeded from each object&apos;s stable id and encode nothing. A neighbourhood&apos;s hue
+        says which schema owns it and nothing more: hues are handed out in catalogue order, so
+        one is never warmer, larger or busier than another.
+      </p>
+    </details>
+  )
+
+  const trayItems: TrayItem[] = [
+    // Search leads on a phone: it is the fastest way to reach an object when the map is small.
+    ...(narrow && finder ? [{ id: 'find', label: 'Find', glyph: '⌕', content: finder }] : []),
+    {
+      id: 'layers',
+      label: 'Layers',
+      glyph: '≣',
+      content: (
+        <fieldset className="hud-layers">
+          <legend>Layers</legend>
+          {LAYER_LABELS.map(([key, label, hint]) => (
+            <label key={key} title={hint}>
+              <input type="checkbox" checked={layers[key]} onChange={() => toggle(key)} />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+      ),
+    },
+    ...(incidents
+      ? [{
+        id: 'incidents',
+        // The chip states the finding itself, so even folded the tray cannot read as "all clear".
+        label: incidentSummaryLabel(incidents),
+        glyph: '⚑',
+        tone: incidentSummaryTone(incidents),
+        // A blocked waiter opens itself, whether or not the map could pin it, and so does a probe
+        // that never reported. Those are warnings, and a warning behind a tap is a warning that was
+        // not given.
+        alert: incidentDemandsAttention(incidents),
+        content: (
+          <IncidentSummary
+            projection={incidents}
+            openId={openIncidentId}
+            onOpen={openIncidentFromList}
+          />
+        ),
+      }]
+      : []),
+    ...(liveStatus
+      ? [{
+        id: 'live',
+        // A degraded feed is a qualifier on every live number the map draws, so the chip states the
+        // connection rather than just naming the panel, and a feed that is not connected opens
+        // itself the way a blocked waiter does. Ordered after incidents so that when both are
+        // saying something, the one that opens itself is the blocking probe.
+        label: feedState ? `Feed · ${feedState}` : 'Feed',
+        glyph: '◉',
+        tone: feedState && feedState !== 'connected' ? 'is-unknown' : '',
+        alert: feedState !== undefined && feedState !== 'connected',
+        content: liveStatus,
+      }]
+      : []),
+    // Only narrow: wide viewports keep the legend bottom-left where a map legend belongs.
+    ...(narrow ? [{ id: 'legend', label: 'Legend', glyph: '☰', content: legend }] : []),
+  ]
 
   if (unavailable) {
     return (
@@ -261,26 +419,10 @@ export function DatabaseCityViewport({
         tables below this map.
       </p>
 
-      {finder && <div className="hud hud-top-left">{finder}</div>}
+      {!narrow && finder && <div className="hud hud-top-left">{finder}</div>}
 
       <div className="hud hud-top-right">
-        <fieldset className="hud-layers">
-          <legend>Layers</legend>
-          {LAYER_LABELS.map(([key, label, hint]) => (
-            <label key={key} title={hint}>
-              <input type="checkbox" checked={layers[key]} onChange={() => toggle(key)} />
-              {label}
-            </label>
-          ))}
-        </fieldset>
-        {liveStatus}
-        {incidents && (
-          <IncidentSummary
-            projection={incidents}
-            openId={openIncidentId}
-            onOpen={openIncidentFromList}
-          />
-        )}
+        <MapTray label="Map overlays" items={trayItems} />
       </div>
 
       {openIncident && popupAt && (
@@ -292,75 +434,7 @@ export function DatabaseCityViewport({
         />
       )}
 
-      <div className="hud hud-bottom-left">
-        <details className="hud-legend">
-          <summary>Legend · what encodes evidence</summary>
-          <ul className="legend-encoded">
-            <li>
-              <i className="legend-swatch legend-footprint" /> Footprint — log₂ of exact reserved 8-KiB pages
-            </li>
-            <li>
-              <i className="legend-swatch legend-height" /> Height — log₂ of exact used 8-KiB pages
-            </li>
-            <li>
-              <i className="legend-swatch legend-attributed" /> Solid amber roof cap — Query Store CPU measured for this object alone
-            </li>
-            <li>
-              <i className="legend-swatch legend-shared" /> Outlined amber cap — CPU of queries that also named other tables; not additive across buildings
-            </li>
-            <li>
-              <i className="legend-swatch legend-direct" /> Index annex width — direct DMV operations
-            </li>
-            <li>
-              <i className="legend-swatch legend-route" /> Road width — captured executions naming both endpoints
-            </li>
-            {(['low', 'medium', 'high', 'unknown'] as const).map(grade => (
-              <li key={grade}>
-                <i className="legend-swatch" style={{ background: swatch(CONGESTION_COLORS[grade]) }} />
-                Road colour — {CONGESTION_LABELS[grade].toLowerCase()}
-              </li>
-            ))}
-            <li>
-              <i className="legend-swatch legend-solid" /> Unbroken road — confirmed reference
-            </li>
-            <li>
-              <i className="legend-swatch legend-dashed" /> Long dashes — probable reference
-            </li>
-            <li>
-              <i className="legend-swatch legend-sparse" /> Short dashes — inferred reference
-            </li>
-            <li>
-              <i className="legend-swatch legend-lane" /> Wait lane width — captured Query Store wait
-              milliseconds from that building to that facility
-            </li>
-            {laneFacilities.map(kind => (
-              <li key={kind}>
-                <i className="legend-swatch" style={{ background: swatch(LANE_COLORS[kind]) }} />
-                Wait lane colour — queued at the {FACILITY_LABELS[kind]}
-              </li>
-            ))}
-            <li>
-              <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
-            </li>
-          </ul>
-          <p className="legend-caveat">
-            A building with no wait lane is not idle: it means no ranked query family carried Query
-            Store wait-category evidence naming it. A lane that threads through several buildings
-            before reaching a facility is a shared lane: it carries one multi-object family&apos;s whole
-            wait total, drawn once along the objects it names, and belongs to none of them
-            individually. {facilityTraffic.note}
-            {facilityTraffic.unmapped.length > 0 &&
-              ` ${facilityTraffic.unmapped.length} captured wait category/categories have no facility` +
-              ' on this map and are listed in the evidence tables rather than folded into one.'}
-          </p>
-          <p className="legend-decoration">
-            Roofs, windows, doors, chimneys, setbacks, crowns, and sidewalks are decoration. They are
-            seeded from each object&apos;s stable id and encode nothing. A neighbourhood&apos;s hue
-            says which schema owns it and nothing more: hues are handed out in catalogue order, so
-            one is never warmer, larger or busier than another.
-          </p>
-        </details>
-      </div>
+      {!narrow && <div className="hud hud-bottom-left">{legend}</div>}
 
       <div className="hud hud-bottom-right">
         <div className="hud-compass">

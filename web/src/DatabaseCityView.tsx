@@ -715,6 +715,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           onSelectRoad={selectRoad}
           roadLabels={roadLabels}
           liveStatus={liveStatus}
+          feedState={feedState}
           incidents={incidents}
         />
       )}

@@ -23,14 +23,18 @@ import {
   buildingLabelText,
   buildingLabelWorldHeight,
   createCityLabels,
+  declutterLabels,
   elideMiddle,
   labelAnchor,
+  labelPixelHeight,
+  labelScreenScale,
   minimumLegibleWorldHeight,
   neighborhoodLabelHeight,
   neighborhoodLabelText,
   LABEL_MAX_CHARS,
   LABEL_WORLD_HEIGHT,
 } from './cityLabels'
+import type { LabelBox } from './cityLabels'
 import type { CityRoute } from './cityRoute'
 import {
   LANDUSE_CITY_COLORS,
@@ -975,15 +979,22 @@ export function createDatabaseCityScene(
   applyLayers()
 
   /**
-   * Hides building and facility names that would project too small to read.
+   * Hides building and facility names that would project too small to read, and grows neighbourhood
+   * names that would.
    *
    * Names are dropped rather than drawn tiny, which is ordinary cartographic practice: a basemap
    * sheds street names as you zoom out instead of shrinking them into illegibility. Because larger
    * tables are lettered larger, they survive to a wider zoom than small ones, so zooming in reveals
-   * names roughly in order of size instead of switching all seventy-five on at once. Neighbourhood
-   * names are drawn several times larger again and hold the wide view on their own.
+   * names roughly in order of size instead of switching all seventy-five on at once.
+   *
+   * Neighbourhood names are the tier that holds the wide view, so they cannot be dropped for being
+   * small — there is nothing above them to fall back on. They are grown to a legible size instead
+   * (see {@link labelScreenScale}), and because growing a name does not give it more ground to sit
+   * on, whatever then collides is resolved by {@link declutterLabels} in territory order. On a
+   * 390-point phone this is the difference between a map with no readable text and a map with the
+   * three or four names that actually fit.
    */
-  const applyLabelLegibility = (viewportHeightPx: number) => {
+  const applyLabelLegibility = (viewportHeightPx: number, viewportWidthPx: number) => {
     const distance = camera.position.distanceTo(controls.target)
     // Every label shares a camera, so the projection factor is computed once and each sprite only
     // has to compare its own height against it. Rendering is on demand, so this runs when the
@@ -996,6 +1007,48 @@ export function createDatabaseCityScene(
     for (const sprite of facilityLabelGroup.children) {
       sprite.visible = LABEL_WORLD_HEIGHT >= minimumWorldHeight
     }
+    applyNeighborhoodLabelScale(distance, viewportHeightPx, viewportWidthPx)
+  }
+
+  const projected = new THREE.Vector3()
+
+  /** Grows neighbourhood names to the legibility floor, then drops whichever ones then collide. */
+  const applyNeighborhoodLabelScale = (
+    distance: number,
+    viewportHeightPx: number,
+    viewportWidthPx: number,
+  ) => {
+    const boxes: LabelBox[] = []
+    for (const sprite of neighborhoodLabelGroup.children) {
+      if (!(sprite instanceof THREE.Sprite)) continue
+      const baseScaleX = (sprite.userData.baseScaleX as number | undefined) ?? sprite.scale.x
+      const baseScaleY = (sprite.userData.baseScaleY as number | undefined) ?? sprite.scale.y
+      const baseY = (sprite.userData.baseY as number | undefined) ?? sprite.position.y
+      const worldHeight = (sprite.userData.labelWorldHeight as number | undefined) ?? baseScaleY
+      const scale = labelScreenScale(worldHeight, distance, camera.fov, viewportHeightPx)
+      sprite.scale.set(baseScaleX * scale, baseScaleY * scale, 1)
+      // Lifting with the type keeps the name clear of the rooftops it grew past.
+      sprite.position.y = baseY + (baseScaleY * (scale - 1)) / 2
+      projected.set(sprite.position.x, sprite.position.y, sprite.position.z).project(camera)
+      const onScreen = projected.z < 1 && Math.abs(projected.x) < 1.6 && Math.abs(projected.y) < 1.6
+      boxes.push({
+        id: (sprite.userData.labelId as string | undefined) ?? String(boxes.length),
+        x: (projected.x * 0.5 + 0.5) * viewportWidthPx,
+        y: (-projected.y * 0.5 + 0.5) * viewportHeightPx,
+        width: labelPixelHeight(baseScaleX * scale, distance, camera.fov, viewportHeightPx),
+        height: labelPixelHeight(baseScaleY * scale, distance, camera.fov, viewportHeightPx),
+        // Territory order: the name of the larger neighbourhood is the one that survives.
+        priority: worldHeight,
+        visible: onScreen,
+      })
+    }
+    const keep = declutterLabels(boxes)
+    let index = 0
+    for (const sprite of neighborhoodLabelGroup.children) {
+      if (!(sprite instanceof THREE.Sprite)) continue
+      sprite.visible = keep.has(boxes[index]?.id ?? '')
+      index += 1
+    }
   }
 
   const draw = () => {
@@ -1007,7 +1060,7 @@ export function createDatabaseCityScene(
       camera.aspect = width / height
       camera.updateProjectionMatrix()
     }
-    applyLabelLegibility(height)
+    applyLabelLegibility(height, width)
     // The sky follows the camera across the plan but stays pinned to the ground plane in height, so
     // its horizon is the city's horizon. Centring it on the camera instead puts the horizon at eye
     // level, which from an aerial view means the whole background is the *under* side of the dome.
@@ -1566,6 +1619,13 @@ export function createDatabaseCityScene(
       // Above the rooftops of an ordinary street, and above its own type size, so the name floats
       // over its neighbourhood instead of being lost among the buildings it names.
       sprite.position.set(district.labelX, worldHeight / 2 + 34, district.labelZ)
+      // The authored size is kept so the screen-space floor can scale from it each frame rather
+      // than compounding on whatever it set last time.
+      sprite.userData.baseScaleX = sprite.scale.x
+      sprite.userData.baseScaleY = sprite.scale.y
+      sprite.userData.baseY = sprite.position.y
+      sprite.userData.labelWorldHeight = worldHeight
+      sprite.userData.labelId = district.name
       neighborhoodLabelGroup.add(sprite)
     }
   }

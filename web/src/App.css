@@ -570,7 +570,7 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 /* Floating HUD. Every overlay is pointer-events:none at the container so the map stays draggable
    between panels; interactive children opt back in. */
 .hud { position: absolute; z-index: 2; display: grid; gap: 8px; pointer-events: none; max-width: min(340px, 42%); }
-.hud > *, .hud button, .hud input, .hud label, .hud summary { pointer-events: auto; }
+.hud > *, .hud button, .hud input, .hud label, .hud summary, .map-tray, .tray-open > * { pointer-events: auto; }
 .hud-top-left { top: 12px; left: 12px; }
 .hud-top-right { top: 12px; right: 12px; justify-items: end; }
 .hud-bottom-left {
@@ -595,6 +595,50 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
   background: rgba(8, 13, 20, 0.9); border: 1px solid #33475a; color: #dbe7f0;
   backdrop-filter: blur(6px); font-size: .74rem;
 }
+
+/*
+ * The overlay tray.
+ *
+ * Wide, this is nothing: `.tray-open` is a plain wrapper and the panels stack exactly as they did.
+ * Narrow, the chips are the whole interface to the overlays, so they are sized as touch targets
+ * first -- 34px tall, which with the 8px gap between rows clears the 44px comfortable-tap band.
+ */
+.tray-open { display: contents; }
+
+.map-tray { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-height: 0; }
+.map-tray-chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; flex: none; }
+.map-tray-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 34px; padding: 0 11px;
+  color: #dbe7f0; background: rgba(8, 13, 20, 0.9); border: 1px solid #33475a;
+  backdrop-filter: blur(6px); font: inherit; font-size: .74rem; cursor: pointer;
+}
+.map-tray-chip:hover { border-color: #55708a; }
+.map-tray-chip:focus-visible { outline: 2px solid #72f4c4; outline-offset: 1px; }
+.map-tray-chip.is-open { border-color: #72f4c4; color: #8be7ce; }
+.map-tray-chip > span { color: #7f95a8; }
+.map-tray-chip.is-open > span { color: #72f4c4; }
+/* Tone is carried by a leading bar rather than by text colour alone, so it survives a colour-blind read. */
+.map-tray-chip.is-alert { border-left: 3px solid #f2b3ad; color: #f2b3ad; }
+.map-tray-chip.is-unknown { border-left: 3px solid #d8b46a; color: #e8cf9b; }
+.map-tray-panel {
+  width: min(300px, calc(100vw - 28px));
+  /*
+   * Bounded by the tray, which is bounded by the map, so the panel always stops short of the camera
+   * controls in the opposite corner. A viewport-relative cap looked right on one phone and ran the
+   * last few legend rows underneath the zoom buttons on the next.
+   */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+/*
+ * The chip is the disclosure, so the panel's own summary would be a second control saying the same
+ * word. It is dropped here rather than in the markup, which keeps the wide layout's fold intact.
+ */
+.map-tray-panel .hud-legend > summary { display: none; }
+.map-tray-panel .hud-legend { padding-top: 10px; }
 .hud-finder { display: grid; gap: 8px; padding: 10px 11px; }
 .hud-field { display: grid; gap: 5px; }
 .hud-field span { color: #93a8ba; font: .66rem ui-monospace, Consolas, monospace; letter-spacing: .06em; text-transform: uppercase; }
@@ -703,10 +747,14 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
 
+/*
+ * At this width the map is too narrow to carry a legend in its own corner, so the legend moves into
+ * the overlay tray instead of being switched off. The breakpoint is shared with MapTray's
+ * NARROW_QUERY: one width, one decision about where the overlays live.
+ */
 @media (max-width: 900px) {
-  .hud { max-width: 60%; }
+  .hud { max-width: calc(100% - 24px); }
   .hud-panel { width: 60%; }
-  .hud-bottom-left { display: none; }
 }
 .city-analysis { margin-top: 24px; }
 .city-object-detail h3 { margin: 18px 0 8px; font-size: .82rem; }
@@ -754,7 +802,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 @media (max-width: 860px) {
   .map-shell {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) 46%;
+    grid-template-rows: minmax(0, 1fr) 42%;
   }
   .map-sidebar {
     grid-row: 2;
@@ -763,7 +811,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
     box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.45);
   }
   .map-stage { grid-row: 1; }
-  .hud { max-width: 60%; }
+  .hud { max-width: calc(100% - 24px); }
   .hud-panel { display: none; }
   .topology li { grid-template-columns: 58px 1fr; }
   .topology li > span:last-child { grid-column: 1 / -1; }
@@ -771,6 +819,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   .city-schema-strip { grid-template-columns: 1fr; }
   .edge-source-facts { grid-template-columns: 1fr; }
   .floating-card { max-width: calc(100vw - 24px); }
+
   /*
    * The qualifications shrink but never disappear. A warning that a narrow screen hides is a
    * warning that was not given, so these rules only ever change type size and wrapping.
@@ -1004,6 +1053,13 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .address-entry.kind-facility .address-icon { color: #efc16e; }
 .address-entry.kind-query .address-icon { color: #8be7ce; }
 .address-text { min-width: 0; display: grid; gap: 2px; }
+/*
+ * A schema-qualified object name is one unbreakable word, and some of them are fifty characters
+ * long. Without this the name simply ran off the side of a phone and was clipped by the sidebar --
+ * no ellipsis, no scroll, no way to read the end of it. Wrapping is the right answer rather than
+ * truncation, because this list is how you find an object by name.
+ */
+.address-text > * { min-width: 0; overflow-wrap: anywhere; }
 .address-name {
   color: #e2eaf0;
   font-size: .81rem;
@@ -1149,3 +1205,53 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .incident-jump.is-blocked .incident-jump-dot { background: #e4483c; }
 .incident-jump.is-waiting .incident-jump-dot { background: #e2a957; }
 .incident-jump.is-deadlock .incident-jump-dot { background: #b02a8f; }
+/* ---------------------------------------------------------- map overlays, narrow viewports */
+
+/*
+ * A phone screen is the map.
+ *
+ * Measured at a 390-point viewport, the map furniture covered 60% of the canvas: the layer switches,
+ * the feed status and the blocking summary alone were a 234x348 panel on a 390x456 drawing. The
+ * panels themselves fold into the tray (see MapTray); these rules shrink what is left to the
+ * smallest thing that is still comfortably tappable.
+ *
+ * This block sits after the overlay definitions on purpose. The narrow rules and the base rules have
+ * the same specificity, so a media query written earlier in the file loses to the base rule it means
+ * to override -- which is exactly what happened the first time these were written.
+ */
+@media (max-width: 900px) {
+  .view-mode-tile { width: 56px; height: 56px; bottom: 10px; left: 10px; }
+  .view-mode-label { padding: 2px 0; font-size: .58rem; }
+
+  .hud-bottom-right { bottom: 10px; right: 10px; gap: 6px; }
+  .hud-compass { justify-self: end; padding: 5px 9px; font-size: .64rem; }
+  .hud-camera { gap: 5px; padding: 5px; justify-content: flex-end; flex-wrap: wrap; max-width: calc(100vw - 84px); }
+  /*
+   * Square icon buttons. The glyph carries the meaning and the accessible name already lives on
+   * aria-label, so dropping the word costs a sighted reader a tooltip and a screen reader nothing.
+   */
+  .hud-camera button { min-width: 36px; min-height: 36px; padding: 0 7px; font-size: .82rem; }
+  .hud-camera button.is-wordy { font-size: .68rem; padding: 0 9px; }
+
+  /*
+   * The feed chip and the tray chips both want the top strip, and 390 points does not hold both.
+   * So they stack: the freshness reading first, because it qualifies everything under it, then the
+   * controls. Neither is displaced and neither is hidden.
+   */
+  .status-chip { left: 10px; top: 10px; transform: none; max-width: calc(100vw - 20px); padding: 5px 9px; font-size: .64rem; }
+  /*
+   * The tray stops short of the camera controls in the opposite corner, so an open panel scrolls
+   * inside the map instead of running underneath the zoom buttons. Flex rather than the grid it uses
+   * on a wide screen, because an auto grid row overflows a capped container instead of shrinking
+   * into it -- which is exactly how the legend ended up under the zoom buttons the first time.
+   */
+  .hud-top-right {
+    top: 46px;
+    max-height: calc(100% - 150px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    min-height: 0;
+  }
+  .hud-road-readout { bottom: 74px; max-width: calc(100vw - 20px); }
+}
