@@ -74,6 +74,81 @@ export type CityLayerToggles = {
 const CITY_DISTRICT_OPACITY = 0.11
 const MAP_DISTRICT_OPACITY = 0.17
 
+/*
+ * Which flat sheet wins where two of them cover the same ground.
+ *
+ * The basemap is a stack of wafer-thin sheets — the ground plate, land cover, the neighbourhood
+ * wash, kerbs, carriageways, centre lines, then traffic over the top — pressed into about a world
+ * unit of height. Their order used to be carried by that height alone, and that works only for as
+ * long as the depth buffer can still tell a hundredth of a unit apart.
+ *
+ * It cannot on a large city. Depth resolution falls off with the square of the distance to the
+ * fragment, and the camera has to stand back in proportion to the plan in order to frame it, so the
+ * coarsest step the buffer can represent at ground level grows roughly linearly with the size of
+ * the database. A 900-table instance plans an ~8,000-unit city, which frames from ~11,000 units
+ * away, and at that range one representable step is about 0.13 units — wider than the whole stack
+ * from kerb to centre line, and ten times the gap between two kinds of land cover. Every sheet then
+ * wins and loses per pixel, and because the orbit damping keeps nudging the camera the winner
+ * changes every frame: the map strobes. Map mode is worse again, because its 13° lens stands more
+ * than three times further back still.
+ *
+ * Polygon offset settles the order in depth-buffer units instead of world units, so the sheets stay
+ * the same distance apart in the only currency the depth test actually spends — whatever the size
+ * of the city or the distance of the camera. Nothing moves: the offset applies to the depth a
+ * fragment writes and tests against, never to where it draws.
+ *
+ * Rank 0 is the plane the buildings stand on, and every sheet is pushed *away* from the eye by its
+ * rank. Pushing down rather than pulling up is deliberate: nothing here may ever be pulled in front
+ * of a building, and map mode flattens buildings to about a hundredth of their height — so what is
+ * left of them is thinner than the ambiguity this exists to correct.
+ */
+export const GROUND_RANK = {
+  /** Shared wait lanes, drawn over the exclusive ones they overlap. */
+  sharedLane: 1,
+  /** Exclusive wait lanes, and the selected building's plate. */
+  facilityLane: 2,
+  /** Graded road ribbons. Lane order refines this — see `roadRank`. */
+  road: 3,
+  /** The casing under a road ribbon, and the halo around a selected one. */
+  roadCasing: 4,
+  /** Aggregate street load. */
+  traffic: 5,
+  laneMark: 6,
+  streetFill: 7,
+  streetCasing: 8,
+  riverBank: 9,
+  /** The neighbourhood wash and the facility pads, which tint land without hiding it. */
+  districtWash: 10,
+  riverWater: 11,
+  landCover: 12,
+  /** The countryside plate the whole city sits on. Nothing is under it. */
+  plate: 13,
+} as const
+
+/**
+ * Fixes a material's place in the flat stack.
+ *
+ * Both terms matter. `polygonOffsetUnits` buys a fixed number of representable depth steps, which is
+ * what separates two sheets seen face on; `polygonOffsetFactor` scales with how much depth the
+ * polygon covers within a single pixel, which is what separates them towards the horizon, where the
+ * ground is so oblique that one pixel spans more depth than the whole stack is thick.
+ */
+export function sink<M extends THREE.Material>(material: M, rank: number): M {
+  material.polygonOffset = true
+  material.polygonOffsetFactor = rank
+  material.polygonOffsetUnits = rank * 2
+  return material
+}
+
+/**
+ * Road ribbons already step apart by lane so two routes sharing a street stay legible. That step is
+ * a fifth of the thinnest gap in the stack, so it needs the same treatment; the fractions stay
+ * inside the road's own rank and never reach its neighbours'.
+ */
+export function roadRank(lane: number): number {
+  return GROUND_RANK.road - Math.min(Math.max(lane, 0), 8) * 0.1
+}
+
 export type CameraNudge =
   | 'panLeft'
   | 'panRight'
@@ -319,21 +394,33 @@ export function createDatabaseCityScene(
     // The plane the city sits on runs past the fog in every direction, so it is doing the job of
     // countryside rather than of floor. Kept close in value to the built parcels it abuts: a big
     // value step at the plan boundary turns the city into a rug thrown on a floor.
-    ground: new THREE.MeshStandardMaterial({ color: 0x7e7c58, roughness: 0.98 }),
+    ground: sink(new THREE.MeshStandardMaterial({ color: 0x7e7c58, roughness: 0.98 }), GROUND_RANK.plate),
     asphalt: new THREE.MeshStandardMaterial({ color: 0x6a6a71, roughness: 0.95 }),
-    laneMark: new THREE.MeshStandardMaterial({ color: 0xc4c0b3, roughness: 0.85 }),
+    laneMark: sink(
+      new THREE.MeshStandardMaterial({ color: 0xc4c0b3, roughness: 0.85 }),
+      GROUND_RANK.laneMark,
+    ),
     sidewalk: new THREE.MeshStandardMaterial({ color: 0x8d8a81, roughness: 0.9 }),
-    civicPad: new THREE.MeshBasicMaterial({ color: 0x2b4a63, transparent: true, opacity: 0.15 }),
+    civicPad: sink(
+      new THREE.MeshBasicMaterial({ color: 0x2b4a63, transparent: true, opacity: 0.15 }),
+      GROUND_RANK.districtWash,
+    ),
     facility: new THREE.MeshStandardMaterial({ color: 0x53707f, roughness: 0.62 }),
     facilityUnknown: new THREE.MeshBasicMaterial({ color: 0x7d8b96, wireframe: true }),
     facilityFill: new THREE.MeshStandardMaterial({ color: 0x63d8ff, emissive: 0x11455c, roughness: 0.35 }),
     facilityAlert: new THREE.MeshStandardMaterial({ color: 0xe4483c, emissive: 0x4a0f0a, roughness: 0.4 }),
     route: new THREE.MeshBasicMaterial({ color: 0x2fe0ff, transparent: true, opacity: 0.92 }),
     routePin: new THREE.MeshStandardMaterial({ color: 0x2fe0ff, emissive: 0x0d5f70, roughness: 0.3 }),
-    roadHighlight: new THREE.MeshBasicMaterial({ color: 0xf4f9ff, transparent: true, opacity: 0.5 }),
+    roadHighlight: sink(
+      new THREE.MeshBasicMaterial({ color: 0xf4f9ff, transparent: true, opacity: 0.5 }),
+      GROUND_RANK.roadCasing,
+    ),
     roadPin: new THREE.MeshStandardMaterial({ color: 0xf4f9ff, emissive: 0x5d7183, roughness: 0.3 }),
     roadPinOffMap: new THREE.MeshStandardMaterial({ color: 0xb0bcc7, emissive: 0x39434d, roughness: 0.45 }),
-    selection: new THREE.MeshBasicMaterial({ color: 0xffd479, transparent: true, opacity: 0.26 }),
+    selection: sink(
+      new THREE.MeshBasicMaterial({ color: 0xffd479, transparent: true, opacity: 0.26 }),
+      GROUND_RANK.facilityLane,
+    ),
     selectionPin: new THREE.MeshStandardMaterial({ color: 0xffd479, emissive: 0x6b4a06, roughness: 0.35 }),
 
     /*
@@ -382,12 +469,25 @@ export function createDatabaseCityScene(
   const landMaterials = Object.fromEntries(
     LAND_USES.map(use => [
       use,
-      new THREE.MeshStandardMaterial({ color: LANDUSE_CITY_COLORS[use], roughness: 0.95, vertexColors: true }),
+      sink(
+        new THREE.MeshStandardMaterial({ color: LANDUSE_CITY_COLORS[use], roughness: 0.95, vertexColors: true }),
+        GROUND_RANK.landCover,
+      ),
     ]),
   ) as Record<LandUse, THREE.MeshStandardMaterial>
   // Water is the one cover that should catch the sun rather than absorb it.
   landMaterials.water.roughness = 0.16
   landMaterials.water.metalness = 0.35
+
+  /*
+   * The river carries the same two covers as the blocks it crosses — but it *crosses* them, and two
+   * sheets that overlap cannot share a rank without fighting over the overlap. So it gets its own
+   * pair, kept in step with the originals whenever the palette changes.
+   */
+  const riverMaterials = {
+    water: sink(landMaterials.water.clone(), GROUND_RANK.riverWater),
+    bank: sink(landMaterials.yard.clone(), GROUND_RANK.riverBank),
+  }
 
   /*
    * Street hierarchy.
@@ -427,10 +527,16 @@ export function createDatabaseCityScene(
     service: { fill: 0x616168, casing: 0x84817a },
   }
   const streetFill = Object.fromEntries(
-    STREET_CLASSES.map(klass => [klass, new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].fill, roughness: 0.94 })]),
+    STREET_CLASSES.map(klass => [
+      klass,
+      sink(new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].fill, roughness: 0.94 }), GROUND_RANK.streetFill),
+    ]),
   ) as Record<StreetClass, THREE.MeshStandardMaterial>
   const streetCasing = Object.fromEntries(
-    STREET_CLASSES.map(klass => [klass, new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].casing, roughness: 0.92 })]),
+    STREET_CLASSES.map(klass => [
+      klass,
+      sink(new THREE.MeshStandardMaterial({ color: CITY_STREET[klass].casing, roughness: 0.92 }), GROUND_RANK.streetCasing),
+    ]),
   ) as Record<StreetClass, THREE.MeshStandardMaterial>
 
   /**
@@ -456,11 +562,22 @@ export function createDatabaseCityScene(
     return material
   }
   const roadMaterials = new Map<number, THREE.MeshBasicMaterial>()
-  const roadMaterial = (color: number, faded: boolean) => {
-    const cacheKey = color * 2 + (faded ? 1 : 0)
+  /**
+   * Ribbon materials, cached by colour, fade *and* depth rank.
+   *
+   * Rank is part of the key rather than a property set at draw time because traffic, roads and the
+   * two kinds of wait lane are four sheets stacked within a quarter of a world unit that all draw
+   * from this one factory. Sharing a material across them would share a rank, and they would be back
+   * to settling their order in world units the depth buffer cannot resolve.
+   */
+  const roadMaterial = (color: number, faded: boolean, rank: number) => {
+    const cacheKey = (color * 2 + (faded ? 1 : 0)) * 1000 + Math.round(rank * 10)
     let material = roadMaterials.get(cacheKey)
     if (!material) {
-      material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: faded ? 0.6 : 0.92 })
+      material = sink(
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: faded ? 0.6 : 0.92 }),
+        rank,
+      )
       roadMaterials.set(cacheKey, material)
     }
     return material
@@ -475,12 +592,12 @@ export function createDatabaseCityScene(
   const districtMaterial = (color: number) => {
     let material = districtMaterials.get(color)
     if (!material) {
-      material = new THREE.MeshBasicMaterial({
+      material = sink(new THREE.MeshBasicMaterial({
         color,
         transparent: true,
         opacity: viewMode === 'map' ? MAP_DISTRICT_OPACITY : CITY_DISTRICT_OPACITY,
         depthWrite: false,
-      })
+      }), GROUND_RANK.districtWash)
       districtMaterials.set(color, material)
     }
     return material
@@ -612,7 +729,10 @@ export function createDatabaseCityScene(
   }
 
   const poiMaterials = new Map<number, THREE.MeshBasicMaterial>()
-  const casingMaterial = new THREE.MeshBasicMaterial({ color: MAP_PALETTE.roadCasing })
+  const casingMaterial = sink(
+    new THREE.MeshBasicMaterial({ color: MAP_PALETTE.roadCasing }),
+    GROUND_RANK.roadCasing,
+  )
   function poiMaterial(color: number): THREE.MeshBasicMaterial {
     let material = poiMaterials.get(color)
     if (!material) {
@@ -642,6 +762,9 @@ export function createDatabaseCityScene(
     for (const use of LAND_USES) {
       landMaterials[use].color.setHex((flat ? LANDUSE_MAP_COLORS : LANDUSE_CITY_COLORS)[use])
     }
+    // The river's clones carry the palette of the covers they were cloned from, never their rank.
+    riverMaterials.water.color.copy(landMaterials.water.color)
+    riverMaterials.bank.color.copy(landMaterials.yard.color)
     for (const klass of STREET_CLASSES) {
       streetFill[klass].color.setHex(flat ? MAP_STREET[klass].fill : CITY_STREET[klass].fill)
       streetCasing[klass].color.setHex(flat ? MAP_STREET[klass].casing : CITY_STREET[klass].casing)
@@ -1216,8 +1339,8 @@ export function createDatabaseCityScene(
     if (terrain.river.length > 1) {
       const banks = riverPositions(terrain.river, 3.4, -0.46)
       const water = riverPositions(terrain.river, 0, -0.5)
-      addMerged(groundGroup, banks, landMaterials.yard, 1)
-      addMerged(groundGroup, water, landMaterials.water, 1)
+      addMerged(groundGroup, banks, riverMaterials.bank, 1)
+      addMerged(groundGroup, water, riverMaterials.water, 1)
     }
   }
 
@@ -1585,7 +1708,7 @@ export function createDatabaseCityScene(
       const width = roadWidth(street.executions)
       const ribbon = ribbonGeometry(street.points, width, null)
       if (!ribbon) continue
-      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(street.color, false))
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(street.color, false, GROUND_RANK.traffic))
       mesh.position.y = 0.045
       mesh.renderOrder = 1
       trafficGroup.add(mesh)
@@ -1626,7 +1749,7 @@ export function createDatabaseCityScene(
       const centreline = offsetPolyline(points, offset)
       const ribbon = ribbonGeometry(points, road.width, DASH_PATTERNS[road.pattern], offset)
       if (!ribbon) continue
-      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(road.color, road.pattern !== 'solid'))
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(road.color, road.pattern !== 'solid', roadRank(lane)))
       // Lane order also stacks the ribbons a hair apart so coplanar roads never z-fight.
       mesh.position.y = 0.06 + lane * 0.014
       mesh.userData.routeId = road.routeId
@@ -1650,7 +1773,7 @@ export function createDatabaseCityScene(
       }
 
       if (!to) {
-        const marker = new THREE.Mesh(track(new THREE.ConeGeometry(3.4, 9, 4)), roadMaterial(road.color, false))
+        const marker = new THREE.Mesh(track(new THREE.ConeGeometry(3.4, 9, 4)), roadMaterial(road.color, false, GROUND_RANK.road))
         const exit = centreline[centreline.length - 1]
         marker.position.set(exit.x, 4.5, exit.z)
         marker.userData.routeId = road.routeId
@@ -1711,7 +1834,7 @@ export function createDatabaseCityScene(
       )
       const ribbon = ribbonGeometry(points, lane.width, DASH_PATTERNS[lane.pattern])
       if (!ribbon) continue
-      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid'))
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid', GROUND_RANK.facilityLane))
       // Lanes sit above every road lane so a lane and a road sharing a street stay distinguishable.
       mesh.position.y = 0.2
       mesh.userData.laneId = lane.laneId
@@ -1730,7 +1853,7 @@ export function createDatabaseCityScene(
       const points = streetPolylineThrough(plan, [...stops, { x: site.x, z: site.z }])
       const ribbon = ribbonGeometry(points, lane.width, DASH_PATTERNS[lane.pattern])
       if (!ribbon) continue
-      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid'))
+      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid', GROUND_RANK.sharedLane))
       // Above exclusive lanes: where a shared lane overlaps one, the shared path stays readable.
       mesh.position.y = 0.32
       mesh.userData.laneId = lane.laneId
@@ -2306,6 +2429,8 @@ export function createDatabaseCityScene(
       for (const material of archetypeMaterials.values()) material.dispose()
       for (const material of roadMaterials.values()) material.dispose()
       for (const material of poiMaterials.values()) material.dispose()
+      riverMaterials.water.dispose()
+      riverMaterials.bank.dispose()
       casingMaterial.dispose()
       labelFactory.dispose()
       renderer.dispose()
