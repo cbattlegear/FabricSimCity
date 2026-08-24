@@ -10,12 +10,11 @@ import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import {
   claimLane,
   corridorKeys,
-  dashSpans,
   DASH_PATTERNS,
   laneOffset,
   offsetPolyline,
-  type DashPattern,
 } from './cityRoads'
+import { ribbonGeometry, ribbonPositions } from './mapRibbon'
 import { type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
 import type { FacilityLane, SharedFacilityLane } from './cityFacilityTraffic'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
@@ -2314,95 +2313,6 @@ export function createDatabaseCityScene(
   }
 }
 
-/**
- * Extrudes a polyline into a flat ribbon, so roads read as surfaces rather than hairlines.
- * `dash` repeats a fixed-length on/off pattern along the whole polyline, which is how the reduced
- * confidence patterns are expressed without needing a line material.
- */
-function ribbonPositions(
-  points: ReadonlyArray<{ x: number; z: number }>,
-  width: number,
-  dash: DashPattern | null,
-  offset = 0,
-  out: number[] = [],
-  y = 0,
-): number[] {
-  const line = offsetPolyline(points, offset)
-  if (line.length < 2) return out
-  const half = width / 2
-  const push = (
-    ax: number,
-    az: number,
-    bx: number,
-    bz: number,
-    nx: number,
-    nz: number,
-  ) => {
-    out.push(
-      ax + nx, y, az + nz,
-      bx + nx, y, bz + nz,
-      bx - nx, y, bz - nz,
-      ax + nx, y, az + nz,
-      bx - nx, y, bz - nz,
-      ax - nx, y, az - nz,
-    )
-  }
-
-  for (const span of dashSpans(line, dash)) {
-    const length = Math.hypot(span.bx - span.ax, span.bz - span.az)
-    if (length < 1e-6) continue
-    const ux = (span.bx - span.ax) / length
-    const uz = (span.bz - span.az) / length
-    push(span.ax, span.az, span.bx, span.bz, -uz * half, ux * half)
-  }
-
-  /*
-   * Patch the joints of an unbroken ribbon.
-   *
-   * Each span is mitre-free, so a bend leaves a wedge of missing ground on the outside of the turn.
-   * The old patch was an axis-aligned square, which was exactly right for a lattice that only ever
-   * bent at 90° and catastrophically wrong now that streets curve and run diagonally: it fired a
-   * square off at every vertex of every bend, which read as white starbursts across the basemap.
-   *
-   * A disc is the only join that is correct for every angle, and a rounded join is what a printed
-   * basemap draws anyway. Endpoints get one too, which closes junctions and the four outer corners
-   * of the city without a special case. A dashed ribbon gets none — its dashes carry around the turn
-   * on their own, and capping them would fill in the gaps that carry the meaning.
-   */
-  if (dash === null) {
-    for (const point of line) pushDisc(out, point.x, point.z, half, y)
-  }
-  return out
-}
-
-/** A flat disc as a triangle fan, used to round off the joints and ends of a ribbon. */
-function pushDisc(out: number[], x: number, z: number, radius: number, y: number, segments = 10) {
-  if (radius <= 0) return
-  const step = (Math.PI * 2) / segments
-  for (let i = 0; i < segments; i += 1) {
-    const a = i * step
-    const b = a + step
-    out.push(
-      x, y, z,
-      x + Math.cos(a) * radius, y, z + Math.sin(a) * radius,
-      x + Math.cos(b) * radius, y, z + Math.sin(b) * radius,
-    )
-  }
-}
-
-function ribbonGeometry(
-  points: ReadonlyArray<{ x: number; z: number }>,
-  width: number,
-  dash: DashPattern | null,
-  offset = 0,
-): THREE.BufferGeometry | null {
-  const positions = ribbonPositions(points, width, dash, offset)
-  if (positions.length === 0) return null
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  geometry.computeVertexNormals()
-  return geometry
-}
 
 /** Where a cross-database reference leaves the map: straight out through the nearest city edge. */
 function rampPoint(plan: CityPlan, from: CityLot): { x: number; z: number } {

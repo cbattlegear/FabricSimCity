@@ -277,17 +277,24 @@ function AtlasLevel({
         <summary>Legend &amp; evidence</summary>
         <div className="sidebar-drawer-body">
           <div className="legend" aria-label="Atlas legend">
-            <span><i className="legend-plot" /> city plot = allocated</span>
+            <span><i className="legend-plot" /> town ground = allocated</span>
             <span><i className="legend-tower" /> tallest tower = used</span>
             <span><i className="legend-live" /> fresh live sample</span>
             <span><i className="legend-unknown">×</i> unknown size</span>
           </div>
           <p className="mapping-note">
-            Each database is a city. Plot side uses allocated KiB: t = min(1, log₂(1 + A) / 50), area = 144 + 9072t.
-            The tallest tower uses used KiB: log₂(1 + U) × 2.6, so zero used bytes is zero height. Blocks follow the
-            plot at one fixed block size; skyline shape, setbacks and masts are decoration seeded from the database id.
-            An × parcel has unknown allocated size and carries no quantity; a fenced city has unknown used size and
-            claims no height.
+            Each database is a town. The <strong>area</strong> its outline encloses is allocated KiB: t = min(1,
+            log₂(1 + A) / 50), area = 144 + 9072t. The tallest tower uses used KiB: log₂(1 + U) × 2.6, so zero used
+            bytes is zero height. Buildings follow that ground at one fixed block size, so their count reads as area
+            and nothing else. An × town has unknown allocated size and carries no quantity; a fenced town has unknown
+            used size and claims no height. Road confidence is the only thing a road between two towns encodes:
+            solid = confirmed, long dash = probable, short dash = weaker.
+          </p>
+          <p className="mapping-note">
+            <strong>Scenery is not evidence.</strong> The shape of a town&rsquo;s edge, its ring road and radial
+            streets, and the river, lakes and woodland between towns are decoration. Town shapes are seeded from the
+            database id; the landscape is seeded from a fixed constant and is byte-identical every session. None of it
+            moves when a database grows, appears or is dropped, and none of it can be read as a measurement.
           </p>
           {snapshot && (
             <>

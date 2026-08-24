@@ -1,6 +1,7 @@
 import * as THREE from 'three'
-import type { AtlasCityLot, AtlasCityPlan } from './atlasCity'
+import type { AtlasCityPlan, AtlasCityLot } from './atlasCity'
 import { mergeAndDispose } from './mergeGeometry'
+import { ribbonPositions } from './mapRibbon'
 
 /**
  * Turns an {@link AtlasCityPlan} into the handful of merged geometries the atlas draws it with.
@@ -25,21 +26,30 @@ const MAST_THRESHOLD = 0.92
 /** A tower taller than this many world units is drawn as two stacked volumes with a setback. */
 const SETBACK_HEIGHT = 26
 
+/**
+ * Painted width of a town street, and of the darker casing under it.
+ *
+ * Constant across every town, like the block pitch: streets are scenery, so letting them grow with a
+ * database would put a second, false size encoding on the sheet. Both fit inside the gap the block
+ * pitch already leaves between buildings.
+ */
+export const STREET_FILL_WIDTH = 1.7
+export const STREET_CASING_WIDTH = 2.9
+
 export interface AtlasCityGeometry {
   /** Building bodies. Carries the database tint and is the city's pick target. */
   readonly massing: THREE.BufferGeometry | null
   /** Roof caps, parapets, and masts, drawn in the lighter accent material. */
   readonly trim: THREE.BufferGeometry | null
-  /** The plot the city stands on, sized by the encoded allocated bytes. */
+  /** The ground the city stands on: the town outline, extruded. Its area is the allocated bytes. */
   readonly pad: THREE.BufferGeometry
-  /** Street centrelines, as a position buffer for {@link THREE.LineSegments}. */
-  readonly streets: THREE.BufferGeometry | null
+  /** The dark edge under every street, drawn first. */
+  readonly streetCasing: THREE.BufferGeometry | null
+  /** The pale surface of every street, drawn over its casing. */
+  readonly streetFill: THREE.BufferGeometry | null
 }
 
 export function buildAtlasCityGeometry(plan: AtlasCityPlan): AtlasCityGeometry {
-  const pad = new THREE.BoxGeometry(plan.side, PAD_HEIGHT, plan.side)
-  pad.translate(0, PAD_HEIGHT / 2, 0)
-
   const massing: THREE.BufferGeometry[] = []
   const trim: THREE.BufferGeometry[] = []
   for (const lot of plan.lots) {
@@ -50,9 +60,33 @@ export function buildAtlasCityGeometry(plan: AtlasCityPlan): AtlasCityGeometry {
   return {
     massing: mergeAndDispose(massing),
     trim: mergeAndDispose(trim),
-    pad,
-    streets: streetGeometry(plan),
+    pad: padGeometry(plan),
+    streetCasing: streetGeometry(plan, STREET_CASING_WIDTH, PAD_HEIGHT + 0.04),
+    streetFill: streetGeometry(plan, STREET_FILL_WIDTH, PAD_HEIGHT + 0.08),
   }
+}
+
+/**
+ * The town's ground: its outline extruded to {@link PAD_HEIGHT}.
+ *
+ * A square box became an extruded polygon here and nowhere else in the pipeline, because the plot was
+ * never really a square -- it was an area, and a square was one arbitrary way to spend it. `Shape`
+ * works in XY, so the outline's `z` is negated on the way in and the prism is stood upright
+ * afterwards, which lands it spanning `y = 0..PAD_HEIGHT` in the same place the box occupied.
+ */
+function padGeometry(plan: AtlasCityPlan): THREE.BufferGeometry {
+  if (plan.outline.length < 3) {
+    const fallback = new THREE.BoxGeometry(plan.side, PAD_HEIGHT, plan.side)
+    fallback.translate(0, PAD_HEIGHT / 2, 0)
+    return fallback
+  }
+  const shape = new THREE.Shape(
+    plan.outline.map(point => new THREE.Vector2(point.x, -point.z)),
+  )
+  const pad = new THREE.ExtrudeGeometry(shape, { depth: PAD_HEIGHT, bevelEnabled: false })
+  pad.rotateX(-Math.PI / 2)
+  pad.computeVertexNormals()
+  return pad
 }
 
 function box(width: number, height: number, depth: number, x: number, y: number, z: number): THREE.BufferGeometry {
@@ -126,14 +160,26 @@ function fence(lot: AtlasCityLot): THREE.BufferGeometry[] {
   return parts
 }
 
-function streetGeometry(plan: AtlasCityPlan): THREE.BufferGeometry | null {
+/**
+ * Every street in a town as one ribbon buffer at the given width.
+ *
+ * Called twice -- once wide and dark, once narrow and pale -- which is the whole trick that makes a
+ * road read as a road rather than as a line, and is the same pair the database city draws one level
+ * down. Shared with that city through {@link ribbonPositions}, so the two surfaces cannot drift.
+ */
+function streetGeometry(
+  plan: AtlasCityPlan,
+  width: number,
+  y: number,
+): THREE.BufferGeometry | null {
   if (plan.streets.length === 0) return null
-  const positions = new Float32Array(plan.streets.length * 6)
-  const y = PAD_HEIGHT + 0.06
-  plan.streets.forEach((street, index) => {
-    positions.set([street.x1, y, street.z1, street.x2, y, street.z2], index * 6)
-  })
+  const positions: number[] = []
+  for (const street of plan.streets) {
+    ribbonPositions(street.points, width, null, 0, positions, y)
+  }
+  if (positions.length === 0) return null
   const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.computeVertexNormals()
   return geometry
 }

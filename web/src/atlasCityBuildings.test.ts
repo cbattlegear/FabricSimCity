@@ -1,7 +1,8 @@
 import * as THREE from 'three'
 import { describe, expect, it } from 'vitest'
 import { planAtlasCity, UNKNOWN_SIDE, VACANT_HEIGHT } from './atlasCity'
-import { buildAtlasCityGeometry, PAD_HEIGHT } from './atlasCityBuildings'
+import { buildAtlasCityGeometry, PAD_HEIGHT, STREET_FILL_WIDTH } from './atlasCityBuildings'
+import { polygonArea } from './mapRibbon'
 import type { ByteMeasurement, DatabaseAtlasItem, Evidence } from './contracts'
 
 const evidence: Evidence = {
@@ -60,9 +61,18 @@ describe('buildAtlasCityGeometry', () => {
 
     expect(geometry.massing).toBeNull()
     expect(geometry.trim).toBeNull()
-    expect(geometry.streets).toBeNull()
-    expect(box.max.x - box.min.x).toBeCloseTo(UNKNOWN_SIDE)
+    expect(geometry.streetCasing).toBeNull()
+    expect(geometry.streetFill).toBeNull()
+    // The plate is an irregular town outline now, so its width varies; what is fixed is the ground
+    // it covers, and that is still exactly the nonquantitative side squared.
+    expect(box.max.x - box.min.x).toBeGreaterThan(UNKNOWN_SIDE)
     expect(box.max.y).toBeCloseTo(PAD_HEIGHT)
+  })
+
+  it('gives the town exactly the ground its allocated size paid for', () => {
+    const plan = planAtlasCity(database(sixtyFourGiB, oneGiB))
+    expect(polygonArea(plan.outline)).toBeCloseTo(plan.side * plan.side, 5)
+    expect(boundingBox(buildAtlasCityGeometry(plan).pad).max.y).toBeCloseTo(PAD_HEIGHT, 6)
   })
 
   it('tops the massing out at exactly the encoded tallest tower, above the pad it stands on', () => {
@@ -73,12 +83,12 @@ describe('buildAtlasCityGeometry', () => {
     expect(boundingBox(geometry.massing!).max.y).toBeCloseTo(PAD_HEIGHT + plan.towerHeight!, 4)
   })
 
-  it('never lets a building cross the plot the allocated size paid for', () => {
+  it('never lets a building cross the town the allocated size paid for', () => {
     const plan = planAtlasCity(database(sixtyFourGiB, oneGiB))
     const box = boundingBox(buildAtlasCityGeometry(plan).massing!)
 
-    expect(box.max.x).toBeLessThanOrEqual(plan.side / 2)
-    expect(box.min.z).toBeGreaterThanOrEqual(-plan.side / 2)
+    expect(box.max.x).toBeLessThanOrEqual(plan.radius.max)
+    expect(box.min.z).toBeGreaterThanOrEqual(-plan.radius.max)
   })
 
   it('fences every lot with no massing above it when used size is unknown', () => {
@@ -95,11 +105,18 @@ describe('buildAtlasCityGeometry', () => {
     expect(boundingBox(geometry.trim!).max.y).toBeCloseTo(PAD_HEIGHT + 0.245, 4)
   })
 
-  it('emits one street segment pair per planned centreline', () => {
+  it('draws every street as a casing and a fill, the way both surfaces draw a road', () => {
     const plan = planAtlasCity(database(sixtyFourGiB, oneGiB))
-    const streets = buildAtlasCityGeometry(plan).streets!
+    const geometry = buildAtlasCityGeometry(plan)
 
-    expect(streets.getAttribute('position').count).toBe(plan.streets.length * 2)
+    expect(plan.streets.length).toBeGreaterThan(0)
+    const casing = boundingBox(geometry.streetCasing!)
+    const fill = boundingBox(geometry.streetFill!)
+    // The casing is the wider of the two and sits under the fill, which is the only thing that makes
+    // a road read as a road rather than as a line.
+    expect(casing.max.x - casing.min.x).toBeGreaterThan(fill.max.x - fill.min.x)
+    expect(casing.max.y).toBeLessThan(fill.min.y)
+    expect(fill.max.x).toBeLessThanOrEqual(plan.radius.max + STREET_FILL_WIDTH)
   })
 
   it('builds the same city twice, so a refresh cannot reshape a database that did not change', () => {

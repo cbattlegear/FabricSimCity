@@ -2,7 +2,16 @@ export type AtlasPosition = Readonly<{ x: number; z: number }>
 
 const columns = 10
 const slots = columns * columns
-const spacing = 112
+
+/**
+ * World units between adjacent town centres.
+ *
+ * Exported because the regional landscape places its water and woodland in the *gaps* of this same
+ * lattice, which is what lets it be generated without knowing which databases exist while still never
+ * dropping a lake on a town centre.
+ */
+export const ATLAS_SPACING = 112
+const spacing = ATLAS_SPACING
 
 /**
  * Squared distance of a slot from the centre of the grid. Squared is enough because it is only ever
