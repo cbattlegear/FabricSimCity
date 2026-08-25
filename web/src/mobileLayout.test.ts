@@ -29,8 +29,8 @@ function lastNarrowRuleFor(selector: string): number {
  * a `display: none` that belonged to `.map-tray-panel .hud-legend > summary`. Splitting into rules
  * first means every assertion below is about one rule's own body.
  */
-function rules(): { selector: string; body: string }[] {
-  const flat = css
+function rules(source: string = css): { selector: string; body: string }[] {
+  const flat = source
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/@media[^{]*\{/g, '')
   const out: { selector: string; body: string }[] = []
@@ -42,12 +42,70 @@ function rules(): { selector: string; body: string }[] {
 }
 
 /** The body of the last rule whose selector list targets exactly `selector`, optionally in a state. */
-function ownRule(selector: string): string | null {
-  const own = rules().filter((rule) => rule.selector
+function ownRule(selector: string, source: string = css): string | null {
+  const own = rules(source).filter((rule) => rule.selector
     .split(',')
     .some((one) => new RegExp(`(^|\\s)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(:[a-z-]+(\\([^)]*\\))?)?$`)
       .test(one.trim())))
   return own.length === 0 ? null : own[own.length - 1].body
+}
+
+/**
+ * The width below which the sidebar becomes a bottom sheet.
+ *
+ * Deliberately not `NARROW`: the tray folds the map overlays at 900px, the sidebar becomes a sheet at
+ * 860px, and they are separate decisions about separate surfaces. Reading the sheet's rules out of
+ * the tray's breakpoint silently picks up the wrong media block.
+ */
+const SHEET = 860
+
+/**
+ * The stylesheet split into the rules that apply at every width and the rules that only apply in the
+ * narrow bottom sheet.
+ *
+ * `ownRule` reads the *last* matching rule with the `@media` wrappers stripped, which is the right
+ * answer for an overlay whose narrow override is the interesting one -- and exactly the wrong answer
+ * for the sidebar, where the desktop rail and the narrow sheet now hold deliberately opposite
+ * contracts. Without this split, adding a narrow override silently retargets every desktop assertion
+ * below at the rule that overrides it.
+ */
+function splitByMedia(source: string): { desktop: string; narrow: string } {
+  const src = source.replace(/\/\*[\s\S]*?\*\//g, '')
+  let desktop = ''
+  let narrow = ''
+  let cursor = 0
+  while (cursor < src.length) {
+    const at = src.indexOf('@media', cursor)
+    if (at === -1) {
+      desktop += src.slice(cursor)
+      break
+    }
+    desktop += src.slice(cursor, at)
+    const open = src.indexOf('{', at)
+    let depth = 0
+    let end = open
+    for (; end < src.length; end++) {
+      if (src[end] === '{') depth++
+      else if (src[end] === '}' && --depth === 0) break
+    }
+    if (new RegExp(`max-width:\\s*${SHEET}px`).test(src.slice(at, open))) {
+      narrow += `${src.slice(open + 1, end)}\n`
+    }
+    cursor = end + 1
+  }
+  return { desktop, narrow }
+}
+
+const { desktop: desktopCss, narrow: narrowCss } = splitByMedia(css)
+
+/** The rule as it stands outside any media query: the desktop rail's contract. */
+function desktopRule(selector: string): string | null {
+  return ownRule(selector, desktopCss)
+}
+
+/** The rule as the narrow bottom sheet overrides it. */
+function narrowRule(selector: string): string | null {
+  return ownRule(selector, narrowCss)
 }
 
 describe('map overlays on a narrow viewport', () => {
@@ -254,7 +312,7 @@ describe('the sidebar column scrolls its own overflow', () => {
 
   it('gives the clipped column a scroll container', () => {
     expect(baseRule('.map-sidebar')).toMatch(/overflow:\s*hidden/)
-    const scroll = ownRule('.sidebar-scroll')
+    const scroll = desktopRule('.sidebar-scroll')
     expect(scroll, '.sidebar-scroll has no rule at all').not.toBeNull()
     expect(scroll).toMatch(/overflow:\s*auto/)
     // Without this a flex child refuses to shrink below its content and the scroller never engages.
@@ -267,34 +325,37 @@ describe('the sidebar column scrolls its own overflow', () => {
    * needed it, which moves the layout on a screen that was never overflowing in the first place.
    */
   it('sizes the scroll regions from their content rather than splitting evenly', () => {
-    expect(ownRule('.sidebar-scroll')).toMatch(/flex:\s*1\s+1\s+auto/)
+    expect(desktopRule('.sidebar-scroll')).toMatch(/flex:\s*1\s+1\s+auto/)
   })
 
   /** The original intent: the header and the search box stay put, only the body moves. */
   it('keeps the header and the search box pinned', () => {
     for (const selector of ['.sidebar-header', '.sidebar-search']) {
-      const body = ownRule(selector)
+      const body = desktopRule(selector)
       expect(body, `${selector} has no rule at all`).not.toBeNull()
       expect(body, `${selector} can be shrunk by the scrolling regions`).toMatch(/flex:\s*none/)
     }
   })
 
   /**
-   * The bottom sheet is 42% of the viewport, and the place card and the legend drawer were each
-   * capped at 46vh of it. Two sections that cannot shrink and together outgrow their container leave
-   * the address list exactly nothing, which is the same defect by a different route. The cap now sits
-   * on the wrapper, which can shrink below it, instead of on the card inside it, which could not.
+   * On the desktop rail the column is a fixed height and the sections shrink into it. The place card
+   * and the legend drawer were each capped at 46vh, and two sections that cannot shrink and together
+   * outgrow their container leave the address list exactly nothing. The cap sits on the wrapper,
+   * which can shrink below it, instead of on the card inside it, which could not.
+   *
+   * This is the desktop mechanism only. The narrow sheet no longer shrinks anything -- it scrolls --
+   * so these rules are switched off there; see the bottom-sheet suite below.
    */
-  it('lets the capped sections shrink inside the narrow bottom sheet', () => {
+  it('lets the capped sections shrink inside the desktop rail', () => {
     for (const selector of ['.sidebar-place-card', '.sidebar-drawer']) {
-      const body = ownRule(selector)
+      const body = desktopRule(selector)
       expect(body, `${selector} lost its height cap`).toMatch(/max-height:\s*46vh/)
       expect(body, `${selector} is not shrinkable`).toMatch(/flex:\s*0\s+1\s+auto/)
       // A column layout, or the section below the cap cannot be told to scroll instead of overflow.
       expect(body, `${selector} is not a column`).toMatch(/flex-direction:\s*column/)
     }
     // The inner sections no longer pin a height of their own, or the wrapper could not shrink them.
-    expect(ownRule('.sidebar-drawer-body')).not.toMatch(/max-height/)
+    expect(desktopRule('.sidebar-drawer-body')).not.toMatch(/max-height/)
     expect(css).not.toMatch(/\.sidebar-place-card \.place-card\s*\{[^}]*max-height/)
   })
 
@@ -304,11 +365,94 @@ describe('the sidebar column scrolls its own overflow', () => {
    * `min-height: 0` here is the difference between "the legend collapses to its summary" and "the
    * legend collapses to ten pixels and you can no longer click it", which is what a full column
    * actually did when this was first written. Leaving the drawer's minimum at `auto` floors it on its
-   * own summary, because the body inside it is already a `min-height: 0` scroller worth nothing.
+   * own summary. The ban is checked at every width, not just on the desktop rule, because a narrow
+   * override would apply to the same element.
    */
   it('never shrinks the legend drawer past its own summary', () => {
-    expect(ownRule('.sidebar-drawer')).not.toMatch(/min-height:\s*0/)
-    expect(ownRule('.sidebar-drawer-body')).toMatch(/min-height:\s*0/)
+    for (const rule of rules().filter((one) => one.selector.split(',')
+      .some((part) => part.trim() === '.sidebar-drawer'))) {
+      expect(rule.body, 'a .sidebar-drawer rule sets min-height: 0').not.toMatch(/min-height:\s*0/)
+    }
+    expect(desktopRule('.sidebar-drawer-body')).toMatch(/min-height:\s*0/)
     expect(css).toMatch(/\.sidebar-drawer > summary \{[^}]*flex:\s*none/)
+  })
+})
+
+/**
+ * The narrow bottom sheet scrolls as one region.
+ *
+ * At <=860px the sidebar is 42% of the viewport -- 293px at 800x700 -- and the desktop column does
+ * not survive that height. Measured with the legend drawer open, the sections' minimums totalled
+ * 427px in a 293px sheet: the address list was squeezed to 0px and 134px of the drawer was clipped
+ * with no way to reach it. The drawer would not give way because `details` wraps its children in a
+ * `::details-content` box that is the flex item, and that box is `display: block; min-height: auto`,
+ * so it floors on its content no matter how hard the column pushes.
+ *
+ * So the sheet is now a single scroll container, the way every mobile map behaves: the header and the
+ * search box scroll with the content, every section sizes to its content, and the sheet takes the
+ * overflow. These are the parts of that contract a source-text test can see. What it cannot see is
+ * the measurement itself -- that the sheet's scrollHeight is now reachable rather than clipped -- so
+ * that is verified in a browser, which is how the ten-pixel drawer got past this file the first time.
+ */
+describe('the narrow bottom sheet scrolls as one region', () => {
+  /** The sheet takes the overflow itself, instead of clipping it as the desktop rail does. */
+  it('makes the sheet the scroll container', () => {
+    const sheet = narrowRule('.map-sidebar')
+    expect(sheet, '.map-sidebar has no narrow rule').not.toBeNull()
+    expect(sheet).toMatch(/overflow:\s*auto/)
+    // The page is position: fixed, so a chained scroll has nowhere to go.
+    expect(sheet).toMatch(/overscroll-behavior:\s*contain/)
+    // And the desktop rail still clips, because there the sections scroll instead.
+    expect(desktopRule('.map-sidebar')).toMatch(/overflow:\s*hidden/)
+  })
+
+  /**
+   * Nothing in the sheet shrinks. Shrinking is what produced the 0px address list: the sections that
+   * could give way gave way entirely, the one that could not kept its size, and the column still
+   * overflowed. Sized from content it simply outgrows the sheet, which the sheet now handles.
+   */
+  it('sizes every section from its content instead of shrinking it', () => {
+    expect(narrowCss).toMatch(/\.map-sidebar > \*\s*\{[^}]*flex:\s*none/)
+  })
+
+  /**
+   * A nested scroller inside a scrolling sheet is a gesture trap: you drag over the address list
+   * expecting the sheet to move and the list swallows it. Every scroller the desktop rail defines
+   * inside the sidebar has to be switched off here.
+   */
+  it('leaves no scroller nested inside the scrolling sheet', () => {
+    for (const selector of ['.sidebar-scroll', '.sidebar-drawer-body', '.sidebar-place-card .place-card']) {
+      expect(desktopRule(selector), `${selector} is not a desktop scroller`).toMatch(/overflow:\s*auto/)
+      expect(narrowRule(selector), `${selector} still scrolls inside the sheet`).toMatch(/overflow:\s*visible/)
+    }
+  })
+
+  /**
+   * The 46vh caps exist to let a section shrink inside a fixed-height column. There is no such column
+   * here any more, and a cap on a section of a scrolling sheet only reintroduces a nested scroller.
+   */
+  it('drops the height caps the scrolling sheet no longer needs', () => {
+    for (const selector of ['.sidebar-place-card', '.sidebar-drawer']) {
+      expect(narrowRule(selector), `${selector} keeps a cap in the sheet`).toMatch(/max-height:\s*none/)
+    }
+  })
+
+  /**
+   * A media query carries no extra specificity, so source order decides. These overrides target rules
+   * defined *below* the stylesheet's first narrow block -- `.sidebar-drawer` is near the end of the
+   * file -- so written there they would every one of them lose, silently.
+   */
+  it('declares the sheet overrides after the rules they override', () => {
+    // The block these overrides live in, which has to come after every base rule it overrides.
+    const block = css.lastIndexOf(`@media (max-width: ${SHEET}px)`)
+    expect(block).toBeGreaterThan(-1)
+    for (const selector of ['.map-sidebar', '.sidebar-scroll', '.sidebar-place-card', '.sidebar-drawer']) {
+      const base = css.indexOf(`\n${selector} {`)
+      expect(base, `${selector} base rule`).toBeGreaterThan(-1)
+      expect(block, `${selector} is overridden before it is defined`).toBeGreaterThan(base)
+    }
+    // And the overrides really are in that last block rather than an earlier, losing one.
+    expect(css.slice(block)).toMatch(/\.map-sidebar\s*\{[^}]*overflow:\s*auto/)
+    expect(css.slice(block)).toMatch(/\.sidebar-drawer\s*\{[^}]*max-height:\s*none/)
   })
 })
