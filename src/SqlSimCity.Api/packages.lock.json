@@ -186,7 +186,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.0.2, )",
-          "Microsoft.SqlServer.TransactSql.ScriptDom": "[170.191.0, )",
+          "Microsoft.SqlServer.TransactSql.ScriptDom": "[180.102.0, )",
           "SqlSimCity.Contracts": "[1.0.0, )",
           "SqlSimCity.Domain": "[1.0.0, )",
           "SqlSimCity.SqlServer": "[1.0.0, )",
@@ -281,9 +281,9 @@
       },
       "Microsoft.SqlServer.TransactSql.ScriptDom": {
         "type": "CentralTransitive",
-        "requested": "[170.191.0, )",
-        "resolved": "170.191.0",
-        "contentHash": "Rd0xOrMhZV3bE7LwkiOv9zJsZ/OUNUS7xvEPvbSVK04vDotPk1lxRTPXxul/E6TSfdmT8E+RoeVDgtIaFMUshQ=="
+        "requested": "[180.102.0, )",
+        "resolved": "180.102.0",
+        "contentHash": "hIE9+a4TUrk1KQY+byb2WioGn6pmR2o03XzFm4kxloPdWio8bJJYfIFhGuveOT3426ZfnNxT6e9hfXb9EA0a9g=="
       }
     }
   }
