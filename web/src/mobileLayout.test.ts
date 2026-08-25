@@ -208,3 +208,107 @@ describe('the tray cannot fold a warning away', () => {
     expect(city).toContain('the smaller neighbourhood’s name is dropped')
   })
 })
+
+/**
+ * The sidebar column has to hand its overflow to a scroll container.
+ *
+ * `.map-sidebar` is `overflow: hidden`, which is correct -- the map is the page and the rail must not
+ * grow the document -- but it means the column is only usable if something inside it scrolls. The
+ * stylesheet defined that scroller as `.sidebar-body` while the markup had been renamed to
+ * `.sidebar-scroll`, so for four rendered call sites there was no rule at all and everything past the
+ * fold was clipped with no way to reach it. These tests pin both halves of that contract: the class
+ * the markup renders is the class the stylesheet styles, and that class actually scrolls.
+ */
+describe('the sidebar column scrolls its own overflow', () => {
+  const markup = ['App.tsx', 'AddressPanel.tsx', 'DatabaseCityView.tsx', 'MapShell.tsx']
+    .map((name) => readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))
+    .join('\n')
+
+  /** Every `sidebar-*` class the JSX actually puts on an element. */
+  const rendered = [...new Set([...markup.matchAll(/className="([^"{}]*)"/g)]
+    .flatMap((match) => match[1].split(/\s+/))
+    .filter((name) => name.startsWith('sidebar-')))]
+
+  /** The first rule for a selector, i.e. the base one rather than a narrow-viewport override. */
+  function baseRule(selector: string): string | null {
+    const own = rules().filter((rule) => rule.selector === selector)
+    return own.length === 0 ? null : own[0].body
+  }
+
+  /**
+   * The guard that would have caught this bug. A wrapper the markup renders and the stylesheet has
+   * never heard of is invisible: it looks like a styled element and behaves like a bare div.
+   */
+  it('styles every sidebar wrapper the markup renders', () => {
+    expect(rendered.length).toBeGreaterThan(6)
+    for (const name of rendered) {
+      expect(ownRule(`.${name}`), `.${name} is rendered but has no rule in App.css`).not.toBeNull()
+    }
+  })
+
+  /** The other direction of the same drift: a scroller styled for a class nobody renders. */
+  it('keeps no rule for the renamed-away .sidebar-body', () => {
+    expect(css).not.toContain('.sidebar-body')
+    expect(markup).not.toContain('sidebar-body')
+  })
+
+  it('gives the clipped column a scroll container', () => {
+    expect(baseRule('.map-sidebar')).toMatch(/overflow:\s*hidden/)
+    const scroll = ownRule('.sidebar-scroll')
+    expect(scroll, '.sidebar-scroll has no rule at all').not.toBeNull()
+    expect(scroll).toMatch(/overflow:\s*auto/)
+    // Without this a flex child refuses to shrink below its content and the scroller never engages.
+    expect(scroll).toMatch(/min-height:\s*0/)
+  })
+
+  /**
+   * The basis is `auto` on purpose. The atlas has three of these call sites and renders two of them
+   * at once, so a `0` basis would divide the free space evenly between them whether or not either one
+   * needed it, which moves the layout on a screen that was never overflowing in the first place.
+   */
+  it('sizes the scroll regions from their content rather than splitting evenly', () => {
+    expect(ownRule('.sidebar-scroll')).toMatch(/flex:\s*1\s+1\s+auto/)
+  })
+
+  /** The original intent: the header and the search box stay put, only the body moves. */
+  it('keeps the header and the search box pinned', () => {
+    for (const selector of ['.sidebar-header', '.sidebar-search']) {
+      const body = ownRule(selector)
+      expect(body, `${selector} has no rule at all`).not.toBeNull()
+      expect(body, `${selector} can be shrunk by the scrolling regions`).toMatch(/flex:\s*none/)
+    }
+  })
+
+  /**
+   * The bottom sheet is 42% of the viewport, and the place card and the legend drawer were each
+   * capped at 46vh of it. Two sections that cannot shrink and together outgrow their container leave
+   * the address list exactly nothing, which is the same defect by a different route. The cap now sits
+   * on the wrapper, which can shrink below it, instead of on the card inside it, which could not.
+   */
+  it('lets the capped sections shrink inside the narrow bottom sheet', () => {
+    for (const selector of ['.sidebar-place-card', '.sidebar-drawer']) {
+      const body = ownRule(selector)
+      expect(body, `${selector} lost its height cap`).toMatch(/max-height:\s*46vh/)
+      expect(body, `${selector} is not shrinkable`).toMatch(/flex:\s*0\s+1\s+auto/)
+      // A column layout, or the section below the cap cannot be told to scroll instead of overflow.
+      expect(body, `${selector} is not a column`).toMatch(/flex-direction:\s*column/)
+    }
+    // The inner sections no longer pin a height of their own, or the wrapper could not shrink them.
+    expect(ownRule('.sidebar-drawer-body')).not.toMatch(/max-height/)
+    expect(css).not.toMatch(/\.sidebar-place-card \.place-card\s*\{[^}]*max-height/)
+  })
+
+  /**
+   * The drawer shrinks, but never past the control you open it with.
+   *
+   * `min-height: 0` here is the difference between "the legend collapses to its summary" and "the
+   * legend collapses to ten pixels and you can no longer click it", which is what a full column
+   * actually did when this was first written. Leaving the drawer's minimum at `auto` floors it on its
+   * own summary, because the body inside it is already a `min-height: 0` scroller worth nothing.
+   */
+  it('never shrinks the legend drawer past its own summary', () => {
+    expect(ownRule('.sidebar-drawer')).not.toMatch(/min-height:\s*0/)
+    expect(ownRule('.sidebar-drawer-body')).toMatch(/min-height:\s*0/)
+    expect(css).toMatch(/\.sidebar-drawer > summary \{[^}]*flex:\s*none/)
+  })
+})

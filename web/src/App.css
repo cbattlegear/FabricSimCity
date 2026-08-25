@@ -330,9 +330,17 @@
 /*
  * The place card sits above the address list rather than replacing it, so the thing you selected and
  * the list you selected it from stay on screen together.
+ *
+ * The 46vh cap lives on the wrapper rather than the card inside it, so the wrapper can also *shrink*
+ * below that cap. A fixed 46vh here is taller than the whole 42%-viewport bottom sheet at <=860px,
+ * which left nothing for the address list to occupy.
  */
 .sidebar-place-card {
-  flex: none;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
   padding: 12px 12px 0;
 }
 
@@ -340,7 +348,7 @@
 .sidebar-place-card .place-card {
   position: static;
   margin: 0;
-  max-height: 46vh;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -411,8 +419,22 @@
 }
 .sidebar-back:hover { border-color: #72f4c4; color: #8be7ce; }
 
-.sidebar-body { flex: 1; min-height: 0; overflow: auto; }
+/*
+ * The sidebar's scrolling regions. `.map-sidebar` is `overflow: hidden`, so without this rule the
+ * column has no scroll container at all and anything past the fold is clipped and unreachable.
+ *
+ * The basis is `auto`, not `0`: the atlas has three of these call sites and renders two of them at
+ * once, and `flex: 1` would split the free space evenly whether or not either one needs it. Sizing
+ * from content means a column that fits looks exactly as it did, and only a column that overflows
+ * shrinks its regions -- proportionally -- into scrollers. `min-height: 0` is what lets that shrink
+ * happen at all in a flex column.
+ */
+.sidebar-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .sidebar-section { padding: 12px 16px; border-bottom: 1px solid #1c2733; }
+
+/* The chrome around the scrolling regions keeps its size, so shrink pressure lands on them. */
+.sidebar-search,
+.sidebar-metric { flex: none; }
 
 .search-field {
   position: relative;
@@ -1119,8 +1141,24 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 
 /* ------------------------------------------------------------ legend drawer */
 
-.sidebar-drawer { border-top: 1px solid #1c2733; background: #0a1017; }
+/*
+ * Same shape as the place card: the cap sits on the drawer so the drawer can shrink below it too.
+ *
+ * Deliberately no `min-height: 0` here. The drawer's content-based minimum is its own summary -- the
+ * body inside it is already a `min-height: 0` scroller and so contributes nothing -- which is exactly
+ * the floor this needs. Adding `min-height: 0` let a full column squeeze the drawer to ten pixels and
+ * clip the control you open it with.
+ */
+.sidebar-drawer {
+  flex: 0 1 auto;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #1c2733;
+  background: #0a1017;
+}
 .sidebar-drawer > summary {
+  flex: none;
   padding: 11px 16px;
   color: #9bb0c2;
   font: .72rem/1 ui-monospace, Consolas, monospace;
@@ -1129,7 +1167,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 }
 .sidebar-drawer > summary:hover { color: #dbe5ed; }
 .sidebar-drawer[open] > summary { border-bottom: 1px solid #1c2733; }
-.sidebar-drawer-body { max-height: 46vh; overflow: auto; }
+.sidebar-drawer-body { min-height: 0; overflow: auto; }
 .sidebar-drawer-body > * { margin-block: 0; }
 
 
