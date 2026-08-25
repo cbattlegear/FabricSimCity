@@ -1293,3 +1293,56 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   }
   .hud-road-readout { bottom: 74px; max-width: calc(100vw - 20px); }
 }
+
+/* ------------------------------------------ the narrow bottom sheet scrolls as one region */
+
+/*
+ * At <=860px the sidebar is a bottom sheet at 42% of the viewport -- 294px at 800x700 -- and it was
+ * still laid out as a desktop column: pinned header and search, with each section an independent
+ * scroller inside a fixed-height parent. Nothing about that survives the height. With the legend
+ * drawer open the sections' minimums totalled 427px in a 293px sheet, the address list was squeezed
+ * to 0px, and 134px of the drawer was clipped with no way to reach it (#61).
+ *
+ * The drawer will not shrink because a `details` element wraps its children in a `::details-content`
+ * box, and that box is the flex item: `display: block`, `min-height: auto`. It floors on its content
+ * however small the sheet gets, so no amount of shrink pressure on the sections can win.
+ *
+ * So the sheet stops being a fixed column of scrollers and becomes a single scroll container, which
+ * is how every mobile map bottom sheet behaves. The header and the search box scroll with the
+ * content, every section sizes to its content, and the one scrollbar belongs to the sheet.
+ *
+ * All of it is scoped to this breakpoint. The desktop rail keeps its pinned header and its
+ * per-region scrollers exactly as they are, and this block sits after the rules it overrides because
+ * a media query has no extra specificity -- written above them, every declaration here would lose.
+ */
+@media (max-width: 860px) {
+  .map-sidebar {
+    overflow: auto;
+    /* The page is `position: fixed`, so a chained scroll has nowhere to go but the address bar. */
+    overscroll-behavior: contain;
+  }
+
+  /*
+   * Nothing in the sheet shrinks. Shrinking is what produced the 0px address list: the sections that
+   * could give way gave way entirely so the one that could not -- the drawer -- kept its size, and
+   * the total still overflowed. Sized from content, the column simply outgrows the sheet, which is
+   * the one thing the sheet now knows how to handle.
+   */
+  .map-sidebar > * { flex: none; }
+
+  /*
+   * The caps exist to let a section shrink inside a fixed-height column. There is no such column
+   * here any more, and a 46vh cap on a scrolling section would only reintroduce a nested scroller.
+   */
+  .sidebar-place-card,
+  .sidebar-drawer { max-height: none; }
+
+  /*
+   * No scrollers inside the scrolling sheet. A nested scroller in a bottom sheet traps the gesture:
+   * you drag over the address list expecting the sheet to move and the list consumes it instead.
+   */
+  .sidebar-scroll,
+  .sidebar-drawer-body,
+  .sidebar-place-card .detail,
+  .sidebar-place-card .place-card { overflow: visible; }
+}
