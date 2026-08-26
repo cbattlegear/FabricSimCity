@@ -154,12 +154,22 @@ describe('map overlays on a narrow viewport', () => {
   })
 
   /**
-   * A folded tray must never read as all-clear. The chip's own label carries the finding, and a
-   * genuine incident opens its panel without being asked.
+   * A folded control must never read as all-clear.
+   *
+   * Incidents left the tray for a sidebar drawer, and on a narrow viewport that drawer is inside the
+   * bottom sheet rather than gone: `.sidebar-drawers` is `display: contents` there, so the drawers
+   * are still rendered and still scroll with the sheet. The guarantee travels with them -- the
+   * closed summary carries the finding, and a real incident opens the drawer unasked. The tray keeps
+   * its own self-opening mechanism for the panels it still holds.
    */
-  it('states the incident finding on the chip and opens a real incident unasked', () => {
-    expect(city).toContain('label: incidentSummaryLabel(incidents)')
-    expect(city).toContain('alert: incidentDemandsAttention(incidents)')
+  it('states the incident finding on the closed control and opens a real incident unasked', () => {
+    const view = readFileSync(new URL('./DatabaseCityView.tsx', import.meta.url), 'utf8')
+    expect(view).toContain('{incidentSummaryLabel(incidents)}')
+    expect(view).toContain('open={incidentDemandsAttention(incidents)}')
+    // Still reachable at narrow width: the wrapper dissolves, the drawers do not.
+    expect(narrowRule('.sidebar-drawers')).toMatch(/display:\s*contents/)
+    expect(narrowRule('.sidebar-drawer'), 'the sheet drawers are switched off')
+      .not.toMatch(/display:\s*none/)
     expect(tray).toContain('if (alerting) setOpenId(alerting)')
   })
 
@@ -243,12 +253,19 @@ describe('the tray cannot fold a warning away', () => {
     expect(view).toContain('feedState={feedState}')
   })
 
+  /**
+   * The incident wording moved out of the tray and into a sidebar drawer, and the guarantee moved
+   * with it: whatever the summary says, it is said by the module holding the evidence, and it is
+   * said on the closed control rather than only inside it.
+   */
   it('delegates the incident wording to the module that holds the evidence', () => {
-    expect(city).toContain('label: incidentSummaryLabel(incidents)')
-    expect(city).toContain('tone: incidentSummaryTone(incidents)')
-    expect(city).toContain('alert: incidentDemandsAttention(incidents)')
+    expect(view).toContain('{incidentSummaryLabel(incidents)}')
+    expect(view).toContain('open={incidentDemandsAttention(incidents)}')
     // No local copy left behind to drift out of step with the projection.
-    expect(city).not.toContain('function incidentChipLabel')
+    expect(view).not.toContain('function incidentChipLabel')
+    // And the tray no longer carries a second, competing copy of it.
+    expect(city, 'the incident summary is in two places at once')
+      .not.toContain("id: 'incidents'")
   })
 
   it('lets Escape close the tray outright rather than bouncing back to the alert', () => {
@@ -257,8 +274,25 @@ describe('the tray cannot fold a warning away', () => {
     expect(tray).not.toMatch(/Escape'\) setOpenId\(alerting\)/)
   })
 
-  it('orders incidents ahead of the feed, so the self-opening panel is the blocking probe', () => {
-    expect(city.indexOf("id: 'incidents'")).toBeLessThan(city.indexOf("id: 'live'"))
+  /**
+   * The drawer opens itself when something is actually wrong.
+   *
+   * This is the same promise the self-opening tray panel made, kept after the move. A live warning
+   * folded behind a summary is a warning that was not given, and `incidentDemandsAttention` is the
+   * one place that decides what counts -- an unreported probe, a blocked waiter, an off-page waiter,
+   * or a retained deadlock.
+   */
+  it('opens the live activity drawer by itself when the projection demands attention', () => {
+    const drawer = view.slice(view.indexOf('const liveActivityDrawer'))
+    const end = drawer.indexOf('</details>')
+    expect(end, 'no live activity drawer in the city view').toBeGreaterThan(-1)
+    const body = drawer.slice(0, end)
+    expect(body).toContain('className="sidebar-drawer"')
+    expect(body, 'the drawer does not open itself for a live warning')
+      .toContain('open={incidentDemandsAttention(incidents)}')
+    expect(body, 'the closed summary does not carry the finding')
+      .toContain('{incidentSummaryLabel(incidents)}')
+    expect(body, 'the drawer holds no summary to read').toContain('<IncidentSummary')
   })
 
   it('no longer claims neighbourhood names are always drawn, because declutter drops some', () => {
@@ -472,13 +506,18 @@ describe('the sidebar column scrolls its own overflow', () => {
    *
    * A sibling combinator, not `:has()`: the card precedes the drawers, so no parent selector is
    * needed, and an engine without `:has()` still applies this one -- where the widened-cap rule
-   * above drops out and leaves both drawers on the half share, which is the safe direction.
+   * above drops out and leaves every drawer on the third share, which is the safe direction.
+   *
+   * 24vh rather than the 16vh two drawers shared. A third drawer does not make the region cheaper:
+   * 16vh three ways is 42.6px at an 800px viewport, a 35px summary and a 7.6px body, which overflows
+   * nothing and is unreadable -- the "necessary, not sufficient" failure again. Measured at 1115x800
+   * with all three open: 64px each, 29px of body, address list 117px, 0px unreachable.
    */
   it('makes an open place card take its share from the drawers', () => {
     const yielded = desktopRule('.sidebar-drawers.is-yielding')
     expect(yielded, 'the drawers do not yield to an open place card').not.toBeNull()
     expect(yielded, 'the yielded budget is not smaller than the default')
-      .toMatch(/--sidebar-drawer-budget:\s*16vh/)
+      .toMatch(/--sidebar-drawer-budget:\s*24vh/)
     // The default the drawers keep when no card is open, which this reduces from.
     expect(desktopRule('.sidebar-drawers')).toMatch(/--sidebar-drawer-budget:\s*46vh/)
     // Still a share of a budget, so each drawer keeps flooring at min(content, cap) and its summary
@@ -644,7 +683,7 @@ describe('the narrow bottom sheet scrolls as one region', () => {
  * non-overflowing is a browser measurement, which is how both previous defects here got past a green
  * suite.
  */
-describe('two drawers in one rail share one height budget', () => {
+describe('three drawers in one rail share one height budget', () => {
   const cityMarkup = readFileSync(new URL('./DatabaseCityView.tsx', import.meta.url), 'utf8')
   const atlasMarkup = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8')
 
@@ -683,16 +722,16 @@ describe('two drawers in one rail share one height budget', () => {
     expect(desktopRule('.sidebar-drawer'))
       .toMatch(/max-height:\s*var\(--sidebar-drawer-cap,\s*46vh\)/)
     expect(desktopRule('.sidebar-drawers'))
-      .toMatch(/--sidebar-drawer-cap:\s*calc\(var\(--sidebar-drawer-budget\)\s*\/\s*2\)/)
+      .toMatch(/--sidebar-drawer-cap:\s*calc\(var\(--sidebar-drawer-budget\)\s*\/\s*3\)/)
   })
 
   /**
    * `:has()` widens, it never narrows, and it is written without `:where()`.
    *
-   * The default is the half share, which always fits, and the conditional rule relaxes it when only
-   * one drawer is open. That direction is the whole safety argument: `:not()` takes a *non-forgiving*
-   * selector list, so an engine without `:has()` invalidates and drops the widening rule and lands on
-   * the half share.
+   * The default is the tightest share -- three open -- which always fits, and the conditional rules
+   * relax it as drawers close. That direction is the whole safety argument: `:not()` takes a
+   * *non-forgiving* selector list, so an engine without `:has()` invalidates and drops both widening
+   * rules and lands on the third share.
    *
    * `:where()` inside `:has()` inverts that, dangerously. `:has()` takes a relative selector list, in
    * which a selector may begin with a combinator; `:where()` takes a *complex* selector list, in which
@@ -704,23 +743,43 @@ describe('two drawers in one rail share one height budget', () => {
    * two that should widen. In the browser, with the real rule: 0 matches with both drawers open, 1
    * with one open.
    */
-  it('widens the cap for a lone drawer instead of narrowing it for two', () => {
-    const conditional = rules().find((one) => /^\.sidebar-drawers:not\(:has\(/.test(one.selector))
-    expect(conditional, 'no conditional cap rule at all').toBeDefined()
-    expect(conditional!.selector, ':where() drops its argument here and inverts the rule')
-      .not.toMatch(/:where\(/)
-    expect(conditional!.selector)
+  it('widens the cap as drawers close instead of narrowing it as they open', () => {
+    const conditionals = rules().filter((one) => /^\.sidebar-drawers:not\(:has\(/.test(one.selector))
+    expect(conditionals.length, 'both conditional cap rules are needed for three drawers').toBe(2)
+    for (const rule of conditionals) {
+      expect(rule.selector, ':where() drops its argument here and inverts the rule')
+        .not.toMatch(/:where\(/)
+    }
+
+    const [twoOpen, oneOpen] = conditionals
+    expect(twoOpen.selector).toContain(
+      ':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open]))')
+    expect(twoOpen.body, 'two drawers must divide the budget less the third summary')
+      .toMatch(/--sidebar-drawer-cap:\s*calc\(\(var\(--sidebar-drawer-budget\)\s*-\s*2\.5rem\)\s*\/\s*2\)/)
+
+    expect(oneOpen.selector)
       .toContain(':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open]))')
-    // It relaxes the cap, so an engine that drops the rule keeps the share that always fits.
-    expect(conditional!.body)
-      .toMatch(/--sidebar-drawer-cap:\s*calc\(var\(--sidebar-drawer-budget\)\s*-\s*2\.5rem\)/)
-    // And it comes after the base rule it relaxes, or it would lose on source order.
+    expect(oneOpen.body, 'a lone drawer may spend the budget less two collapsed summaries')
+      .toMatch(/--sidebar-drawer-cap:\s*calc\(var\(--sidebar-drawer-budget\)\s*-\s*5rem\)/)
+
+    /*
+     * Source order, not specificity. Both conditionals match when exactly one drawer is open --
+     * neither `~` chain is present -- and a `:not(:has())` selector has the same specificity either
+     * way, so the lone-drawer rule only wins by coming last. Swap them and one open drawer silently
+     * gets the two-drawer share.
+     */
+    expect(
+      css.indexOf(':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open])) {'),
+      'the lone-drawer rule must come after the two-drawer rule it relaxes',
+    ).toBeGreaterThan(
+      css.indexOf(':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open]))'))
+    // And both come after the base rule they relax, or they would lose on source order.
     expect(css.indexOf('.sidebar-drawers:not('), 'the conditional rule is not in the stylesheet')
       .toBeGreaterThan(css.indexOf('\n.sidebar-drawers {'))
   })
 
-  /** A budget nothing is inside is not a budget. Both drawers have to be in the wrapper. */
-  it('renders both city drawers inside the wrapper', () => {
+  /** A budget nothing is inside is not a budget. All three drawers have to be in the wrapper. */
+  it('renders every city drawer inside the wrapper', () => {
     // Matched by prefix rather than as a literal: the wrapper also carries the `is-yielding`
     // modifier that hands its budget to an open place card, so pinning the exact opening tag here
     // would fail for a change that has nothing to do with what this test is about.
@@ -728,6 +787,7 @@ describe('two drawers in one rail share one height budget', () => {
     expect(open, 'DatabaseCityView renders no .sidebar-drawers wrapper').toBeGreaterThan(-1)
     const close = cityMarkup.indexOf('</div>', open)
     const wrapped = cityMarkup.slice(open, close)
+    expect(wrapped, 'live activity is outside the budget').toContain('{liveActivityDrawer}')
     expect(wrapped, 'the plan finder is outside the budget').toContain('{planFinder}')
     expect(wrapped, 'the legend drawer is outside the budget').toContain('<LegendDrawer')
     // The metric stays outside: it is `flex: none` and shrinking it was never the problem.
@@ -736,15 +796,15 @@ describe('two drawers in one rail share one height budget', () => {
 
   /**
    * The atlas is deliberately not wrapped. It renders one drawer, so it has nothing to divide, and
-   * wrapping it would halve a cap that already fits -- a regression dressed as consistency. The
-   * `46vh` fallback is what makes leaving it alone a no-op rather than an omission.
+   * wrapping it would cut a cap that already fits to a third -- a regression dressed as consistency.
+   * The `46vh` fallback is what makes leaving it alone a no-op rather than an omission.
    */
   it('leaves the single-drawer atlas column unwrapped', () => {
     expect(atlasMarkup).toContain('className="sidebar-drawer"')
     expect(atlasMarkup, 'the atlas has one drawer and nothing to share a budget with')
       .not.toContain('sidebar-drawers')
     expect((cityMarkup.match(/className="sidebar-drawer"/g) ?? []).length,
-      'the city rail no longer has the two drawers this budget exists for').toBe(2)
+      'the city rail no longer has the drawers this budget exists for').toBe(3)
   })
 
   /**
@@ -752,7 +812,7 @@ describe('two drawers in one rail share one height budget', () => {
    * the wrapper existed rather than re-patched around it.
    *
    * The load-bearing part is subtle: custom properties inherit through `display: contents`, so the
-   * drawers below go on inheriting `--sidebar-drawer-cap` -- a 23vh half-share, *tighter* than the
+   * drawers below go on inheriting `--sidebar-drawer-cap` -- a 15.3vh third-share, *tighter* than the
    * 46vh that predates this change. `max-height: none` in the same block is the only thing discarding
    * it. Weaken that override and the sheet's drawers do not return to their old cap, they get a worse
    * one, which is why it is pinned here as well as in the sheet suite above.
@@ -760,7 +820,7 @@ describe('two drawers in one rail share one height budget', () => {
   it('dissolves the wrapper in the narrow sheet', () => {
     expect(narrowRule('.sidebar-drawers'), '.sidebar-drawers has no narrow rule')
       .toMatch(/display:\s*contents/)
-    expect(narrowRule('.sidebar-drawer'), 'the inherited half-share cap is no longer discarded')
+    expect(narrowRule('.sidebar-drawer'), 'the inherited third-share cap is no longer discarded')
       .toMatch(/max-height:\s*none/)
     // In the last block, or a media query with no extra specificity loses to the base rule.
     const block = css.lastIndexOf(`@media (max-width: ${SHEET}px)`)

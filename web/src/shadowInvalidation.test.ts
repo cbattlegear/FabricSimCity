@@ -61,7 +61,7 @@ describe('the shadow map is invalidated by whatever changed what casts', () => {
   /*
    * The enumeration the issue asks for, pinned one method at a time.
    *
-   * Object rebuilds, road/traffic/facility/lane/route/incident rebuilds, selection, layer
+   * Object rebuilds, road/traffic/facility/route/incident rebuilds, selection, layer
    * visibility and the map↔city swap all reach the renderer through these methods. Asset arrival
    * and the time-of-day change are not methods, so they are checked separately below.
    */
@@ -70,7 +70,6 @@ describe('the shadow map is invalidated by whatever changed what casts', () => {
     ['setRoads', 'roads cast and receive'],
     ['setTraffic', 'traffic ribbons are geometry'],
     ['setFacilities', 'facility shells are casters'],
-    ['setFacilityLanes', 'wait lanes are geometry'],
     ['setRoute', 'a drawn route adds geometry'],
     ['setSelected', 'selection changes what a building looks like'],
     ['setSelectedRoad', 'road highlight changes geometry'],

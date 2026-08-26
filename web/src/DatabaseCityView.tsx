@@ -20,13 +20,19 @@ import { assignWorkloadTraffic } from './cityWorkloadTraffic'
 import { attributedWaits, type WaitAttributionTotals } from './cityWaitAttribution'
 import { CONGESTION_LABELS, gradeRoads, type RoadTraffic } from './cityTraffic'
 import { FACILITY_LABELS, projectFacilities, type Facility, type FacilityKind } from './cityInfrastructure'
-import { projectFacilityTraffic, type FacilityTraffic } from './cityFacilityTraffic'
+import {
+  facilityMixLabel,
+  facilityShares,
+  projectFacilityTraffic,
+  type FacilityTraffic,
+} from './cityFacilityTraffic'
 import { AddressBook } from './AddressPanel'
 import { buildAddressBook, type AddressEntry } from './addressBook'
 import { resolveSidebarMode } from './sidebarMode'
 import { CityLoadingScreen } from './CityLoadingScreen'
 import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
-import { projectIncidents } from './cityIncidents'
+import { incidentDemandsAttention, incidentSummaryLabel, projectIncidents } from './cityIncidents'
+import { IncidentSummary } from './IncidentPopup'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
 type Metric = (typeof metrics)[number]
@@ -293,6 +299,26 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const incidents = useMemo(
     () => projectIncidents(snapshot?.snapshot ?? null, visibleObjects),
     [snapshot, visibleObjects])
+
+  /**
+   * Which incident popup is open, and the request to fly the camera to it.
+   *
+   * This lives here rather than in the viewport because the list that opens these pins is a sidebar
+   * drawer now, outside the map entirely. The nonce is what lets the same object be asked for twice:
+   * a marker outside the frustum projects to nothing, so the camera has to move before the popup can
+   * be seen, and clicking the same entry again has to move it again.
+   */
+  const [openIncidentId, setOpenIncidentId] = useState<string | null>(null)
+  const [incidentFocus, setIncidentFocus] = useState<{ objectId: string; nonce: number } | null>(null)
+  const incidentFocusNonce = useRef(0)
+  const openIncidentFromList = useCallback((markerId: string) => {
+    const marker = incidents.markers.find(entry => entry.id === markerId) ?? null
+    if (marker) {
+      incidentFocusNonce.current += 1
+      setIncidentFocus({ objectId: marker.objectId, nonce: incidentFocusNonce.current })
+    }
+    setOpenIncidentId(markerId)
+  }, [incidents])
   const families = page?.topQueryFamilies ?? []
   const facilityTraffic = useMemo(
     () => projectFacilityTraffic(families, visibleObjects),
@@ -322,13 +348,27 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
       const volume = road.executions === null
         ? 'volume unavailable'
         : `${road.executions.toLocaleString()} executions`
+      // Where the waiting queued, now that the six-hue lanes are off the map. The road's colour is
+      // the whole of the waiting; this says which facility that waiting was spent at, which is the
+      // question the lanes used to answer and the one the colour cannot.
+      const mix = [road.fromObjectId, road.toId]
+        .map(objectId => {
+          const label = facilityMixLabel(facilityShares(objectId, facilityTraffic))
+          return label === null ? null : `${endpointName(objectId)} queued at ${label}`
+        })
+        .filter((entry): entry is string => entry !== null)
       labels.set(
         road.routeId,
-        `${endpointName(road.fromObjectId)} ↔ ${endpointName(road.toId)} · ${volume} · ${CONGESTION_LABELS[road.grade]}`,
+        [
+          `${endpointName(road.fromObjectId)} ↔ ${endpointName(road.toId)}`,
+          volume,
+          CONGESTION_LABELS[road.grade],
+          ...mix,
+        ].join(' · '),
       )
     }
     return labels
-  }, [roads, endpointName])
+  }, [roads, endpointName, facilityTraffic])
 
   const selectedRoad = roads.find(road => road.routeId === selectedRoadId) ?? null
   useEffect(() => {
@@ -539,6 +579,30 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     setRouteError(null)
   }, [])
 
+  const liveActivityDrawer = (
+    /*
+     * Live activity is a drawer, not a map tray item.
+     *
+     * As a tray item it was a black box floating over the city: a chip you had to unfold, holding a
+     * list of buttons that moved the camera, sitting on top of the thing it moved. Here it is beside
+     * the map with the rest of the reading material, open by default when something is actually
+     * wrong so a warning is never one tap away from being missed.
+     */
+    <details className="sidebar-drawer" open={incidentDemandsAttention(incidents)}>
+      <summary>
+        Live activity
+        <span className="drawer-badge">{incidentSummaryLabel(incidents)}</span>
+      </summary>
+      <div className="sidebar-drawer-body">
+        <IncidentSummary
+          projection={incidents}
+          openId={openIncidentId}
+          onOpen={openIncidentFromList}
+        />
+      </div>
+    </details>
+  )
+
   const planFinder = (
     <details className="sidebar-drawer">
       <summary>Route a captured query plan</summary>
@@ -705,6 +769,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                 * fragment, so without it both drawers are direct flex children of the rail.
                 */}
               <div className={`sidebar-drawers${placeCard ? ' is-yielding' : ''}`}>
+                {liveActivityDrawer}
                 {planFinder}
                 {page && <LegendDrawer
                   page={page}
@@ -777,6 +842,9 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           liveStatus={liveStatus}
           feedState={feedState}
           incidents={incidents}
+          openIncidentId={openIncidentId}
+          onOpenIncident={setOpenIncidentId}
+          incidentFocus={incidentFocus}
         />
       )}
 

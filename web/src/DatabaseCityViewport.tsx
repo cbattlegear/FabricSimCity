@@ -6,21 +6,17 @@ import {
   type CityLayerToggles,
   type DatabaseCitySceneController,
 } from './DatabaseCityScene'
-import { CONGESTION_COLORS, CONGESTION_LABELS, type RoadTraffic } from './cityTraffic'
-import { LANE_COLORS, type FacilityTraffic } from './cityFacilityTraffic'
-import { FACILITY_LABELS, type Facility, type FacilityKind } from './cityInfrastructure'
+import { CONGESTION_COLORS, CONGESTION_GRADES, CONGESTION_LABELS, type RoadTraffic } from './cityTraffic'
+import type { FacilityTraffic } from './cityFacilityTraffic'
+import { type Facility } from './cityInfrastructure'
 import type { CityRoute } from './cityRoute'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import type { CityPlan } from './cityPlan'
 import type { MapViewMode } from './mapStyle'
-import {
-  incidentDemandsAttention,
-  incidentSummaryLabel,
-  incidentSummaryTone,
-  type IncidentProjection,
-} from './cityIncidents'
+import type { IncidentProjection } from './cityIncidents'
+import type { IncidentPlacement } from './cityIncidentPlacement'
 import type { LiveFeedConnectionState } from './liveIncidents'
-import { IncidentPopup, IncidentSummary } from './IncidentPopup'
+import { IncidentPopup } from './IncidentPopup'
 import { MapTray, useNarrowViewport, type TrayItem } from './MapTray'
 
 type Props = {
@@ -59,6 +55,22 @@ type Props = {
   feedState?: LiveFeedConnectionState
   /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
+  /**
+   * The incident whose popup is open, owned by the view rather than by this component.
+   *
+   * The list that opens these pins is a sidebar drawer now, outside this viewport entirely, so the
+   * selection has to live where both can see it. Pin clicks report upwards through
+   * {@link onOpenIncident} exactly as the list does.
+   */
+  openIncidentId?: string | null
+  onOpenIncident?: (id: string | null) => void
+  /**
+   * A request to centre the camera on one object before its popup opens.
+   *
+   * A marker behind the camera projects to nothing, so a sidebar entry that only set the id would
+   * open a popup nobody sees. The nonce is what makes asking twice for the same object work.
+   */
+  incidentFocus?: { objectId: string; nonce: number } | null
 }
 
 const KEY_ACTIONS: Record<string, CameraNudge> = {
@@ -88,7 +100,6 @@ const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
 const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string, string?]> = [
   ['traffic', 'Traffic'],
   ['paths', 'Query paths'],
-  ['waitLanes', 'Wait lanes'],
   ['infrastructure', 'Infrastructure'],
   ['route', 'Query route'],
   [
@@ -121,6 +132,9 @@ export function DatabaseCityViewport({
   liveStatus,
   feedState,
   incidents,
+  openIncidentId = null,
+  onOpenIncident,
+  incidentFocus = null,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<DatabaseCitySceneController | null>(null)
@@ -128,16 +142,20 @@ export function DatabaseCityViewport({
   const [unavailable, setUnavailable] = useState(false)
   const [heading, setHeading] = useState(0)
   const [hoveredRoadId, setHoveredRoadId] = useState<string | null>(null)
-  const [openIncidentId, setOpenIncidentId] = useState<string | null>(null)
   const [popupAt, setPopupAt] = useState<{ x: number; y: number } | null>(null)
+  const [popupPlacement, setPopupPlacement] = useState<IncidentPlacement | null>(null)
   const [layers, setLayers] = useState<CityLayerToggles>({
     traffic: true,
     paths: false,
-    waitLanes: true,
     infrastructure: true,
     route: true,
     labels: true,
   })
+
+  const openIncident = useCallback(
+    (id: string | null) => onOpenIncident?.(id),
+    [onOpenIncident],
+  )
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -147,7 +165,7 @@ export function DatabaseCityViewport({
         onSelect,
         onSelectRoad,
         onHoverRoad: setHoveredRoadId,
-        onSelectIncident: setOpenIncidentId,
+        onSelectIncident: openIncident,
         onCameraChange: () => setHeading(sceneRef.current?.heading() ?? 0),
       })
     } catch {
@@ -159,15 +177,12 @@ export function DatabaseCityViewport({
       controller.dispose()
       sceneRef.current = null
     }
-  }, [onSelect, onSelectRoad])
+  }, [onSelect, onSelectRoad, openIncident])
 
   useEffect(() => sceneRef.current?.setObjects(objects, cityPlan), [objects, cityPlan])
   useEffect(() => sceneRef.current?.setRoads(roads), [roads])
   useEffect(() => sceneRef.current?.setTraffic(traffic), [traffic])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
-  useEffect(
-    () => sceneRef.current?.setFacilityLanes(facilityTraffic.lanes, facilityTraffic.sharedLanes),
-    [facilityTraffic])
   useEffect(() => sceneRef.current?.setRoute(route), [route])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
   useEffect(() => sceneRef.current?.setSelectedRoad(selectedRoadId), [selectedRoadId])
@@ -175,13 +190,23 @@ export function DatabaseCityViewport({
   useEffect(() => sceneRef.current?.setViewMode(viewMode), [viewMode])
   useEffect(() => sceneRef.current?.setIncidents(incidents?.markers ?? []), [incidents])
 
+  // Opening a pin from the sidebar centres its object first, because a marker outside the frustum
+  // projects to nothing and would open a popup the reader never sees.
+  useEffect(() => {
+    if (incidentFocus) sceneRef.current?.focusObject(incidentFocus.objectId)
+  }, [incidentFocus])
+
   /**
    * The popup is HTML over a canvas, so it has to follow the pin as the camera moves. Projecting on
    * an animation frame is what keeps it glued; the loop only runs while a popup is actually open.
+   *
+   * The pin's placement rides along the same loop, because the popup has to state which rung of the
+   * placement ladder put the pin where it is, and only the scene knows which road it landed on.
    */
   useEffect(() => {
     if (!openIncidentId) {
       setPopupAt(null)
+      setPopupPlacement(null)
       return
     }
     let handle = 0
@@ -191,6 +216,10 @@ export function DatabaseCityViewport({
         current && next && Math.abs(current.x - next.x) < 0.5 && Math.abs(current.y - next.y) < 0.5
           ? current
           : next)
+      const placement = sceneRef.current?.incidentPlacement(openIncidentId) ?? null
+      setPopupPlacement(current => (current?.basis === placement?.basis && current?.routeId === placement?.routeId
+        ? current
+        : placement))
       handle = requestAnimationFrame(track)
     }
     handle = requestAnimationFrame(track)
@@ -200,22 +229,9 @@ export function DatabaseCityViewport({
   // A marker that disappears from the snapshot must take its popup with it.
   useEffect(() => {
     if (openIncidentId && !incidents?.markers.some(marker => marker.id === openIncidentId)) {
-      setOpenIncidentId(null)
+      openIncident(null)
     }
-  }, [incidents, openIncidentId])
-
-  /**
-   * Opening an incident from the summary list, rather than by clicking its pin.
-   *
-   * The popup is anchored by projecting the marker to screen, and a marker behind the camera or
-   * outside the frustum projects to nothing — so a list entry that only set the id would open a
-   * popup the user never sees. Centring the building first is what makes the keyboard route real.
-   */
-  const openIncidentFromList = useCallback((markerId: string) => {
-    const marker = incidents?.markers.find(entry => entry.id === markerId) ?? null
-    if (marker) sceneRef.current?.focusObject(marker.objectId)
-    setOpenIncidentId(markerId)
-  }, [incidents])
+  }, [incidents, openIncidentId, openIncident])
 
   const nudge = useCallback((action: CameraNudge) => {
     sceneRef.current?.nudge(action)
@@ -243,17 +259,8 @@ export function DatabaseCityViewport({
 
   const narrow = useNarrowViewport()
 
-  // Only facilities that actually received a lane are given a legend swatch, so the legend never
-  // advertises a colour for traffic that was not measured.
-  const laneFacilities: FacilityKind[] = [
-    ...new Set([
-      ...facilityTraffic.lanes.map(lane => lane.facility),
-      ...facilityTraffic.sharedLanes.map(lane => lane.facility),
-    ]),
-  ].sort()
-
   const hoverLabel = hoveredRoadId === null ? null : roadLabels.get(hoveredRoadId) ?? null
-  const openIncident = incidents?.markers.find(marker => marker.id === openIncidentId) ?? null
+  const openMarker = incidents?.markers.find(marker => marker.id === openIncidentId) ?? null
 
   /*
    * One legend, two homes. Wide, it lives bottom-left where a map legend belongs, folded behind its
@@ -282,9 +289,11 @@ export function DatabaseCityViewport({
           <i className="legend-swatch legend-direct" /> Index annex width — direct DMV operations
         </li>
         <li>
-          <i className="legend-swatch legend-route" /> Road width — captured executions naming both endpoints
+          <i className="legend-swatch legend-route" /> Road width — one constant. Every road is drawn
+          the same width, so colour is the only thing saying how a road is doing. Captured executions
+          are still reported in the hover readout and the evidence tables.
         </li>
-        {(['low', 'medium', 'high', 'unknown'] as const).map(grade => (
+        {CONGESTION_GRADES.map(grade => (
           <li key={grade}>
             <i className="legend-swatch" style={{ background: swatch(CONGESTION_COLORS[grade]) }} />
             Road colour — {CONGESTION_LABELS[grade].toLowerCase()}
@@ -300,25 +309,25 @@ export function DatabaseCityViewport({
           <i className="legend-swatch legend-sparse" /> Short dashes — inferred reference
         </li>
         <li>
-          <i className="legend-swatch legend-lane" /> Wait lane width — captured Query Store wait
-          milliseconds from that building to that facility
+          <i className="legend-swatch legend-incident-block">⚠</i> Yellow pin — a waiter is blocked
+          right now, placed on the road rather than on a building
         </li>
-        {laneFacilities.map(kind => (
-          <li key={kind}>
-            <i className="legend-swatch" style={{ background: swatch(LANE_COLORS[kind]) }} />
-            Wait lane colour — queued at the {FACILITY_LABELS[kind]}
-          </li>
-        ))}
+        <li>
+          <i className="legend-swatch legend-incident-deadlock">✖</i> Red pin — a deadlock the engine
+          already recorded and resolved, read from <code>system_health</code>
+        </li>
         <li>
           <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
         </li>
       </ul>
       <p className="legend-caveat">
-        A building with no wait lane is not idle: it means no ranked query family carried Query
-        Store wait-category evidence naming it. A lane that threads through several buildings
-        before reaching a facility is a shared lane: it carries one multi-object family&apos;s whole
-        wait total, drawn once along the objects it names, and belongs to none of them
-        individually. {facilityTraffic.note}
+        Road colour is graded from one measured ratio: captured wait milliseconds per captured
+        execution. It accounts for <strong>every</strong> wait category Query Store captured for the
+        queries on that road, not a chosen few — the per-facility split that used to be drawn as
+        separate coloured lanes is now in the road&apos;s hover readout and in the evidence tables
+        instead of competing with the road for the same piece of map. A road with no colour is grey,
+        not green: grey means no captured family named both of its endpoints, which is not a claim
+        that the road is quiet. {facilityTraffic.note}
         {facilityTraffic.unmapped.length > 0 &&
           ` ${facilityTraffic.unmapped.length} captured wait category/categories have no facility` +
           ' on this map and are listed in the evidence tables rather than folded into one.'}
@@ -351,26 +360,6 @@ export function DatabaseCityViewport({
         </div>
       ),
     },
-    ...(incidents
-      ? [{
-        id: 'incidents',
-        // The chip states the finding itself, so even folded the tray cannot read as "all clear".
-        label: incidentSummaryLabel(incidents),
-        glyph: '⚑',
-        tone: incidentSummaryTone(incidents),
-        // A blocked waiter opens itself, whether or not the map could pin it, and so does a probe
-        // that never reported. Those are warnings, and a warning behind a tap is a warning that was
-        // not given.
-        alert: incidentDemandsAttention(incidents),
-        content: (
-          <IncidentSummary
-            projection={incidents}
-            openId={openIncidentId}
-            onOpen={openIncidentFromList}
-          />
-        ),
-      }]
-      : []),
     ...(liveStatus
       ? [{
         id: 'live',
@@ -426,12 +415,13 @@ export function DatabaseCityViewport({
         <MapTray label="Map overlays" items={trayItems} />
       </div>
 
-      {openIncident && popupAt && (
+      {openMarker && popupAt && (
         <IncidentPopup
-          marker={openIncident}
+          marker={openMarker}
+          placement={popupPlacement}
           x={popupAt.x}
           y={popupAt.y}
-          onClose={() => setOpenIncidentId(null)}
+          onClose={() => openIncident(null)}
         />
       )}
 

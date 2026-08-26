@@ -8,6 +8,8 @@ import {
   MAX_LANE_WIDTH,
   MIN_LANE_WIDTH,
   WAIT_CATEGORY_ROUTING,
+  facilityMixLabel,
+  facilityShares,
   laneWidth,
   projectFacilityTraffic,
   routeWaitCategory,
@@ -331,3 +333,137 @@ describe('projectFacilityTraffic', () => {
     expect(traffic.lanes[0].rationale).not.toContain(Number('9007199254740995').toLocaleString())
   })
 })
+
+/**
+ * The lanes are off the map now, so this is the only surviving route from a wait category to a
+ * reader. If it drifts from the lane totals, the map has quietly stopped answering "where did the
+ * time go" while still looking as though it does.
+ */
+describe('facilityShares · the readout that replaced the lanes', () => {
+  it('splits one object\'s waiting by facility, busiest first', () => {
+    const traffic = projectFacilityTraffic(
+      [family({
+        familyId: 'f1',
+        objectIds: ['a'],
+        waitMillisecondsByCategory: { 'Buffer IO': '250', 'Lock': '750' },
+      })],
+      objects,
+    )
+
+    const shares = facilityShares('a', traffic)
+    expect(shares.map(share => share.facility)).toEqual(['lock', 'storage'])
+    expect(shares[0].waitMilliseconds).toBe('750')
+    expect(shares[0].share).toBeCloseTo(0.75, 10)
+    expect(shares[1].share).toBeCloseTo(0.25, 10)
+  })
+
+  it('answers for the object asked about and not for its neighbours', () => {
+    const traffic = projectFacilityTraffic(
+      [
+        family({ familyId: 'f1', objectIds: ['a'], waitMillisecondsByCategory: { 'Lock': '100' } }),
+        family({ familyId: 'f2', objectIds: ['b'], waitMillisecondsByCategory: { 'Buffer IO': '900' } }),
+      ],
+      objects,
+    )
+
+    expect(facilityShares('a', traffic).map(share => share.facility)).toEqual(['lock'])
+    expect(facilityShares('b', traffic).map(share => share.facility)).toEqual(['storage'])
+  })
+
+  it('adds up several families that queued at the same facility', () => {
+    const traffic = projectFacilityTraffic(
+      [
+        family({ familyId: 'f1', objectIds: ['a'], waitMillisecondsByCategory: { 'Lock': '100' } }),
+        family({ familyId: 'f2', objectIds: ['a'], waitMillisecondsByCategory: { 'Lock': '400' } }),
+      ],
+      objects,
+    )
+
+    const shares = facilityShares('a', traffic)
+    expect(shares).toHaveLength(1)
+    expect(shares[0].waitMilliseconds).toBe('500')
+    expect(shares[0].share).toBe(1)
+  })
+
+  /**
+   * A family naming two objects queued once, not once per object. Folding its wait into both would
+   * hand each building time it never spent -- the thing `sharedLanes` exists to keep separate.
+   */
+  it('leaves a multi-object family\'s wait out, rather than giving it to both', () => {
+    const traffic = projectFacilityTraffic(
+      [family({ familyId: 'f1', objectIds: ['a', 'b'], waitMillisecondsByCategory: { 'Lock': '900' } })],
+      objects,
+    )
+
+    expect(traffic.sharedLanes.length).toBeGreaterThan(0)
+    expect(facilityShares('a', traffic)).toEqual([])
+    expect(facilityShares('b', traffic)).toEqual([])
+  })
+
+  it('claims nothing for an object with no attributed waiting', () => {
+    const traffic = projectFacilityTraffic(
+      [family({ familyId: 'f1', objectIds: ['a'], waitMillisecondsByCategory: { 'Lock': '100' } })],
+      objects,
+    )
+    expect(facilityShares('b', traffic)).toEqual([])
+    expect(facilityShares('nowhere', traffic)).toEqual([])
+  })
+
+  /** Counters here run past 2^53, so the totals are summed as BigInt and reported as strings. */
+  it('does not round a counter past the safe integer range', () => {
+    const traffic = projectFacilityTraffic(
+      [family({
+        familyId: 'f1',
+        objectIds: ['a'],
+        waitMillisecondsByCategory: { 'Lock': '9007199254740993', 'Buffer IO': '9007199254740993' },
+      })],
+      objects,
+    )
+
+    const shares = facilityShares('a', traffic)
+    expect(shares.map(share => share.waitMilliseconds))
+      .toEqual(['9007199254740993', '9007199254740993'])
+    expect(shares[0].share).toBeCloseTo(0.5, 10)
+  })
+
+  it('breaks a dead-heat on facility name so the readout does not flicker', () => {
+    const traffic = projectFacilityTraffic(
+      [family({
+        familyId: 'f1',
+        objectIds: ['a'],
+        waitMillisecondsByCategory: { 'Buffer IO': '100', 'Lock': '100' },
+      })],
+      objects,
+    )
+    expect(facilityShares('a', traffic).map(share => share.facility)).toEqual(['lock', 'storage'])
+  })
+})
+
+describe('facilityMixLabel', () => {
+  const shares = (...entries: [string, number][]) =>
+    entries.map(([label, share]) => ({
+      facility: 'lock' as const,
+      label,
+      waitMilliseconds: '1',
+      share,
+    }))
+
+  it('names the facility the way the map labels it, so it can be found', () => {
+    const traffic = projectFacilityTraffic(
+      [family({ familyId: 'f1', objectIds: ['a'], waitMillisecondsByCategory: { 'Lock': '100' } })],
+      objects,
+    )
+    expect(facilityMixLabel(facilityShares('a', traffic))).toBe('lock authority 100%')
+  })
+
+  it('lists at most three, because the fourth is noise in a hover readout', () => {
+    expect(facilityMixLabel(shares(['One', 0.4], ['Two', 0.3], ['Three', 0.2], ['Four', 0.1])))
+      .toBe('one 40%, two 30%, three 20%')
+  })
+
+  /** Null, not "0%" and not an empty string: nothing was attributed, so nothing is claimed. */
+  it('returns null when there is nothing to report', () => {
+    expect(facilityMixLabel([])).toBeNull()
+  })
+})
+

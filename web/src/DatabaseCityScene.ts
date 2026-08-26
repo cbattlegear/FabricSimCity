@@ -2,10 +2,10 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import { ARTERIAL_WIDTH, streetPitch, streetPolyline, streetPolylineThrough, streetRoute, type CityLot, type CityPlan, type StreetClass } from './cityPlan'
+import { ARTERIAL_WIDTH, streetPitch, streetRoute, type CityLot, type CityPlan, type StreetClass } from './cityPlan'
 import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
 import { assignQueryRoutes } from './cityQueryTraffic'
-import { roadWidth, type RoadTraffic } from './cityTraffic'
+import { ROAD_WIDTH, type RoadTraffic } from './cityTraffic'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import {
   claimLane,
@@ -16,7 +16,6 @@ import {
 } from './cityRoads'
 import { ribbonGeometry, ribbonPositions } from './mapRibbon'
 import { type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
-import type { FacilityLane, SharedFacilityLane } from './cityFacilityTraffic'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
 import { LANDMARK_ASSETS, loadCityAssets, type AssetRole, type CityAssets, type SceneryAsset } from './cityAssets'
 import {
@@ -54,6 +53,7 @@ import {
 } from './timeOfDay'
 import type { LandUse, TerrainBlock } from './cityTerrain'
 import type { IncidentMarker } from './cityIncidents'
+import { placeIncident, type IncidentPlacement } from './cityIncidentPlacement'
 
 export type CityLayerToggles = {
   traffic: boolean
@@ -63,7 +63,6 @@ export type CityLayerToggles = {
    * together. Turn it on to see which tables are named together; leave it off to read the streets.
    */
   paths: boolean
-  waitLanes: boolean
   infrastructure: boolean
   route: boolean
   /** Ground labels naming each building, facility and neighbourhood. */
@@ -182,18 +181,19 @@ export type DatabaseCitySceneController = {
   /** The aggregate street-load layer built from the workload's executions and apportioned waits. */
   setTraffic(traffic: WorkloadTraffic): void
   setFacilities(facilities: readonly Facility[]): void
-  /** Measured wait lanes from buildings to the facility their workload queued at. */
-  setFacilityLanes(
-    lanes: readonly FacilityLane[],
-    sharedLanes: readonly SharedFacilityLane[],
-  ): void
   setRoute(route: CityRoute | null): void
   setSelected(objectId: string | null): void
   /** Highlights one road and pins both of its endpoints. */
   setSelectedRoad(routeId: string | null): void
   setLayers(layers: Partial<CityLayerToggles>): void
-  /** Live incident pins, anchored to the lot of each object a blocked waiter named. */
+  /** Live incident pins, placed on the road between the parties rather than on a roof. */
   setIncidents(markers: readonly IncidentMarker[]): void
+  /**
+   * Where one incident pin ended up and which rung of the placement ladder put it there, or null
+   * when it is not drawn. The popup states the rung, because a pin on the measured road between two
+   * named objects and a pin at an object's kerb are different claims.
+   */
+  incidentPlacement(id: string): IncidentPlacement | null
   /**
    * Screen position of one incident pin, or null when it is not drawn or is behind the camera.
    * Used to anchor the HTML popup over the canvas.
@@ -733,43 +733,129 @@ export function createDatabaseCityScene(
    * Live incident pins. Unlike POI pins these are drawn in *both* modes: a blocked waiter is the
    * one thing on this map worth interrupting you for, and hiding it behind a mode switch would be a
    * way of not telling you.
+   *
+   * They sit on the **road** rather than on a roof — see {@link ./cityIncidentPlacement} for why and
+   * for the fallback ladder — and they are sprites, so they face the camera from every angle and
+   * stay the same shape whether the city is drawn flat or in 3D.
    */
   const incidentGroup = new THREE.Group()
   scene.add(incidentGroup)
   const incidentPickable: THREE.Object3D[] = []
   const incidentAnchors = new Map<string, THREE.Vector3>()
+  const incidentPlacements = new Map<string, IncidentPlacement>()
 
-  const SEVERITY_COLORS: Record<IncidentMarker['severity'], number> = {
-    blocked: 0xe4483c,
-    waiting: 0xe2a957,
-    deadlock: 0xb02a8f,
+  /**
+   * Two pins, not four.
+   *
+   * Blocking of any kind — a plain blocked waiter or a cycle in the live wait graph — is a yellow
+   * warning, because it is happening now and may clear on its own. A deadlock the engine already
+   * recorded is a red crash, because a transaction was killed and it is not going to clear. Grading
+   * live blocking into several reds would put the loudest colour on the least certain claim.
+   */
+  const INCIDENT_PIN_STYLE: Record<IncidentMarker['severity'], { glyph: string; color: string; ink: string }> = {
+    blocked: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
+    waiting: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
+    cycle: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
+    deadlock: { glyph: '✖', color: '#e4483c', ink: '#f7e9e7' },
   }
+
+  const INCIDENT_PIN_PX = 96
+  const incidentPinMaterials = new Map<string, THREE.SpriteMaterial | null>()
+
+  /** Rasterizes one pin face, cached per severity. Null when the browser refuses a 2D context. */
+  function incidentPinMaterial(severity: IncidentMarker['severity']): THREE.SpriteMaterial | null {
+    const cached = incidentPinMaterials.get(severity)
+    if (cached !== undefined) return cached
+
+    const style = INCIDENT_PIN_STYLE[severity]
+    const canvas = document.createElement('canvas')
+    canvas.width = INCIDENT_PIN_PX
+    canvas.height = INCIDENT_PIN_PX
+    const context = canvas.getContext('2d')
+    if (!context) {
+      incidentPinMaterials.set(severity, null)
+      return null
+    }
+
+    const centre = INCIDENT_PIN_PX / 2
+    context.beginPath()
+    context.arc(centre, centre, centre - 6, 0, Math.PI * 2)
+    context.fillStyle = style.color
+    context.fill()
+    // A dark ring so the pin survives being drawn over its own road, which is the same colour family.
+    context.lineWidth = 6
+    context.strokeStyle = 'rgba(7, 11, 17, 0.9)'
+    context.stroke()
+
+    context.font = `700 ${Math.round(INCIDENT_PIN_PX * 0.56)}px "Segoe UI Symbol", "Segoe UI", system-ui, sans-serif`
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillStyle = style.ink
+    context.fillText(style.glyph, centre, centre + 2)
+
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    texture.generateMipmaps = false
+    texture.minFilter = THREE.LinearFilter
+    texture.magFilter = THREE.LinearFilter
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      // An incident that a building hides is an incident you were not told about, so the pin ignores
+      // the depth buffer for the same reason a label does.
+      depthTest: false,
+    })
+    material.toneMapped = false
+    incidentPinMaterials.set(severity, material)
+    return material
+  }
+
+  /** World size of one pin face. Big enough to find from the default framing, small enough to sit on a road. */
+  const INCIDENT_PIN_WORLD = 13
 
   function buildIncidents(markers: readonly IncidentMarker[]) {
     clearGroup(incidentGroup)
     incidentPickable.length = 0
     incidentAnchors.clear()
+    incidentPlacements.clear()
     if (!plan) return
+
+    // The roads as they were actually drawn, so a pin lands on the ribbon a reader can see rather
+    // than on the straight line between two lots that nothing draws.
+    const placementRoads = [...roadPaths.values()].map(entry => ({
+      routeId: entry.road.routeId,
+      fromObjectId: entry.road.fromObjectId,
+      toId: entry.road.toId,
+      executions: entry.road.executions,
+      polyline: entry.polyline,
+    }))
 
     for (const marker of markers) {
       const lot = plan.lots.get(marker.objectId)
       if (!lot) continue
-      const color = SEVERITY_COLORS[marker.severity]
-      // Map mode flattens the buildings, so the pin has to come down with them. Anchoring to the
-      // massing that is actually drawn keeps the popup's tail on its building instead of parallaxing
-      // off it at the edges of a top-down view.
-      const y = viewMode === 'map' ? 4 : (lot.height ?? 8) + 9
-      const material = poiMaterial(color)
-      const head = new THREE.Mesh(track(new THREE.SphereGeometry(2.2, 16, 12)), material)
-      head.position.set(lot.x, y, lot.z)
-      head.userData.incidentId = marker.id
-      const stem = new THREE.Mesh(track(new THREE.ConeGeometry(1.5, 5.5, 12)), material)
-      stem.position.set(lot.x, y - 3.4, lot.z)
-      stem.rotation.x = Math.PI
-      stem.userData.incidentId = marker.id
-      incidentGroup.add(head, stem)
-      incidentPickable.push(head, stem)
-      incidentAnchors.set(marker.id, new THREE.Vector3(lot.x, y + 2.4, lot.z))
+      const placement = placeIncident(
+        marker.objectId,
+        marker.counterpartObjectIds,
+        { x: lot.accessX, z: lot.accessZ },
+        placementRoads,
+      )
+      if (!placement) continue
+      const material = incidentPinMaterial(marker.severity)
+      if (!material) continue
+
+      // Map mode flattens the buildings, so the pin comes down with them; in 3D it clears a low
+      // building without floating so high that it stops looking like it is on the road.
+      const y = viewMode === 'map' ? 7 : 17
+      const pin = new THREE.Sprite(material)
+      pin.position.set(placement.x, y, placement.z)
+      pin.scale.set(INCIDENT_PIN_WORLD, INCIDENT_PIN_WORLD, 1)
+      pin.renderOrder = 6
+      pin.userData.incidentId = marker.id
+      incidentGroup.add(pin)
+      incidentPickable.push(pin)
+      incidentAnchors.set(marker.id, new THREE.Vector3(placement.x, y + INCIDENT_PIN_WORLD * 0.5, placement.z))
+      incidentPlacements.set(marker.id, placement)
     }
   }
 
@@ -975,7 +1061,6 @@ export function createDatabaseCityScene(
   /** Wider ribbons drawn beneath the road fill. Map mode only — casings are a basemap idiom. */
   const roadCasingGroup = new THREE.Group()
   roadCasingGroup.visible = false
-  const laneGroup = new THREE.Group()
   const roadHighlightGroup = new THREE.Group()
   const infrastructureGroup = new THREE.Group()
   const routeGroup = new THREE.Group()
@@ -996,7 +1081,6 @@ export function createDatabaseCityScene(
     trafficGroup,
     roadGroup,
     roadHighlightGroup,
-    laneGroup,
     buildingGroup,
     infrastructureGroup,
     routeGroup,
@@ -1018,8 +1102,6 @@ export function createDatabaseCityScene(
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
   let currentIncidents: readonly IncidentMarker[] = []
-  let currentLanes: readonly FacilityLane[] = []
-  let currentSharedLanes: readonly SharedFacilityLane[] = []
   let selectedId: string | null = null
   let selectedRoadId: string | null = null
   let hoveredRoadId: string | null = null
@@ -1032,7 +1114,6 @@ export function createDatabaseCityScene(
   const layers: CityLayerToggles = {
     traffic: true,
     paths: false,
-    waitLanes: true,
     infrastructure: true,
     route: true,
     labels: true,
@@ -1069,7 +1150,6 @@ export function createDatabaseCityScene(
     roadGroup.visible = layers.paths
     roadCasingGroup.visible = layers.paths && flatMode
     trafficGroup.visible = layers.traffic
-    laneGroup.visible = layers.waitLanes
     roadHighlightGroup.visible = layers.traffic || layers.paths
     infrastructureGroup.visible = layers.infrastructure
     routeGroup.visible = layers.route
@@ -1884,22 +1964,22 @@ export function createDatabaseCityScene(
   /**
    * Draws the workload's traffic on the streets that carry it.
    *
-   * One ribbon per street, not one per query. Width comes from the executions routed over it and
-   * colour from the waiting those executions carried, so a wide dark-red street is one that a lot of
-   * queries use and wait on — which is the thing you want to see standing back from a city.
+   * One ribbon per street, not one per query, all at the same {@link ROAD_WIDTH}. Colour is the
+   * whole story: it comes from the waiting those executions carried, so a dark-red street is one the
+   * workload waits on — which is the thing you want to see standing back from a city. Executions no
+   * longer change the width; they are still reported on the street and in the evidence tables.
    */
   function buildTraffic(traffic: WorkloadTraffic) {
     clearGroup(trafficGroup)
     if (traffic.streets.size === 0) return
 
-    // Widest first so a heavy street keeps the top of the stack where two overlap at a junction.
+    // Busiest first so a heavy street keeps the top of the stack where two overlap at a junction.
     const ordered = [...traffic.streets.values()].sort(
       (left, right) => right.executions - left.executions || left.edgeId - right.edgeId,
     )
     for (const street of ordered) {
       if (street.points.length < 2) continue
-      const width = roadWidth(street.executions)
-      const ribbon = ribbonGeometry(street.points, width, null)
+      const ribbon = ribbonGeometry(street.points, ROAD_WIDTH, null)
       if (!ribbon) continue
       const mesh = new THREE.Mesh(track(ribbon), roadMaterial(street.color, false, GROUND_RANK.traffic))
       mesh.position.y = 0.045
@@ -1918,8 +1998,11 @@ export function createDatabaseCityScene(
     roadPickable.length = 0
     roadPaths.clear()
 
-    // Widest first, so the heaviest traffic keeps the centre line and the light roads move aside.
-    const ordered = [...roads].sort((left, right) => right.width - left.width || left.routeId.localeCompare(right.routeId))
+    // Busiest first, so the heaviest traffic keeps the centre line and the light roads move aside.
+    // Every ribbon is the same width now, so executions do the ordering they used to do by proxy.
+    const ordered = [...roads].sort(
+      (left, right) => (right.executions ?? -1) - (left.executions ?? -1) || left.routeId.localeCompare(right.routeId),
+    )
     const corridorLanes = new Map<string, Set<number>>()
 
     // Every on-map ribbon's path, spread across the network by loading the measured executions as
@@ -2006,52 +2089,6 @@ export function createDatabaseCityScene(
       pin.rotation.x = Math.PI
       roadHighlightGroup.add(pin)
     })
-  }
-
-  function buildFacilityLanes(
-    lanes: readonly FacilityLane[],
-    sharedLanes: readonly SharedFacilityLane[],
-  ) {
-    clearGroup(laneGroup)
-    if (!plan) return
-    for (const lane of lanes) {
-      const from = plan.lots.get(lane.objectId)
-      const site = facilitySites.get(lane.facility)
-      // A lane whose building or facility is not on this map is dropped from the geometry only; it
-      // still appears in the evidence table, so it is never silently lost.
-      if (!from || !site) continue
-      const points = streetPolyline(
-        plan,
-        { x: from.accessX, z: from.accessZ },
-        { x: site.x, z: site.z },
-      )
-      const ribbon = ribbonGeometry(points, lane.width, DASH_PATTERNS[lane.pattern])
-      if (!ribbon) continue
-      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid', GROUND_RANK.facilityLane))
-      // Lanes sit above every road lane so a lane and a road sharing a street stay distinguishable.
-      mesh.position.y = 0.2
-      mesh.userData.laneId = lane.laneId
-      laneGroup.add(mesh)
-    }
-    for (const lane of sharedLanes) {
-      const site = facilitySites.get(lane.facility)
-      if (!site) continue
-      const stops = lane.objectIds
-        .map(objectId => plan?.lots.get(objectId))
-        .filter((lot): lot is NonNullable<typeof lot> => lot !== undefined)
-        .map(lot => ({ x: lot.accessX, z: lot.accessZ }))
-      if (stops.length === 0) continue
-      // One continuous path: building to building along the objects the family names, then out to the
-      // facility. Drawn once, so the family's whole wait total is never double-counted on the map.
-      const points = streetPolylineThrough(plan, [...stops, { x: site.x, z: site.z }])
-      const ribbon = ribbonGeometry(points, lane.width, DASH_PATTERNS[lane.pattern])
-      if (!ribbon) continue
-      const mesh = new THREE.Mesh(track(ribbon), roadMaterial(lane.color, lane.pattern !== 'solid', GROUND_RANK.sharedLane))
-      // Above exclusive lanes: where a shared lane overlaps one, the shared path stays readable.
-      mesh.position.y = 0.32
-      mesh.userData.laneId = lane.laneId
-      laneGroup.add(mesh)
-    }
   }
 
   function buildInfrastructure(facilities: readonly Facility[]) {
@@ -2464,7 +2501,6 @@ export function createDatabaseCityScene(
       buildBuildings(objects, plan)
       buildRoads(currentRoads, plan)
       if (currentTraffic) buildTraffic(currentTraffic)
-      buildFacilityLanes(currentLanes, currentSharedLanes)
       buildInfrastructure(currentFacilities)
       buildRoute(currentRoute)
       buildIncidents(currentIncidents)
@@ -2494,12 +2530,6 @@ export function createDatabaseCityScene(
     setFacilities(facilities) {
       currentFacilities = facilities
       buildInfrastructure(facilities)
-      requestRender()
-    },
-    setFacilityLanes(lanes, sharedLanes) {
-      currentLanes = lanes
-      currentSharedLanes = sharedLanes
-      buildFacilityLanes(lanes, sharedLanes)
       requestRender()
     },
     setRoute(route) {
@@ -2533,6 +2563,9 @@ export function createDatabaseCityScene(
       currentIncidents = markers
       buildIncidents(markers)
       requestRender()
+    },
+    incidentPlacement(id) {
+      return incidentPlacements.get(id) ?? null
     },
     incidentScreenPosition(id) {
       const anchor = incidentAnchors.get(id)
@@ -2649,6 +2682,10 @@ export function createDatabaseCityScene(
       for (const material of archetypeMaterials.values()) material.dispose()
       for (const material of roadMaterials.values()) material.dispose()
       for (const material of poiMaterials.values()) material.dispose()
+      for (const material of incidentPinMaterials.values()) {
+        material?.map?.dispose()
+        material?.dispose()
+      }
       riverMaterials.water.dispose()
       riverMaterials.bank.dispose()
       casingMaterial.dispose()

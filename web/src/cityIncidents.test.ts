@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   SEVERITY_LABELS,
+  deadlockSummaryLabel,
+  deadlockSummaryTone,
   incidentDemandsAttention,
   incidentSummaryLabel,
   incidentSummaryTone,
@@ -9,7 +11,46 @@ import {
   projectIncidents,
 } from './cityIncidents'
 import type { DatabaseCityObject } from './databaseCityContracts'
-import type { LiveIncidentSnapshot, LockResource } from './liveContracts'
+import type {
+  DeadlockGraph,
+  DeadlockParticipant,
+  DeadlockResource,
+  DeadlockSample,
+  LiveIncidentSnapshot,
+  LockResource,
+} from './liveContracts'
+
+function part(processId: string, mode: string): DeadlockParticipant {
+  return { processId, mode, requestType: 'wait' }
+}
+
+function resource(overrides: Partial<DeadlockResource> = {}): DeadlockResource {
+  return {
+    resourceKind: 'keylock',
+    databaseId: 7,
+    objectName: 'sim.dbo.Customer',
+    indexName: 'PK_Customer',
+    associatedObjectId: 100,
+    owners: [part('p1', 'X')],
+    waiters: [part('p2', 'S')],
+    ...overrides,
+  } as DeadlockResource
+}
+
+function graph(overrides: Partial<DeadlockGraph> = {}): DeadlockGraph {
+  return {
+    id: 'dl:1',
+    occurredAt: '2024-05-01T11:40:00Z',
+    processes: [
+      { id: 'p1', sessionId: 51, isVictim: false },
+      { id: 'p2', sessionId: 52, isVictim: true },
+    ],
+    resources: [resource()],
+    victimProcessIds: ['p2'],
+    includesSqlText: true,
+    ...overrides,
+  } as unknown as DeadlockGraph
+}
 
 function objectOf(objectId: string, schemaName: string, name: string): DatabaseCityObject {
   return {
@@ -58,6 +99,7 @@ interface SnapshotSpec {
   cycleSessionIds?: number[]
   status?: string
   reason?: string
+  deadlocks?: Partial<DeadlockSample>
 }
 
 function snapshotOf(spec: SnapshotSpec = {}): LiveIncidentSnapshot {
@@ -97,6 +139,20 @@ function snapshotOf(spec: SnapshotSpec = {}): LiveIncidentSnapshot {
       cycles: cycles.length > 0 ? [cycles.map(sessionId => `n${sessionId}`)] : [],
       summary: {},
     },
+    // Omitted unless a test asks for it: a fixture that always carries a reader would hide the case
+    // where an older API build serves a snapshot without one.
+    ...(spec.deadlocks
+      ? {
+        deadlocks: {
+          graphs: [],
+          totalRetainedCount: 0,
+          collectedAt: '2024-05-01T12:00:00Z',
+          status: 'Available',
+          reason: 'Read 0 deadlock graph(s) from system_health.',
+          ...spec.deadlocks,
+        },
+      }
+      : {}),
   } as unknown as LiveIncidentSnapshot
 }
 
@@ -247,7 +303,13 @@ describe('projectIncidents · severity and merging', () => {
         cycleSessionIds: [51, 60],
       }),
       objects)
-    expect(projection.markers[0].severity).toBe('deadlock')
+    /*
+     * `cycle`, not `deadlock`. A cycle in the *live* wait graph is a weaker observation than a
+     * deadlock: the engine resolves a real deadlock and rolls a victim back before any sample of
+     * `sys.dm_exec_requests` could see it, so anything visible here by definition was not one.
+     * `deadlock` is reserved for a graph `system_health` actually recorded.
+     */
+    expect(projection.markers[0].severity).toBe('cycle')
     expect(projection.markers[0].headline).toContain('wait cycle')
     const detail = projection.markers[0].details.join(' ')
     expect(detail).toContain('cycle in the current wait graph')
@@ -280,7 +342,7 @@ describe('projectIncidents · severity and merging', () => {
       }),
       objects)
     expect(projection.markers).toHaveLength(1)
-    expect(projection.markers[0].severity).toBe('deadlock')
+    expect(projection.markers[0].severity).toBe('cycle')
     // The demoted waiter is not lost; it is still described.
     expect(projection.markers[0].details.join(' ')).toContain('session 51')
   })
@@ -355,7 +417,20 @@ describe('projectIncidents · provenance', () => {
   })
 
   it('labels every severity it can emit', () => {
-    expect(Object.keys(SEVERITY_LABELS).sort()).toEqual(['blocked', 'deadlock', 'waiting'])
+    expect(Object.keys(SEVERITY_LABELS).sort()).toEqual(['blocked', 'cycle', 'deadlock', 'waiting'])
+  })
+
+  /**
+   * The two names have to stay distinguishable in the words as well as in the union.
+   *
+   * `cycle` is what the live wait graph can show; `deadlock` is what `system_health` recorded and the
+   * engine already killed. Labelling a live cycle "deadlock" claims the engine failed to resolve
+   * something it resolves in milliseconds, which is the strongest wrong claim this map could make.
+   */
+  it('never labels a live wait cycle as a deadlock', () => {
+    expect(SEVERITY_LABELS.cycle).not.toMatch(/deadlock/i)
+    expect(SEVERITY_LABELS.deadlock).toMatch(/deadlock/i)
+    expect(SEVERITY_LABELS.deadlock).not.toBe(SEVERITY_LABELS.cycle)
   })
 })
 
@@ -368,6 +443,7 @@ describe('projectIncidents · provenance', () => {
 describe('incident popups are reachable without a pointer', () => {
   const popup = readFileSync(new URL('./IncidentPopup.tsx', import.meta.url), 'utf8')
   const viewport = readFileSync(new URL('./DatabaseCityViewport.tsx', import.meta.url), 'utf8')
+  const view = readFileSync(new URL('./DatabaseCityView.tsx', import.meta.url), 'utf8')
 
   it('lists every marker in the summary as a real button', () => {
     expect(popup).toContain('{markers.map(marker => (')
@@ -377,10 +453,20 @@ describe('incident popups are reachable without a pointer', () => {
     expect(popup).toContain("aria-expanded={openId === marker.id}")
   })
 
+  /**
+   * The list now lives in a sidebar drawer, outside the map, so the camera move crosses a component
+   * boundary: the view asks, the viewport does it. The nonce is what makes clicking the same entry
+   * twice move the camera twice -- without it the second click sets an identical object id, React
+   * bails out of the effect, and a reader who has since panned away gets a popup anchored nowhere.
+   */
   it('centres the building before opening, so the popup cannot anchor off screen', () => {
-    expect(viewport).toContain('const openIncidentFromList = useCallback((markerId: string) => {')
-    expect(viewport).toContain('sceneRef.current?.focusObject(marker.objectId)')
-    expect(viewport).toContain('onOpen={openIncidentFromList}')
+    expect(view).toContain('const openIncidentFromList = useCallback((markerId: string) => {')
+    expect(view).toContain('setIncidentFocus({ objectId: marker.objectId, nonce: incidentFocusNonce.current })')
+    expect(view).toContain('onOpen={openIncidentFromList}')
+    expect(view).toContain('incidentFocus={incidentFocus}')
+    expect(viewport).toContain('if (incidentFocus) sceneRef.current?.focusObject(incidentFocus.objectId)')
+    // Re-asking for the same object has to be a new request, or the second click does nothing.
+    expect(view).toContain('incidentFocusNonce.current += 1')
   })
 
   it('keeps the qualification text even when markers are listed', () => {
@@ -388,12 +474,202 @@ describe('incident popups are reachable without a pointer', () => {
     expect(popup).toContain("<span className=\"is-unknown\">Blocking not observed</span>")
   })
 })
+describe('projectIncidents · recorded deadlocks', () => {
+  it('treats an absent reader as not observed, never as "no deadlocks"', () => {
+    const projection = projectIncidents(snapshotOf({}), objects)
+    expect(projection.deadlocks.observed).toBe(false)
+    expect(projection.deadlocks.reason).toMatch(/nothing is claimed about deadlocks/i)
+    expect(deadlockSummaryLabel(projection)).toBe('Not observed')
+    expect(deadlockSummaryTone(projection)).toBe('is-unknown')
+    // An unreported reader is a hole in the evidence, and a hole is worth surfacing.
+    expect(incidentDemandsAttention(projection)).toBe(true)
+  })
+
+  /**
+   * `Unsupported` is Azure SQL Database, which has no `system_health` session at all. Rendering it
+   * the same as "read the window and found nothing" would claim a clean bill of health on an
+   * instance that was never examined.
+   */
+  it('keeps "unsupported" distinct from "none retained"', () => {
+    const unsupported = projectIncidents(
+      snapshotOf({ deadlocks: { status: 'Unsupported', reason: 'No system_health session exists here.' } }),
+      objects)
+    expect(unsupported.deadlocks.observed).toBe(false)
+    expect(unsupported.deadlocks.reason).toContain('No system_health session exists here.')
+    expect(deadlockSummaryLabel(unsupported)).toBe('Not observed')
+
+    const empty = projectIncidents(
+      snapshotOf({ requests: [{ sessionId: 51, lockResource: null }], deadlocks: {} }),
+      objects)
+    expect(empty.deadlocks.observed).toBe(true)
+    expect(deadlockSummaryLabel(empty)).toBe('None in window')
+    expect(deadlockSummaryTone(empty)).toBe('')
+    expect(incidentDemandsAttention(empty)).toBe(false)
+  })
+
+  it('reads a stale sample, because stale evidence is still evidence', () => {
+    const projection = projectIncidents(
+      snapshotOf({ deadlocks: { status: 'Stale', graphs: [graph()], totalRetainedCount: 1 } }),
+      objects)
+    expect(projection.deadlocks.observed).toBe(true)
+    expect(projection.markers.some(marker => marker.severity === 'deadlock')).toBe(true)
+  })
+
+  it('pins a recorded graph to the object its resource names', () => {
+    const projection = projectIncidents(
+      snapshotOf({ deadlocks: { graphs: [graph()], totalRetainedCount: 1 } }),
+      objects)
+    const marker = projection.markers.find(entry => entry.severity === 'deadlock')
+    expect(marker?.objectId).toBe('object:dbo:100')
+    expect(marker?.headline).toContain('deadlock was recorded here')
+    expect(marker?.source).toContain('system_health')
+  })
+
+  /**
+   * A deadlock is history by the time anything can read it, and dating it from the snapshot would
+   * present an hour-old event as something happening now.
+   */
+  it('dates the pin from when the deadlock happened and says so', () => {
+    const projection = projectIncidents(
+      snapshotOf({ deadlocks: { graphs: [graph()], totalRetainedCount: 1 } }),
+      objects)
+    const marker = projection.markers.find(entry => entry.severity === 'deadlock')
+    const detail = marker?.details.join(' ') ?? ''
+    expect(detail).toContain('recorded at 2024-05-01T11:40:00Z')
+    expect(detail).toMatch(/this is history/i)
+    expect(detail).toContain('victim session 52')
+  })
+
+  /** Two loaded resources make the pin a claim about a relationship, so the road can be found. */
+  it('names the other loaded objects in the graph as counterparts', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        deadlocks: {
+          graphs: [graph({
+            resources: [
+              resource(),
+              resource({
+                objectName: null,
+                databaseId: 7,
+                associatedObjectId: 200,
+                owners: [part('p2', 'X')],
+                waiters: [part('p1', 'S')],
+              }),
+            ],
+          })],
+          totalRetainedCount: 1,
+        },
+      }),
+      objects)
+    const marker = projection.markers.find(entry => entry.severity === 'deadlock')
+    expect(marker?.objectId).toBe('object:dbo:100')
+    expect(marker?.counterpartObjectIds).toEqual(['7/object/200'])
+  })
+
+  /**
+   * The anchor is the resource the *victim* was waiting for, because that is the request the engine
+   * actually killed. Anchoring on the first resource in document order would move the pin for a
+   * reason that has nothing to do with the deadlock.
+   */
+  it('anchors on the victim\'s own resource rather than on document order', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        deadlocks: {
+          graphs: [graph({
+            resources: [
+              resource({
+                objectName: null,
+                associatedObjectId: 200,
+                owners: [part('p2', 'X')],
+                waiters: [part('p1', 'S')],
+              }),
+              resource(),
+            ],
+          })],
+          totalRetainedCount: 1,
+        },
+      }),
+      objects)
+    const marker = projection.markers.find(entry => entry.severity === 'deadlock')
+    // p2 is the victim and waits on the `dbo.Customer` resource, which is second in the list.
+    expect(marker?.objectId).toBe('object:dbo:100')
+  })
+
+  it('says when the anchor is not the victim\'s resource, rather than implying it was', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        deadlocks: {
+          graphs: [graph({ resources: [resource({ waiters: [part('p1', 'S')] })] })],
+          totalRetainedCount: 1,
+        },
+      }),
+      objects)
+    const marker = projection.markers.find(entry => entry.severity === 'deadlock')
+    expect(marker?.details.join(' ')).toMatch(/victim's own resource is not on this page/i)
+  })
+
+  it('says statement text is absent rather than empty when it was not requested', () => {
+    const projection = projectIncidents(
+      snapshotOf({ deadlocks: { graphs: [graph({ includesSqlText: false })], totalRetainedCount: 1 } }),
+      objects)
+    expect(projection.markers.find(entry => entry.severity === 'deadlock')?.details.join(' '))
+      .toMatch(/absent rather than empty/i)
+  })
+
+  /**
+   * A deadlock between two tables in another database is real and is counted; drawing it anywhere on
+   * this page would be a lie about where it happened.
+   */
+  it('counts a graph it cannot place instead of pinning it to the wrong lot', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        deadlocks: {
+          graphs: [graph({ resources: [resource({ objectName: 'other.dbo.Elsewhere', associatedObjectId: 999 })] })],
+          totalRetainedCount: 4,
+        },
+      }),
+      objects)
+    expect(projection.markers.some(entry => entry.severity === 'deadlock')).toBe(false)
+    expect(projection.deadlocks.retainedCount).toBe(4)
+    expect(projection.deadlocks.graphCount).toBe(1)
+    // Read one of four, and pinned none of the one: the summary discloses the window it read, and
+    // `pinnedCount` is what says the map is not showing even that one.
+    expect(projection.deadlocks.pinnedCount).toBe(0)
+    expect(deadlockSummaryLabel(projection)).toBe('1 of 4 retained')
+  })
+
+  it('resolves a resource kind that names no object to nothing, not to a guess', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        deadlocks: {
+          graphs: [graph({
+            resources: [resource({ resourceKind: 'exchangeEvent', objectName: null, associatedObjectId: null })],
+          })],
+          totalRetainedCount: 1,
+        },
+      }),
+      objects)
+    expect(projection.markers.some(entry => entry.severity === 'deadlock')).toBe(false)
+  })
+
+  it('treats a retained deadlock as something the reader must be shown', () => {
+    const projection = projectIncidents(
+      snapshotOf({ deadlocks: { graphs: [graph()], totalRetainedCount: 1 } }),
+      objects)
+    expect(incidentDemandsAttention(projection)).toBe(true)
+    expect(deadlockSummaryTone(projection)).toBe('is-alert')
+  })
+})
+
 describe('incident summary wording · a folded chip may be the whole probe', () => {
   const base = {
     markers: [],
     offPageCount: 0,
     unresolved: [],
     probeReported: true,
+    // Deadlocks observed and none found, so this fixture keeps saying exactly what it used to about
+    // blocking. A projection with an unreported deadlock reader is a different case, tested below.
+    deadlocks: { observed: true, graphCount: 0, retainedCount: 0, pinnedCount: 0, reason: 'd' },
     reason: 'r',
   } as const
 

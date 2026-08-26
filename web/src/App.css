@@ -361,9 +361,10 @@
  * `.sidebar-drawer` uses and for the same reason. With `min-height: 0` the card was the only section
  * that could give way, so it gave way entirely: shrink is distributed in proportion to flex-basis,
  * and the address list's basis is its whole scroll height, so the list kept its space and the card
- * lost nearly all of its own. Measured at 1440x900 with both drawers open, the card held 72px of
- * 472px of content -- title, kind and nothing else -- with 414px of the selected object's measured
- * evidence reachable only by scrolling a 72px window. At 1280x720 it was 47px.
+ * lost nearly all of its own. Measured at 1440x900 with the drawers open -- two of them, before the
+ * live-activity drawer joined them -- the card held 72px of 472px of content -- title, kind and
+ * nothing else -- with 414px of the selected object's measured evidence reachable only by scrolling
+ * a 72px window. At 1280x720 it was 47px.
  *
  * The cap is 34vh rather than 46vh because the card no longer shrinks. 46vh floors the card at 414px
  * in a 900px rail, which together with the drawers' own 46vh budget overflows a column that is
@@ -390,7 +391,7 @@
 /*
  * A query route takes the whole rail over.
  *
- * When a route is open the address book — search, list, metric footer, both drawers — is not
+ * When a route is open the address book — search, list, metric footer, every drawer — is not
  * rendered, so the card is the only thing under the header. The shared-with-a-list `46vh` cap would
  * strand the rest of the rail empty, so a full-takeover card grows to fill the column instead and
  * scrolls its own content (`.hud-slideover` inside is already a `min-height: 0` `overflow: auto`
@@ -1225,10 +1226,15 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * So the budget moves up one level. The wrapper takes the 46vh, and the drawers inside divide it
  * via `--sidebar-drawer-cap`. The region then costs the column what a single drawer costs today.
  *
- * The default is the *half* share, and the `:has()` rule below widens it when only one drawer is
- * open. That direction is deliberate: `:not()` takes a non-forgiving selector list, so an engine
- * without `:has()` drops the widening rule entirely and lands on the half share -- which always
- * fits. Getting this backwards reintroduces the overflow, so do not add `:where()` around the
+ * The share is `budget / openCount`, and the count is three because the city column now stacks Live
+ * activity, the plan finder and the legend. The arithmetic that has to hold is
+ * `cap x openCount + 34.5px x closedCount <= budget`, since every closed drawer still spends its
+ * summary; raising the cap and trusting shrink to sort it out does not work, for the reason above.
+ *
+ * The default is the *tightest* share -- all three open -- and the `:has()` rules below widen it as
+ * drawers close. That direction is deliberate: `:not()` takes a non-forgiving selector list, so an
+ * engine without `:has()` drops both widening rules entirely and lands on the third share, which
+ * always fits. Getting this backwards reintroduces the overflow, so do not add `:where()` around the
  * argument to "hold the specificity down": `:has()` takes a *relative* selector list and `:where()`
  * takes a *complex* one, which may not begin with a combinator, so `:where(> ...)` has its argument
  * discarded by forgiving parsing. Chromium then reports the selector back as literally
@@ -1241,15 +1247,23 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  */
 .sidebar-drawers {
   --sidebar-drawer-budget: 46vh;
-  --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) / 2);
+  --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) / 3);
   flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   max-height: var(--sidebar-drawer-budget);
 }
-/* Only one drawer open: it may spend the budget less the other's collapsed summary (34.5px). */
+/*
+ * At most two drawers open: the two may divide the budget less the third's collapsed summary
+ * (34.5px). Written before the one-open rule on purpose -- both match when one drawer is open, and
+ * a media query adds no specificity, so source order is what picks the winner.
+ */
+.sidebar-drawers:not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open])) {
+  --sidebar-drawer-cap: calc((var(--sidebar-drawer-budget) - 2.5rem) / 2);
+}
+/* Only one drawer open: it may spend the budget less the other two collapsed summaries. */
 .sidebar-drawers:not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open])) {
-  --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) - 2.5rem);
+  --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) - 5rem);
 }
 
 /*
@@ -1258,10 +1272,18 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * The card, the list and the drawers are three claims on one rail. The card now floors instead of
  * shrinking (see `.sidebar-place-card`), so something else has to give, and the drawers are the
  * right thing: "Legend & evidence" is reference material, while the card is the object the reader
- * just asked for by name. Measured at 1440x900 with both drawers open, taking the card's floor out
+ * just asked for by name. Measured at 1440x900 with the drawers open -- two of them, at the time --
+ * taking the card's floor out
  * of the list instead left the list at 78px, and at 1280x720 it left it at 0px with 6px of the rail
  * unreachable -- a column that does not overflow and is still useless. Yielding here instead holds
  * the list at 231px and 141px.
+ *
+ * 24vh, not the 16vh that two drawers shared. A third drawer does not make the region cheaper, and
+ * 16vh divided three ways is 42.6px per drawer at an 800px viewport -- a 35px summary and a 7.6px
+ * body, which overflows nothing and can be read by nobody. That is the failure this file already
+ * warns about twice: zero unreachable pixels is necessary and not sufficient. 24vh gives each of
+ * three open drawers 64px, the same 29px of body two drawers had at 16vh, and it is measured, not
+ * reasoned -- see the numbers in the pull request that introduced Live activity.
  *
  * A modifier the markup sets rather than `.sidebar-place-card ~ .sidebar-drawers`, which would do
  * the same job in CSS alone. That selector ends in `.sidebar-drawers`, and `ownRule()` in
@@ -1271,19 +1293,20 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * there to find (`.sidebar-brand .sidebar-mark`). A class the component owns is cheaper than either.
  *
  * The drawers keep flooring at `min(content, cap)`, so each summary stays inside its share and
- * clickable: measured 72px and 58px against a 35px summary.
+ * clickable: measured at 1115x800, three open drawers hold 63px each against a 35px summary, and
+ * the one open at rest holds 75px.
  */
 .sidebar-drawers.is-yielding {
-  --sidebar-drawer-budget: 16vh;
+  --sidebar-drawer-budget: 24vh;
 }
 
 /*
  * Same shape as the place card: the cap sits on the drawer so the drawer can shrink below it too.
  *
  * The cap is read from `--sidebar-drawer-cap` rather than written here, so a column holding more
- * than one drawer can hand each of them a share of one budget instead of giving both a flat 46vh
- * that cannot fit together -- see `.sidebar-drawers`. The `46vh` fallback is what an *unwrapped*
- * drawer gets, which is the atlas, so that column is unchanged.
+ * than one drawer can hand each of them a share of one budget instead of giving every one of them a
+ * flat 46vh that cannot fit together -- see `.sidebar-drawers`. The `46vh` fallback is what an
+ * *unwrapped* drawer gets, which is the atlas, so that column is unchanged.
  *
  * Deliberately no `min-height: 0` on `.sidebar-drawer` itself. Its automatic minimum is its content
  * height clamped by this `max-height` -- 368px in an 800px viewport, with the summary always inside
@@ -1520,15 +1543,17 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 
   /*
    * The sheet's contract runs on `.map-sidebar > *`, a direct-child selector, so the drawer wrapper
-   * would take both drawers out of its reach. Rather than duplicate every sheet rule for the
+   * would take all three drawers out of its reach. Rather than duplicate every sheet rule for the
    * wrapper's children, the wrapper stops generating a box: at this breakpoint the drawers are
    * direct flex children of the sheet again and every rule above lands exactly where it did before
    * the wrapper existed. `.tray-open` uses the same idiom.
    *
    * Custom properties still inherit through `display: contents`, so the drawers below go on
-   * inheriting `--sidebar-drawer-cap` -- a 23vh half-share, tighter than the 46vh that predates the
-   * wrapper. That is harmless only because `max-height: none` above discards it. Weaken that
-   * override and the sheet's drawers do not merely return to their old cap, they get a worse one.
+   * inheriting `--sidebar-drawer-cap` -- a 15.33vh third-share by default, and the share tracks the
+   * open count, so it is tighter still than the half-share two drawers inherited and far tighter
+   * than the 46vh that predates the wrapper. That is harmless only because `max-height: none` above
+   * discards it. Weaken that override and the sheet's drawers do not merely return to their old cap,
+   * they get a worse one -- and a worse one again with every drawer added to the rail.
    */
   .sidebar-drawers { display: contents; }
 

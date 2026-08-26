@@ -2,7 +2,7 @@ import { assignTraffic, tourDemands, type TravelDemand } from './cityAssignment'
 import { dedupePoints, nearestIntersectionId, type CityPlan } from './cityPlan'
 import type { DatabaseCityQueryFamily } from './databaseCityContracts'
 import { familyCostShares, familyWaitByObject } from './cityWaitAttribution'
-import { CONGESTION_COLORS, type CongestionGrade } from './cityTraffic'
+import { CONGESTION_COLORS, congestionFromDelay, type CongestionGrade } from './cityTraffic'
 
 /**
  * Building the city's traffic map out of the workload itself.
@@ -17,8 +17,8 @@ import { CONGESTION_COLORS, type CongestionGrade } from './cityTraffic'
  * different questions and are measured differently:
  *
  * - **executions** — Query Store's captured execution count for every family whose drawn journey uses
- *   this street, summed. Measured, and nothing else. This drives width, exactly as road width always
- *   has.
+ *   this street, summed. Measured, and nothing else. It is reported, not drawn: street width is a
+ *   constant now, for the reason given on {@link ROAD_WIDTH}.
  * - **wait milliseconds** — the wait time apportioned to the buildings at each end of the leg. The
  *   milliseconds are measured; which building they were placed on is the optimizer's estimated cost
  *   share; and spreading them along a route is this module's model. Colour comes from the ratio of
@@ -26,19 +26,16 @@ import { CONGESTION_COLORS, type CongestionGrade } from './cityTraffic'
  *
  * There is deliberately no single blended "traffic score". Executions are a count and waits are a
  * duration; a number mixing them would have no unit and no way to be checked against anything
- * SQL Server reported. Two honest channels beat one invented one.
+ * SQL Server reported. Two honest channels beat one invented one — even now that only one of them
+ * is drawn.
  *
  * The route between two buildings remains invented — SQL Server has no streets — so which street a
  * family's traffic lands on is scenery, and the legend says so. What the traffic is *made of* is not.
+ *
+ * The ladder that turns the ratio into a colour lives in {@link ./cityTraffic}, so a street and the
+ * co-reference road running along it are graded by one rule rather than by two that agree by
+ * coincidence.
  */
-
-/**
- * Grade thresholds in milliseconds of captured waiting per execution. Invented cut points on a
- * measured ratio, in the same spirit as the wait-share thresholds roads have always been graded by:
- * the numbers are real, where the line between "amber" and "red" falls is a choice.
- */
-export const MEDIUM_DELAY_MS_PER_EXECUTION = 5
-export const HIGH_DELAY_MS_PER_EXECUTION = 50
 
 export interface StreetLoad {
   readonly edgeId: number
@@ -91,12 +88,7 @@ const EMPTY: WorkloadTraffic = {
   note: 'No ranked query family could be routed through this page, so no traffic is drawn.',
 }
 
-export function congestionFromDelay(delay: number | null): CongestionGrade {
-  if (delay === null || !Number.isFinite(delay)) return 'unknown'
-  if (delay >= HIGH_DELAY_MS_PER_EXECUTION) return 'high'
-  if (delay >= MEDIUM_DELAY_MS_PER_EXECUTION) return 'medium'
-  return 'low'
-}
+export { congestionFromDelay }
 
 /**
  * Orders a family's buildings into the journey it makes.

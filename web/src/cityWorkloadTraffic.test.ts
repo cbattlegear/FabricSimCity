@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { planCity, type CityPlanOptions } from './cityPlan'
 import {
-  HIGH_DELAY_MS_PER_EXECUTION,
-  MEDIUM_DELAY_MS_PER_EXECUTION,
+  HEAVY_DELAY_MS_PER_EXECUTION,
+  MODERATE_DELAY_MS_PER_EXECUTION,
+  SEVERE_DELAY_MS_PER_EXECUTION,
+} from './cityTraffic'
+import {
   assignWorkloadTraffic,
   congestionFromDelay,
   visitOrder,
@@ -114,9 +117,20 @@ describe('congestionFromDelay', () => {
   })
 
   it('grades by measured waiting per execution', () => {
-    expect(congestionFromDelay(0)).toBe('low')
-    expect(congestionFromDelay(MEDIUM_DELAY_MS_PER_EXECUTION)).toBe('medium')
-    expect(congestionFromDelay(HIGH_DELAY_MS_PER_EXECUTION)).toBe('high')
+    expect(congestionFromDelay(0)).toBe('free')
+    expect(congestionFromDelay(MODERATE_DELAY_MS_PER_EXECUTION)).toBe('moderate')
+    expect(congestionFromDelay(HEAVY_DELAY_MS_PER_EXECUTION)).toBe('heavy')
+    expect(congestionFromDelay(SEVERE_DELAY_MS_PER_EXECUTION)).toBe('severe')
+  })
+
+  /**
+   * The streets and the co-reference roads have to be the same ladder, not two that happen to share
+   * a palette. Re-exporting is what makes "the street is amber and the road along it is green"
+   * impossible for reasons of drift rather than of measurement.
+   */
+  it('is the same function the roads are graded by', async () => {
+    const roads = await import('./cityTraffic')
+    expect(congestionFromDelay).toBe(roads.congestionFromDelay)
   })
 })
 
@@ -210,7 +224,8 @@ describe('assignWorkloadTraffic', () => {
     for (const street of loaded) {
       expect(street.waitMilliseconds).toBeCloseTo(9000, 6)
       expect(street.delayPerExecution).toBeCloseTo(9, 6)
-      expect(street.grade).toBe('medium')
+      // 9 ms per execution is past the 5 ms cut point and short of the 50 ms one.
+      expect(street.grade).toBe('heavy')
     }
   })
 
@@ -277,7 +292,7 @@ describe('assignWorkloadTraffic', () => {
     ])
     const graded = [...busy.streets.values()].filter(street => street.grade !== 'unknown')
     expect(graded.length).toBeGreaterThan(0)
-    for (const street of graded) expect(street.grade).toBe('high')
+    for (const street of graded) expect(street.grade).toBe('severe')
   })
 
   it('keeps a single-building family off the streets but does not call it unroutable', () => {

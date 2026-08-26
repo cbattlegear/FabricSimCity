@@ -1,4 +1,5 @@
-import { SEVERITY_LABELS, type IncidentMarker, type IncidentProjection } from './cityIncidents'
+import { deadlockSummaryLabel, SEVERITY_LABELS, type IncidentMarker, type IncidentProjection } from './cityIncidents'
+import type { IncidentPlacement } from './cityIncidentPlacement'
 
 /**
  * The incident callout.
@@ -9,11 +10,18 @@ import { SEVERITY_LABELS, type IncidentMarker, type IncidentProjection } from '.
  */
 export function IncidentPopup({
   marker,
+  placement,
   x,
   y,
   onClose,
 }: {
   marker: IncidentMarker
+  /**
+   * Where the pin ended up and why. Stated rather than assumed: a pin on the measured road between
+   * two named objects and a pin at one object's kerb are different claims, and a reader who cannot
+   * tell them apart is being misled by the more confident one.
+   */
+  placement?: IncidentPlacement | null
   x: number
   y: number
   onClose: () => void
@@ -33,6 +41,7 @@ export function IncidentPopup({
       <ul>
         {marker.details.map(detail => <li key={detail}>{detail}</li>)}
       </ul>
+      {placement && <p className="incident-placement">{placement.rationale}</p>}
       <p className="incident-source">
         {marker.source} · observed {new Date(marker.observedAt).toLocaleTimeString()}
       </p>
@@ -59,7 +68,7 @@ export function IncidentSummary({
   openId?: string | null
   onOpen?: (markerId: string) => void
 }) {
-  const { markers, offPageCount, unresolved, probeReported, reason } = projection
+  const { markers, offPageCount, unresolved, probeReported, reason, deadlocks } = projection
   return (
     <div className="incident-summary" role="status">
       {!probeReported && <span className="is-unknown">Blocking not observed</span>}
@@ -67,6 +76,9 @@ export function IncidentSummary({
       {probeReported && markers.length > 0 && (
         <span className="is-alert">{markers.length} object(s) with a blocked waiter</span>
       )}
+      <span className={deadlocks.observed && deadlocks.retainedCount > 0 ? 'is-alert' : deadlocks.observed ? '' : 'is-unknown'}>
+        Deadlocks · {deadlockSummaryLabel(projection)}
+      </span>
       {onOpen && markers.length > 0 && (
         <ul className="incident-list">
           {markers.map(marker => (
@@ -85,11 +97,18 @@ export function IncidentSummary({
         </ul>
       )}
       <small>{reason}</small>
+      <small>{deadlocks.reason}</small>
       {offPageCount > 0 && (
         <small>{offPageCount} resolved lock wait(s) name an object outside this bounded page.</small>
       )}
       {unresolved.length > 0 && (
         <small>{unresolved.length} lock wait(s) name no object: {unresolved[0].reason}</small>
+      )}
+      {deadlocks.observed && deadlocks.retainedCount > deadlocks.pinnedCount && (
+        <small>
+          {deadlocks.retainedCount - deadlocks.pinnedCount} recorded deadlock(s) name no object on
+          this bounded page, so they are counted here rather than pinned anywhere.
+        </small>
       )}
     </div>
   )
