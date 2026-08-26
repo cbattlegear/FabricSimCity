@@ -4,8 +4,8 @@ import {
   fetchPlan,
   fetchQueryFamilies,
   fetchQueryFamily,
-  subscribeToLiveIncidents,
 } from './api'
+import { subscribeToLiveIncidents } from './liveFeed'
 import { accessibleObjectLabel, attributedAbsenceLabel, databaseCityMetricValue, databaseCitySharedMetricValue, formatKiB, shouldRenderRoute } from './databaseCity'
 import type { DatabaseCityObject, DatabaseCityPage, DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { LiveIncidentResponse } from './liveContracts'
@@ -747,7 +747,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
       {page && (
         <DatabaseCityViewport
           objects={visibleObjects}
-          planOptions={planOptions}
+          cityPlan={cityPlan}
           viewMode={viewMode}
           roads={roads}
           traffic={workloadTraffic}
