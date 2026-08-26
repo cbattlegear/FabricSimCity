@@ -348,7 +348,7 @@ describe('the sidebar column scrolls its own overflow', () => {
    */
   it('lets the capped sections shrink inside the desktop rail', () => {
     expect(desktopRule('.sidebar-place-card'), '.sidebar-place-card lost its height cap')
-      .toMatch(/max-height:\s*46vh/)
+      .toMatch(/max-height:\s*34vh/)
     // The drawer reads its cap from the wrapper's budget instead of writing 46vh itself; see the
     // shared-budget suite below for why, and for the 46vh fallback that keeps an unwrapped drawer
     // -- the atlas -- exactly as it was.
@@ -405,6 +405,88 @@ describe('the sidebar column scrolls its own overflow', () => {
     }
     expect(desktopRule('.sidebar-drawer-body')).toMatch(/min-height:\s*0/)
     expect(css).toMatch(/\.sidebar-drawer > summary \{[^}]*flex:\s*none/)
+  })
+
+  /**
+   * The layers panel names itself with a heading it owns, not with a `<legend>`.
+   *
+   * A `legend` is a *rendered legend*: the browser lifts it out of flow into the block-start border,
+   * centred on the border line. That border is also the top edge of a floating panel, so the upper
+   * half of "LAYERS" was drawn above the panel against the map and read as clipped. Nothing in CSS
+   * puts it back -- `padding-top` on the box and `margin-top` on the legend were both measured and
+   * both moved it not at all -- so the fix is to stop using the element whose whole purpose is to sit
+   * in the border.
+   *
+   * Worth knowing if this is ever revisited: `getBoundingClientRect` reported the legend flush with
+   * the fieldset, because a fieldset's box is measured from its rendered legend's top. The geometry
+   * looked correct while the pixels did not, and only a screenshot settled it.
+   */
+  it('gives the layers panel a heading rather than a legend in its border', () => {
+    expect(city, 'the layers panel is back to a fieldset/legend').not.toMatch(/<legend>/)
+    expect(city, 'the layers panel is no longer a labelled group')
+      .toMatch(/className="hud-layers" role="group" aria-labelledby=/)
+    // The accessible name has to be the visible string, not a second copy that can drift from it.
+    expect(city, 'the heading the group points at is not rendered')
+      .toMatch(/className="hud-layers-title" id=\{layersTitleId\}>Layers</)
+    expect(desktopRule('.hud-layers-title'), '.hud-layers-title has no rule at all').not.toBeNull()
+    // And the old rule is gone, or it would style an element nobody renders.
+    expect(css, '.hud-layers legend still has a rule').not.toMatch(/\.hud-layers legend/)
+  })
+
+  /**
+   * The place card gets the same floor the drawer has, and for the same reason.
+   *
+   * With `min-height: 0` the card was the only section on the rail that could give way, so it gave
+   * way entirely: flex distributes shrink in proportion to flex-basis, and the address list's basis
+   * is its whole scroll height, so the list kept its space while the card lost nearly all of its own.
+   * Measured at 1440x900 with both drawers open, the card held 72px of 472px of content -- the title
+   * and nothing else -- and 414px of the selected object's measured evidence was reachable only by
+   * scrolling a 72px window. 47px at 1280x720; 81px at 1115x800, which is the case AGENTS.md already
+   * described. Leaving the minimum at `auto` floors the card at its content clamped by its own cap:
+   * 306px, 245px and 272px at those three sizes, with the six-row evidence list fully on screen at
+   * 1440x900.
+   *
+   * Checked at every width, like the drawer's ban: a narrow override would reach the same element.
+   */
+  it('never squeezes the place card past its own evidence', () => {
+    const cardRules = rules().filter((one) => one.selector.split(',')
+      .some((part) => part.trim() === '.sidebar-place-card'))
+    // Or the loop below would pass by matching nothing at all.
+    expect(cardRules.length, 'no .sidebar-place-card rule to check').toBeGreaterThan(1)
+    for (const rule of cardRules) {
+      expect(rule.body, 'a .sidebar-place-card rule sets min-height: 0').not.toMatch(/min-height:\s*0/)
+    }
+    // The floor is only a floor because the cap is definite; without it the card would floor on its
+    // full content instead and overflow the rail.
+    expect(desktopRule('.sidebar-place-card'), '.sidebar-place-card lost the cap its floor depends on')
+      .toMatch(/max-height:\s*34vh/)
+  })
+
+  /**
+   * And the card's floor is paid for by the drawers, not by the address list.
+   *
+   * Three sections claim one rail. Taking the card's floor out of the list left the list at 78px at
+   * 1440x900 and at 0px at 1280x720 with 6px of the rail unreachable -- a column that does not
+   * overflow and is still useless, which is the failure AGENTS.md warns measuring overflow alone
+   * does not catch. Yielding the drawers' budget instead holds the list at 231px and 141px.
+   *
+   * A sibling combinator, not `:has()`: the card precedes the drawers, so no parent selector is
+   * needed, and an engine without `:has()` still applies this one -- where the widened-cap rule
+   * above drops out and leaves both drawers on the half share, which is the safe direction.
+   */
+  it('makes an open place card take its share from the drawers', () => {
+    const yielded = desktopRule('.sidebar-drawers.is-yielding')
+    expect(yielded, 'the drawers do not yield to an open place card').not.toBeNull()
+    expect(yielded, 'the yielded budget is not smaller than the default')
+      .toMatch(/--sidebar-drawer-budget:\s*16vh/)
+    // The default the drawers keep when no card is open, which this reduces from.
+    expect(desktopRule('.sidebar-drawers')).toMatch(/--sidebar-drawer-budget:\s*46vh/)
+    // Still a share of a budget, so each drawer keeps flooring at min(content, cap) and its summary
+    // stays inside that: measured 72px and 58px against a 35px summary.
+    expect(desktopRule('.sidebar-drawer')).toMatch(/max-height:\s*var\(--sidebar-drawer-cap,\s*46vh\)/)
+    // And the markup actually sets it, or the rule above is styling nothing.
+    expect(markup, 'the drawers wrapper never gets the yielding modifier')
+      .toMatch(/sidebar-drawers\$\{\s*placeCard \? ' is-yielding' : ''\s*\}/)
   })
 
   /**
@@ -639,7 +721,10 @@ describe('two drawers in one rail share one height budget', () => {
 
   /** A budget nothing is inside is not a budget. Both drawers have to be in the wrapper. */
   it('renders both city drawers inside the wrapper', () => {
-    const open = cityMarkup.indexOf('<div className="sidebar-drawers">')
+    // Matched by prefix rather than as a literal: the wrapper also carries the `is-yielding`
+    // modifier that hands its budget to an open place card, so pinning the exact opening tag here
+    // would fail for a change that has nothing to do with what this test is about.
+    const open = cityMarkup.search(/<div className=[{"`]+sidebar-drawers/)
     expect(open, 'DatabaseCityView renders no .sidebar-drawers wrapper').toBeGreaterThan(-1)
     const close = cityMarkup.indexOf('</div>', open)
     const wrapped = cityMarkup.slice(open, close)
