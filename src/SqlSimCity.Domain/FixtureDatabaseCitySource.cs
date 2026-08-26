@@ -367,10 +367,16 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
     ///
     /// <para>
     /// The set spans four orders of magnitude on purpose. A reader with no server to point at should
-    /// still see the whole range the city can draw -- a family moving a few kilobytes and one moving
-    /// hundreds of megabytes -- rather than a single middling value repeated. Family 7 reads mostly
-    /// in another database, so its total exceeds the sum of its per-object entries and the "bytes
-    /// read from objects this page does not draw" disclosure stays demonstrable offline.
+    /// still see the whole range the city can draw -- a family moving a few hundred bytes and one
+    /// moving hundreds of megabytes -- rather than a single middling value repeated. Concretely, at
+    /// least one family lands in each band the vehicle ladder divides this measurement into
+    /// (64 KiB and 8 MiB and 512 MiB are its cut points), because a band with no fixture family in it
+    /// is a vehicle class nobody can see without a live server.
+    /// <c>FixtureSourcePlanDataVolumesSpanEveryVehicleBandSoNoClassIsInvisibleOffline</c> pins that,
+    /// and it is the reason these
+    /// values are spread rather than clustered. Family 7 reads mostly in another database, so its
+    /// total exceeds the sum of its per-object entries and the "bytes read from objects this page
+    /// does not draw" disclosure stays demonstrable offline.
     /// </para>
     ///
     /// <para>
@@ -387,7 +393,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
             2 => [("object:dbo:110", 3_072)],
             3 => [("object:reporting:300", 780_140_544)],
             4 => [("object:dbo:100", 512)],
-            5 => [("object:dbo:110", 9_437_184)],
+            5 => [("object:dbo:110", 1_572_864)],
             6 =>
             [
                 ("object:dbo:100", 1_048_576),

@@ -259,6 +259,69 @@ public sealed class DatabaseCityTests : IClassFixture<WebApplicationFactory<ApiA
             family.WaitMillisecondsByCategory.Count == 0 && family.TotalWaitMilliseconds != "0");
     }
 
+    /// <summary>
+    /// The vehicle ladder picks a class from <c>PlanDataVolume</c>, so a band with no fixture family
+    /// in it is a vehicle nobody can see without a live server -- and the gap is silent, because
+    /// every band still renders something. The fixture set had exactly that hole (nothing between
+    /// 64 KiB and 8 MiB) until this pinned it.
+    /// </summary>
+    [Fact]
+    public async Task FixtureSourcePlanDataVolumesSpanEveryVehicleBandSoNoClassIsInvisibleOffline()
+    {
+        var source = new FixtureDatabaseCitySource();
+        var page = await source.GetDatabaseAsync(
+            "fixture-target-primary/database/sales", DatabaseCityMetric.Cpu, 20, null, CancellationToken.None);
+
+        var volumes = page!.TopQueryFamilies
+            .Where(family => family.PlanDataVolume is not null)
+            .Select(family => BigInteger.Parse(
+                family.PlanDataVolume!.EstimatedBytesPerExecution, CultureInfo.InvariantCulture))
+            .ToList();
+
+        // The ladder's own cut points. If they move, this moves with them -- the point is that each
+        // band stays populated, not that these particular numbers are right.
+        var bands = new (string Name, BigInteger Low, BigInteger High)[]
+        {
+            ("bicycle", 0, 64L * 1024),
+            ("car", 64L * 1024, 8L * 1024 * 1024),
+            ("box van", 8L * 1024 * 1024, 512L * 1024 * 1024),
+            ("semi-truck", 512L * 1024 * 1024, BigInteger.Pow(2, 96)),
+        };
+
+        foreach (var band in bands)
+        {
+            Assert.True(
+                volumes.Any(value => value >= band.Low && value < band.High),
+                $"No fixture family moves between {band.Low} and {band.High} bytes per execution, so the " +
+                $"'{band.Name}' class cannot be seen without a live server. Fixture volumes: " +
+                string.Join(", ", volumes.Select(value => value.ToString(CultureInfo.InvariantCulture))));
+        }
+
+        // Absent is not zero: a family whose plans stated no row size must stay absent, so the
+        // "unknown vehicle" path is demonstrable too.
+        Assert.Contains(page.TopQueryFamilies, family => family.PlanDataVolume is null);
+        Assert.DoesNotContain(volumes, value => value.IsZero);
+
+        // Per-object entries may sum to less than the total -- bytes read in another database are
+        // real work but are not this page's to place -- and must never sum to more.
+        foreach (var family in page.TopQueryFamilies.Where(item => item.PlanDataVolume is not null))
+        {
+            var volume = family.PlanDataVolume!;
+            var placed = volume.ByObject.Aggregate(BigInteger.Zero, (sum, entry) =>
+                sum + BigInteger.Parse(entry.EstimatedBytesPerExecution, CultureInfo.InvariantCulture));
+            Assert.True(
+                placed <= BigInteger.Parse(volume.EstimatedBytesPerExecution, CultureInfo.InvariantCulture),
+                $"{family.FamilyId} places more bytes on buildings than its plans say it moves.");
+        }
+
+        // The off-page disclosure itself has to stay demonstrable, or nothing exercises the branch.
+        Assert.Contains(page.TopQueryFamilies, family =>
+            family.PlanDataVolume is { } volume &&
+            volume.ByObject.Aggregate(BigInteger.Zero, (sum, entry) =>
+                sum + BigInteger.Parse(entry.EstimatedBytesPerExecution, CultureInfo.InvariantCulture))
+                < BigInteger.Parse(volume.EstimatedBytesPerExecution, CultureInfo.InvariantCulture));
+    }
+
     [Fact]
     public async Task FixtureSourceRejectsTokensAcrossMetrics()
     {
