@@ -36,6 +36,18 @@ export const INSTRUMENT_SOURCE = `(() => {
     offStart: null,
     contexts: 0,
     rendererName: null,
+    /**
+     * Every requestAnimationFrame callback the page has run, counted unconditionally.
+     *
+     * The frame list below is deliberately selective: it only records while collecting, and
+     * only when the callback actually submitted draw calls. That is right for frame cost and
+     * wrong for the question "is there still a loop running?", because a loop that schedules
+     * itself forever and draws nothing is invisible in it and indistinguishable from a page
+     * at rest. This counter is the one number that separates them.
+     *
+     * (No backticks in here: this whole file is one template literal.)
+     */
+    rafTotal: 0,
   };
   window.__measure = state;
 
@@ -138,6 +150,7 @@ export const INSTRUMENT_SOURCE = `(() => {
   let previousStart = null;
   window.requestAnimationFrame = function (callback) {
     return rawRaf((timestamp) => {
+      state.rafTotal += 1;
       const before = state.live;
       state.live = { calls: 0, tris: 0, offCalls: 0, offTris: 0, offMs: 0, instanced: 0 };
       const started = now();

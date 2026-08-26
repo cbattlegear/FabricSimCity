@@ -15,6 +15,7 @@
 import { writeFileSync } from 'node:fs'
 import { VIEWPORTS, launch, cityUrl, openCity, addressCounts, instrument } from './lib/city.js'
 import { orbit, nudgeOrbit } from './lib/orbit.js'
+import { vehicleCensus, idlePass, vehicleFramePass } from './lib/vehicles.js'
 import {
   typeSearch,
   clearSearch,
@@ -39,6 +40,9 @@ function parseArgs(argv) {
     clock: null,
     size: null,
     skipOrbit: false,
+    vehicles: false,
+    idleSeconds: 5,
+    reducedMotion: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
@@ -56,6 +60,9 @@ function parseArgs(argv) {
       case '--orbit-seconds': args.orbitSeconds = Number(value); index += 1; break
       case '--size': args.size = value; index += 1; break
       case '--skip-orbit': args.skipOrbit = true; break
+      case '--vehicles': args.vehicles = true; break
+      case '--idle-seconds': args.idleSeconds = Number(value); index += 1; break
+      case '--reduced-motion': args.reducedMotion = true; break
       case '--headless': args.headed = false; break
       case '--headed': args.headed = true; break
       case '--help':
@@ -66,6 +73,12 @@ function parseArgs(argv) {
   --viewport rail|sheet|both   Which side of the 860px breakpoint. Default both
   --size <WxH>          Measure one custom viewport instead, e.g. 1115x800
   --skip-orbit          Skip the orbit and frame-cost passes (layout runs only)
+  --vehicles            Add the live-vehicle passes: the roster the page reports, the
+                        cost of an animating frame with the camera still, and an idle
+                        window that counts rAF callbacks nobody asked for
+  --idle-seconds <n>    Length of the idle window. Default 5
+  --reduced-motion      Emulate prefers-reduced-motion: reduce. With --vehicles this is
+                        the run that must report a stopped loop
   --mode city|map       Initial view mode. Default city
   --term <text>         What to type into the address book. Default "orders"
   --orbit-seconds <n>   Length of the orbit drag. Default 4
@@ -88,6 +101,31 @@ async function measureViewport(context, viewport, args) {
   await page.setViewportSize({ width: viewport.width, height: viewport.height })
 
   /*
+   * Emulated before the app loads, not after.
+   *
+   * `DatabaseCityScene` reads `prefers-reduced-motion` when it builds and does not start a
+   * vehicle loop at all when it is set. Flipping the media query on an already-built scene
+   * would measure a scene that had already decided, and would report the animated path while
+   * claiming to report the reduced one.
+   */
+  if (args.reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' })
+
+  /*
+   * Collect page errors for the whole run.
+   *
+   * A React tree that throws unmounts the subtree under its boundary, and the next thing this
+   * harness does is wait for a control inside it. The failure then surfaces as "locator timed
+   * out waiting for the search box", which reads like a layout problem and is nothing of the
+   * sort. Recording the exception makes the difference visible instead of leaving it to be
+   * guessed at.
+   */
+  const pageErrors = []
+  page.on('pageerror', error => pageErrors.push(String(error?.message ?? error)))
+  page.on('console', message => {
+    if (message.type() === 'error') pageErrors.push(`console: ${message.text()}`)
+  })
+
+  /*
    * Pin the hour when asked.
    *
    * The city is lit for the clock on the machine looking at it, so a run at midnight measures
@@ -107,6 +145,21 @@ async function measureViewport(context, viewport, args) {
   const geometry = { resting: await sidebarGeometry(page) }
 
   /*
+   * The census is read here, before the sidebar states below, and that ordering is load-bearing.
+   *
+   * `openPlaceCard` replaces the drawers with the place card -- `[worstCase]` reports "drawers
+   * not present" for exactly that reason -- and the vehicle ladder lives inside the legend
+   * drawer. Read after it, `document.querySelector('.vehicle-ladder')` is null and the census
+   * reports every class "missing from the ladder", which reads as a broken feature rather than
+   * a probe looking in a DOM the probe itself dismantled. The first run of this harness said
+   * "size ladder present NO" against a build whose ladder was demonstrably there.
+   *
+   * A closed <details> is fine: its children stay in the DOM, so the legend does not need to be
+   * open for the census to find the ladder.
+   */
+  const census = args.vehicles ? await vehicleCensus(page) : null
+
+  /*
    * Three states, measured in the order a reader reaches them.
    *
    * `resting` is the column as it loads, with every drawer closed. That is the state a casual
@@ -123,6 +176,25 @@ async function measureViewport(context, viewport, args) {
 
   const dragOrbit = args.skipOrbit ? null : await orbit(page, { seconds: args.orbitSeconds })
   const buttonOrbit = args.skipOrbit ? null : await nudgeOrbit(page)
+
+  /*
+   * The frame passes run *after* the orbit passes and take no input of their own.
+   *
+   * Orbit inertia keeps its own loop alive briefly after a drag and the render-on-demand pass
+   * draws for a frame or two after any change, so both passes below start with a settle window.
+   * Without it the idle sample catches those winding down and reports a vehicle loop that is
+   * not there — which would make the "loop stops" claim pass for the wrong reason.
+   */
+  const vehicles = args.vehicles
+    ? {
+      census,
+      animating: await vehicleFramePass(page, { seconds: args.idleSeconds }),
+      idle: await idlePass(page, {
+        seconds: args.idleSeconds,
+        label: args.reducedMotion ? 'idle (reduced motion)' : 'idle',
+      }),
+    }
+    : null
 
   /*
    * Captured last, and deliberately so.
@@ -147,9 +219,40 @@ async function measureViewport(context, viewport, args) {
     console.log(`  screenshot: ${path}`)
   }
 
-  const search = await typeSearch(page, args.term)
-  const cleared = await clearSearch(page, { term: args.term })
-  const entryClick = await clickFirstEntry(page)
+  /*
+   * The address-book passes are last and are allowed to fail without discarding the run.
+   *
+   * Every pass above it is a completed measurement by this point, and throwing here threw all
+   * of them away — a five-minute page walk plus the orbit and vehicle numbers, lost to a
+   * locator timeout in the pass that happens to come last. The error is reported as a failed
+   * pass, which is what every other reachability step in this file already does.
+   */
+  let search = null
+  let cleared = null
+  let entryClick = null
+  try {
+    /*
+     * The place card has to be dismissed first, and this is the same trap the vehicle census
+     * hit: `openPlaceCard` puts the sidebar into a mode whose place card *supersedes* the
+     * address book, so by the time this pass runs the search box it is looking for no longer
+     * exists. The symptom was not a clear "not found" either -- `typeSearch` waits on the
+     * searchbox role with Playwright's default 30s budget, so the whole pass died on a timeout
+     * that read like a slow page rather than a missing panel, and took the typing numbers and
+     * the trusted entry click down with it.
+     *
+     * Reloading is deliberate rather than pressing Escape or clicking a close control: the
+     * building place card has no close button (only the facility and road cards do), so there
+     * is no interaction that reliably returns *every* card to the address book. The resting
+     * state is what this pass is supposed to measure anyway.
+     */
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.locator('.address-entry').first().waitFor({ state: 'visible', timeout: 120000 })
+    search = await typeSearch(page, args.term)
+    cleared = await clearSearch(page, { term: args.term })
+    entryClick = await clickFirstEntry(page)
+  } catch (error) {
+    pageErrors.push(`address book pass failed: ${String(error?.message ?? error)}`)
+  }
 
   await page.close()
 
@@ -161,9 +264,11 @@ async function measureViewport(context, viewport, args) {
     sidebarSteps,
     orbit: dragOrbit,
     buttonOrbit,
+    vehicles,
     search,
     cleared,
     trustedEntryClick: entryClick,
+    pageErrors,
   }
 }
 
@@ -210,21 +315,90 @@ function report(result) {
       `${result.buttonOrbit.drawCalls.median} (offscreen ${result.buttonOrbit.offscreenDrawCalls.median})`))
   }
 
+  if (result.vehicles) {
+    const { census, animating, idle } = result.vehicles
+    out.push('\n  -- live vehicles --')
+    out.push(line('size ladder present', census.ladderPresent ? 'yes' : 'NO'))
+    for (const [klass, text] of Object.entries(census.classes)) {
+      out.push(line(`  ${klass}`, text ?? 'missing from the ladder'))
+    }
+    if (census.summary) out.push(line('roster summary', census.summary))
+
+    out.push('\n  animating, camera still:')
+    if (animating.frames === 0) {
+      out.push(line('  frames drawn', `0 — ${animating.note}`))
+    } else {
+      out.push(line('  frames drawn', `${animating.frames} over ${animating.windowSeconds}s`))
+      out.push(line('  CPU ms/frame median | p95 | max',
+        `${animating.cpuMsPerFrame.median} | ${animating.cpuMsPerFrame.p95} | ${animating.cpuMsPerFrame.max}`))
+      out.push(line('  fps (from median interval)', animating.fps ?? 'n/a'))
+      out.push(line('  draw calls/frame median | max',
+        `${animating.drawCalls.median} | ${animating.drawCalls.max}`))
+      /*
+       * The line this whole pass exists for. Vehicles never cast shadows and the vehicle loop
+       * never sets `shadowMap.needsUpdate`, so an animating frame must submit nothing offscreen
+       * at all. A non-zero median here is the 948-call shadow pass from issue #90 back on every
+       * frame, which is far worse than it was before: it would now be re-armed by an animation
+       * that runs whether or not anyone touches the page.
+       */
+      out.push(line('  OFFSCREEN (shadow) calls med | max',
+        `${animating.offscreenDrawCalls.median} | ${animating.offscreenDrawCalls.max}`
+        + (animating.offscreenDrawCalls.max === 0 ? '  ✓ shadow pass not re-armed' : '')))
+      /*
+       * The verdict is about *how many* frames ran a shadow pass, not the maximum.
+       *
+       * One shadow frame is the legitimate re-bake after a scene change; every frame is #90's
+       * regression. Judging on `max` alone marks correct code as a regression the moment a
+       * bake lands inside the sample window, which it routinely does.
+       *
+       * Measured, with the live feed delivering a snapshot roughly every 3s: an *empty* roster
+       * draws 2 frames in a 6s window and both carry 948 offscreen calls, because the only thing
+       * asking for a frame is the snapshot arriving through `requestRender()`. The same window
+       * with vehicles moving draws 31 frames and still only 2 of them shadow. The 29 extra frames
+       * are the vehicle loop, and they cost 0 offscreen calls -- which is the claim this line
+       * exists to check.
+       */
+      out.push(line('  shadow frames in window',
+        `${animating.offscreenFrames} of ${animating.frames}`
+        + (animating.offscreenFrames === 0
+          ? '  ✓ no shadow pass at all'
+          : animating.offscreenFrames === animating.frames && animating.frames > 5
+            ? '  ← REGRESSION: every frame runs the shadow pass'
+            : `  ✓ ${animating.frames - animating.offscreenFrames} loop frames at 0 offscreen calls;`
+              + ` the ${animating.offscreenFrames} that shadow are scene-change re-bakes`)))
+      out.push(line('  shadow pass ms/frame median', animating.shadowPassMs.median))
+      out.push(line('  triangles/frame median',
+        animating.trianglesPerFrame.median?.toLocaleString?.() ?? animating.trianglesPerFrame.median))
+    }
+
+    out.push(`\n  ${idle.label}, no input at all:`)
+    out.push(line('  rAF callbacks in window',
+      `${idle.callbacks} over ${(idle.windowMs / 1000).toFixed(1)}s (${idle.callbacksPerSecond}/s)`))
+    out.push(line('  draw calls in window', `${idle.drawCalls} (${idle.drawCallsPerSecond}/s)`))
+    out.push(line('  loop still running?', idle.loopRunning ? 'YES' : 'no — page is at rest'))
+  }
+
   out.push('\n  -- address book --')
   out.push(line('entries rendered', result.addressBook.entries))
   out.push(line('nodes under .sidebar-scroll', result.addressBook.scrollNodes))
   out.push(line('document nodes', result.addressBook.documentNodes))
-  out.push(line('trusted click on search field', `${result.search.trustedClickMs} ms`))
-  out.push(line(`typing "${result.search.term}" keystrokes`, result.search.keystrokes))
-  out.push(line('key-to-paint ms median | p95 | max',
-    `${result.search.keyToPaintMs.median} | ${result.search.keyToPaintMs.p95} | ${result.search.keyToPaintMs.max}`))
-  out.push(line('first keystroke to paint', `${result.search.firstKeyToPaintMs} ms`))
-  out.push(line('per key', result.search.perKeyToPaintMs.join(', ')))
-  out.push(line('long tasks during typing', result.search.longTasksMs.join(', ') || 'none'))
-  out.push(line('entries after typing', result.search.entriesAfter.entries))
-  out.push(line('clearing: last key to paint', `${result.cleared.lastKeyToPaintMs} ms`))
-  out.push(line('clearing: per key', result.cleared.perKeyToPaintMs.join(', ')))
-  out.push(line('entries after clearing', result.cleared.entriesAfter.entries))
+  if (!result.search) {
+    out.push(line('typing pass', 'DID NOT RUN — see page errors below'))
+  } else {
+    out.push(line('trusted click on search field', `${result.search.trustedClickMs} ms`))
+    out.push(line(`typing "${result.search.term}" keystrokes`, result.search.keystrokes))
+    out.push(line('key-to-paint ms median | p95 | max',
+      `${result.search.keyToPaintMs.median} | ${result.search.keyToPaintMs.p95} | ${result.search.keyToPaintMs.max}`))
+    out.push(line('first keystroke to paint', `${result.search.firstKeyToPaintMs} ms`))
+    out.push(line('per key', result.search.perKeyToPaintMs.join(', ')))
+    out.push(line('long tasks during typing', result.search.longTasksMs.join(', ') || 'none'))
+    out.push(line('entries after typing', result.search.entriesAfter.entries))
+  }
+  if (result.cleared) {
+    out.push(line('clearing: last key to paint', `${result.cleared.lastKeyToPaintMs} ms`))
+    out.push(line('clearing: per key', result.cleared.perKeyToPaintMs.join(', ')))
+    out.push(line('entries after clearing', result.cleared.entriesAfter.entries))
+  }
 
   out.push('\n  -- reachability --')
   for (const step of result.sidebarSteps ?? []) {
@@ -257,7 +431,16 @@ function report(result) {
   }
   out.push('')
   out.push(line('trusted click on first entry',
-    result.trustedEntryClick.ok ? `passed in ${result.trustedEntryClick.ms} ms` : `FAILED: ${result.trustedEntryClick.error}`))
+    !result.trustedEntryClick
+      ? 'DID NOT RUN'
+      : result.trustedEntryClick.ok
+        ? `passed in ${result.trustedEntryClick.ms} ms`
+        : `FAILED: ${result.trustedEntryClick.error}`))
+  if (result.pageErrors?.length) {
+    out.push('\n  -- page errors --')
+    for (const error of result.pageErrors.slice(0, 12)) out.push(`    ${error}`)
+    if (result.pageErrors.length > 12) out.push(`    ... and ${result.pageErrors.length - 12} more`)
+  }
   return out.join('\n')
 }
 

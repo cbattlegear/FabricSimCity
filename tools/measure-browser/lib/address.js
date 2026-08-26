@@ -2,6 +2,24 @@ import { summarize, round } from './stats.js'
 import { addressCounts } from './city.js'
 
 /**
+ * How long a *trusted* click is given before it is called a failure.
+ *
+ * This was 5s, which was enough before vehicles and is not enough now -- and the reason is worth
+ * writing down, because the failure it produced looked like a broken control rather than a tight
+ * budget. `locator.click()` hit-tests and waits for actionability, and it can only re-check that
+ * on a rendered frame. A city of 4,200 objects under live load renders at ~6fps (163 ms/frame
+ * measured), so a handful of re-checks alone spends most of a 5s budget: trusted clicks on the
+ * orbit buttons in the same run took 2.0-2.7s each, and the plan finder's submit timed out.
+ *
+ * Raising the budget is the right response *because* it keeps the click trusted, which is the
+ * whole point of the pass. The tempting alternatives -- `force: true`, or `element.click()` via
+ * `evaluate` -- both bypass the hit-test, so they would turn this into a green line while a
+ * genuinely unreachable control stayed unreachable. AGENTS.md calls that out specifically: it is
+ * how issue #65's column was found to be uninteractable rather than merely unreadable.
+ */
+const TRUSTED_CLICK_TIMEOUT_MS = 20000
+
+/**
  * What a keystroke in the address-book search box costs.
  *
  * Typed with `pressSequentially`, which issues trusted key events one at a time through
@@ -21,7 +39,7 @@ export async function typeSearch(page, term, { perKeyDelayMs = 260 } = {}) {
   // Trusted click on the field itself: hit-tested, so a search box covered by the place
   // card or a drawer fails here rather than being typed into invisibly.
   const clickStartedAt = Date.now()
-  await field.click({ timeout: 5000 })
+  await field.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
   const trustedClickMs = Date.now() - clickStartedAt
 
   const before = await addressCounts(page)
@@ -64,7 +82,7 @@ export async function typeSearch(page, term, { perKeyDelayMs = 260 } = {}) {
  */
 export async function clearSearch(page, { term }) {
   const field = page.getByRole('searchbox', { name: /Search queries, tables and infrastructure/i })
-  await field.click({ timeout: 5000 })
+  await field.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
   await page.evaluate(() => window.__measure.start())
   for (let index = 0; index < term.length; index += 1) {
     await page.keyboard.press('Backspace')
@@ -94,7 +112,7 @@ export async function clickFirstEntry(page) {
   await entry.waitFor({ state: 'visible', timeout: 10000 })
   const startedAt = Date.now()
   try {
-    await entry.click({ timeout: 5000 })
+    await entry.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
     return { ok: true, ms: Date.now() - startedAt }
   } catch (reason) {
     return { ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] }
@@ -127,7 +145,7 @@ export async function openSidebarWorstCase(page, { populatePlanFinder = true } =
     }
     const startedAt = Date.now()
     try {
-      await summary.click({ timeout: 5000 })
+      await summary.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
       steps.push({ step: `open "${label}"`, ok: true, ms: Date.now() - startedAt })
     } catch (reason) {
       steps.push({ step: `open "${label}"`, ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
@@ -143,7 +161,7 @@ export async function openSidebarWorstCase(page, { populatePlanFinder = true } =
     const submit = page.getByRole('button', { name: 'Route it' })
     const startedAt = Date.now()
     try {
-      await submit.click({ timeout: 5000 })
+      await submit.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
       await page.locator('.hud-results li').first().waitFor({ state: 'visible', timeout: 30000 })
       steps.push({ step: 'populate plan finder', ok: true, ms: Date.now() - startedAt })
     } catch (reason) {
@@ -160,8 +178,8 @@ export async function openPlaceCard(page) {
   const startedAt = Date.now()
   try {
     await entry.waitFor({ state: 'visible', timeout: 10000 })
-    await entry.click({ timeout: 5000 })
-    await page.locator('.sidebar-place-card').waitFor({ state: 'visible', timeout: 5000 })
+    await entry.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    await page.locator('.sidebar-place-card').waitFor({ state: 'visible', timeout: TRUSTED_CLICK_TIMEOUT_MS })
     return { step: 'open place card', ok: true, ms: Date.now() - startedAt }
   } catch (reason) {
     return { step: 'open place card', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] }

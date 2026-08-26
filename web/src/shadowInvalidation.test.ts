@@ -25,6 +25,19 @@ import { readFileSync } from 'node:fs'
 
 const scene = readFileSync(new URL('./DatabaseCityScene.ts', import.meta.url), 'utf8')
 
+/**
+ * The same source with its comments removed.
+ *
+ * These guards assert that a region of code does *not* mention `requestRender()` or `needsUpdate`,
+ * and a doc comment explaining why it must not is exactly such a mention. Matching raw text would
+ * therefore make documenting the rule break the guard for it, which is a bad trade in both
+ * directions: it discourages the explanation, and it hides real code behind prose noise. Stripping
+ * comments first makes each assertion a statement about behaviour rather than about wording.
+ */
+function code(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+}
+
 /** The body of one method of the returned controller object, which sits at four-space indent. */
 function controllerMethod(name: string): string {
   const start = scene.indexOf(`\n    ${name}(`)
@@ -76,6 +89,7 @@ describe('the shadow map is invalidated by whatever changed what casts', () => {
     ['setLayers', 'toggling a layer changes caster visibility'],
     ['setViewMode', 'map mode turns the shadow map off and city mode turns it back on'],
     ['setIncidents', 'incident markers are objects in the scene'],
+    ['setVehicles', 'a live sample adds, moves and removes vehicle meshes'],
   ])('%s invalidates, because %s', name => {
     const body = controllerMethod(name)
     expect(body).toMatch(/[^a-zA-Z]requestRender\(\)/)
@@ -99,13 +113,145 @@ describe('the shadow map is invalidated by whatever changed what casts', () => {
   })
 
   it('leaves the damping loop drawing without asking for a new shadow pass', () => {
-    const loop = scene.slice(
+    const loop = code(scene.slice(
       scene.indexOf('const runDampingLoop'),
-      scene.indexOf("controls.addEventListener('change'"),
-    )
+      scene.indexOf('const runVehicleLoop'),
+    ))
     // The loop calls draw() straight, so an orbit renders many frames and invalidates on none.
     expect(loop).toMatch(/\n\s*draw\(\)/)
     expect(loop).not.toMatch(/requestRender\(\)/)
     expect(loop).not.toMatch(/needsUpdate/)
   })
+
+  /*
+   * The vehicle loop is the one continuous frame loop this scene runs, so it gets the strictest
+   * version of the same contract.
+   *
+   * Unlike the damping loop, which ends within a second of the camera settling, this one runs for as
+   * long as anything is executing on the instance — which on a busy server is indefinitely. A single
+   * `requestRender()` inside it would therefore re-arm the 948-caster shadow pass on *every frame*,
+   * restoring more than issue #90 removed and doing it in the one place where nothing casts a shadow
+   * to begin with.
+   */
+  it('leaves the vehicle loop drawing without asking for a new shadow pass', () => {
+    const loop = code(scene.slice(
+      scene.indexOf('const runVehicleLoop'),
+      scene.indexOf('const stopVehicleLoop'),
+    ))
+    expect(loop).toMatch(/\n\s*draw\(\)/)
+    expect(loop).not.toMatch(/requestRender\(\)/)
+    expect(loop).not.toMatch(/scheduleFrame\(\)/)
+    expect(loop).not.toMatch(/needsUpdate/)
+  })
+
+  /*
+   * Two handles, not one.
+   *
+   * `runDampingLoop` zeroes `animationHandle` the moment damping settles. A vehicle loop sharing it
+   * would be orphaned by that — a second rAF chain still running with nothing left holding its
+   * handle, so neither `stopVehicleLoop` nor `dispose()` could ever cancel it, and the frames it
+   * kept drawing would outlive the scene. The two loops therefore keep separate handles, and
+   * `dispose()` cancels both.
+   */
+  it('gives the vehicle loop its own handle, and cancels it on dispose', () => {
+    const loop = code(scene.slice(
+      scene.indexOf('const runVehicleLoop'),
+      scene.indexOf('const stopVehicleLoop'),
+    ))
+    expect(loop).not.toMatch(/animationHandle/)
+    expect(loop).toMatch(/vehicleHandle = requestAnimationFrame/)
+    const dispose = code(controllerMethod('dispose'))
+    expect(dispose).toMatch(/vehicleHandle !== 0\) cancelAnimationFrame\(vehicleHandle\)/)
+  })
+
+  /*
+   * The loop must end on its own, not merely be cancellable.
+   *
+   * An idle instance samples an empty roster, and a loop that kept running over one would burn a
+   * frame every 16 ms drawing nothing at all — the exact "renders continuously" behaviour this
+   * scene's on-demand design exists to avoid, reintroduced at the moment there is least to show.
+   */
+  it('stops the vehicle loop when nothing is moving', () => {
+    const loop = code(scene.slice(
+      scene.indexOf('const runVehicleLoop'),
+      scene.indexOf('const stopVehicleLoop'),
+    ))
+    // Guarded before the first frame is ever requested…
+    expect(loop).toMatch(/movingVehicles === 0\) return/)
+    // …and re-tested inside the step, so it ends whenever the roster drains.
+    expect(loop).toMatch(/if \(disposed \|\| movingVehicles === 0\) \{\s*vehicleHandle = 0/)
+  })
+
+  /*
+   * Nothing a vehicle does can dirty the shadow map, because no vehicle casts into it.
+   *
+   * This is the property that makes the loop above safe at all. It is asserted over the whole build
+   * function rather than over one line so that adding a second mesh kind — a bus, a train — cannot
+   * quietly opt back in.
+   */
+  it('never lets a vehicle cast or receive a shadow', () => {
+    const build = code(scene.slice(
+      scene.indexOf('function buildVehicles()'),
+      scene.indexOf('const vehicleMatrix'),
+    ))
+    expect(build).toMatch(/castShadow = false/)
+    expect(build).toMatch(/receiveShadow = false/)
+    expect(build).not.toMatch(/castShadow = true/)
+    expect(build).not.toMatch(/receiveShadow = true/)
+    expect(build).not.toMatch(/needsUpdate\s*=\s*true;?\s*$/m)
+  })
+})
+
+/**
+ * That `buildIncidents` still *asks* whether a marker stops traffic.
+ *
+ * `stopsTraffic` was extracted from this function precisely so the rule could be tested directly,
+ * and `cityIncidents.test.ts` now covers all four severities against it. That guards the rule and
+ * not the use of it: the scene can stop consulting `stopsTraffic` altogether -- replacing the
+ * conditional with `if (true)`, or deleting it while tidying -- and every behavioural test in the
+ * repository still passes. Verified, not assumed: that exact mutation left 919/919 green.
+ *
+ * What is at stake is not a style point. SQL Server recycles session ids, so a recorded deadlock
+ * graph naming session 55 and a live session 55 are unrelated queries. Admitting deadlock markers
+ * to `blockedPlacements` parks a *running* request's vehicle at the scene of something that already
+ * finished, and asserts a connection between them that nothing in the data supports.
+ *
+ * This is a source-text guard, which is weaker than a behavioural one and is used here for the
+ * reason the file already uses several: `buildIncidents` is a closure over the scene factory and
+ * is not reachable from a test without a refactor larger than the change it would protect. The
+ * assertions below are written so the mutation above fails them.
+ */
+describe('a live block stops traffic only when stopsTraffic says so', () => {
+/** `buildIncidents` through to the next sibling function, both at two-space indent. */
+const incidents = (() => {
+  const start = scene.indexOf('\n  function buildIncidents(')
+  expect(start, 'buildIncidents should exist at two-space indent').toBeGreaterThan(-1)
+  const rest = scene.slice(start + 1)
+  const next = rest.slice(1).search(/\n {2}function [A-Za-z]/)
+  return code(next === -1 ? rest : rest.slice(0, next + 1))
+})()
+
+it('consults stopsTraffic rather than deciding for itself', () => {
+  expect(incidents).toMatch(/if \(stopsTraffic\(marker\)\)/)
+})
+
+it('records no placement that the guard has not admitted', () => {
+  /*
+   * Ordering, not just presence, is what makes this fail on the mutation. `if (true)` and a
+   * deleted conditional both leave `blockedPlacements.set` reachable with no call to
+   * `stopsTraffic` before it, so requiring the call to appear *first* rejects both -- where
+   * asserting only that the file mentions `stopsTraffic` somewhere would accept them.
+   */
+  const writes = [...incidents.matchAll(/blockedPlacements\.set\(/g)]
+  expect(writes, 'buildIncidents should record blocked placements').toHaveLength(1)
+  const guard = incidents.indexOf('stopsTraffic(marker)')
+  expect(guard, 'stopsTraffic should be consulted').toBeGreaterThan(-1)
+  expect(guard).toBeLessThan(writes[0].index!)
+})
+
+it('takes stopsTraffic from cityIncidents rather than redefining it locally', () => {
+  // A local `const stopsTraffic = () => true` would satisfy both assertions above.
+  expect(code(scene)).toMatch(/import \{[^}]*\bstopsTraffic\b[^}]*\} from '\.\/cityIncidents'/)
+  expect(code(scene)).not.toMatch(/(?:const|let|function)\s+stopsTraffic\b/)
+})
 })

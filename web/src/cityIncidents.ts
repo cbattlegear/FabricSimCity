@@ -27,6 +27,16 @@ export interface IncidentMarker {
    * appears in the waiting DMVs and so names no object.
    */
   readonly counterpartObjectIds: readonly string[]
+  /**
+   * The sessions this incident names. One for a live block or cycle; the victim sessions a recorded
+   * deadlock graph named, which may be none.
+   *
+   * Carried so a live sample can be matched back to the pin it produced rather than re-derived —
+   * see `cityVehicles.ts`, which stops a blocked request's vehicle at this pin. A recorded deadlock
+   * is history and its sessions are gone, so a reader of this field has to keep `severity` in mind:
+   * a `deadlock` entry names who was rolled back, not who is waiting now.
+   */
+  readonly sessionIds: readonly number[]
   readonly severity: IncidentSeverity
   /** One line naming what is happening. Never a judgement, always the observation. */
   readonly headline: string
@@ -137,6 +147,30 @@ export function deadlockSummaryLabel(projection: IncidentProjection): string {
 export function deadlockSummaryTone(projection: IncidentProjection): 'is-alert' | 'is-unknown' | '' {
   if (!projection.deadlocks.observed) return 'is-unknown'
   return projection.deadlocks.retainedCount > 0 ? 'is-alert' : ''
+}
+
+/**
+ * Whether a vehicle that reaches this marker should stop at it.
+ *
+ * The rule is about *time*, not about severity ranking: three of the four severities describe
+ * something happening right now, and `deadlock` describes something the engine already finished.
+ * A recorded deadlock graph names the sessions that took part, but by the time the graph is
+ * readable the victim has been killed and the winner has moved on — and SQL Server recycles
+ * session ids, so a live session carrying the same number as one named in the graph is very
+ * probably an unrelated request that merely inherited the id. Parking a running query at that pin
+ * would claim it is caught in a deadlock that is over and was never its own.
+ *
+ * `waiting` and `cycle` must keep stopping traffic. A cycle is the weaker observation of the two —
+ * the engine kills the victim before `sys.dm_exec_requests` can sample the whole ring — but both
+ * are drawn from sessions that are still on the instance, so the vehicle and the pin refer to the
+ * same request.
+ *
+ * Exported, rather than inlined at the one call site in `DatabaseCityScene.ts`, so the rule can be
+ * tested across all four severities directly. Inline it and the only thing describing it is a
+ * comment, which no suite reads.
+ */
+export function stopsTraffic(marker: Pick<IncidentMarker, 'severity'>): boolean {
+  return marker.severity !== 'deadlock'
 }
 
 const DEADLOCKS_NOT_OBSERVED = {
@@ -292,6 +326,7 @@ export function projectIncidents(
       id: `${kind}:${source.sessionId}:${objectId}`,
       objectId,
       counterpartObjectIds: blockerObjectId && blockerObjectId !== objectId ? [blockerObjectId] : [],
+      sessionIds: [source.sessionId],
       severity,
       headline: inCycle
         ? `Session ${source.sessionId} is in a wait cycle here`
@@ -316,6 +351,9 @@ export function projectIncidents(
     byObject.set(objectId, {
       ...merged,
       counterpartObjectIds: [...new Set([...existing.counterpartObjectIds, ...marker.counterpartObjectIds])],
+      // Every session that named this object keeps its claim on the pin. Dropping the loser would
+      // strand its vehicle: the block is measured, and one pin is all the page has room for.
+      sessionIds: [...new Set([...existing.sessionIds, ...marker.sessionIds])],
     })
   }
 
@@ -422,6 +460,7 @@ function projectDeadlocks(
       id: `deadlock:${graph.id}:${anchor.objectId}`,
       objectId: anchor.objectId,
       counterpartObjectIds: counterparts,
+      sessionIds: victimSessions,
       severity: 'deadlock',
       headline: `A deadlock was recorded here at ${graph.occurredAt}`,
       details,
