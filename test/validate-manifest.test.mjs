@@ -990,23 +990,195 @@ describe('regression: server.database_discovery on Azure SQL DB is nuanced, not 
     });
   });
 
+  // The city map joins a live request to the Query Store family that already knows which tables the
+  // query reads, and query_hash is the only key that does it exactly. The join is string equality
+  // across two collectors, so a formatting difference matches nothing and renders identically to an
+  // instance where nothing is running. The probe therefore hands back raw bytes and lets one shared
+  // converter in the application decide the text form.
+  describe('regression: active requests carry the Query Store join key, unformatted', () => {
+    test('projects query_hash and query_plan_hash from the requests DMV', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.active_requests')));
+      assert.match(
+        source,
+        /\br\.query_hash\b/i,
+        'sessions.active_requests must project sys.dm_exec_requests.query_hash: without it a running ' +
+          'request cannot be matched to the Query Store family that names its tables',
+      );
+      assert.match(source, /\br\.query_plan_hash\b/i);
+      assert.match(
+        source,
+        /^\s*v\.query_hash,\s*$/im,
+        'the outer SELECT must return query_hash, not just carry it inside the CTE',
+      );
+      assert.match(source, /^\s*v\.query_plan_hash,\s*$/im);
+    });
+
+    test('never renders the hash to text in SQL', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.active_requests')));
+      assert.doesNotMatch(
+        source,
+        /CONVERT\s*\(\s*(VAR)?CHAR[^)]*query_(plan_)?hash|fn_varbintohexstr|CAST\s*\(\s*[vr]\.query_(plan_)?hash\s+AS\s+(N?VAR)?CHAR/i,
+        'the hash must be returned as raw binary(8): formatting it here would put a second, ' +
+          'independent rendering next to the Query Store collector, and the two silently disagreeing ' +
+          'produces zero matches that look exactly like a quiet server',
+      );
+    });
+
+    test('manifest result contract explains the join and the all-zero sentinel', () => {
+      const probe = probeById('sessions.active_requests');
+      assert.match(
+        probe.resultContract,
+        /query_hash/i,
+        'the published contract must document the join key it now returns',
+      );
+      assert.match(
+        probe.resultContract,
+        /raw binary\(8\)|unformatted/i,
+        'the contract must say the hash is unformatted, so a consumer does not expect an 0x prefix',
+      );
+      assert.match(
+        probe.resultContract,
+        /all-zero/i,
+        "the contract must say the engine's all-zero hash is an absence, not a family every " +
+          'unhashed request shares',
+      );
+    });
+  });
+
+  // A deadlock probe has two ways to be quietly wrong, and both produce a result that looks exactly
+  // like a healthy instance. Reading the ring_buffer target loses the newest events to the
+  // target_data size limit -- measured at 2,752 of 5,000, newest first -- so the deadlock that just
+  // happened is the one missing. Truncating the graph XML to a length cap produces something no
+  // reader can open, which the caller then discards, reaching the same place by a different route.
+  describe('regression: the deadlock probe reads the source that keeps recent deadlocks', () => {
+    test('reads the system_health event_file target, never the ring buffer', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.deadlock_graphs')));
+      assert.match(
+        source,
+        /sys\.fn_xe_file_target_read_file\s*\(/i,
+        'the probe must read the event_file target: it is the only system_health source that ' +
+          'still holds the most recent deadlocks',
+      );
+      assert.doesNotMatch(
+        source,
+        /dm_xe_session_targets|target_data|ring_buffer/i,
+        "the ring_buffer target's target_data is size-limited and drops its newest events first, " +
+          'so a probe built on it answers "no deadlock" for a deadlock that just happened',
+      );
+    });
+
+    test('filters on the event name before parsing any XML', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.deadlock_graphs')));
+      assert.match(
+        source,
+        /object_name\s*=\s*'xml_deadlock_report'/i,
+        'object_name is a plain column of the table-valued function, so filtering on it discards ' +
+          'every non-deadlock event before the expensive CAST to xml -- without it the probe ' +
+          'shreds tens of thousands of unrelated events per call',
+      );
+    });
+
+    test('never truncates the graph XML', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.deadlock_graphs')));
+      assert.doesNotMatch(
+        source,
+        /\b(LEFT|SUBSTRING)\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.?(deadlock_xml|redacted_text|full_text)\b/i,
+        'a truncated deadlock graph is not parseable, so clipping it to a length cap loses the ' +
+          'whole deadlock rather than part of it; the bound belongs on the number of graphs',
+      );
+      assert.match(
+        source,
+        /@MaxGraphs/,
+        'the probe must bound the number of graphs instead, so it still has a cap',
+      );
+    });
+
+    test('redacts statement text at source rather than fetching and discarding it', () => {
+      const raw = readProbeSource(probeById('sessions.deadlock_graphs'));
+      const source = stripSqlComments(raw);
+      // The redaction is structural: <process> is rebuilt from its attributes alone, which is what
+      // drops its executionStack and inputbuf children. Nothing names those nodes in the code, so
+      // the mechanism is pinned here and the documentation of it is pinned against the raw file.
+      assert.match(
+        source,
+        /<process>\s*\{\s*\$[A-Za-z_][A-Za-z0-9_]*\/@\*\s*\}\s*<\/process>/,
+        'each <process> must be rebuilt attributes-only: that is what removes the graph\'s only ' +
+          'text-bearing nodes, and copying the element wholesale would ship every submitted batch',
+      );
+      assert.match(
+        raw,
+        /executionStack/,
+        'the header must name the nodes the rebuild drops, so a reader can tell that attributes ' +
+          'are kept deliberately and only statement text is removed',
+      );
+      assert.match(raw, /inputbuf/);
+      const probe = probeById('sessions.deadlock_graphs');
+      const includeText = probe.parameters.find((p) => p.name === '@IncludeSqlText');
+      assert.ok(includeText, 'the probe must expose @IncludeSqlText');
+      assert.equal(
+        includeText.default,
+        false,
+        'statement text must be opt-in here: a deadlock graph carries a whole submitted batch for ' +
+          'every participant and, unlike a live request, nobody asked for it interactively',
+      );
+    });
+
+    test('identity is derived from the redacted graph, so text inclusion does not fork it', () => {
+      const source = stripSqlComments(readProbeSource(probeById('sessions.deadlock_graphs')));
+      assert.match(
+        source,
+        /HASHBYTES\s*\(\s*'SHA2_256'\s*,\s*CAST\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.redacted_xml\b/i,
+        'deadlock_id must hash the redacted graph: hashing the full graph would give one deadlock ' +
+          'two identities depending on @IncludeSqlText, and a consumer holding both would count ' +
+          'it twice',
+      );
+    });
+
+    test('the contract distinguishes an empty window from a quiet instance', () => {
+      const probe = probeById('sessions.deadlock_graphs');
+      assert.match(
+        probe.resultContract,
+        /zero rows/i,
+        'the contract must say what an empty result means',
+      );
+      assert.match(
+        probe.resultContract,
+        /roll(s)? (its files )?over|retained/i,
+        'the contract must say the observation window is bounded by system_health file retention',
+      );
+      assert.match(
+        probe.azureSqlDatabase.notes,
+        /Unsupported/,
+        'Azure SQL Database has no system_health session, and that must be reported as ' +
+          'Unsupported rather than as an empty list',
+      );
+    });
+  });
+
   test('only the documented, platform-limited probes are flagged unsupported on Azure SQL Database', () => {
     // Azure-unsupported is legitimate only for probes that call a DMV/catalog view Microsoft's own
     // documentation does not list as available on Azure SQL Database (sys.master_files,
-    // sys.dm_os_host_info), or that require tempdb as the current database while Azure SQL
-    // Database does not permit a tempdb connection. The session/task allocation DMVs in
+    // sys.dm_os_host_info), that require tempdb as the current database while Azure SQL
+    // Database does not permit a tempdb connection, or that read a server-scoped Extended Events
+    // session Azure SQL Database does not have. The session/task allocation DMVs in
     // tempdb.usage are explicitly documented as applicable only to tempdb, so a user-database
     // query is not a supported substitute. Unsupported is not a catch-all escape hatch, and this
     // test pins the exact allow-list so a future edit cannot silently widen it.
-    const allowedUnsupported = new Set(['io.file_io_stats', 'server.host_info', 'tempdb.usage']);
+    const allowedUnsupported = new Set([
+      'io.file_io_stats',
+      'server.host_info',
+      'sessions.deadlock_graphs',
+      'tempdb.usage',
+    ]);
     const stillUnsupported = manifest.probes.filter((p) => p.azureSqlDatabase.unsupported === true);
     for (const probe of stillUnsupported) {
       assert.ok(
         allowedUnsupported.has(probe.id),
         `probe '${probe.id}' is flagged unsupported on Azure SQL Database but is not on the ` +
           'documented allow-list (io.file_io_stats: sys.master_files; server.host_info: ' +
-          'sys.dm_os_host_info; tempdb.usage: tempdb-only connection scope) -- verify against ' +
-          'Microsoft Learn before adding it there',
+          'sys.dm_os_host_info; sessions.deadlock_graphs: no system_health session and no ' +
+          'server-scoped sys.dm_xe_sessions; tempdb.usage: tempdb-only connection scope) -- ' +
+          'verify against Microsoft Learn before adding it there',
       );
     }
     assert.deepEqual(

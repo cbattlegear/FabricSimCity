@@ -91,13 +91,17 @@ public class LiveIncidentCollectorTests
         Assert.NotEmpty(snapshot.Diagnostics.UnavailableFields);
 
         // Every subsystem that actually attempted its SQL probe and timed out reports Disconnected.
-        // tempdb is the one exception: with the server-identity probe also failing, the platform is
-        // Unknown this cycle, so tempdb is never attempted at all (requirement 4) and reports
-        // Unknown rather than a misleading Disconnected for a probe call that never happened.
+        // tempdb and deadlocks are the two exceptions, for the same reason: with the server-identity
+        // probe also failing, the platform is Unknown this cycle, so neither is attempted at all
+        // (requirement 4; the system_health session is server-scoped and absent on Azure SQL
+        // Database) and both report Unknown rather than a misleading Disconnected for a probe call
+        // that never happened.
         var tempdbField = Assert.Single(snapshot.Diagnostics.UnavailableFields, f => f.Field == "tempdb");
         Assert.Equal(DataStatus.Unknown, tempdbField.Status);
+        var deadlockField = Assert.Single(snapshot.Diagnostics.UnavailableFields, f => f.Field == "deadlocks");
+        Assert.Equal(DataStatus.Unknown, deadlockField.Status);
         Assert.All(
-            snapshot.Diagnostics.UnavailableFields.Where(f => f.Field != "tempdb"),
+            snapshot.Diagnostics.UnavailableFields.Where(f => f.Field is not ("tempdb" or "deadlocks")),
             f => Assert.Equal(DataStatus.Disconnected, f.Status));
     }
 

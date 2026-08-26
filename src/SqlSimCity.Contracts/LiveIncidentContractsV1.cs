@@ -251,6 +251,29 @@ public sealed record LiveRequestV1(
     /// statement inside a very long batch is truncated in the batch and not in the statement.
     /// </summary>
     public LiveTextTruncationV1? CurrentStatementTextTruncation { get; init; }
+
+    /// <summary>
+    /// <c>sys.dm_exec_requests.query_hash</c>, rendered with <see cref="Convert.ToHexString(byte[])"/>
+    /// — uppercase hex, no <c>0x</c> prefix. This is the same value Query Store publishes as
+    /// <c>DatabaseCityQueryFamilyV1.QueryHash</c>, and it is deliberately produced by the same
+    /// converter on both sides: the two are joined by string equality, so a difference in case or
+    /// prefix would match nothing and be indistinguishable from an instance where nothing is running.
+    /// <para>
+    /// Null means this row carries no request, or the engine reported no hash for it. It never means
+    /// "unknown query", and a consumer must not fall back to matching on statement text. An all-zero
+    /// hash is normalized to null here for the same reason: zero is the engine's "not hashed", not a
+    /// family whose hash happens to be zero, and letting it through would collide every unhashed
+    /// request onto one family.
+    /// </para>
+    /// </summary>
+    public string? QueryHash { get; init; }
+
+    /// <summary>
+    /// <c>sys.dm_exec_requests.query_plan_hash</c>, rendered exactly as <see cref="QueryHash"/> is.
+    /// Joins to <c>sys.query_store_plan.query_plan_hash</c>, so it distinguishes which plan for a
+    /// query family is running, not just which family. Same null and all-zero semantics.
+    /// </summary>
+    public string? QueryPlanHash { get; init; }
 }
 
 /// <summary>
@@ -414,6 +437,118 @@ public sealed record FileIoDeltaV1(
 public sealed record FileIoSampleV1(IReadOnlyList<FileIoDeltaV1> Files, DataStatus Status, string Reason);
 
 /// <summary>
+/// One participant in a recorded deadlock, projected from a <c>&lt;process&gt;</c> element of the
+/// graph. Every field here comes from an attribute, which is why the collector can offer a graph
+/// with statement text removed and still describe the deadlock completely: the engine puts the
+/// batch text in child elements and everything else in attributes.
+/// <para>
+/// <see cref="Id"/> is the graph-internal process identifier (for example <c>process21c43b4d088</c>)
+/// and is the only thing the resource list's owner/waiter entries refer to, so it is what joins a
+/// participant to what it held and what it wanted. It is unique within one graph and meaningless
+/// outside it -- never store it as a session identity.
+/// </para>
+/// </summary>
+public sealed record DeadlockProcessV1(
+    string Id,
+    int? SessionId,
+    bool IsVictim,
+    int? DatabaseId,
+    string? DatabaseName,
+    string? LockMode,
+    string? WaitResource,
+    long? WaitTimeMs,
+    string? TransactionName,
+    string? IsolationLevel,
+    string? ClientApplication,
+    string? HostName,
+    string? LoginName,
+    string? Statement);
+
+/// <summary>
+/// One resource in a recorded deadlock's <c>&lt;resource-list&gt;</c>, with the participants that
+/// held it and the participants that were waiting for it.
+/// <para>
+/// <see cref="ResourceKind"/> is the element name the engine chose -- <c>keylock</c>,
+/// <c>objectlock</c>, <c>pagelock</c>, <c>ridlock</c>, <c>exchangeEvent</c> and others -- and it is
+/// carried through verbatim rather than mapped onto a closed enumeration, because the set is the
+/// engine's to extend and an unrecognised kind must still be reportable. A consumer that cannot
+/// render a kind should say so, not drop the resource.
+/// </para>
+/// <para>
+/// <see cref="ObjectName"/> is present for the lock kinds that name an object and absent for the
+/// ones that do not (an <c>exchangeEvent</c> is a parallelism resource inside one query and names
+/// nothing). Absent means "this resource kind has no object", never "the object is unknown".
+/// </para>
+/// </summary>
+public sealed record DeadlockResourceV1(
+    string ResourceKind,
+    int? DatabaseId,
+    string? ObjectName,
+    string? IndexName,
+    long? AssociatedObjectId,
+    IReadOnlyList<DeadlockParticipantV1> Owners,
+    IReadOnlyList<DeadlockParticipantV1> Waiters);
+
+/// <summary>
+/// A reference from a resource to one of the graph's processes, with the lock mode involved.
+/// <see cref="ProcessId"/> matches <see cref="DeadlockProcessV1.Id"/> within the same graph.
+/// </summary>
+public sealed record DeadlockParticipantV1(string ProcessId, string? Mode, string? RequestType);
+
+/// <summary>
+/// One deadlock the engine already resolved and recorded, read back from the <c>system_health</c>
+/// session. A deadlock is only ever historical: by the time anything can query for it the victim
+/// has been rolled back and nothing about it remains in <c>sys.dm_exec_requests</c> or
+/// <c>sys.dm_os_waiting_tasks</c>. This is not a live measurement and must not be rendered as one --
+/// <see cref="OccurredAt"/> is when it happened, which may be minutes or hours before the snapshot
+/// carrying it.
+/// <para>
+/// <see cref="Id"/> is stable for a given deadlock across calls, and across whether statement text
+/// was requested, so a consumer can deduplicate a deadlock that appears in several consecutive
+/// snapshots. It is derived from the event timestamp and a hash of the graph's redacted form; see
+/// <c>sql/probes/sessions/deadlock_graphs.sql</c>.
+/// </para>
+/// <para>
+/// <see cref="IncludesSqlText"/> reports what the graph actually contained, not what was asked for,
+/// so a consumer never renders an empty statement as "this participant ran nothing".
+/// </para>
+/// </summary>
+public sealed record DeadlockGraphV1(
+    string Id,
+    DateTimeOffset OccurredAt,
+    IReadOnlyList<DeadlockProcessV1> Processes,
+    IReadOnlyList<DeadlockResourceV1> Resources,
+    IReadOnlyList<string> VictimProcessIds,
+    bool IncludesSqlText);
+
+/// <summary>
+/// Deadlocks recorded by the <c>system_health</c> session, with the observation window disclosed.
+/// <para>
+/// An empty <see cref="Graphs"/> with <see cref="DataStatus.Available"/> means "no deadlock is
+/// retained in the window that was read". It does not mean the instance has no deadlocks:
+/// <c>system_health</c> rolls its event files over, so an older deadlock is simply gone.
+/// <see cref="DataStatus.Unsupported"/> means deadlocks are not observed here at all -- Azure SQL
+/// Database has no <c>system_health</c> session -- and the two are never conflated.
+/// </para>
+/// <para>
+/// <see cref="CollectedAt"/> is when this sample was read, which is deliberately not the snapshot's
+/// own <c>CollectedAt</c>. Reading the session's files costs roughly a second, far too much for the
+/// sampler's 2-5 second cycle, so the sample is refreshed on its own slower interval and reused in
+/// between. A consumer showing deadlock age must use this, not the snapshot timestamp.
+/// </para>
+/// <para>
+/// <see cref="TotalRetainedCount"/> is the number of deadlocks the probe saw before any cap was
+/// applied, so a capped list is never read as a calmer instance.
+/// </para>
+/// </summary>
+public sealed record DeadlockSampleV1(
+    IReadOnlyList<DeadlockGraphV1> Graphs,
+    int TotalRetainedCount,
+    DateTimeOffset? CollectedAt,
+    DataStatus Status,
+    string Reason);
+
+/// <summary>
 /// Per-scheduler CPU/runnable-queue pressure. <c>current_tasks_count</c>/<c>runnable_tasks_count</c>
 /// etc. are instant gauges and are reported as-is; <c>total_cpu_usage_ms</c>/
 /// <c>total_scheduler_delay_ms</c> are cumulative since engine start and are delta'd the same way as
@@ -507,6 +642,7 @@ public sealed record LiveIncidentSnapshotV1(
     FileIoSampleV1 FileIo,
     SchedulerPressureV1 Scheduler,
     LogSpaceUsageV1 LogSpace,
+    DeadlockSampleV1 Deadlocks,
     CollectionDiagnosticsV1 Diagnostics);
 
 /// <summary>

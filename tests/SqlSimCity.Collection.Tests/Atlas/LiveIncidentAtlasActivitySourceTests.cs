@@ -96,6 +96,7 @@ public sealed class LiveIncidentAtlasActivitySourceTests
                 new FileIoSampleV1([], DataStatus.Available, "available"),
                 new SchedulerPressureV1([], DataStatus.Available, "available"),
                 new LogSpaceUsageV1(null, null, null, DataStatus.Available, "available"),
+                new DeadlockSampleV1([], 0, Now, DataStatus.Available, "available"),
                 new CollectionDiagnosticsV1(1, Now, Now, 1, 0, 0, unavailable ?? [])),
             new LiveCollectorStatusV1(
                 SamplerRunState.Running, 1, Now, Now, 0, null, null, 0, 0));

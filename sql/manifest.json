@@ -554,8 +554,47 @@
         }
       ],
       "resultSets": 1,
-      "resultContract": "Zero or more rows, one per (session_id, request_id). Idle rows have NULL request_id and NULL request_status, and use the session's current database_id/name; active rows use the request database. sys.dm_exec_requests.status is never NULL for a request that exists, so a NULL request_status means the session has no request and must not be replaced with a synthetic status. With @IncludeSqlText=1 current_statement_text is the offset-resolved executing statement and batch_text is the submitted batch; with 0 both are NULL and sys.dm_exec_sql_text is not invoked. No plan XML is fetched. Both caps disclose what they omitted instead of shrinking the result silently: visible_session_count is the row count before @MaxRows applied, selection_rank is the deterministic order the cap keeps, and batch_text_length / current_statement_text_length are the character counts before @MaxTextLength applied, so a capped result can never be mistaken for a smaller server or a shorter statement.",
+      "resultContract": "Zero or more rows, one per (session_id, request_id). Idle rows have NULL request_id and NULL request_status, and use the session's current database_id/name; active rows use the request database. sys.dm_exec_requests.status is never NULL for a request that exists, so a NULL request_status means the session has no request and must not be replaced with a synthetic status. query_hash and query_plan_hash are returned as raw binary(8), unformatted, and carry the same values Query Store stores as sys.query_store_query.query_hash / sys.query_store_plan.query_plan_hash, so a consumer can join a running request to the query family Query Store already attributed to objects; the application renders both sides with one converter so they cannot disagree about case or an 0x prefix, and an all-zero hash means the engine reported none and must be treated as absent rather than as a family. A NULL hash is 'no request, or no hash for it', never 'unknown query'. With @IncludeSqlText=1 current_statement_text is the offset-resolved executing statement and batch_text is the submitted batch; with 0 both are NULL and sys.dm_exec_sql_text is not invoked. No plan XML is fetched. Both caps disclose what they omitted instead of shrinking the result silently: visible_session_count is the row count before @MaxRows applied, selection_rank is the deterministic order the cap keeps, and batch_text_length / current_statement_text_length are the character counts before @MaxTextLength applied, so a capped result can never be mistaken for a smaller server or a shorter statement.",
       "relativeCost": "low"
+    },
+    {
+      "id": "sessions.deadlock_graphs",
+      "title": "Recorded deadlock graphs from the system_health session",
+      "file": "probes/sessions/deadlock_graphs.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": true,
+        "notes": "Unsupported: Azure SQL Database has no system_health Extended Events session, and its Extended Events views are database-scoped (sys.dm_xe_database_sessions / sys.dm_xe_database_session_targets) rather than the server-scoped sys.dm_xe_sessions this session lives in. There is no built-in session recording xml_deadlock_report to read, so LiveIncidentCollector reports deadlock evidence as Unsupported with a reason. That is deliberately not the same as an empty list: empty means no deadlock is retained in the window that was read, Unsupported means deadlocks are not observed here at all."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+). sys.fn_xe_file_target_read_file additionally reads the session's .xel files through the SQL Server service account, so a caller with the permission can still get a read error if the engine cannot reach its own log directory; that is 'not observed', never 'no deadlocks'.",
+      "cadenceClass": "standard",
+      "parameters": [
+        {
+          "name": "@SinceUtc",
+          "sqlDbType": "DateTime2",
+          "required": false,
+          "default": null,
+          "description": "When supplied, only deadlocks recorded strictly after this UTC instant are returned. NULL returns everything still retained. This filters the result; it does not bound the file read."
+        },
+        {
+          "name": "@MaxGraphs",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": null,
+          "description": "When supplied, returns at most this many deadlocks, most recent first, then by deadlock_id so the kept set is deterministic. NULL returns every retained deadlock. visible_deadlock_count always reports the pre-cap count."
+        },
+        {
+          "name": "@IncludeSqlText",
+          "sqlDbType": "Bit",
+          "required": false,
+          "default": false,
+          "description": "When 0 (the default) the graph is rebuilt with each <process> copied attributes-only, which removes its <executionStack> and <inputbuf> children -- the only text-bearing nodes -- while keeping every attribute and the whole <resource-list>. When 1 the graph is returned exactly as recorded, statement text included. Defaults to 0, the opposite of sessions.active_requests, because a deadlock graph carries a whole submitted batch for every participant and nobody asked for it interactively."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per recorded deadlock: deadlock_id, deadlock_time_utc, process_count, resource_count, victim_count, includes_sql_text, deadlock_xml, deadlock_xml_length, visible_deadlock_count, selection_rank. deadlock_id is stable across calls and across @IncludeSqlText settings because it hashes the redacted graph, so asking for statement text never gives one deadlock two identities. deadlock_xml is a complete parseable graph or it is absent -- it is never truncated, because half a graph is not a graph and no reader could open it; the bound is on graph count instead and deadlock_xml_length reports the character count. Zero rows means no deadlock is retained in the window that was read, NOT that the instance has no deadlocks: system_health rolls its files over (four 5 MB files by default), so an older deadlock is simply gone, and a stopped or altered session records nothing. The application must publish this as an observation window, never as a clean bill of health. Reads the session's event_file target rather than its ring_buffer target on purpose: the ring buffer's target_data XML is size-limited and drops its most recent events, measured at 2,752 of 5,000 events readable with the newest 50 minutes missing, so a ring-buffer-based probe answers 'no deadlock' for a deadlock that just happened.",
+      "relativeCost": "medium"
     },
     {
       "id": "sessions.waiting_tasks",

@@ -40,4 +40,30 @@ public interface ILiveIncidentProbeExecutor
     Task<IReadOnlyList<SchedulerRow>> GetSchedulerPressureAsync(bool includeIdealWorkersLimit, CancellationToken cancellationToken);
 
     Task<LogSpaceRow?> GetLogSpaceUsageAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads deadlocks recorded by the <c>system_health</c> Extended Events session.
+    /// <para>
+    /// This probe is server-scoped and reads the session's event files, which costs roughly a
+    /// second on an ordinary instance. It is deliberately not on the sampler's per-cycle path; the
+    /// collector refreshes it on its own slower interval and reuses the sample in between.
+    /// </para>
+    /// <para>
+    /// <paramref name="azureScoped"/> is rejected. Azure SQL Database has no <c>system_health</c>
+    /// session and no server-scoped Extended Events views, so there is nothing to degrade to -- the
+    /// collector must report this as <c>Unsupported</c>, which is not the same as an empty list.
+    /// </para>
+    /// </summary>
+    /// <param name="sinceUtc">
+    /// When supplied, only deadlocks recorded strictly after this instant are returned. This
+    /// filters the result; the session's files are read either way.
+    /// </param>
+    /// <param name="maxGraphs">Cap on graphs returned, most recent first. Null returns everything retained.</param>
+    /// <param name="includeSqlText">Whether to ask for the graph with participant statement text included.</param>
+    Task<IReadOnlyList<DeadlockGraphRow>> GetDeadlockGraphsAsync(
+        bool azureScoped,
+        DateTimeOffset? sinceUtc,
+        int? maxGraphs,
+        bool includeSqlText,
+        CancellationToken cancellationToken);
 }

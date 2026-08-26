@@ -20,6 +20,20 @@ public sealed class FakeLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
     public Func<bool, CancellationToken, Task<IReadOnlyList<SchedulerRow>>>? SchedulerPressure { get; set; }
     public Func<CancellationToken, Task<LogSpaceRow?>>? LogSpaceUsage { get; set; }
 
+    /// <summary>
+    /// Hook for <c>sessions.deadlock_graphs</c>. The arguments are surfaced so a test can assert
+    /// what the collector actually asked for -- in particular that it is not requesting statement
+    /// text by default, and that it applies the configured graph cap.
+    /// </summary>
+    public Func<bool, DateTimeOffset?, int?, bool, CancellationToken, Task<IReadOnlyList<DeadlockGraphRow>>>? DeadlockGraphs { get; set; }
+
+    /// <summary>
+    /// How many times the deadlock probe was actually invoked. The collector reuses one sample
+    /// across cycles, so this is what distinguishes "reused" from "re-read" -- a count equal to the
+    /// cycle count means the refresh interval is not being honoured.
+    /// </summary>
+    public int DeadlockGraphsCallCount { get; private set; }
+
     public int ActiveRequestsCallCount { get; private set; }
 
     public static ServerIdentityResult DefaultIdentity(DateTimeOffset startTime, int engineEdition = 2) => new(
@@ -54,4 +68,16 @@ public sealed class FakeLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
 
     public Task<LogSpaceRow?> GetLogSpaceUsageAsync(CancellationToken cancellationToken) =>
         (LogSpaceUsage ?? (_ => Task.FromResult<LogSpaceRow?>(null)))(cancellationToken);
+
+    public Task<IReadOnlyList<DeadlockGraphRow>> GetDeadlockGraphsAsync(
+        bool azureScoped,
+        DateTimeOffset? sinceUtc,
+        int? maxGraphs,
+        bool includeSqlText,
+        CancellationToken cancellationToken)
+    {
+        DeadlockGraphsCallCount++;
+        return (DeadlockGraphs ?? ((_, _, _, _, _) => Task.FromResult<IReadOnlyList<DeadlockGraphRow>>([])))(
+            azureScoped, sinceUtc, maxGraphs, includeSqlText, cancellationToken);
+    }
 }

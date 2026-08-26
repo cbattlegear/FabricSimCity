@@ -177,7 +177,9 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                         Convert.ToInt32(reader["visible_session_count"], CultureInfo.InvariantCulture),
                         Convert.ToInt32(reader["selection_rank"], CultureInfo.InvariantCulture),
                         AsNullableInt32(reader, "batch_text_length"),
-                        AsNullableInt32(reader, "current_statement_text_length")));
+                        AsNullableInt32(reader, "current_statement_text_length"),
+                        AsBytes(reader, "query_hash"),
+                        AsBytes(reader, "query_plan_hash")));
                 }
 
                 return (IReadOnlyList<ActiveRequestRow>)rows;
@@ -455,6 +457,74 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
     private const decimal BytesPerMegabyte = 1_024m * 1_024m;
 
     /// <summary>
+    /// Reads deadlocks recorded by <c>system_health</c>; Azure SQL Database has no such session and
+    /// no server-scoped Extended Events views, so there is nothing to degrade to.
+    /// </summary>
+    public Task<IReadOnlyList<DeadlockGraphRow>> GetDeadlockGraphsAsync(
+        bool azureScoped,
+        DateTimeOffset? sinceUtc,
+        int? maxGraphs,
+        bool includeSqlText,
+        CancellationToken cancellationToken) =>
+        azureScoped
+            ? Task.FromException<IReadOnlyList<DeadlockGraphRow>>(new ProbeObjectUnavailableException(
+                "Azure SQL Database has no system_health Extended Events session, and its Extended Events views are database-scoped, so recorded deadlocks are not observable.",
+                null,
+                null))
+            : GetDeadlockGraphsCoreAsync(sinceUtc, maxGraphs, includeSqlText, cancellationToken);
+
+    private Task<IReadOnlyList<DeadlockGraphRow>> GetDeadlockGraphsCoreAsync(
+        DateTimeOffset? sinceUtc,
+        int? maxGraphs,
+        bool includeSqlText,
+        CancellationToken cancellationToken) =>
+        ExecuteAsync(
+            "sessions.deadlock_graphs",
+            "server",
+            async (reader, ct) =>
+            {
+                var rows = new List<DeadlockGraphRow>();
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    // deadlock_time_utc is a datetime2 the engine already recorded in UTC, so it is
+                    // read with the same zone-free conversion the other timestamp columns use. A
+                    // naive DateTimeOffset(DateTime) would reinterpret it in the collector process's
+                    // local zone and move every deadlock by the offset.
+                    var occurredAt = AsDateTimeOffset(reader, "deadlock_time_utc");
+                    if (occurredAt is null)
+                    {
+                        // The event has no timestamp, so nothing can say when the deadlock happened.
+                        // Reporting it with a substituted "now" would date a historical event to the
+                        // moment it was read, which is the one thing a deadlock must never claim.
+                        continue;
+                    }
+
+                    rows.Add(new DeadlockGraphRow(
+                        (string)reader["deadlock_id"],
+                        occurredAt.Value,
+                        Convert.ToInt32(reader["process_count"], CultureInfo.InvariantCulture),
+                        Convert.ToInt32(reader["resource_count"], CultureInfo.InvariantCulture),
+                        Convert.ToInt32(reader["victim_count"], CultureInfo.InvariantCulture),
+                        Convert.ToBoolean(reader["includes_sql_text"], CultureInfo.InvariantCulture),
+                        AsString(reader, "deadlock_xml") ?? string.Empty,
+                        Convert.ToInt32(reader["deadlock_xml_length"], CultureInfo.InvariantCulture),
+                        Convert.ToInt32(reader["visible_deadlock_count"], CultureInfo.InvariantCulture),
+                        Convert.ToInt32(reader["selection_rank"], CultureInfo.InvariantCulture)));
+                }
+
+                return (IReadOnlyList<DeadlockGraphRow>)rows;
+            },
+            cancellationToken,
+            new Dictionary<string, object?>
+            {
+                // The probe compares against a datetime2, so the filter is handed over as UTC.
+                // Passing a local-offset value would silently shift the window.
+                ["@SinceUtc"] = sinceUtc?.UtcDateTime,
+                ["@MaxGraphs"] = maxGraphs,
+                ["@IncludeSqlText"] = includeSqlText,
+            });
+
+    /// <summary>
     /// Converts an exact byte count to megabytes, rounded to two decimals to match
     /// the precision the live-incident contract and its fixtures already use.
     /// </summary>
@@ -465,6 +535,13 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
             MidpointRounding.AwayFromZero);
 
     private static string? AsString(SqlDataReader reader, string column) => reader[column] is DBNull ? null : (string)reader[column];
+
+    /// <summary>
+    /// Reads a <c>binary</c>/<c>varbinary</c> column as raw bytes, or null for a NULL column. Used
+    /// where the value is a join key rather than a display value, so the formatting decision belongs
+    /// to whichever converter the other side of the join already uses.
+    /// </summary>
+    private static byte[]? AsBytes(SqlDataReader reader, string column) => reader[column] as byte[];
 
     /// <summary>
     /// Encodes a <c>varbinary</c> column (e.g. <c>waiting_task_address</c>, <c>resource_address</c>,

@@ -90,6 +90,7 @@ function baseSnapshot(overrides: Partial<LiveIncidentSnapshot> = {}): LiveIncide
     fileIo: { files: [], status: 'Available', reason: 'ok' },
     scheduler: { schedulers: [], status: 'Available', reason: 'ok' },
     logSpace: { totalLogSizeMb: null, usedLogSpaceMb: null, usedLogSpacePercent: null, status: 'Available', reason: 'ok' },
+    deadlocks: { graphs: [], totalRetainedCount: 0, collectedAt: null, status: 'Unknown', reason: 'not sampled in this test' },
     diagnostics: { sequence: 1, collectedAt: '2026-01-01T00:00:00Z', sourceTimestamp: '2026-01-01T00:00:00Z', durationMs: 5, missedCycles: 0, skippedCycles: 0, unavailableFields: [] },
     ...overrides,
   }

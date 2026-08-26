@@ -27,6 +27,7 @@ public sealed class StubLiveIncidentCollector : ILiveIncidentCollector
         new FileIoSampleV1([], DataStatus.Available, "ok"),
         new SchedulerPressureV1([], DataStatus.Available, "ok"),
         new LogSpaceUsageV1(1, 1, 1, DataStatus.Available, "ok"),
+        new DeadlockSampleV1([], 0, DateTimeOffset.UnixEpoch, DataStatus.Available, "ok"),
         new CollectionDiagnosticsV1(sequence, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, 1, 0, 0, []));
 
     public Task<LiveIncidentSnapshotV1> CollectAsync(long sequence, CancellationToken cancellationToken)

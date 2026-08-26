@@ -139,6 +139,15 @@ public static class LiveIncidentsServiceCollectionExtensions
             sampleBounds.MaxTextLength, boundsSection, nameof(LiveIncidentsSampleBoundsOptions.MaxTextLength));
         var maxTempdbRows = ParseBound(
             sampleBounds.MaxTempdbRows, boundsSection, nameof(LiveIncidentsSampleBoundsOptions.MaxTempdbRows));
+        var maxDeadlockGraphs = ParseBound(
+            sampleBounds.MaxDeadlockGraphs, boundsSection, nameof(LiveIncidentsSampleBoundsOptions.MaxDeadlockGraphs));
+        var deadlockRefreshSeconds = sampleBounds.DeadlockRefreshSeconds;
+        if (deadlockRefreshSeconds < 0)
+        {
+            throw new LiveIncidentsConfigurationException(
+                $"{boundsSection}:{nameof(LiveIncidentsSampleBoundsOptions.DeadlockRefreshSeconds)} must be a " +
+                "positive number of seconds, or 0 to disable recorded-deadlock collection.");
+        }
 
         // Building the profile, platform, and secret provider now -- not lazily inside a
         // service factory -- guarantees every validation exception below surfaces the moment
@@ -187,7 +196,10 @@ public static class LiveIncidentsServiceCollectionExtensions
                 sp.GetRequiredService<ILiveIncidentProbeExecutor>(),
                 targetId,
                 displayName,
-                configuredPlatform: platform));
+                configuredPlatform: platform,
+                deadlockRefreshInterval: TimeSpan.FromSeconds(deadlockRefreshSeconds),
+                maxDeadlockGraphs: maxDeadlockGraphs,
+                includeDeadlockSqlText: sampleBounds.IncludeDeadlockSqlText));
     }
 
     /// <summary>

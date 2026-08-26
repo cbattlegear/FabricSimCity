@@ -129,6 +129,38 @@ public sealed class ShowplanParserTests
         Assert.Contains(comparison.Changes, change => change.Path == "root/warnings");
     }
 
+    /// <summary>
+    /// <c>AvgRowSize</c> is the second half of the data-volume estimate: rows alone say how many
+    /// things move, not how much. The attribute is optional in showplan, and a missing one has to
+    /// stay null rather than becoming zero, because a wide table read through an operator that did
+    /// not state a row size would otherwise be reported as moving nothing.
+    /// </summary>
+    [Fact]
+    public async Task CapturesAvgRowSizeAndLeavesItNullWhenTheOperatorDidNotStateOne()
+    {
+        const string xml = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+              <BatchSequence><Batch><Statements><StmtSimple><QueryPlan>
+                <RelOp NodeId="0" LogicalOp="Join" PhysicalOp="Nested Loops" EstimateRows="10">
+                  <RelOp NodeId="1" LogicalOp="Clustered Index Scan" PhysicalOp="Clustered Index Scan"
+                    EstimateRows="1000" AvgRowSize="137.5">
+                    <IndexScan><Object Database="[db]" Schema="[dbo]" Table="[T]" Index="[PK_T]" /></IndexScan>
+                  </RelOp>
+                </RelOp>
+              </QueryPlan></StmtSimple></Statements></Batch></BatchSequence>
+            </ShowPlanXML>
+            """;
+
+        var parsed = await new SecureShowplanParser().ParseAsync("1", xml);
+
+        var scan = parsed.Nodes.Single(node => node.NodeId == 1);
+        Assert.Equal(137.5m, scan.EstimatedRowSizeBytes);
+        Assert.Equal(1000m, scan.EstimatedRows);
+
+        var join = parsed.Nodes.Single(node => node.NodeId == 0);
+        Assert.Null(join.EstimatedRowSizeBytes);
+    }
+
     [Fact]
     public async Task SiblingNodeIdsDoNotMatterButParsedChildOrderDoes()
     {

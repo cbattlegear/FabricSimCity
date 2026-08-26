@@ -132,6 +132,13 @@ function snapshot(overrides: Partial<LiveIncidentSnapshot> = {}): LiveIncidentSn
       status: 'Available',
       reason: 'ok',
     },
+    deadlocks: {
+      graphs: [],
+      totalRetainedCount: 0,
+      collectedAt: null,
+      status: 'Unknown',
+      reason: 'not sampled in this test',
+    },
     diagnostics: {
       sequence: 1,
       collectedAt: '2024-05-01T00:00:00Z',

@@ -129,6 +129,7 @@ public sealed class SecureShowplanParser
                         Attribute(reader, "PhysicalOp") ?? "Unknown")
                     {
                         EstimatedRows = DecimalAttribute(reader, "EstimateRows"),
+                        EstimatedRowSizeBytes = DecimalAttribute(reader, "AvgRowSize"),
                         EstimatedCpuCost = DecimalAttribute(reader, "EstimateCPU"),
                         EstimatedIoCost = DecimalAttribute(reader, "EstimateIO"),
                         EstimatedTotalSubtreeCost = DecimalAttribute(reader, "EstimatedTotalSubtreeCost"),
@@ -315,6 +316,7 @@ public sealed class SecureShowplanParser
         public string LogicalOperation { get; } = logicalOperation;
         public string PhysicalOperation { get; } = physicalOperation;
         public decimal? EstimatedRows { get; init; }
+        public decimal? EstimatedRowSizeBytes { get; init; }
         public decimal? EstimatedCpuCost { get; init; }
         public decimal? EstimatedIoCost { get; init; }
         public decimal? EstimatedTotalSubtreeCost { get; init; }
@@ -332,7 +334,8 @@ public sealed class SecureShowplanParser
             EstimatedCpuCost, EstimatedIoCost, EstimatedTotalSubtreeCost, Parallel,
             ObjectReference,
             Expressions.Count == 0 ? null : string.Join(" && ", Expressions.Order(StringComparer.Ordinal)),
-            Warnings);
+            Warnings,
+            EstimatedRowSizeBytes);
     }
 }
 

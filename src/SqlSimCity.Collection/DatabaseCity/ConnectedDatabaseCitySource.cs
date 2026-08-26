@@ -239,6 +239,7 @@ public sealed class ConnectedDatabaseCitySource(
         evidence)
     {
         WaitAttribution = family.WaitAttribution,
+        PlanDataVolume = family.PlanDataVolume,
     };
 
     /// <summary>

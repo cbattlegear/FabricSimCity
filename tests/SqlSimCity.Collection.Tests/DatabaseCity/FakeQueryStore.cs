@@ -28,9 +28,25 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
         string? index = null) => new(database, schema, table, index);
 
     /// <summary>Declares one compiled plan and the object references its nodes carry.</summary>
-    public static (string PlanId, ShowplanObjectV1[] References) Plan(
+    public static (string PlanId, PlanNode[] Nodes) Plan(
         string planId,
-        params ShowplanObjectV1[] references) => (planId, references);
+        params ShowplanObjectV1[] references) =>
+        (planId, references.Select(reference => new PlanNode(reference)).ToArray());
+
+    /// <summary>
+    /// Declares one compiled plan whose nodes carry row estimates. Separate from <see cref="Plan"/>
+    /// because most attribution tests do not care about sizing, and a plan with no row estimates is
+    /// the ordinary case a real Query Store returns for a plan compiled before the estimate existed.
+    /// </summary>
+    public static (string PlanId, PlanNode[] Nodes) SizedPlan(
+        string planId,
+        params PlanNode[] nodes) => (planId, nodes);
+
+    /// <summary>One operator in a declared plan: what it reads, and what the optimizer expected.</summary>
+    public sealed record PlanNode(
+        ShowplanObjectV1 Reference,
+        decimal? EstimatedRows = null,
+        decimal? EstimatedRowSizeBytes = null);
 
     private static readonly DateTimeOffset Observed = new(2026, 8, 17, 17, 0, 0, TimeSpan.Zero);
 
@@ -53,7 +69,7 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
         string familyId,
         string cpu,
         string executions,
-        (string PlanId, ShowplanObjectV1[] References)[] plans,
+        (string PlanId, PlanNode[] Nodes)[] plans,
         string waitMilliseconds = "0",
         IReadOnlyList<IReadOnlyDictionary<string, string>>? runtimeWaits = null)
     {
@@ -81,10 +97,11 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
 
         foreach (var plan in plans)
         {
-            var nodes = plan.References
-                .Select((reference, i) => new ShowplanNodeV1(
+            var nodes = plan.Nodes
+                .Select((node, i) => new ShowplanNodeV1(
                     i + 1, i == 0 ? null : 1, "Scan", "Index Scan",
-                    null, null, null, null, false, reference, null, []))
+                    node.EstimatedRows, null, null, null, false, node.Reference, null, [],
+                    node.EstimatedRowSizeBytes))
                 .ToArray();
             _plans[plan.PlanId] = new NormalizedShowplanV1(
                 "1.0", plan.PlanId, "1.539", null, null, null, nodes,
