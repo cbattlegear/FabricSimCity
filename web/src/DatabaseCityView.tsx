@@ -33,6 +33,12 @@ import { resolveSidebarMode } from './sidebarMode'
 import { CityLoadingScreen } from './CityLoadingScreen'
 import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
 import { incidentDemandsAttention, incidentSummaryLabel, projectIncidents } from './cityIncidents'
+import {
+  drawersHoldOpenRegion,
+  effectiveRegion,
+  toggleRegion,
+  type SidebarRegion,
+} from './sidebarAccordion'
 import { EMPTY_ROSTER, vehicleSummaryLabel, type VehicleRoster } from './cityVehicles'
 import {
   advanceQueryFeed,
@@ -98,6 +104,20 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     new URLSearchParams(window.location.search).get('object'))
   const [selectedRoadId, setSelectedRoadId] = useState<string | null>(null)
   const [addressTerm, setAddressTerm] = useState('')
+  /*
+   * Which one of the rail's four disclosure regions is open.
+   *
+   * One piece of state for four `<details>` elements, because the invariant the user asked for --
+   * open one and the other three close -- is not something four independent booleans can express.
+   * See `sidebarAccordion.ts` for the measured defect this replaces; the short version is that four
+   * regions sharing one fixed-height column left three of them holding 18px each.
+   *
+   * It lives here rather than in the components because this is the nearest ancestor that can see
+   * all four, and because `addressTerm` lives here too -- a live search term has to be able to pin
+   * the directory open, and doing that in the same reducer is what makes pinning it open close the
+   * others as well.
+   */
+  const [chosenRegion, setChosenRegion] = useState<SidebarRegion | null>(null)
   const [loading, setLoading] = useState(true)
   /** True while pages after the first are still being walked in the background. */
   const [backfilling, setBackfilling] = useState(false)
@@ -354,6 +374,33 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const incidents = useMemo(
     () => projectIncidents(snapshot?.snapshot ?? null, visibleObjects),
     [snapshot, visibleObjects])
+
+  /*
+   * The region that is actually open, and the one thing allowed to open one on the reader's behalf.
+   *
+   * A live search term pins the directory (the field is inside it, so a term with the results
+   * collapsed is a trap) and `effectiveRegion` folds that in without a second source of truth.
+   *
+   * Live activity still opens itself when something is wrong, but only on the *transition* into
+   * that state. The old markup passed `open={incidentDemandsAttention(incidents)}` straight to the
+   * element and got away with it because React writes the DOM property only when the prop changes,
+   * so a close click stuck until the condition flipped. Under the accordion that prop no longer
+   * exists -- one piece of state drives all four -- so the "only when it changes" part has to be
+   * written out. Without the ref, a standing warning would reopen live activity on every render and
+   * make the other three regions impossible to keep open.
+   */
+  const openRegion = effectiveRegion(chosenRegion, addressTerm)
+  const alerting = incidentDemandsAttention(incidents)
+  const wasAlerting = useRef(false)
+  useEffect(() => {
+    if (alerting && !wasAlerting.current) setChosenRegion('activity')
+    wasAlerting.current = alerting
+  }, [alerting])
+  const regionToggle = useCallback(
+    (region: SidebarRegion) => (open: boolean) =>
+      setChosenRegion(current => toggleRegion(current, region, open)),
+    [],
+  )
 
   /**
    * Which incident popup is open, and the request to fly the camera to it.
@@ -718,7 +765,11 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
      * the map with the rest of the reading material, open by default when something is actually
      * wrong so a warning is never one tap away from being missed.
      */
-    <details className="sidebar-drawer" open={incidentDemandsAttention(incidents)}>
+    <details
+      className="sidebar-drawer"
+      open={openRegion === 'activity'}
+      onToggle={event => regionToggle('activity')((event.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary>
         Live activity
         <span className="drawer-badge">{incidentSummaryLabel(incidents)}</span>
@@ -734,7 +785,11 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   )
 
   const planFinder = (
-    <details className="sidebar-drawer">
+    <details
+      className="sidebar-drawer"
+      open={openRegion === 'plans'}
+      onToggle={event => regionToggle('plans')((event.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary>Route a captured query plan</summary>
       <div className="sidebar-drawer-body">
         <form
@@ -861,6 +916,8 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           entries={addressEntries}
           term={addressTerm}
           onTermChange={setAddressTerm}
+          open={openRegion === 'directory'}
+          onOpenChange={regionToggle('directory')}
           selectedId={selectedAddressId}
           onSelect={openAddress}
           footer={
@@ -897,10 +954,16 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                 * that left 167px of the column unreachable and squeezed the address list to 0px.
                 * The wrapper owns the budget and hands each drawer its share; see `.sidebar-drawers`.
                 *
+                * That budget is now the *closed-state* fallback rather than the working mechanism:
+                * the accordion means at most one drawer in here is ever open, and the open one is
+                * granted the column outright. `is-open` is what asks for it. The division survives
+                * because it is what keeps the rail sane if the invariant is ever broken, and because
+                * its own guards encode measurements that were expensive to obtain.
+                *
                 * It has to be a real element: everything between here and `.map-sidebar` is a
                 * fragment, so without it both drawers are direct flex children of the rail.
                 */}
-              <div className={`sidebar-drawers${placeCard ? ' is-yielding' : ''}`}>
+              <div className={`sidebar-drawers${placeCard ? ' is-yielding' : ''}${drawersHoldOpenRegion(openRegion) ? ' is-open' : ''}`}>
                 {liveActivityDrawer}
                 {planFinder}
                 {page && <LegendDrawer
@@ -923,6 +986,8 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                   onShowFamily={showFamilyOnMap}
                   selectedObject={selected}
                   vehicles={vehicleRoster}
+                  open={openRegion === 'legend'}
+                  onOpenChange={regionToggle('legend')}
                 />}
               </div>
             </>
@@ -1146,6 +1211,8 @@ function LegendDrawer({
   onShowFamily,
   selectedObject,
   vehicles,
+  open,
+  onOpenChange,
 }: {
   page: DatabaseCityPage
   objects: readonly DatabaseCityObject[]
@@ -1166,6 +1233,8 @@ function LegendDrawer({
   onShowFamily: (family: DatabaseCityQueryFamily) => void | Promise<void>
   selectedObject: DatabaseCityObject | null
   vehicles: VehicleRoster
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }) {
   /*
    * Default off, per the request, and the state is local because nothing outside this table reads
@@ -1181,7 +1250,11 @@ function LegendDrawer({
     [page.topQueryFamilies, placedIds, showUnmappedFamilies],
   )
   return (
-    <details className="sidebar-drawer">
+    <details
+      className="sidebar-drawer"
+      open={open}
+      onToggle={event => onOpenChange((event.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary>Legend &amp; evidence</summary>
       <div className="sidebar-drawer-body">
         <div className="city-legend" aria-label="Database city legend">

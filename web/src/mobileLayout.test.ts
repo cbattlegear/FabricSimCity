@@ -281,6 +281,14 @@ describe('the tray cannot fold a warning away', () => {
    * folded behind a summary is a warning that was not given, and `incidentDemandsAttention` is the
    * one place that decides what counts -- an unreported probe, a blocked waiter, an off-page waiter,
    * or a retained deadlock.
+   *
+   * How it opens itself changed with the accordion. `open={incidentDemandsAttention(incidents)}`
+   * used to be passed straight to the element and got away with it because React writes a DOM
+   * property only when the prop *changes*, so a close click stuck until the condition flipped. One
+   * shared piece of state has no such prop, so the "only when it changes" part is now written out
+   * against a ref -- and it has to stay written out. Setting the region on every render where a
+   * warning stands would reopen live activity underneath the reader and make the other three regions
+   * impossible to keep open, which is a worse failure than the one this guards.
    */
   it('opens the live activity drawer by itself when the projection demands attention', () => {
     const drawer = view.slice(view.indexOf('const liveActivityDrawer'))
@@ -288,8 +296,14 @@ describe('the tray cannot fold a warning away', () => {
     expect(end, 'no live activity drawer in the city view').toBeGreaterThan(-1)
     const body = drawer.slice(0, end)
     expect(body).toContain('className="sidebar-drawer"')
-    expect(body, 'the drawer does not open itself for a live warning')
-      .toContain('open={incidentDemandsAttention(incidents)}')
+    expect(body, 'the drawer is no longer driven by the accordion')
+      .toContain("open={openRegion === 'activity'}")
+    expect(view, 'the drawer does not open itself for a live warning')
+      .toMatch(/if \(alerting && !wasAlerting\.current\) setChosenRegion\('activity'\)/)
+    expect(view, 'a standing warning reopens the drawer on every render, pinning the rail')
+      .toMatch(/const wasAlerting = useRef\(false\)/)
+    expect(view, 'incidentDemandsAttention is no longer what decides')
+      .toMatch(/const alerting = incidentDemandsAttention\(incidents\)/)
     expect(body, 'the closed summary does not carry the finding')
       .toContain('{incidentSummaryLabel(incidents)}')
     expect(body, 'the drawer holds no summary to read').toContain('<IncidentSummary')
@@ -1161,5 +1175,144 @@ describe('the count beside a drawer title', () => {
     ].join('\n')
     const uses = panels.match(/className="drawer-badge"/g) ?? []
     expect(uses.length, 'the badge class is no longer what the summaries use').toBeGreaterThanOrEqual(3)
+  })
+})
+describe('the rail accordion', () => {
+  /*
+   * The measured defect this replaces, recorded so the numbers are not lost: at 1440x900 on
+   * `AdventureWorks` with all four regions open, live activity, the plan finder and the legend each
+   * held **18px of body** against 134px, 81px and 84,953px of content, while the directory held
+   * 178px against 11,712px. The rail reported **0 unreachable pixels** the whole time -- every one
+   * of those bodies is an `overflow: auto` scroller, and an 18px scroller clips nothing at all. That
+   * is the "zero unreachable is necessary and not sufficient" failure, reached by a third route.
+   *
+   * The grant is what makes one open region worth opening. Without `max-height: none` the region
+   * still divides the 34vh budget with three closed siblings.
+   */
+  it('gives the one open region the column instead of a share of a budget', () => {
+    const grant = ownRule('.sidebar-drawer[open]', desktopCss)
+    expect(grant, 'no rule grants an open drawer the column').not.toBeNull()
+    expect(grant!, 'the open drawer still divides the budget').toMatch(/max-height:\s*none/)
+    expect(grant!, 'the open drawer cannot grow into the column').toMatch(/flex:\s*1 1 auto/)
+  })
+
+  /*
+   * Lifting the cap lifts the floor with it. A flex item's *automatic* minimum is its content size
+   * clamped by its own definite `max-height`, so `max-height: none` on the legend floors it at the
+   * whole 84,953px -- unshrinkable, and straight back out of a rail that is `overflow: hidden`.
+   *
+   * And the floor is emphatically not `0`: that is the 10px-drawer defect, where the summary you
+   * click to close the region gets clipped along with everything else.
+   */
+  it('names a floor for the open region that is a floor and not a second cap', () => {
+    for (const selector of ['.sidebar-drawer[open]', '.sidebar-directory[open]']) {
+      const grant = ownRule(selector, desktopCss)
+      expect(grant, `${selector} has no rule at all`).not.toBeNull()
+      const floor = grant!.match(/min-height:\s*([\d.]+)rem/)
+      expect(floor, `${selector} names no explicit floor, so it floors on its own content`)
+        .not.toBeNull()
+      const rem = Number(floor![1])
+      expect(rem, `${selector} floors too low to keep its summary clickable`)
+        .toBeGreaterThanOrEqual(2.5)
+      expect(rem, `${selector} floor is a second cap, not a floor`).toBeLessThan(6)
+    }
+  })
+
+  /*
+   * The wrapper caps its drawers, so granting a drawer the column does nothing while the wrapper
+   * itself is still pinned to 34vh. Both halves are needed; either alone is a no-op.
+   */
+  it('lets the drawer wrapper take the column when it holds the open region', () => {
+    const rule = desktopRule('.sidebar-drawers.is-open')
+    expect(rule, 'no rule lifts the wrapper when a drawer inside it is open').not.toBeNull()
+    expect(rule!).toMatch(/max-height:\s*none/)
+    expect(rule!).toMatch(/flex:\s*1 1 auto/)
+  })
+
+  /*
+   * `.sidebar-drawers` is `overflow: visible`, so a wrapper that can shrink below its contents
+   * spills the drawers back out of the clipped rail -- the #63 defect one level out, which is why
+   * the base wrapper is guarded against `min-height: 0` above. Lifting its cap means it needs a real
+   * number in place of the automatic minimum it just lost.
+   *
+   * The arithmetic, not taste: two collapsed siblings at 35px each (34px of summary plus their 1px
+   * `border-top`, measured) plus the open drawer's own 2.75rem floor is 114px.
+   */
+  it('floors the lifted wrapper above its own collapsed summaries', () => {
+    const rule = desktopRule('.sidebar-drawers.is-open') ?? ''
+    const floor = rule.match(/min-height:\s*([\d.]+)rem/)
+    expect(floor, 'the lifted wrapper names no floor, so it floors on the open drawer content')
+      .not.toBeNull()
+    expect(Number(floor![1]) * 16, 'the wrapper can be squeezed until a summary clips')
+      .toBeGreaterThanOrEqual(35 * 2 + 44)
+  })
+
+  /*
+   * The atlas drawer has no wrapper, and `max-height: var(--sidebar-drawer-cap, 46vh)` is what keeps
+   * it byte-identical. A grant written on `.sidebar-drawer[open]` alone would reach it and change a
+   * column this work never measured.
+   */
+  it('leaves the unwrapped atlas drawer alone', () => {
+    const grants = rules(desktopCss).filter((rule) => rule.selector
+      .split(',')
+      .some((one) => /\.sidebar-drawer\[open\]$/.test(one.trim())))
+    expect(grants.length, 'no grant rule for an open drawer').toBeGreaterThan(0)
+    for (const rule of grants) {
+      const part = rule.selector.split(',').map((one) => one.trim())
+        .find((one) => /\.sidebar-drawer\[open\]$/.test(one))!
+      expect(part, 'the grant reaches a drawer outside .sidebar-drawers, which is the atlas')
+        .toMatch(/^\.sidebar-drawers > /)
+    }
+  })
+
+  /*
+   * `[open]` and never `:not([open])`. `ownRule()` matches a selector part ending in the one asked
+   * for, optionally followed by a pseudo-class -- and `:not([open])` *is* a pseudo-class, so
+   * `.sidebar-drawer:not([open])` reads to the helper as `.sidebar-drawer`. Being later in the file
+   * it would silently retarget every assertion about the base drawer at the accordion override,
+   * which is the `ownRule()` trap AGENTS.md documents. This is the guard for that.
+   */
+  it('does not retarget the base drawer and directory assertions', () => {
+    expect(desktopRule('.sidebar-drawer'), 'the base drawer rule is no longer what ownRule finds')
+      .toMatch(/max-height:\s*var\(--sidebar-drawer-cap, 46vh\)/)
+    expect(desktopRule('.sidebar-directory'), 'the base directory rule was retargeted')
+      .toMatch(/max-height:\s*\d+(?:\.\d+)?vh/)
+    expect(css, 'a :not([open]) selector will retarget ownRule() lookups')
+      .not.toMatch(/\.sidebar-(?:drawer|directory):not\(\[open\]\)\s*[,{]/)
+  })
+
+  /*
+   * "Directory closed" used to mean "nothing else is claiming the column". It stopped meaning that
+   * once an open drawer could claim it: the feed kept its lifted, content-sized height while the
+   * legend beside it was squeezed -- the opposite of what opening the legend asks for.
+   */
+  it('takes the feed lift away while any region is open', () => {
+    const lifted = css.match(/\.map-sidebar:has\(> \.sidebar-directory:not\(\[open\]\)\)[^{]*\{[^}]*\}/)
+    expect(lifted, 'no rule lifts the feed cap when the directory is closed').not.toBeNull()
+    expect(lifted![0], 'an open drawer no longer takes the feed lift away')
+      .toMatch(/:not\(:has\(\.sidebar-drawer\[open\]\)\)/)
+    // Same trap as everywhere else: a :where() inside :has() is dropped by forgiving parsing.
+    expect(lifted![0]).not.toMatch(/:where\(/)
+  })
+
+  /*
+   * Nothing in the sheet shrinks, and the grants outrank the rules that say so:
+   * `.sidebar-directory[open]` scores (0,2,0) and `.sidebar-drawers > .sidebar-drawer[open]` scores
+   * (0,3,0) against `.map-sidebar > *` and `.sidebar-drawers > *` at (0,1,0). So the override has to
+   * match on the same selectors -- and live in the LAST narrow block, because the base rules it
+   * overrides are declared after the first one.
+   */
+  it('hands the accordion grants back in the bottom sheet', () => {
+    expect(narrowRule('.sidebar-drawer[open]'), 'the open drawer still flexes in the sheet')
+      .toMatch(/flex:\s*none/)
+    expect(narrowRule('.sidebar-directory[open]'), 'the open directory still flexes in the sheet')
+      .toMatch(/flex:\s*none/)
+    expect(narrowRule('.sidebar-drawer[open]'), 'the sheet keeps a desktop floor it cannot use')
+      .toMatch(/min-height:\s*auto/)
+
+    const override = css.lastIndexOf('.sidebar-drawers > .sidebar-drawer[open] { flex: none')
+    expect(override, 'no narrow override for the accordion grants').toBeGreaterThan(-1)
+    expect(override, 'the override is not in the last narrow block')
+      .toBeGreaterThan(css.lastIndexOf(`@media (max-width: ${SHEET}px)`))
   })
 })

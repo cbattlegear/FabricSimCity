@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { SearchField } from './MapShell'
 import { searchAddressBook, type AddressEntry, type AddressKind } from './addressBook'
 
@@ -22,6 +22,8 @@ export function AddressBook({
   entries,
   term,
   onTermChange,
+  open,
+  onOpenChange,
   selectedId,
   onSelect,
   footer,
@@ -29,6 +31,8 @@ export function AddressBook({
   entries: readonly AddressEntry[]
   term: string
   onTermChange: (term: string) => void
+  open: boolean
+  onOpenChange: (open: boolean) => void
   selectedId: string | null
   onSelect: (entry: AddressEntry) => void
   footer?: ReactNode
@@ -36,22 +40,21 @@ export function AddressBook({
   const groups = useMemo(() => searchAddressBook(entries, term), [entries, term])
   const total = groups.reduce((sum, group) => sum + group.entries.length, 0)
   /*
-   * Closed by default, and the live query feed above takes the room it gives up.
+   * Closed by default, and whichever rail region you open instead takes the room it gives up.
    *
    * This directory is the retained view -- the families, tables and facilities the collector has
-   * accumulated -- and the feed is what is happening right now. Only one of those two changes while
-   * you watch it, so the rail defaults to the one that does. Measured at 1115x800 the feed sat on
-   * its 162px floor in every state with the directory open, showing two rows of a log that was
-   * scrolling 47; closed, it has the rest of the column.
+   * accumulated -- and the feed above it is what is happening right now. Only one of those two
+   * changes while you watch it, so the rail defaults to the one that does. Measured at 1115x800 the
+   * feed sat on its 162px floor in every state with the directory open, showing two rows of a log
+   * that was scrolling 47; closed, it has the rest of the column.
    *
-   * `open` is state rather than the browser's own toggle because a search term has to be able to
-   * force it: typing into the field and getting no visible results would be a trap, and the field is
-   * inside the disclosure. `hasTerm` therefore pins it open, and `userOpen` remembers a deliberate
-   * click so clearing the term does not slam it shut under the reader.
+   * `open` is a prop rather than the browser's own toggle because the directory is one of four
+   * regions sharing one fixed-height column, and only one of the four may be open at a time -- see
+   * `sidebarAccordion.ts`. Owning the state here would make that invariant unenforceable, since this
+   * component cannot see the other three. A search term still pins it open, but that now happens in
+   * the same reducer that closes the others, so pinning it open closes them too.
    */
   const hasTerm = term.trim().length > 0
-  const [userOpen, setUserOpen] = useState(false)
-  const open = userOpen || hasTerm
 
   return (
     <>
@@ -63,7 +66,7 @@ export function AddressBook({
           // A term is holding it open, so a close click has to clear the term as well or the element
           // would reopen on the next render and the click would look like it did nothing.
           if (!next && hasTerm) onTermChange('')
-          setUserOpen(next)
+          onOpenChange(next)
         }}
       >
         <summary>
