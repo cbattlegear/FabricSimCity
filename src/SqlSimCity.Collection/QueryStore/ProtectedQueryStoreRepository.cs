@@ -15,7 +15,34 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
 
     internal const string RawQueryTextKind = "query-store-query-text";
     internal const string RawShowplanKind = "query-store-showplan";
-    internal const string NormalizedPlanKind = "query-store-normalized-plan";
+
+    /// <summary>
+    /// The kind of a cached normalized plan, carrying the version of the contract that produced
+    /// it. The cache is keyed by plan id alone, and a cached plan is returned without re-reading
+    /// the Showplan it came from, so without a version stamp a record written by an older build
+    /// is indistinguishable from a current one and is served forever.
+    ///
+    /// The defect that motivates it: <c>ShowplanNodeV1.EstimatedRowSizeBytes</c> is a trailing
+    /// positional parameter with a <c>null</c> default, so a record serialized before that member
+    /// existed deserializes into a node whose row size is silently null rather than failing. The
+    /// plan then states no data volume, and a query whose vehicle is sized from that volume falls
+    /// off the size ladder entirely -- for good, because a cache hit never re-parses.
+    ///
+    /// Bumping this constant retires every record written by an earlier contract: the read below
+    /// treats an unrecognized kind as a miss, and the miss re-hydrates from the Showplan and
+    /// overwrites. Bump it whenever a member is added to the normalized plan contract.
+    /// </summary>
+    internal const string NormalizedPlanKind = "query-store-normalized-plan-v2";
+
+    /// <summary>
+    /// Kinds this type no longer writes but may still find in a store written by an earlier
+    /// build. They are listed in <see cref="PlanCacheRecordKinds"/> so that a record left behind
+    /// by a superseded contract is still measured as cache and still evictable under quota,
+    /// rather than becoming unaccounted-for storage that nothing can reclaim.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> SupersededNormalizedPlanKinds =
+        ["query-store-normalized-plan"];
+
     internal const string NormalizedPlanChunkKind = "query-store-normalized-plan-chunk";
 
     /// <summary>
@@ -31,7 +58,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
     /// again for something it already refused.
     /// </summary>
     public static readonly IReadOnlyList<string> PlanCacheRecordKinds =
-        [RawQueryTextKind, RawShowplanKind, NormalizedPlanKind, NormalizedPlanChunkKind];
+        [RawQueryTextKind, RawShowplanKind, NormalizedPlanKind, NormalizedPlanChunkKind,
+         .. SupersededNormalizedPlanKinds];
 
     private readonly IProtectedRecordReadSession? _session;
 
@@ -109,6 +137,18 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
     /// cold database-city page reads up to 96 plans, so the reads share one connection. When
     /// the caller is already inside <see cref="ReadBatchAsync{T}"/> this joins that batch
     /// instead of opening a second connection.
+    ///
+    /// A record whose kind is not <see cref="NormalizedPlanKind"/> is reported as a miss rather
+    /// than returned. It was written by a build whose normalized plan contract has since gained
+    /// a member, and deserializing it would fill that member with the contract's default -- a
+    /// silently incomplete plan that no later read would ever correct, because a cache hit does
+    /// not re-parse. Treating it as a miss re-hydrates from the Showplan, which is sound because
+    /// nothing in this cache is a system of record. The cost is one re-parse per superseded plan,
+    /// paid once: the write that follows replaces the whole prefix, superseded record included.
+    ///
+    /// Records under the pre-prefix id scheme are not consulted at all. That scheme was retired
+    /// before the current contract existed, so any record still under it is superseded by
+    /// definition, and reading one would reintroduce exactly the staleness this guards against.
     /// </summary>
     public Task<NormalizedShowplanV1?> ReadNormalizedPlanAsync(
         string planId, CancellationToken cancellationToken = default) =>
@@ -122,9 +162,8 @@ public sealed class ProtectedQueryStoreRepository(IProtectedRecordStore store)
         var prefix = NormalizedPlanPrefix(planId);
         using var record = await GetRecordAsync(
             new ProtectedRecordId($"{prefix}manifest"), cancellationToken).ConfigureAwait(false);
-        if (record is null)
-            return await ReadJsonAsync<NormalizedShowplanV1>(
-                Id("normalized-plan", planId, "current"), cancellationToken).ConfigureAwait(false);
+        if (record is null || !string.Equals(record.RecordKind, NormalizedPlanKind, StringComparison.Ordinal))
+            return null;
         using var document = JsonDocument.Parse(record.Payload);
         if (!document.RootElement.TryGetProperty(nameof(QueryStoreChunkManifest.ChunkCount), out var count))
             return JsonSerializer.Deserialize<NormalizedShowplanV1>(record.Payload.Span);
