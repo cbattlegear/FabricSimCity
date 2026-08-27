@@ -274,6 +274,123 @@ public sealed class ProtectedQueryStoreHistoryTests
     }
 
     [Fact]
+    public async Task SupersededNormalizedPlanRecordIsReportedAsACacheMiss()
+    {
+        var store = new MemoryProtectedStore();
+        var repository = new ProtectedQueryStoreRepository(store);
+        await repository.StoreNormalizedPlanAsync(RowSizePlan("db:7", null), Now);
+
+        // What an upgraded store actually holds: the same bytes an earlier build wrote, under the
+        // kind that build stamped them with. The payload is left untouched, because the payload is
+        // not what makes the record stale -- the contract it was serialized from is.
+        RestampNormalizedPlan(store, "query-store-normalized-plan");
+
+        Assert.Null(await repository.ReadNormalizedPlanAsync("db:7"));
+    }
+
+    [Fact]
+    public async Task SupersededCachedPlanIsReparsedSoAStatedRowSizeReturns()
+    {
+        var store = new MemoryProtectedStore();
+        var repository = new ProtectedQueryStoreRepository(store);
+        var history = new ConnectedQueryStoreHistorySource(
+            repository, new RowSizePlanSource(), new SecureShowplanParser(),
+            new QueryStoreCollectionStatusTracker(), TimeProvider.System);
+        // ShowplanNodeV1.EstimatedRowSizeBytes is a trailing positional parameter defaulting to
+        // null, so a record written before it existed deserializes into a node that states no row
+        // size instead of failing to deserialize at all. A cache hit never re-parses, so without
+        // the version stamp this plan reports no data volume for as long as the record survives.
+        await repository.StoreNormalizedPlanAsync(RowSizePlan("db:42", null), Now);
+        RestampNormalizedPlan(store, "query-store-normalized-plan");
+
+        var plan = await history.GetPlanAsync("db:42", default);
+
+        Assert.Equal(9m, plan?.Nodes.Single().EstimatedRowSizeBytes);
+    }
+
+    [Fact]
+    public async Task ReparsingReplacesTheSupersededRecordRatherThanOrphaningIt()
+    {
+        var store = new MemoryProtectedStore();
+        var repository = new ProtectedQueryStoreRepository(store);
+        var history = new ConnectedQueryStoreHistorySource(
+            repository, new RowSizePlanSource(), new SecureShowplanParser(),
+            new QueryStoreCollectionStatusTracker(), TimeProvider.System);
+        await repository.StoreNormalizedPlanAsync(RowSizePlan("db:42", null), Now);
+        RestampNormalizedPlan(store, "query-store-normalized-plan");
+
+        await history.GetPlanAsync("db:42", default);
+
+        // The re-hydrating write replaces the whole prefix, so the superseded record is gone
+        // rather than left behind as a second manifest under the same plan id.
+        var manifest = Assert.Single(NormalizedPlanManifests(store));
+        Assert.Equal("query-store-normalized-plan-v2", manifest.RecordKind);
+    }
+
+    [Fact]
+    public async Task SupersededPlanRecordsAreStillMeasuredAsCacheAndStillEvictable()
+    {
+        var store = new MemoryProtectedStore();
+        var repository = new ProtectedQueryStoreRepository(store);
+        await repository.StoreNormalizedPlanAsync(RowSizePlan("db:7", null), Now);
+        RestampNormalizedPlan(store, "query-store-normalized-plan");
+
+        var usage = await store.MeasureUsageAsync();
+        Assert.True(
+            usage.StoredBytesForKinds(ProtectedQueryStoreRepository.PlanCacheRecordKinds) > 0,
+            "a superseded plan record that no kind list names is storage nothing can reclaim");
+
+        var eviction = await repository.EnforcePlanCacheQuotaAsync(usage, 1);
+
+        Assert.True(eviction.EvictedRecords > 0);
+        Assert.Empty(NormalizedPlanManifests(store));
+    }
+
+    /// <summary>
+    /// The cache is keyed by plan id and served without re-reading the Showplan, so a record
+    /// written before the contract gained a member deserializes with that member defaulted --
+    /// silently, and for as long as the record survives. The record kind is the only thing that
+    /// retires such records, and nothing about adding a member forces it to move.
+    ///
+    /// So the contract's shape is pinned here against the kind that currently describes it. A
+    /// member added without bumping the kind fails this test, rather than shipping as a cache
+    /// that quietly answers with less than it used to.
+    /// </summary>
+    [Fact]
+    public void AddingAMemberToTheNormalizedPlanContractRequiresBumpingTheCacheKind()
+    {
+        Assert.Contains(
+            "query-store-normalized-plan-v2", ProtectedQueryStoreRepository.PlanCacheRecordKinds);
+        Assert.Equal(
+            13, typeof(ShowplanNodeV1).GetConstructors().Single().GetParameters().Length);
+        Assert.Equal(
+            12, typeof(NormalizedShowplanV1).GetConstructors().Single().GetParameters().Length);
+    }
+
+    private static ProtectedRecord[] NormalizedPlanManifests(MemoryProtectedStore store) =>
+        store.Records.Values
+            .Where(record =>
+                record.Id.Value.StartsWith("qs:normalized-plan:", StringComparison.Ordinal) &&
+                record.Id.Value.EndsWith(":manifest", StringComparison.Ordinal))
+            .ToArray();
+
+    private static void RestampNormalizedPlan(MemoryProtectedStore store, string recordKind)
+    {
+        var existing = Assert.Single(NormalizedPlanManifests(store));
+        store.Records[existing.Id.Value] = new ProtectedRecord(
+            existing.Id, recordKind, existing.CapturedAt, existing.Resolution, existing.Payload);
+    }
+
+    private static NormalizedShowplanV1 RowSizePlan(string planId, decimal? rowSizeBytes) =>
+        new("1.0", planId, "1.6", null, null, null,
+            [new ShowplanNodeV1(
+                0, null, "Scan", "Index Scan", 4, 1, 1, 1, false, null, null, [], rowSizeBytes)],
+            QueryOptimizationKind.None, null, "fingerprint",
+            "Compiled estimates only.",
+            new QueryStoreEvidenceV1(
+                QueryStoreSource.QueryStore, DataStatus.Available, Now, null, "plan", "compiled"));
+
+    [Fact]
     public async Task FamilyBuildIndexesEachFactSetOnce()
     {
         const int familyCount = 500;
@@ -524,5 +641,30 @@ public sealed class ProtectedQueryStoreHistoryTests
             Task.FromResult<string?>(
                 $"<ShowPlanXML><!--RAW_PRIVATE_MARKER{new string('x', 40_000)}-->" +
                 "<RelOp NodeId=\"0\" LogicalOp=\"Scan\" PhysicalOp=\"Index Scan\" /></ShowPlanXML>");
+    }
+
+    /// <summary>
+    /// A Showplan whose one operator states an <c>AvgRowSize</c>, so a plan parsed from it can be
+    /// told apart from one deserialized out of a cache record written before the normalized plan
+    /// contract could carry a row size.
+    /// </summary>
+    private sealed class RowSizePlanSource : IQueryStoreIncrementalSource
+    {
+        public Task<IReadOnlyList<string>> DiscoverDatabasesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<string>>([]);
+        public Task<QueryStoreDatabaseState> GetStateAsync(
+            string databaseId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<QueryStoreFactPage> ReadPageAsync(
+            string databaseId, QueryStoreFactKind kind, DateTimeOffset startInclusive,
+            DateTimeOffset endExclusive, string? pageToken, int pageSize,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<QueryTextPayload> ReadQueryTextAsync(
+            string databaseId, string queryTextId, CancellationToken cancellationToken) =>
+            Task.FromResult(new QueryTextPayload(null, false, false));
+        public Task<string?> ReadPlanXmlAsync(
+            string databaseId, string planId, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(
+                "<ShowPlanXML><RelOp NodeId=\"0\" LogicalOp=\"Scan\" PhysicalOp=\"Index Scan\" " +
+                "EstimateRows=\"4\" AvgRowSize=\"9\" /></ShowPlanXML>");
     }
 }
