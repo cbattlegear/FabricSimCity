@@ -61,6 +61,7 @@ import {
   polylineLength,
   travelledFraction,
   VEHICLE_CAP,
+  vehiclePaintHue,
   type Vehicle,
   type VehicleClass,
   type VehicleRoster,
@@ -1053,6 +1054,10 @@ export function createDatabaseCityScene(
       material.opacity = flat ? MAP_DISTRICT_OPACITY : CITY_DISTRICT_OPACITY
     }
     materials.civicPad.opacity = flat ? 0.34 : 0.15
+    // Paint is a city-mode idea and `instanceColor` multiplies the ink map mode inverts to, so the
+    // tints are rewritten here rather than only when the roster is rebuilt — a mode toggle changes
+    // no vehicle, and would otherwise leave the previous mode's paint multiplying the new palette.
+    writeVehicleColors()
 
     // Under ambient light alone a standard material renders as its flat base colour, which is the
     // unlit look a basemap needs — without swapping every material's class.
@@ -1675,11 +1680,41 @@ export function createDatabaseCityScene(
    * Framed on a whole city, 1.77 m projects to well under a pixel and the smallest class simply
    * vanishes — and an empty street is *already* meaningful here (nothing was sampled on it), so a
    * vehicle that disappears through being small tells the reader something false.
+   *
+   * 16 rather than the 7 this started at, because "does not vanish" turned out to be a much weaker
+   * requirement than "can be recognised". Measured against a 60-object database at whole-city
+   * framing (1032x900 canvas, fov 46, ~1495 units out), 7 px put a bicycle at 5.7 px and a car at
+   * 13.4 px on screen — a smudge two or three pixels wide, which is why the authored shells were
+   * reported as "just blocks" even though the kit had loaded and every model was drawing correctly.
+   * The same framing at 16 px puts the bicycle at 12.9 px and the car at 30.7 px, which is the
+   * point at which a windscreen and a wheelbase resolve.
    */
-  const VEHICLE_MIN_PX = 7
+  const VEHICLE_MIN_PX = 16
 
-  /** Growth is capped so a bicycle never inflates into something that reads as a truck. */
-  const VEHICLE_MAX_GROWTH = 9
+  /**
+   * Growth is capped so a bicycle never inflates into something that reads as a truck.
+   *
+   * **This number and {@link VEHICLE_MIN_PX} have to move together.** {@link labelScreenScale}
+   * returns `min(maxGrowth, minimumPx / projected)`, so whichever term is smaller is the only one
+   * that has any effect and raising the other alone changes nothing at all. Which term binds depends
+   * on how far out the camera is, so both framings have to be checked: on a small database the
+   * camera is close, `minimumPx / projected` is small, and the floor binds; on a large one the
+   * camera pulls back until that ratio exceeds the cap, and from there the cap alone sets the size.
+   * A change that raised only the floor would therefore be invisible on exactly the big cities where
+   * vehicles are smallest, and one that raised only the cap would be invisible on the small ones.
+   *
+   * 18 is a ceiling, not a preference. Magnification is shared by all five classes (see
+   * {@link placeVehicles}), so the semi-trailer sets how far this can go: 12.24 m at 18x occupies
+   * about 220 world units, which is just inside the ~234-unit light trail already accepted behind a
+   * moving vehicle. Past that a single truck is longer than the street it is driving down, and the
+   * city stops reading as a city.
+   *
+   * What this distorts is the vehicle-to-building ratio, and only that. Because every class shares
+   * one factor, the ladder between the five — the thing that actually carries a measurement — is
+   * exactly as true at 18x as at 1x. A vehicle and a building are different units that this map
+   * never invites comparing, so inflating one against the other costs a reading nobody was making.
+   */
+  const VEHICLE_MAX_GROWTH = 18
 
   type VehicleBatch = {
     readonly klass: VehicleClass
@@ -1771,6 +1806,7 @@ export function createDatabaseCityScene(
     }
 
     placeVehicles()
+    writeVehicleColors()
     if (movingVehicles > 0) runVehicleLoop()
     else stopVehicleLoop()
   }
@@ -1779,6 +1815,71 @@ export function createDatabaseCityScene(
   const vehiclePosition = new THREE.Vector3()
   const vehicleQuaternion = new THREE.Quaternion()
   const vehicleScale = new THREE.Vector3()
+
+  /*
+   * ----------------------------------------------------------------------------------------------
+   * Paint.
+   *
+   * Each live vehicle's body is tinted from a hash of its id, so half a dozen requests on one street
+   * read as half a dozen vehicles rather than one shell drawn six times. `vehiclePaintHue` in
+   * `cityVehicles.ts` owns the hash and explains why it is a hash; the two constants below are the
+   * whole of the appearance decision.
+   *
+   * Saturation and lightness are fixed for every vehicle, and that is the point. Length is the only
+   * measured channel on this map, and a colour that also varied in depth or brightness would read as
+   * a second one. Holding both flat leaves hue saying exactly one thing — *which* request this is —
+   * and nothing about how big it is. It also keeps every vehicle equally bright, so paint can never
+   * be the reason one of them is harder to see than its neighbour.
+   *
+   * Three things about how this reaches the GPU, each of which fails silently:
+   *
+   * 1. **`vertexColors` is deliberately not set on the material**, despite being the flag usually
+   *    named in the same breath as `setColorAt`. In three 0.185 the *vertex* prefix defines
+   *    `USE_COLOR` from `material.vertexColors` alone, while `USE_INSTANCING_COLOR` comes from
+   *    `instanceColor` being present — so instance colours already work without it. Turning it on
+   *    would additionally make the shader multiply in a `color` *geometry attribute* that the kit
+   *    geometry does not have; an unbound attribute reads as zero, and the vehicles would render
+   *    black. The flag is the trap here, not the fix.
+   * 2. **The body role only.** Glass, trim and metal keep their authored materials, so a painted car
+   *    still reads as a car with windows rather than a solid lozenge. `unknown` is left alone
+   *    entirely — it draws with `materials.vehicleUnknown`, which this never touches — because
+   *    "the retained plans never stated a volume" has to stay visibly off the ladder, and a painted
+   *    unknown is just one more car.
+   * 3. **White in map mode.** `instanceColor` *multiplies* the material colour, and map mode inverts
+   *    the vehicle ladder to a dark ink so it survives on a light basemap. A hue multiplied into
+   *    that ink is near-black, not colour. White is the identity, so a printed basemap comes out
+   *    exactly as it did before paint existed. Paint is a city-mode idea: a basemap draws a moving
+   *    thing in one ink, and colouring it in would be inventing a legend.
+   * ----------------------------------------------------------------------------------------------
+   */
+  const VEHICLE_PAINT_SATURATION = 0.68
+  const VEHICLE_PAINT_LIGHTNESS = 0.6
+  const vehiclePaint = new THREE.Color()
+
+  function writeVehicleColors() {
+    const flat = viewMode === 'map'
+    for (const batch of vehicleBatches) {
+      for (const mesh of batch.meshes) {
+        // Identity, not role: the body role and the non-unknown box fallback are exactly the meshes
+        // drawn with this material, and asking the mesh avoids keeping a second list in step.
+        if (mesh.material !== materials.vehicleBody) continue
+        for (let index = 0; index < batch.vehicles.length; index += 1) {
+          if (flat) vehiclePaint.setRGB(1, 1, 1)
+          else {
+            vehiclePaint.setHSL(
+              vehiclePaintHue(batch.vehicles[index].id),
+              VEHICLE_PAINT_SATURATION,
+              VEHICLE_PAINT_LIGHTNESS,
+              THREE.SRGBColorSpace,
+            )
+          }
+          mesh.setColorAt(index, vehiclePaint)
+        }
+        const instanceColor = mesh.instanceColor
+        if (instanceColor) instanceColor.needsUpdate = true
+      }
+    }
+  }
 
   /*
    * The light trail behind a moving vehicle.

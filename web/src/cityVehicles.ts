@@ -410,6 +410,35 @@ export function vehicleClass(family: DatabaseCityQueryFamily): VehicleClass {
 }
 
 /**
+ * The hue, in `[0, 1)`, that a vehicle's body is painted — derived from its id and nothing else.
+ *
+ * Hashed rather than drawn from `Math.random()` because the roster is rebuilt from scratch on every
+ * live sample, which is every two to five seconds. A random hue would repaint the whole city on that
+ * cadence, and a vehicle that changes colour while you are watching it reads as a *different*
+ * vehicle. Hashing the id makes the colour a property of the request, so a car keeps its paint from
+ * the moment it appears until it leaves the map, across every rebuild in between.
+ *
+ * Hue only. The caller pairs this with one fixed saturation and one fixed lightness, so no vehicle
+ * can be brighter, deeper or more washed-out than another. That is deliberate: this map already has
+ * exactly one measured visual channel — length, which says how much data the query moves — and a
+ * second channel that varied with *anything* would invite a reading nobody measured. Colour here is
+ * identity, not magnitude.
+ *
+ * FNV-1a over the UTF-16 code units. It avalanches well enough that ids differing in one character
+ * land far apart on the wheel, which is the only property that matters: two vehicles on the same
+ * street have to be told apart at a glance.
+ */
+export function vehiclePaintHue(id: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < id.length; index += 1) {
+    hash ^= id.charCodeAt(index)
+    // The FNV prime, by shift-and-add: `hash * 16777619` overflows a double's exact integer range.
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0
+  }
+  return (hash >>> 0) / 4294967296
+}
+
+/**
  * Parses one of PR 1's decimal byte strings.
  *
  * `BigInt` rather than `Number` because the product of a row count and a row size routinely exceeds
