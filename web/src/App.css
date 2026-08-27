@@ -1408,6 +1408,31 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 }
 .sidebar-drawer > summary:hover { color: #dbe5ed; }
 .sidebar-drawer[open] > summary { border-bottom: 1px solid #1c2733; }
+
+/*
+ * The count that rides beside a drawer's title.
+ *
+ * Every one of these summaries is written as a bare text node followed by the span --
+ * `<summary>City directory<span class="drawer-badge">114 places</span></summary>` -- and the span had
+ * no rule at all, so the two ran together and the rail read "City directory114 places" and "Live
+ * activityNo blocks". The separation has to come from CSS rather than a space in the markup: JSX
+ * drops whitespace between a text node and an element on the next line, so the space a reader of the
+ * component "sees" is not in the output, and a `{' '}` fixes one call site while leaving the next one
+ * to rediscover the same bug.
+ *
+ * Pushed to the trailing edge rather than merely spaced, so the title and the count read as two
+ * columns however long either gets. The float is what does that: `margin-inline-start: auto` is the
+ * obvious way and is inert here, because it only resolves against free space inside a flex or grid
+ * container and this summary is neither. Making it `display: flex` would work and costs the
+ * disclosure triangle, which belongs to `display: list-item` -- and the triangle is the only thing
+ * saying the row can be opened.
+ */
+.drawer-badge {
+  float: inline-end;
+  padding-inline-start: .75em;
+  color: #6f8296;
+  font-variant-numeric: tabular-nums;
+}
 .sidebar-drawer-body { min-height: 0; overflow: auto; }
 .sidebar-drawer-body > * { margin-block: 0; }
 

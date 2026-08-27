@@ -340,8 +340,18 @@ describe('a vehicle is released when its execution arrives in the feed', () => {
 })
 
 describe('a vehicle whose execution has gone finishes its road and leaves', () => {
+  /**
+   * How long this road takes to drive end to end, at whatever `VEHICLE_SPEED` currently is.
+   *
+   * Derived rather than a fixed 1,000 units, because every scenario below is really about *when* a
+   * car is on its road and not about how long the road is. A literal length silently couples them:
+   * doubling the speed once already turned "20 seconds in, query left 10 seconds ago" from a car two
+   * thirds of the way round its first lap into a car that had finished and retired, so
+   * `vehicles[0]` was `undefined` and the guard failed on a property of nothing.
+   */
+  const LONG_ROAD_SECONDS = 30
   /** A road long enough that a car takes a while to cross it, so laps are observable. */
-  const longRoad = road({ polyline: [{ x: 0, z: 0 }, { x: 1_000, z: 0 }] })
+  const longRoad = road({ polyline: [{ x: 0, z: 0 }, { x: VEHICLE_SPEED * LONG_ROAD_SECONDS, z: 0 }] })
 
   function rosterAt(firstSeenAgoMs: number, endedAgoMs: number | null) {
     return buildVehicleRoster({
@@ -629,7 +639,11 @@ describe('a blocked vehicle stops, and only on evidence it is entitled to', () =
     const roster = buildVehicleRoster({
       events: [event({ blocked: true, firstSeenAt: NOW - 3_000, endedAt: NOW - 1_000 })],
       families: [family()],
-      roads: [road()],
+      // Long enough that three seconds of travel is under one lap at any speed, so this stays a test
+      // about releasing a block rather than an accident of how fast the default 100-unit road is
+      // lapped. At 82 units/second a car covers that road two and a half times in three seconds and
+      // retires, which is why the assertion below started reading a property of `undefined`.
+      roads: [road({ polyline: [{ x: 0, z: 0 }, { x: VEHICLE_SPEED * 4, z: 0 }] })],
       blocked: new Map([[51, { x: 30, z: 40, basis: 'sharedRoad', routeId: 'route-1', rationale: 'pinned' }]]),
       now: NOW,
     })

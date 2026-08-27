@@ -185,8 +185,15 @@ describe('the exported vehicle kit contains what the scene asks for', () => {
     // Both anchors are asserted before slicing. `indexOf` returns -1 for a renamed anchor, and
     // `slice(-1, …)` or `slice(…, -1)` silently widens the window to most of the file, at which
     // point this stops testing the fallback table and starts passing on anything.
+    //
+    // The end anchor is `VEHICLE_MIN_PX` and not `VEHICLE_Y`, which is what it used to be. `VEHICLE_Y`
+    // was promoted to module scope so the trail height could be derived from the road ribbon stack,
+    // which moved it about 1,500 lines *above* `VEHICLE_SIZE` -- so the window inverted, `to < from`,
+    // and `String.slice` with a reversed range returns an empty string. Every `length:` lookup below
+    // then finds nothing. The assertion on the line after this comment is the only reason that
+    // surfaced as a failure rather than as four silently-skipped comparisons.
     const from = scene.indexOf('const VEHICLE_SIZE')
-    const to = scene.indexOf('const VEHICLE_Y')
+    const to = scene.indexOf('const VEHICLE_MIN_PX')
     expect(from).toBeGreaterThan(-1)
     expect(to).toBeGreaterThan(from)
     const table = scene.slice(from, to)

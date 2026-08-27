@@ -29,13 +29,23 @@ function constant(name: string): number {
   return Number(match![1])
 }
 
-/** Read from the scene rather than restated, so the ladder and the guard cannot drift apart. */
+/**
+ * Read from the scene rather than restated, so the ladder and the guard cannot drift apart.
+ *
+ * The slice ends at `VEHICLE_MIN_PX` and not, as it first did, at `VEHICLE_Y`. `VEHICLE_Y` was a
+ * local sitting just below the ladder until the trail fix promoted it to a module-level constant
+ * near the top of the file, at which point `indexOf` found it *before* `VEHICLE_SIZE` and the slice
+ * inverted — `scene.slice(from, to)` with `to < from` returns the empty string, so every class would
+ * have read as "no longer a rung on the ladder". Both bounds are now constants this file already
+ * reads by name, so renaming either one fails loudly here instead of silently retargeting the slice.
+ */
 function vehicleLength(klass: string): number {
   const from = scene.indexOf('const VEHICLE_SIZE')
-  const to = scene.indexOf('const VEHICLE_Y')
+  const to = scene.indexOf('const VEHICLE_MIN_PX')
   expect(from, 'VEHICLE_SIZE has been renamed and this guard now measures nothing')
     .toBeGreaterThan(-1)
-  expect(to, 'VEHICLE_Y has been renamed and this slice is unbounded').toBeGreaterThan(from)
+  expect(to, 'VEHICLE_MIN_PX no longer follows the ladder and this slice is unbounded')
+    .toBeGreaterThan(from)
   const match = scene.slice(from, to).match(new RegExp(`${klass}: \\{[^}]*length: ([\\d.]+)`))
   expect(match, `${klass} is no longer a rung on the ladder`).not.toBeNull()
   return Number(match![1])

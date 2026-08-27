@@ -1084,3 +1084,82 @@ describe('three drawers in one rail share one height budget', () => {
       .toBeGreaterThan(css.indexOf('\n.sidebar-drawers {'))
   })
 })
+
+/*
+ * The count that rides beside a drawer title.
+ *
+ * Measured in Chromium before the fix, at 1440x900, 1115x800 and 820x900 alike: the gap between the
+ * title's last glyph box and the badge's first was **0.00px** at every one of them, which is what
+ * "City directory114 places" and "Live activityNo blocks" are. `.drawer-badge` simply had no rule.
+ * After: 188.31px / 120.31px / 601.31px, each badge inset 16px from the trailing edge, still one
+ * 34px line.
+ *
+ * These live in this file so they read the desktop/sheet split above rather than growing a fourth
+ * private stylesheet parser -- and because the trap that split exists for applies here directly: a
+ * narrow override for `.drawer-badge` would silently retarget the desktop assertion at itself.
+ */
+describe('the count beside a drawer title', () => {
+  it('is separated from the title by CSS, because the markup cannot carry a space', () => {
+    const rule = desktopRule('.drawer-badge')
+    expect(rule, '.drawer-badge has no rule at all -- the title and the count run together').not.toBeNull()
+    expect(rule, 'nothing holds the count off the title').toMatch(/padding-inline-start:\s*[^;]+/)
+  })
+
+  /*
+   * The failure this pins is a *silent* one, which is why it is asserted rather than left to review.
+   * `margin-inline-start: auto` is the idiomatic way to push a child to the trailing edge and it does
+   * nothing at all here: it only resolves against free space inside a flex or grid container, and
+   * `<summary>` is `display: list-item`. It parses, it survives every linter, and the badge stays
+   * exactly where it was.
+   */
+  it('reaches the trailing edge by a means that works outside flex and grid', () => {
+    const rule = desktopRule('.drawer-badge') ?? ''
+    expect(rule, 'the count no longer reaches the trailing edge').toMatch(/float:\s*inline-end/)
+    expect(rule, 'margin auto is inert on a list-item summary and will not move the badge')
+      .not.toMatch(/margin-inline-start:\s*auto/)
+  })
+
+  /*
+   * The other way to right-align this is `display: flex` on the summary, which works and takes the
+   * disclosure triangle with it -- the triangle is `display: list-item`'s marker, and it is the only
+   * thing on the row saying the row opens. So the badge must not be paid for out of the summary's
+   * display type.
+   */
+  /*
+   * Deliberately not `desktopRule`. `ownRule` returns the *last* rule matching the selector and its
+   * optional pseudo-class, and the rule after each of these summaries is its own `:hover` -- so
+   * `desktopRule('.sidebar-drawer > summary')` hands back `color: #dbe5ed` and an assertion about
+   * `display` passes against a stylesheet that does set `display: flex`. That was caught by mutating
+   * the stylesheet and watching this very test keep passing, which is the whole reason to run the
+   * mutation rather than trust the green tick. Every rule targeting the summary has to be checked,
+   * because any one of them can carry the declaration.
+   */
+  it('does not cost the summary its disclosure marker', () => {
+    for (const selector of ['.sidebar-drawer > summary', '.sidebar-directory > summary']) {
+      const matching = rules(desktopCss).filter((rule) => rule.selector
+        .split(',')
+        .some((one) => one.trim() === selector || one.trim().startsWith(`${selector}:`)))
+      expect(matching.length, `no rule targets ${selector} any more`).toBeGreaterThan(0)
+      for (const rule of matching) {
+        expect(rule.body, `${selector} became a flex container, which drops the disclosure triangle`)
+          .not.toMatch(/display:\s*(flex|grid|inline-flex|inline-grid)/)
+      }
+    }
+  })
+
+  it('reads as secondary to the title rather than competing with it', () => {
+    const rule = desktopRule('.drawer-badge') ?? ''
+    expect(rule, 'the count is not dimmed against the title').toMatch(/color:\s*#[0-9a-f]{6}/i)
+    // Counts change in place while you watch them; proportional digits make the row twitch.
+    expect(rule).toMatch(/font-variant-numeric:\s*tabular-nums/)
+  })
+
+  it('covers every summary that carries one, not just the one that was reported', () => {
+    const panels = [
+      readFileSync(new URL('./AddressPanel.tsx', import.meta.url), 'utf8'),
+      readFileSync(new URL('./DatabaseCityView.tsx', import.meta.url), 'utf8'),
+    ].join('\n')
+    const uses = panels.match(/className="drawer-badge"/g) ?? []
+    expect(uses.length, 'the badge class is no longer what the summaries use').toBeGreaterThanOrEqual(3)
+  })
+})

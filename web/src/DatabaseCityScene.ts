@@ -12,6 +12,7 @@ import {
   corridorKeys,
   DASH_PATTERNS,
   laneOffset,
+  MAX_LANE,
   offsetPolyline,
 } from './cityRoads'
 import { ribbonGeometry, ribbonPositions } from './mapRibbon'
@@ -171,6 +172,52 @@ export function sink<M extends THREE.Material>(material: M, rank: number): M {
 export function roadRank(lane: number): number {
   return GROUND_RANK.road - Math.min(Math.max(lane, 0), 8) * 0.1
 }
+
+/*
+ * ------------------------------------------------------------------------------------------------
+ * The three things drawn on the street, and the order they have to be drawn in.
+ * ------------------------------------------------------------------------------------------------
+ *
+ * `GROUND_RANK` above orders the flat sheets *under* the street by polygon offset, which works
+ * because they are coplanar. These three are not coplanar and are not ordered that way: they are
+ * separated in `y`, and depth testing decides which one a pixel belongs to. So the ordering is only
+ * as good as the arithmetic, and getting it wrong makes something disappear rather than flicker.
+ *
+ * That is exactly what happened to the light trail. It was pinned at a hard-coded `0.05` under a
+ * comment claiming it was "just above the road ribbon", while road ribbons are laid at
+ * `ROAD_Y + lane * ROAD_LANE_STEP` and so reach {@link ROAD_TOP_Y} — nearly three times as high. A
+ * trail is drawn along the route its vehicle is driving, which is precisely where that route's own
+ * ribbon is, so the ribbon sat on top of the wake for its entire length and the trail was visible
+ * only where it happened to be wider than the road under it. Measured in Chromium before the fix:
+ * of ~906,400 pixels, between 28 and 76 trail-coloured pixels changed from frame to frame — the
+ * fringes, and nothing else.
+ *
+ * Deriving all three from one expression is the point. Two independent literals is what let the
+ * ribbon stack grow past the trail without anything saying so.
+ */
+
+/** The height of the lowest road ribbon. */
+export const ROAD_Y = 0.06
+/** How far each additional lane sharing a street is lifted, so coplanar ribbons never z-fight. */
+export const ROAD_LANE_STEP = 0.014
+/** The highest ribbon any lane can claim. Every lane from 0 to `MAX_LANE` is below this. */
+export const ROAD_TOP_Y = ROAD_Y + MAX_LANE * ROAD_LANE_STEP
+/**
+ * The light trail, clear of the whole ribbon stack rather than of lane zero alone.
+ *
+ * The gap is small because the trail still has to read as painted *onto* the street rather than
+ * floating over it; it only has to beat the depth buffer, not be seen to.
+ */
+export const TRAIL_Y = ROAD_TOP_Y + 0.006
+/**
+ * The vehicles, above their own wake.
+ *
+ * A vehicle is a solid model standing on this point and rising `height * magnify` above it, so this
+ * is where it meets the road and not where it is seen. Keeping it over {@link TRAIL_Y} means a car
+ * sits on its trail instead of inside it, and the brightest end of the ribbon — the flare, at the
+ * bumper — is not swallowed by the shell it is supposed to be trailing from.
+ */
+export const VEHICLE_Y = TRAIL_Y + 0.01
 
 export type CameraNudge =
   | 'panLeft'
@@ -1659,20 +1706,27 @@ export function createDatabaseCityScene(
   }
 
   /*
-   * How fast a vehicle travels, in world units per second — the same speed for all five classes.
+   * How fast a vehicle travels, in world units per second.
    *
-   * Speed is *not* a channel. SQL Server reports nothing about how fast a request is progressing, so
-   * a faster-moving vehicle would be a claim nobody measured, and it would also fight the one claim
-   * that is real: size. Everything drives at one speed and differs only in size.
+   * Speed *is* a channel, which reverses what this comment said until recently. What it encodes is
+   * the family's mean duration per execution — a Query Store aggregate — scaled to ±15% around the
+   * base speed, so a historically quick query drives a quick car.
    *
-   * The number itself lives in `cityVehicles.ts` beside {@link travelledFraction}, because the roster
-   * has to know it too: it is what decides when a finished car has reached the end of its road and
-   * can leave the map. Two copies would drift, and the symptom would be cars vanishing early or
-   * lingering — neither of which looks like a bug in a constant.
+   * The distinction that keeps this honest is between a *duration aggregate* and *progress*. SQL
+   * Server still reports nothing about how far through a running statement is, so a vehicle's pace is
+   * never a claim about the execution it represents; it is a claim about what executions of that
+   * query have typically cost, which is measured. It is also why the scale comes off the family and
+   * not off the live request's elapsed time: the live figure grows between samples, and a car whose
+   * speed changed under it would jump down the road on every tick.
+   *
+   * Size still carries the larger claim, and the ±15% band is deliberately too narrow to compete
+   * with it — see `VEHICLE_SPEED_VARIATION`.
+   *
+   * The numbers themselves live in `cityVehicles.ts` beside {@link travelledFraction}, because the
+   * roster has to know them too: they are what decide when a finished car has reached the end of its
+   * road and can leave the map. Two copies would drift, and the symptom would be cars vanishing early
+   * or lingering — neither of which looks like a bug in a constant.
    */
-
-  /** Vehicles sit a hair above the road ribbon so they never z-fight with it. */
-  const VEHICLE_Y = 0.06
 
   /**
    * The shortest a bicycle may be allowed to get on screen, in CSS pixels.
@@ -1933,8 +1987,37 @@ export function createDatabaseCityScene(
    * over road it was never on.
    */
   const TRAIL_SPAN = 26
-  /** Ribbon width at the bumper, in world units. Close to a car's width, so it reads as its wake. */
-  const TRAIL_WIDTH = 1.9
+  /**
+   * How wide the ribbon is at the bumper, **as a fraction of the width of the vehicle leaving it**.
+   *
+   * This was a flat 1.9 world units for every class, which is roughly a car's width (1.87) — so the
+   * ribbon was sized for exactly one of the five rungs and wrong for the other four in both
+   * directions. It read worst at the bottom, which is also where most of the traffic is: a bicycle is
+   * 0.52 m wide and 1.77 m long, so its wake was **3.6x wider than the bike** and half again wider
+   * than the bike was *long*. Measured at whole-city framing on a 60-object database (magnify 12.7),
+   * that is a 15.4 px-wide ribbon trailing a 4.2 px-wide, 14.3 px-long shell — which is not a wake,
+   * it is a smudge with a speck at the front of it. And 71% of the vehicles on that database are
+   * bicycles, so it was the common case rather than an edge one.
+   *
+   * Deriving it from {@link VEHICLE_SIZE} rather than restating a number is the same lesson the trail
+   * *height* taught one screen up: two independent literals is what lets a ribbon and the thing it
+   * belongs to drift apart with nothing saying so. A new class, or a re-export of `vehicles.glb` at
+   * different proportions, now moves both together.
+   *
+   * Below one, so the streak sits inside the silhouette and reads as light coming off the vehicle
+   * rather than as a tyre mark the full width of it. The resulting ladder at that same framing is
+   * 2.6 px / 9.4 px / 11.6 px / 13.2 px for bike, car, van and semi-trailer — narrower than the old
+   * flat ribbon at every rung, which is the other half of what was asked for.
+   *
+   * Deliberately *not* floored at a minimum width. A floor is what {@link VEHICLE_MIN_PX} does for
+   * the shells, and it is right there because a vehicle that vanishes tells the reader something
+   * false — an empty street already means "nothing was sampled here". A trail carries no such
+   * meaning on its own, and a floor would flatten the bottom of exactly the ladder this restores. The
+   * narrowest case stays legible anyway because the ribbon is long: at the cap, a bicycle's wake is
+   * about a pixel across and some 330 world units back, and a one-pixel streak that long is not
+   * something the eye loses.
+   */
+  const TRAIL_WIDTH_RATIO = 0.62
   /**
    * Opacity at the bumper once a vehicle has settled.
    *
@@ -1953,8 +2036,6 @@ export function createDatabaseCityScene(
   /** What the bumper end of a city-mode trail is tinted toward, so the leading edge reads as bright. */
   const TRAIL_HIGHLIGHT = new THREE.Color(0xffffff)
   const TRAIL_VERTICES = VEHICLE_CAP * TRAIL_SEGMENTS * 6
-  /** Just above the road ribbon and just below the vehicles, so it z-fights with neither. */
-  const TRAIL_Y = 0.05
 
   const trailPositions = new Float32Array(TRAIL_VERTICES * 3)
   const trailColors = new Float32Array(TRAIL_VERTICES * 4)
@@ -2027,12 +2108,15 @@ export function createDatabaseCityScene(
     let vertex = 0
     const flat = viewMode === 'map'
     const base = flat ? TRAIL_MAP_COLOR : TRAIL_CITY_COLOR
-    const halfWidth = (TRAIL_WIDTH * magnify) / 2
     // Magnified with the shells, so the ribbon keeps its proportion to the car at every zoom. See
     // TRAIL_SPAN: magnifying one and not the other is what made this invisible.
     const span = TRAIL_SPAN * magnify
 
     for (const batch of vehicleBatches) {
+      // Per class, not per frame: the batches are already grouped by class, so the wake of every
+      // vehicle in one costs a single multiply rather than a lookup per vehicle. See
+      // TRAIL_WIDTH_RATIO for why this is no longer one width shared by all five rungs.
+      const halfWidth = (VEHICLE_SIZE[batch.klass].width * TRAIL_WIDTH_RATIO * magnify) / 2
       for (let index = 0; index < batch.moving; index += 1) {
         const vehicle = batch.vehicles[index]
         const length = batch.routeLengths[index]
@@ -2042,7 +2126,12 @@ export function createDatabaseCityScene(
         const elapsed = vehicle.elapsedSeconds + seconds
         // A vehicle still waiting out its launch stagger has covered no road, so it has no wake.
         if (elapsed <= 0) continue
-        const head = travelledFraction(vehicle.points, elapsed, vehicle.finishedAfterSeconds) * length
+        const head = travelledFraction(
+          vehicle.points,
+          elapsed,
+          vehicle.finishedAfterSeconds,
+          vehicle.speedScale,
+        ) * length
         const tail = Math.max(0, head - span)
         if (head - tail < 0.01) continue
 
@@ -2156,6 +2245,7 @@ export function createDatabaseCityScene(
             vehicle.points,
             vehicle.elapsedSeconds + seconds,
             vehicle.finishedAfterSeconds,
+            vehicle.speedScale,
           )
           const at = pointAt(vehicle.points, travelled)
           x = at.x
@@ -2880,8 +2970,9 @@ export function createDatabaseCityScene(
       const ribbon = ribbonGeometry(points, road.width, DASH_PATTERNS[road.pattern], offset)
       if (!ribbon) continue
       const mesh = new THREE.Mesh(track(ribbon), roadMaterial(road.color, road.pattern !== 'solid', roadRank(lane)))
-      // Lane order also stacks the ribbons a hair apart so coplanar roads never z-fight.
-      mesh.position.y = 0.06 + lane * 0.014
+      // Lane order also stacks the ribbons a hair apart so coplanar roads never z-fight. The trail
+      // and the vehicles are laid above the top of this stack -- see ROAD_TOP_Y.
+      mesh.position.y = ROAD_Y + lane * ROAD_LANE_STEP
       mesh.userData.routeId = road.routeId
       mesh.renderOrder = 1
       roadGroup.add(mesh)
