@@ -1107,8 +1107,8 @@ function LiveQueryTicker({
     <div className="query-ticker">
       {feed.events.length === 0 && (
         <p className="hud-note">
-          Nothing sampled yet. The collector looks every few seconds, so a query that starts and
-          finishes between two looks never appears here at all.
+          Nothing observed yet. Queries are learned two ways — caught mid-execution, or read from
+          the plan cache once they finish — and neither has reported one.
         </p>
       )}
       {feed.events.length > 0 && (
@@ -1130,12 +1130,23 @@ function LiveQueryTicker({
                   <span className="query-ticker-when">{clockTime(event.firstSeenAt)}</span>
                   <span className="query-ticker-where">
                     {event.databaseName ?? 'database not reported'}
-                    {' · '}
-                    session {event.sessionId}
-                    {' · '}
-                    {event.command ?? 'command not reported'}
+                    {event.sessionId !== null ? ` · session ${event.sessionId}` : ''}
+                    {event.command ? ` · ${event.command}` : ''}
                     {event.waitType ? ` · waiting on ${event.waitType}` : ''}
                   </span>
+                  {/*
+                    * A row standing for more than one execution says so, because the alternative is
+                    * a list in which four executions and one execution look identical. The tilde
+                    * marks a first observation: the engine reports a cumulative counter, so the
+                    * first time this browser sees a plan there is nothing to difference against and
+                    * 1 is the evidenced floor rather than a measurement.
+                    */}
+                  {event.executions > 1 && (
+                    <span className="query-ticker-flag is-repeat">
+                      {event.executionsEstimated ? '~' : ''}
+                      {event.executions}×
+                    </span>
+                  )}
                   {event.blocked && event.endedAt === null && (
                     <span className="query-ticker-flag is-blocked">blocked</span>
                   )}
@@ -1273,23 +1284,27 @@ function LegendDrawer({
         </div>
 
         <p className="mapping-note">
-          <strong>Vehicles are what is running right now.</strong> One vehicle is one row of{' '}
-          <code>sys.dm_exec_requests</code> that was executing when the collector last sampled, matched
-          to a query family by <code>query_hash</code> and placed on the busiest road that family
+          <strong>Vehicles are executions the engine reported.</strong> One vehicle is one execution,
+          learned about one of two ways: a row of <code>sys.dm_exec_requests</code> that was executing
+          when the collector last sampled, or a plan in <code>sys.dm_exec_query_stats</code> whose
+          execution counter advanced since the previous sample. Either way it is matched to a query
+          family by <code>query_hash</code> and placed on the busiest road that family
           already draws. Its size maps the bytes that family&apos;s retained execution plans estimate
           it moves per execution — the four cut points above are an invented ladder, chosen so each
-          rung is a rough order of magnitude, and only the ordering between them is evidence. Every
-          vehicle drives at the same speed, because nothing in the engine reports how fast a request
-          is progressing; speed here would be decoration dressed as a measurement. A vehicle stops
+          rung is a rough order of magnitude, and only the ordering between them is evidence. A
+          vehicle&apos;s speed varies by up to 15% with its family&apos;s mean captured duration, so a
+          historically slow family crawls and a fast one hurries; it is a property of the family, not
+          a reading of this execution&apos;s progress, which the engine does not report. A vehicle stops
           only where a live block pinned its own session, and it stops on the street it was already
           driving: it never changes road to reach a pin, because the pin&apos;s placement is a claim
           about the blocked object, not about this request&apos;s route. Recorded deadlock graphs stop
           nothing, since the sessions they name were already killed before anything could be sampled.{' '}
           <strong>Grey cubes are not small queries.</strong> A cube means the retained plans never
           stated both a row count and a row width, so no size was measured; it sits on no rung, which
-          is why it has no length to read. <strong>An empty street means nothing was sampled on it,
-          not that nothing ran on it</strong> — the feed takes a periodic snapshot, so a query that
-          began and finished between two samples was never seen at all.{' '}
+          is why it has no length to read. <strong>An empty street means neither source reported an
+          execution on it, not that nothing ran on it</strong> — sampling still misses a query that
+          began and finished between two samples <em>and</em> whose plan was never cached, and the
+          plan cache cannot see a statement it did not keep a plan for.{' '}
           {vehicleSummaryLabel(vehicles)}
         </p>
 

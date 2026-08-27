@@ -15,6 +15,18 @@ public sealed class FakeLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
     public Func<CancellationToken, Task<IReadOnlyList<WaitingTaskFact>>>? WaitingTasks { get; set; }
     public Func<CancellationToken, Task<IReadOnlyList<BlockingInputFact>>>? BlockingInputs { get; set; }
     public Func<CancellationToken, Task<IReadOnlyList<MemoryGrantRow>>>? MemoryGrants { get; set; }
+
+    /// <summary>
+    /// Hook for <c>sessions.completed_query_stats</c>. The watermark argument is surfaced because it
+    /// is the one the collector must NOT advance after a failed read -- a test that cannot see what
+    /// was asked for cannot tell a retained watermark from a discarded interval.
+    /// </summary>
+    public Func<DateTimeOffset?, int?, bool, int?, CancellationToken, Task<IReadOnlyList<CompletedQueryRow>>>? CompletedQueries { get; set; }
+
+    /// <summary>The watermark passed on the most recent completed-query call, or null if never called.</summary>
+    public DateTimeOffset? LastCompletedQueryWatermark { get; private set; }
+
+    public int CompletedQueriesCallCount { get; private set; }
     public Func<bool, CancellationToken, Task<TempdbUsageRaw>>? TempdbUsage { get; set; }
     public Func<bool, CancellationToken, Task<IReadOnlyList<FileIoRow>>>? FileIoStats { get; set; }
     public Func<bool, CancellationToken, Task<IReadOnlyList<SchedulerRow>>>? SchedulerPressure { get; set; }
@@ -48,8 +60,16 @@ public sealed class FakeLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
         return (ActiveRequests ?? (_ => Task.FromResult<IReadOnlyList<ActiveRequestRow>>([])))(cancellationToken);
     }
 
-    public Task<IReadOnlyList<WaitingTaskFact>> GetWaitingTasksAsync(CancellationToken cancellationToken) =>
-        (WaitingTasks ?? (_ => Task.FromResult<IReadOnlyList<WaitingTaskFact>>([])))(cancellationToken);
+    public Task<IReadOnlyList<CompletedQueryRow>> GetCompletedQueriesAsync(
+        DateTimeOffset? sinceEngineLocal, int? maxRows, bool includeSqlText, int? maxTextLength, CancellationToken cancellationToken)
+    {
+        CompletedQueriesCallCount++;
+        LastCompletedQueryWatermark = sinceEngineLocal;
+        return (CompletedQueries ?? ((_, _, _, _, _) => Task.FromResult<IReadOnlyList<CompletedQueryRow>>([])))(
+            sinceEngineLocal, maxRows, includeSqlText, maxTextLength, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<WaitingTaskFact>> GetWaitingTasksAsync(CancellationToken cancellationToken) =>        (WaitingTasks ?? (_ => Task.FromResult<IReadOnlyList<WaitingTaskFact>>([])))(cancellationToken);
 
     public Task<IReadOnlyList<BlockingInputFact>> GetBlockingInputsAsync(CancellationToken cancellationToken) =>
         (BlockingInputs ?? (_ => Task.FromResult<IReadOnlyList<BlockingInputFact>>([])))(cancellationToken);

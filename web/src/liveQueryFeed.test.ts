@@ -4,11 +4,17 @@ import {
   liveQuerySummaryLabel,
   queryEventId,
   EMPTY_QUERY_FEED,
+  LIVE_QUERY_ARRIVAL_BURST_CAP,
   LIVE_QUERY_FEED_CAP,
 } from './liveQueryFeed'
 import type { LiveQueryFeedScope } from './liveQueryFeed'
 import type { DatabaseCityQueryFamily } from './databaseCityContracts'
-import type { LiveIncidentSnapshot, LiveRequest } from './liveContracts'
+import type {
+  CompletedQuery,
+  CompletedQuerySample,
+  LiveIncidentSnapshot,
+  LiveRequest,
+} from './liveContracts'
 
 /**
  * The feed is the only surface on this page that claims to be a log of *events*, and every way it
@@ -117,7 +123,7 @@ describe('an arrival is an observation, and the row says whose clock it is on', 
 
   it('says in plain words that arrival is an observation and departure is not success', () => {
     const feed = fold([snapshot([request()])])
-    expect(feed.reason).toMatch(/first sampled the execution, not when the query started/i)
+    expect(feed.reason).toMatch(/first learned of the execution, not when the query ran/i)
     expect(feed.reason).toMatch(/not that it succeeded/i)
   })
 })
@@ -598,5 +604,271 @@ describe('the feed describes one database, not the instance it was sampled from'
     )
     expect(moved.events).toHaveLength(0)
     expect(moved.elsewhere).toBe(1)
+  })
+})
+
+/**
+ * Helpers for the plan-cache half of the feed.
+ *
+ * These build a snapshot carrying both sources, because the whole point of the fold is that they
+ * arrive together and land in one list.
+ */
+function completed(over: Partial<CompletedQuery> = {}): CompletedQuery {
+  return {
+    planKey: 'a'.repeat(64),
+    executions: 1,
+    firstObservation: false,
+    lastExecutionAt: '2024-01-01T00:00:03Z',
+    lastElapsedTimeUs: 2_000,
+    lastWorkerTimeUs: 1_000,
+    lastLogicalReads: 8,
+    lastRows: 1,
+    databaseId: 5,
+    databaseName: 'Shop',
+    statementText: 'SELECT 2',
+    queryHash: 'AABBCCDDEEFF0011',
+    queryPlanHash: null,
+    ...over,
+  }
+}
+
+function completedSample(
+  queries: CompletedQuery[],
+  over: Partial<CompletedQuerySample> = {},
+): CompletedQuerySample {
+  return {
+    queries,
+    plansAdvanced: queries.length,
+    totalExecutions: queries.reduce((sum, query) => sum + query.executions, 0),
+    watermarkEngineLocal: '2024-01-01T00:00:03Z',
+    intervalMs: 3_000,
+    status: 'Available',
+    reason: 'read',
+    ...over,
+  }
+}
+
+/** A snapshot carrying both sources. */
+function both(requests: LiveRequest[], sample: CompletedQuerySample | null): LiveIncidentSnapshot {
+  return { requests, completedQueries: sample ?? undefined } as LiveIncidentSnapshot
+}
+
+describe('finished queries and running ones are one list, not two', () => {
+  /*
+   * The reason this source exists at all. Mutation checked: dropping the plan-cache pass leaves the
+   * feed with only the request rows, which is the ~2%-of-the-workload view that motivated the change.
+   */
+  it('admits an execution that no request sample ever caught', () => {
+    const feed = fold([both([], completedSample([completed()]))])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.events[0].source).toBe('plan-cache')
+    expect(feed.executions).toBe(1)
+  })
+
+  /*
+   * The user asked for one combined view rather than a "live" and a "completed" section. Both
+   * sources therefore share one ordinal sequence and one sort, so a finished query and a running one
+   * interleave by arrival like any other two rows.
+   *
+   * Mutation checked: appending plan-cache events after the sort, or giving them a separate ordinal
+   * counter, puts every finished query below every running one regardless of when it turned up.
+   */
+  it('interleaves both sources by arrival rather than grouping them', () => {
+    const feed = fold([
+      both([request({ requestId: 'req:51:0' })], null),
+      both([request({ requestId: 'req:51:0' })], completedSample([completed({ queryHash: null })])),
+      both([request({ sessionId: 52, requestId: 'req:52:0', queryHash: null })], null),
+    ])
+    expect(feed.events.map(event => event.source)).toEqual([
+      'sampled-request',
+      'plan-cache',
+      'sampled-request',
+    ])
+  })
+
+  /*
+   * A plan-cache row describes executions that had already finished when they were read, so there is
+   * no departure left to observe. Retiring it on the next sample would re-create exactly the
+   * completed-versus-live distinction this list exists to remove -- and would do it by dimming every
+   * such row one sample after it appeared.
+   *
+   * Mutation checked: removing the `source === 'plan-cache'` guard from the merge loop marks every
+   * one of them "gone" on the very next fold.
+   */
+  it('never marks a finished query as having departed', () => {
+    const feed = fold([
+      both([], completedSample([completed()])),
+      both([], completedSample([], { watermarkEngineLocal: '2024-01-01T00:00:06Z' })),
+      both([], completedSample([], { watermarkEngineLocal: '2024-01-01T00:00:09Z' })),
+    ])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.events[0].endedAt).toBeNull()
+  })
+
+  /*
+   * `running` drives the collapsed drawer summary. A plan-cache row has already finished, so counting
+   * it would report an idle instance as busy -- and it has `endedAt === null` precisely because of
+   * the guard above, so the naive count is the one that goes wrong.
+   *
+   * Mutation checked: counting every `endedAt === null` event reports 1 running here.
+   */
+  it('does not count a finished query as running', () => {
+    const feed = fold([both([], completedSample([completed()]))])
+    expect(feed.running).toBe(0)
+    expect(liveQuerySummaryLabel(feed)).toBe('1 execution seen')
+  })
+})
+
+describe('a cumulative counter is not an execution count', () => {
+  /*
+   * One row can stand for several executions, and the summary has to say so or a busy instance reads
+   * as a quiet one. Mutation checked: reporting `events.length` instead of summing `executions`
+   * says 1 where the engine ran the query four times.
+   */
+  it('reports executions rather than rows when a plan ran more than once', () => {
+    const feed = fold([both([], completedSample([completed({ executions: 4 })]))])
+    expect(feed.events[0].executions).toBe(4)
+    expect(feed.executions).toBe(4)
+    expect(feed.observed).toBe(1)
+    expect(feed.reason).toMatch(/accounting for 4 executions/i)
+  })
+
+  /*
+   * A first observation is a floor, not a measurement, and the row is flagged so the UI can mark it.
+   * Mutation checked: dropping `executionsEstimated` renders "4×" identically whether the number was
+   * differenced or assumed.
+   */
+  it('carries the estimated flag through from a first observation', () => {
+    const feed = fold([both([], completedSample([completed({ executions: 1, firstObservation: true })]))])
+    expect(feed.events[0].executionsEstimated).toBe(true)
+  })
+})
+
+describe('one execution is one car', () => {
+  /*
+   * A query slow enough to be caught mid-flight will also advance the plan cache when it finishes.
+   * Admitting both puts two rows -- and two cars -- on the map for one execution.
+   *
+   * Mutation checked: removing the `arrivedHashes` subtraction yields two events for one query.
+   */
+  it('does not list a query twice when both sources report it in one sample', () => {
+    const feed = fold([both([request()], completedSample([completed()]))])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.events[0].source).toBe('sampled-request')
+  })
+
+  /*
+   * The subtraction is partial, not all-or-nothing: a plan that ran four times while one of those
+   * executions was caught mid-flight still has three the request list never saw. Discarding the
+   * whole row would lose them.
+   *
+   * Mutation checked: skipping the row whenever the hash overlaps at all drops three real executions.
+   */
+  it('keeps the executions a caught request does not account for', () => {
+    const feed = fold([both([request()], completedSample([completed({ executions: 4 })]))])
+    expect(feed.events).toHaveLength(2)
+    const planRow = feed.events.find(event => event.source === 'plan-cache')
+    expect(planRow?.executions).toBe(3)
+  })
+})
+
+describe('the same plan running again is a new arrival', () => {
+  /*
+   * Keying a plan-cache row on the plan alone folds every later interval into the row that arrived
+   * first -- which then keeps its original arrival time, so a hot plan appears once and the feed
+   * looks frozen while the instance churns. This is the plan-cache form of the session-reuse trap
+   * the request identity already guards against.
+   *
+   * Mutation checked: dropping the watermark from `completedEventId` produces one event for three
+   * intervals.
+   */
+  it('lists each interval a hot plan advanced in', () => {
+    const feed = fold([
+      both([], completedSample([completed()], { watermarkEngineLocal: '2024-01-01T00:00:03Z' })),
+      both([], completedSample([completed()], { watermarkEngineLocal: '2024-01-01T00:00:06Z' })),
+      both([], completedSample([completed()], { watermarkEngineLocal: '2024-01-01T00:00:09Z' })),
+    ])
+    expect(feed.events).toHaveLength(3)
+    expect(new Set(feed.events.map(event => event.id)).size).toBe(3)
+  })
+
+  /*
+   * The identity is the engine's own watermark, so folding the same sample twice -- a re-render, a
+   * retry, a duplicated poll -- cannot double the list.
+   */
+  it('is idempotent when the same sample is folded twice', () => {
+    const sample = both([], completedSample([completed()]))
+    const feed = fold([sample, sample])
+    expect(feed.events).toHaveLength(1)
+  })
+})
+
+describe('the plan cache is instance-wide and bursty', () => {
+  /*
+   * Scope applies to both sources or the fix for the wrong-city feed only half works.
+   * Mutation checked: skipping the scope test on plan-cache rows refills the list from neighbouring
+   * databases the moment you switch cities.
+   */
+  it('drops and counts a finished query from another database', () => {
+    const feed = fold([both([], completedSample([completed({ databaseName: 'Warehouse' })]))])
+    expect(feed.events).toHaveLength(0)
+    expect(feed.elsewhere).toBe(1)
+  })
+
+  /*
+   * A measured three-second window advanced 103 distinct plans. Without a per-sample cap that single
+   * sample replaces the entire 60-row list nearly twice over, so nothing stays on screen long enough
+   * to read.
+   *
+   * Mutation checked: removing the burst cap admits all 103.
+   */
+  it('caps how many finished queries one sample may contribute', () => {
+    const many = Array.from({ length: 103 }, (_, index) =>
+      completed({ planKey: `${index}`.padStart(64, '0'), queryHash: null }))
+    const feed = fold([both([], completedSample(many))])
+    expect(feed.events).toHaveLength(LIVE_QUERY_ARRIVAL_BURST_CAP)
+  })
+
+  /*
+   * The cut is by recency, which is the order the collector returns. Taking the busiest or costliest
+   * plans instead would make this the leaderboard the module comment says it is not.
+   */
+  it('keeps the most recently executed plans rather than the busiest', () => {
+    const feed = fold([both([], completedSample([
+      completed({ planKey: 'recent'.padStart(64, '0'), executions: 1, queryHash: null }),
+      ...Array.from({ length: LIVE_QUERY_ARRIVAL_BURST_CAP }, (_, index) =>
+        completed({ planKey: `${index}`.padStart(64, '0'), executions: 500, queryHash: null })),
+    ]))])
+    expect(feed.events.map(event => event.id)).toContain(`plan|${'recent'.padStart(64, '0')}|2024-01-01T00:00:03Z`)
+  })
+})
+
+describe('a missing plan-cache source says so', () => {
+  /*
+   * An API build older than this field carries no `completedQueries` at all, which looks identical to
+   * a quiet instance. The two claims are very different and the reason has to separate them.
+   */
+  it('distinguishes an absent source from a source that read nothing', () => {
+    const absent = fold([both([], null)])
+    expect(absent.completedStatus).toBeNull()
+    expect(absent.reason).toMatch(/no plan-cache reading at all/i)
+
+    const read = fold([both([], completedSample([]))])
+    expect(read.completedStatus).toBe('Available')
+    expect(read.reason).toMatch(/no cached plan advanced its counter/i)
+    expect(read.reason).not.toMatch(/no plan-cache reading at all/i)
+  })
+
+  /*
+   * A failed read is neither of the above, and saying nothing would let a permissions problem read as
+   * an idle server.
+   */
+  it('reports a failed read as a failure rather than as silence', () => {
+    const feed = fold([both([], completedSample([], {
+      status: 'PermissionDenied',
+      reason: 'VIEW SERVER STATE is required.',
+    }))])
+    expect(feed.reason).toMatch(/PermissionDenied/)
+    expect(feed.reason).toMatch(/VIEW SERVER STATE is required/)
   })
 })

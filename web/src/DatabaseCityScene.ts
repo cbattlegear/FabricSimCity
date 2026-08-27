@@ -1637,7 +1637,8 @@ export function createDatabaseCityScene(
    * ----------------------------------------------------------------------------------------------
    * Live vehicles.
    *
-   * One vehicle is one row of `sys.dm_exec_requests` that was running when the sampler last looked.
+   * One vehicle is one execution the engine reported — a row of `sys.dm_exec_requests` caught running,
+   * or an advance in a `sys.dm_exec_query_stats` execution counter.
    * Which of the five shells it gets comes from the estimated bytes its plan moves; `cityVehicles.ts`
    * owns that decision and the join behind it, and everything below is drawing.
    *

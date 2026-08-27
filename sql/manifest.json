@@ -639,6 +639,52 @@
       "relativeCost": "low"
     },
     {
+      "id": "sessions.completed_query_stats",
+      "title": "Executions completed since the last sample, from the plan cache",
+      "file": "probes/sessions/completed_query_stats.sql",
+      "connectionScope": "server",
+      "minPlatform": "SQL Server 2016 (13.x)",
+      "azureSqlDatabase": {
+        "unsupported": false,
+        "notes": "Supported. sys.dm_exec_query_stats, sys.dm_exec_sql_text and sys.dm_exec_plan_attributes all exist on Azure SQL Database, where VIEW DATABASE STATE scopes them to the connected database. That narrower visibility is harmless here because the consumer filters to one database anyway; it does mean visible_plan_count is a count of that database\\u0027s cached plans rather than the instance\\u0027s, so it must not be read as an instance-wide plan-cache size."
+      },
+      "requiredPermission": "VIEW SERVER STATE (SQL Server 2019 and earlier) or VIEW SERVER PERFORMANCE STATE (SQL Server 2022+); on Azure SQL Database, VIEW DATABASE STATE.",
+      "cadenceClass": "realtime",
+      "parameters": [
+        {
+          "name": "@SinceEngineLocal",
+          "sqlDbType": "DateTime2",
+          "required": false,
+          "default": null,
+          "description": "When supplied, only plans whose last_execution_time is strictly later are returned. NULL returns every cached plan, which is what a first call wants. This is a prefilter that bounds how much of the plan cache is returned; it never decides how many executions occurred, because a plan that ran 18 times in the interval reports one last_execution_time exactly like a plan that ran once. Callers must pass back the sampled_at_engine_local value from the previous call rather than their own clock: last_execution_time is the engine\\u0027s local time, and a watermark taken from a collector in another time zone silently filters out executions that really happened."
+        },
+        {
+          "name": "@IncludeSqlText",
+          "sqlDbType": "Bit",
+          "required": false,
+          "default": true,
+          "description": "When 0, no SQL text function is invoked and both text columns are NULL. Edge collection uses 0 so raw SQL is never fetched or transmitted. Defaults to 1, matching sessions.active_requests, because a feed of executions with no statement text says nothing a reader can use."
+        },
+        {
+          "name": "@MaxRows",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": null,
+          "description": "When supplied, at most this many rows are returned, ordered by last_execution_time descending so a cap keeps the most recent executions rather than an arbitrary slice. NULL returns every matching row. visible_plan_count always reports the pre-cap count, so a bounded sample is never mistaken for a quieter instance."
+        },
+        {
+          "name": "@MaxTextLength",
+          "sqlDbType": "Int",
+          "required": false,
+          "default": null,
+          "description": "When supplied, batch_text and statement_text are shortened to this many characters. batch_text_length and statement_text_length always report the untruncated lengths, so a shortened value is never mistaken for a short statement. Applied in SQL rather than after the read for the reason measured in sessions.active_requests: the cost is paid materializing the text out of the engine."
+        }
+      ],
+      "resultSets": 1,
+      "resultContract": "Zero or more rows, one per plan_key -- the identity of one statement within one cached plan (sql_handle + plan_handle + both statement offsets, hashed). The statement offsets are part of the key because a cached batch or stored procedure holds one row per statement, so keying on the plan alone would report a procedure\\u0027s executions as a single query\\u0027s. execution_count, total_worker_time_us, total_elapsed_time_us, total_logical_reads and total_rows are cumulative since creation_time and are meaningless as absolutes -- they exist to be differenced across two samples, which is the only way to obtain an execution count for an interval. creation_time travels with every row because those counters restart without warning: plan eviction, a recompile, DBCC FREEPROCCACHE and an engine restart all reuse the same plan_key with execution_count back at a small number, and differencing across that yields a large negative delta whose naive clamp to zero silently drops every execution until the counter climbs back -- minutes of a feed reporting an idle instance. The last_* columns describe the single most recent execution and are the honest per-execution figures; a lifetime average is not a description of the execution that just happened. database_id is resolved from sys.dm_exec_plan_attributes and NOT from sys.dm_exec_sql_text.dbid, which is not interchangeable: the text function returns NULL dbid for ad-hoc and prepared statements, which is most of an application workload, so a probe reading it would attribute almost nothing and a per-database feed would sit permanently empty while the server was saturated. Zero rows means no cached plan executed since the watermark, NOT that the instance ran nothing: a statement compiled with OPTION (RECOMPILE) leaves no row at all, unparameterized ad-hoc text under \\u0027optimize for ad hoc workloads\\u0027 is stubbed on first execution, natively compiled procedures report through sys.dm_exec_procedure_stats instead, and anything evicted between two reads takes its executions with it. The application publishes this as executions the plan cache retained, never as a complete accounting of the workload.",
+      "relativeCost": "medium"
+    },
+    {
       "id": "sessions.memory_grants",
       "title": "Query memory grant requests and holders",
       "file": "probes/sessions/memory_grants.sql",

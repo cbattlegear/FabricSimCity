@@ -81,6 +81,7 @@ public class LiveIncidentCollectorTests
             TempdbUsage = (_, _) => throw new ProbeTimeoutException("The tempdb probe timed out.", null, null),
             FileIoStats = (_, _) => throw new ProbeTimeoutException("The file I/O probe timed out.", null, null),
             SchedulerPressure = (_, _) => throw new ProbeTimeoutException("The scheduler probe timed out.", null, null),
+            CompletedQueries = (_, _, _, _, _) => throw new ProbeTimeoutException("The completed-query probe timed out.", null, null),
             LogSpaceUsage = _ => throw new ProbeTimeoutException("The log space probe timed out.", null, null),
         };
         var collector = new LiveIncidentCollector(probes, "target-1", "Test Server", TimeProvider.System);
@@ -393,6 +394,7 @@ public class LiveIncidentCollectorTests
             TempdbUsage = (_, _) => throw new ProbeTimeoutException("timed out", null, null),
             FileIoStats = (_, _) => throw new ProbeTimeoutException("timed out", null, null),
             SchedulerPressure = (_, _) => throw new ProbeTimeoutException("timed out", null, null),
+            CompletedQueries = (_, _, _, _, _) => throw new ProbeTimeoutException("timed out", null, null),
             LogSpaceUsage = _ => throw new ProbeTimeoutException("timed out", null, null),
         };
         var collector = new LiveIncidentCollector(probes, "target-1", "Test Server", TimeProvider.System);

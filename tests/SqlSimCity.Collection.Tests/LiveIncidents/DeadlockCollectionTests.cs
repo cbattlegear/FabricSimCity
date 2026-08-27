@@ -136,6 +136,7 @@ public class DeadlockCollectionTests
         probes.FileIoStats = (_, _) => throw new ProbeTimeoutException("The file I/O probe timed out.", null, null);
         probes.SchedulerPressure = (_, _) => throw new ProbeTimeoutException("The scheduler probe timed out.", null, null);
         probes.LogSpaceUsage = _ => throw new ProbeTimeoutException("The log-space probe timed out.", null, null);
+        probes.CompletedQueries = (_, _, _, _, _) => throw new ProbeTimeoutException("The completed-query probe timed out.", null, null);
 
         time.Advance(TimeSpan.FromSeconds(10));
         var disconnected = await collector.CollectAsync(2, CancellationToken.None);

@@ -52,6 +52,75 @@ public sealed record ActiveRequestRow(
     /// <summary><c>sys.dm_exec_requests.query_plan_hash</c>, on the same terms as <see cref="QueryHash"/>.</summary>
     byte[]? QueryPlanHash = null);
 
+/// <summary>
+/// One row of <c>sessions.completed_query_stats</c>: the plan cache's cumulative counters for one
+/// statement within one cached plan, as of this sample.
+/// <para>
+/// Nothing here is an execution count for an interval, and reading it as one is the mistake this
+/// type exists to make hard. <see cref="ExecutionCount"/> is cumulative since
+/// <see cref="CreationTime"/>, so the number of executions that happened between two samples is
+/// obtained only by differencing two observations of it -- see
+/// <c>LiveIncidentCollector.CollectCompletionsAsync</c>. The probe's <c>@SinceEngineLocal</c>
+/// watermark bounds how much of the plan cache comes back; it never says how many times a plan ran,
+/// because a plan that ran 18 times in the interval reports one <see cref="LastExecutionTime"/>
+/// exactly like a plan that ran once.
+/// </para>
+/// <para>
+/// <see cref="CreationTime"/> is part of the identity for differencing, not decoration. Plan
+/// eviction, a recompile, a plan-cache flush and an engine restart all reuse the same
+/// <see cref="PlanKey"/> with the counter back at a small number; differencing across that gives a
+/// large negative delta, and clamping it to zero silently drops every execution until the counter
+/// climbs back to its old value -- on a hot plan, minutes of the feed reporting an idle instance.
+/// </para>
+/// <para>
+/// <see cref="VisiblePlanCount"/> is the probe's disclosure of what <c>@MaxRows</c> omitted (the
+/// pre-cap row count), and <see cref="BatchTextLength"/>/<see cref="StatementTextLength"/> are the
+/// pre-truncation character counts, on exactly the terms <see cref="ActiveRequestRow"/> uses.
+/// </para>
+/// </summary>
+public sealed record CompletedQueryRow(
+    /// <summary>Stable hash of <c>sql_handle + plan_handle + both statement offsets</c>: the identity of one statement within one cached plan, and the key the counter is differenced on.</summary>
+    string PlanKey,
+    /// <summary>
+    /// The engine's own clock, read once at the start of the probe. Passed back as the next
+    /// <c>@SinceEngineLocal</c>. Never the collector process's clock -- see the probe's own note on
+    /// why a watermark taken locally filters out executions that really happened.
+    /// </summary>
+    DateTimeOffset SampledAtEngineLocal,
+    /// <summary>When this plan was compiled. A change means the counters restarted; it is not a delta.</summary>
+    DateTimeOffset? CreationTime,
+    DateTimeOffset? LastExecutionTime,
+    /// <summary>Cumulative since <see cref="CreationTime"/>. Meaningless as an absolute; exists to be differenced.</summary>
+    long ExecutionCount,
+    long TotalWorkerTimeUs,
+    /// <summary>The most recent execution's CPU time. The honest per-execution figure; a lifetime average is not a description of the execution that just happened.</summary>
+    long LastWorkerTimeUs,
+    long TotalElapsedTimeUs,
+    /// <summary>The most recent execution's elapsed time, on the same terms as <see cref="LastWorkerTimeUs"/>.</summary>
+    long LastElapsedTimeUs,
+    long TotalLogicalReads,
+    long LastLogicalReads,
+    long TotalRows,
+    long LastRows,
+    /// <summary>
+    /// Resolved from <c>sys.dm_exec_plan_attributes</c>, never from <c>sys.dm_exec_sql_text.dbid</c>,
+    /// which is NULL for ad-hoc and prepared statements and would leave most of a real workload
+    /// unattributed. Null here means the plan carries no owning database context at all.
+    /// </summary>
+    int? DatabaseId,
+    string? DatabaseName,
+    string? BatchText,
+    /// <summary>The one statement of the batch this row's counters belong to, resolved via the statement offsets.</summary>
+    string? StatementText,
+    int VisiblePlanCount,
+    int SelectionRank,
+    int? BatchTextLength,
+    int? StatementTextLength,
+    /// <summary><c>query_hash</c> as the raw <c>binary(8)</c> the engine reported, on exactly the terms <see cref="ActiveRequestRow.QueryHash"/> describes: never formatted here, so one converter renders it and the Query Store join cannot silently disagree.</summary>
+    byte[]? QueryHash = null,
+    /// <summary><c>query_plan_hash</c>, on the same terms as <see cref="QueryHash"/>.</summary>
+    byte[]? QueryPlanHash = null);
+
 /// <summary>Row shape for <c>sessions.memory_grants</c>.</summary>
 public sealed record MemoryGrantRow(
     int SessionId,

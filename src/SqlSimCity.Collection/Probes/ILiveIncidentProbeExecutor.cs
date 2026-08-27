@@ -18,6 +18,42 @@ public interface ILiveIncidentProbeExecutor
 
     Task<IReadOnlyList<ActiveRequestRow>> GetActiveRequestsAsync(CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Reads the plan cache's cumulative per-plan execution counters, which is the only way to learn
+    /// about a query that has already finished.
+    /// <para>
+    /// This is the companion to <see cref="GetActiveRequestsAsync"/> rather than a variant of it.
+    /// <c>sys.dm_exec_requests</c> holds a row only while a request is executing, so an OLTP
+    /// statement taking a millisecond is invisible unless a sample lands inside that millisecond.
+    /// Measured against the AdventureWorks churn workload, twelve samples 250 ms apart over one
+    /// 3-second window caught 8 request rows in total while the plan cache recorded 364 executions
+    /// over the same 3 seconds -- so live-request sampling observed roughly 2% of the work, and the
+    /// rest was never sampled rather than absent.
+    /// </para>
+    /// <para>
+    /// The returned counters are cumulative. A caller wanting "executions in the last interval" must
+    /// difference them against its own previous observation, keyed on
+    /// <see cref="CompletedQueryRow.PlanKey"/> and guarded by
+    /// <see cref="CompletedQueryRow.CreationTime"/>; the row itself never carries an interval count.
+    /// </para>
+    /// </summary>
+    /// <param name="sinceEngineLocal">
+    /// The <see cref="CompletedQueryRow.SampledAtEngineLocal"/> value from the previous call, which
+    /// bounds how much of the plan cache is returned. Null returns every cached plan and is what a
+    /// first call wants. This must be an engine-local instant carried back from a previous row and
+    /// never the collector's own clock: a watermark from a process in a different time zone, or with
+    /// a drifted clock, silently filters out executions that really happened.
+    /// </param>
+    /// <param name="maxRows">Cap on rows returned, most recently executed first. Null returns every matching row; the pre-cap count always travels with the result.</param>
+    /// <param name="includeSqlText">Whether to resolve statement and batch text. Edge collection passes false so raw SQL is never fetched.</param>
+    /// <param name="maxTextLength">Cap on returned text length. The untruncated lengths always travel with the result.</param>
+    Task<IReadOnlyList<CompletedQueryRow>> GetCompletedQueriesAsync(
+        DateTimeOffset? sinceEngineLocal,
+        int? maxRows,
+        bool includeSqlText,
+        int? maxTextLength,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<WaitingTaskFact>> GetWaitingTasksAsync(CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BlockingInputFact>> GetBlockingInputsAsync(CancellationToken cancellationToken);

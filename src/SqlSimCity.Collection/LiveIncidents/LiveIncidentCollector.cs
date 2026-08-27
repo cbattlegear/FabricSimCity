@@ -47,6 +47,23 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
     // held and reused. It carries its own CollectedAt, so reusing it never backdates or freshens it.
     private DeadlockSampleV1? _lastDeadlockSample;
 
+    /// <summary>One plan's cumulative counter as of the previous cycle. Both fields are needed: the count is the thing differenced, and the compile time is what says whether differencing it is valid at all.</summary>
+    private readonly record struct PlanCounter(DateTimeOffset? CreationTime, long ExecutionCount);
+
+    private readonly int? _maxCompletedQueryRows;
+
+    // Previous cycle's cumulative plan-cache counters, keyed by plan_key. This is the whole basis for
+    // turning a cumulative counter into an interval count, and it is the reason this type documents
+    // itself as single-threaded: two overlapping cycles would difference against each other's writes.
+    private Dictionary<string, PlanCounter> _previousPlanCounters = new(StringComparer.Ordinal);
+
+    // The engine's own clock as of the last successful completed-query read, used both as the next
+    // probe watermark and to measure the interval the counts cover. Engine-local by construction and
+    // never this process's clock -- see the probe's note on why a locally-taken watermark filters out
+    // executions that really happened.
+    private DateTimeOffset? _completedQueryWatermark;
+    private DateTimeOffset? _previousCompletedSampleAt;
+
     public LiveIncidentCollector(
         ILiveIncidentProbeExecutor probes,
         string targetId,
@@ -56,7 +73,8 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         EnginePlatform? configuredPlatform = null,
         TimeSpan? deadlockRefreshInterval = null,
         int? maxDeadlockGraphs = 25,
-        bool includeDeadlockSqlText = false)
+        bool includeDeadlockSqlText = false,
+        int? maxCompletedQueryRows = DefaultMaxCompletedQueryRows)
     {
         ArgumentNullException.ThrowIfNull(probes);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetId);
@@ -70,7 +88,21 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         _deadlockRefreshInterval = deadlockRefreshInterval ?? TimeSpan.FromSeconds(60);
         _maxDeadlockGraphs = maxDeadlockGraphs;
         _includeDeadlockSqlText = includeDeadlockSqlText;
+        _maxCompletedQueryRows = maxCompletedQueryRows;
     }
+
+    /// <summary>
+    /// The default cap on plans returned per completed-query sample.
+    /// <para>
+    /// Sized against a real workload rather than guessed: the AdventureWorks churn instance held 505
+    /// cached plans, of which 103 advanced over a 3-second window, and the probe returned them in
+    /// 21 ms. 250 leaves generous headroom over that while bounding a pathological cache, and because
+    /// the cap keeps the most recently executed plans, what it drops is the least recent activity
+    /// rather than an arbitrary slice. The pre-cap count always travels with the sample, so a capped
+    /// read is never mistaken for a quieter instance.
+    /// </para>
+    /// </summary>
+    public const int DefaultMaxCompletedQueryRows = 250;
 
     public async Task<LiveIncidentSnapshotV1> CollectAsync(long sequence, CancellationToken cancellationToken)
     {
@@ -114,6 +146,17 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         var truncations = new List<SampleTruncationV1>();
         var (requests, requestsSucceeded) = await CollectRequestsAsync(unavailable, truncations, cancellationToken).ConfigureAwait(false);
         anyOperationalSuccess = anyOperationalSuccess || requestsSucceeded;
+
+        // Reads the plan cache rather than the request list, so it reports the queries that already
+        // finished -- which on an OLTP instance is nearly all of them. This DOES contribute to
+        // anyOperationalSuccess, unlike the reused deadlock sample: every value in it was read from
+        // the server during this cycle.
+        var completedQueries = await CollectCompletedQueriesAsync(cancellationToken).ConfigureAwait(false);
+        anyOperationalSuccess = anyOperationalSuccess || completedQueries.Status == DataStatus.Available;
+        if (completedQueries.Status != DataStatus.Available)
+        {
+            unavailable.Add(new UnavailableFieldV1("completedQueries", completedQueries.Status, completedQueries.Reason));
+        }
 
         IReadOnlyList<BlockingInputFact> blockingFacts = [];
         try
@@ -251,7 +294,10 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
             scheduler,
             logSpace,
             deadlocks,
-            diagnostics);
+            diagnostics)
+        {
+            CompletedQueries = completedQueries,
+        };
     }
 
     private async Task<(IReadOnlyList<LiveRequestV1> Requests, bool Succeeded)> CollectRequestsAsync(
@@ -460,6 +506,217 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         row.TimeoutSec,
         row.WaitTimeMs?.ToString(CultureInfo.InvariantCulture),
         row.BatchText);
+
+    /// <summary>
+    /// Reads the plan cache's cumulative execution counters and differences them against the previous
+    /// cycle, turning "this plan has now run 71,787 times" into "this plan ran 4 times in the last
+    /// three seconds".
+    /// <para>
+    /// This subsystem exists because <see cref="CollectRequestsAsync"/> structurally cannot see a
+    /// query that has already finished, and most queries have. Measured against the AdventureWorks
+    /// churn workload, twelve samples 250 ms apart over one 3-second window caught 8 rows from
+    /// <c>sys.dm_exec_requests</c> in total, while the plan cache recorded 364 executions over the
+    /// same 3 seconds. The missing 98% was never sampled rather than absent, and a live view built
+    /// only on active requests reports a saturated instance as nearly idle.
+    /// </para>
+    /// <para>
+    /// Three ways this could quietly lie, and what stops each:
+    /// </para>
+    /// <para>
+    /// <b>The counters restart without warning.</b> Plan eviction under memory pressure, a recompile,
+    /// a plan-cache flush and an engine restart all reuse the same plan key with
+    /// <c>execution_count</c> back at a small number. Subtracting gives a large negative delta, and
+    /// the obvious repair -- clamping to zero -- means the plan contributes nothing until its counter
+    /// climbs back past its old value, which on a hot plan is minutes of the feed reporting an idle
+    /// instance. <c>creation_time</c> is therefore compared first, and a change is treated as a
+    /// restart: the executions since the new compile are what happened, so the new count is the
+    /// delta.
+    /// </para>
+    /// <para>
+    /// <b>The first sight of a plan is not a measurement.</b> On the first cycle every plan is new and
+    /// its cumulative count is its whole history -- 71,787 on the measured instance. Emitting that
+    /// would claim 71,787 executions happened in the last three seconds. Emitting zero would instead
+    /// swallow the first execution of every query the instance ever runs, which on a quiet
+    /// demonstration server is most of them. So a first observation emits 1, flagged as such: the
+    /// plan's last execution fell inside the window the probe filtered on, so at least one execution
+    /// really did happen, and one is the floor the evidence supports rather than a guess.
+    /// </para>
+    /// <para>
+    /// <b>Remembering every plan forever is a leak.</b> The plan cache turns over, so keys are pruned
+    /// to those the probe still reports.
+    /// </para>
+    /// </summary>
+    private async Task<CompletedQuerySampleV1> CollectCompletedQueriesAsync(CancellationToken cancellationToken)
+    {
+        if (_maxCompletedQueryRows is <= 0)
+        {
+            return new CompletedQuerySampleV1([], 0, 0, _completedQueryWatermark, null, DataStatus.Disabled,
+                "Completed-query collection is disabled by configuration " +
+                "(LiveIncidents:SampleBounds:MaxCompletedQueryRows is 0), so only queries caught mid-execution " +
+                "are reported. This is a local choice, not a statement about the instance.");
+        }
+
+        IReadOnlyList<CompletedQueryRow> rows;
+        try
+        {
+            rows = await _probes.GetCompletedQueriesAsync(
+                sinceEngineLocal: _completedQueryWatermark,
+                maxRows: _maxCompletedQueryRows,
+                includeSqlText: true,
+                maxTextLength: null,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProbeExecutionException ex)
+        {
+            var (status, reason) = Classify(ex);
+            // The watermark is deliberately left where it was. Advancing it past an interval that was
+            // never read would permanently discard every execution in that interval; leaving it means
+            // the next successful cycle covers the gap, and differencing the counters stops anything
+            // being counted twice.
+            return new CompletedQuerySampleV1([], 0, 0, _completedQueryWatermark, null, status, reason);
+        }
+
+        var previous = _previousPlanCounters;
+        var current = new Dictionary<string, PlanCounter>(rows.Count, StringComparer.Ordinal);
+        var completed = new List<CompletedQueryV1>();
+        var totalExecutions = 0L;
+        var plansAdvanced = 0;
+        var firstObservations = 0;
+        var restarts = 0;
+        DateTimeOffset? watermark = null;
+
+        foreach (var row in rows)
+        {
+            current[row.PlanKey] = new PlanCounter(row.CreationTime, row.ExecutionCount);
+
+            // Every row of one sample carries the same engine instant, but taking the maximum keeps
+            // the watermark monotonic even if that ever stops being true.
+            if (watermark is null || row.SampledAtEngineLocal > watermark)
+            {
+                watermark = row.SampledAtEngineLocal;
+            }
+
+            var hasPrevious = previous.TryGetValue(row.PlanKey, out var prior);
+            var restarted = hasPrevious && prior.CreationTime != row.CreationTime;
+            var firstObservation = !hasPrevious;
+
+            long executions;
+            if (firstObservation)
+            {
+                executions = 1;
+                firstObservations++;
+            }
+            else if (restarted)
+            {
+                executions = row.ExecutionCount;
+                restarts++;
+            }
+            else
+            {
+                executions = row.ExecutionCount - prior.ExecutionCount;
+            }
+
+            // Zero is the ordinary case for a row whose last execution fell between the watermark and
+            // the previous read: the probe returned it, but nothing new happened. Negative should be
+            // unreachable now that creation_time guards the restart case, and is discarded rather than
+            // clamped for the same reason -- a negative delta is evidence the identity is wrong, not
+            // evidence of activity.
+            if (executions <= 0)
+            {
+                continue;
+            }
+
+            plansAdvanced++;
+            totalExecutions += executions;
+
+            completed.Add(new CompletedQueryV1(
+                row.PlanKey,
+                executions,
+                firstObservation,
+                row.LastExecutionTime,
+                row.LastElapsedTimeUs,
+                row.LastWorkerTimeUs,
+                row.LastLogicalReads,
+                row.LastRows,
+                row.DatabaseId,
+                row.DatabaseName,
+                string.IsNullOrWhiteSpace(row.StatementText) ? row.BatchText : row.StatementText,
+                QueryHashFormat.ToJoinKey(row.QueryHash),
+                QueryHashFormat.ToJoinKey(row.QueryPlanHash)));
+        }
+
+        // Pruned to what the probe still reports, so a plan that ages out of the cache does not keep
+        // a counter alive for the process's lifetime. A plan filtered out by the watermark this cycle
+        // is dropped too and will read as a first observation when it next runs -- one execution
+        // understated, against an unbounded dictionary. That trade is only sound because the entry
+        // carries no history worth keeping: a single count, not a series.
+        _previousPlanCounters = current;
+
+        var interval = _previousCompletedSampleAt is { } last && watermark is { } nowEngine
+            ? (decimal?)(nowEngine - last).TotalMilliseconds
+            : null;
+        if (watermark is not null)
+        {
+            _previousCompletedSampleAt = watermark;
+            _completedQueryWatermark = watermark;
+        }
+
+        var preCapCount = rows.Count > 0 ? rows[0].VisiblePlanCount : 0;
+        return new CompletedQuerySampleV1(
+            completed,
+            plansAdvanced,
+            totalExecutions,
+            watermark,
+            interval,
+            DataStatus.Available,
+            CompletedQueryReason(completed.Count, totalExecutions, preCapCount, rows.Count, firstObservations, restarts, interval));
+    }
+
+    private static string CompletedQueryReason(
+        int shown, long executions, int preCapCount, int returnedRows, int firstObservations, int restarts, decimal? intervalMs)
+    {
+        var parts = new List<string>();
+        if (shown == 0)
+        {
+            parts.Add(
+                "No cached plan advanced its execution counter since the last sample. That is a stronger " +
+                "statement than an empty live-request list, but it is still not proof the instance ran " +
+                "nothing: a statement compiled with OPTION (RECOMPILE) leaves no plan-cache row at all, " +
+                "ad-hoc text can be stubbed rather than cached on its first execution, natively compiled " +
+                "procedures report elsewhere, and a plan evicted between two reads takes its executions with it.");
+        }
+        else
+        {
+            var window = intervalMs is { } ms
+                ? $" over the {ms:F0} ms since the previous sample"
+                : " since the previous sample";
+            parts.Add($"{executions} execution(s) across {shown} plan(s){window}, read from the plan cache's cumulative counters.");
+        }
+
+        if (preCapCount > returnedRows)
+        {
+            parts.Add(
+                $"{returnedRows} of {preCapCount} plan(s) matching the window were returned; the rest were dropped by the row cap, " +
+                "most recently executed first, so their executions are not counted here.");
+        }
+
+        if (firstObservations > 0)
+        {
+            parts.Add(
+                $"{firstObservations} plan(s) had no previous sample to difference against and are counted as one execution each " +
+                "-- the floor the evidence supports, not a measured count, since a cumulative counter cannot say how many of its " +
+                "executions fell inside this interval.");
+        }
+
+        if (restarts > 0)
+        {
+            parts.Add(
+                $"{restarts} plan(s) were recompiled or re-cached since the last sample, restarting their counters; their executions " +
+                "are counted from the new compile rather than differenced across the restart.");
+        }
+
+        return string.Join(" ", parts);
+    }
 
     /// <summary>
     /// Reads deadlocks recorded by the <c>system_health</c> session, at most once per

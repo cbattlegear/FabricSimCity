@@ -195,6 +195,95 @@ public sealed class SqlLiveIncidentProbeExecutor : ILiveIncidentProbeExecutor
                 ["@MaxTextLength"] = _maxTextLength,
             });
 
+    /// <summary>
+    /// Reads the plan cache's cumulative execution counters -- the only source for a query that has
+    /// already finished. The counters come back cumulative on purpose; differencing them is
+    /// <c>LiveIncidentCollector</c>'s job, because only it holds the previous observation.
+    /// </summary>
+    public Task<IReadOnlyList<CompletedQueryRow>> GetCompletedQueriesAsync(
+        DateTimeOffset? sinceEngineLocal,
+        int? maxRows,
+        bool includeSqlText,
+        int? maxTextLength,
+        CancellationToken cancellationToken) =>
+        ExecuteAsync(
+            "sessions.completed_query_stats",
+            "server",
+            async (reader, ct) =>
+            {
+                var rows = new List<CompletedQueryRow>();
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    var sampledAt = AsDateTimeOffset(reader, "sampled_at_engine_local");
+                    if (sampledAt is null)
+                    {
+                        // The engine clock is what the next watermark is built from. A row without it
+                        // cannot advance the watermark, and admitting it would leave the caller to
+                        // substitute its own clock -- the precise substitution this probe exists to
+                        // avoid. Dropping the row costs one sample of one plan; guessing costs every
+                        // execution that falls on the wrong side of a skewed watermark.
+                        continue;
+                    }
+
+                    rows.Add(new CompletedQueryRow(
+                        (string)reader["plan_key"],
+                        sampledAt.Value,
+                        AsDateTimeOffset(reader, "creation_time"),
+                        AsDateTimeOffset(reader, "last_execution_time"),
+                        Convert.ToInt64(reader["execution_count"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["total_worker_time_us"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["last_worker_time_us"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["total_elapsed_time_us"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["last_elapsed_time_us"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["total_logical_reads"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["last_logical_reads"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["total_rows"], CultureInfo.InvariantCulture),
+                        Convert.ToInt64(reader["last_rows"], CultureInfo.InvariantCulture),
+                        AsNullableInt32(reader, "database_id"),
+                        AsString(reader, "database_name"),
+                        AsString(reader, "batch_text"),
+                        AsString(reader, "statement_text"),
+                        Convert.ToInt32(reader["visible_plan_count"], CultureInfo.InvariantCulture),
+                        Convert.ToInt32(reader["selection_rank"], CultureInfo.InvariantCulture),
+                        AsNullableInt32(reader, "batch_text_length"),
+                        AsNullableInt32(reader, "statement_text_length"),
+                        AsBytes(reader, "query_hash"),
+                        AsBytes(reader, "query_plan_hash")));
+                }
+
+                return (IReadOnlyList<CompletedQueryRow>)rows;
+            },
+            cancellationToken,
+            new Dictionary<string, object?>
+            {
+                // DateTimeOffset would bind as datetimeoffset and be rejected by the declared
+                // DateTime2 parameter. The value is an engine-local reading already carried in a
+                // zero-offset DateTimeOffset (see AsDateTimeOffset), so DateTime is the honest shape
+                // for it -- taking .UtcDateTime here would be a claim that it is UTC.
+                ["@SinceEngineLocal"] = sinceEngineLocal?.DateTime,
+                // Both text settings are *intersected* with this executor's own configuration rather
+                // than taken from the caller. _includeSqlText is the edge-mode privacy switch: when
+                // it is off, no raw SQL may be fetched or transmitted at all, and a caller that asked
+                // for text must not be able to turn it back on. The cap composes the same way, so a
+                // caller can always ask for less text than the executor allows and never for more.
+                ["@IncludeSqlText"] = includeSqlText && _includeSqlText,
+                ["@MaxTextLength"] = MinCap(maxTextLength, _maxTextLength),
+                ["@MaxRows"] = maxRows,
+            });
+
+    /// <summary>
+    /// The tighter of two optional caps, where null means "no cap". Null is the identity, so
+    /// <c>MinCap(null, 4096)</c> is 4096 and not "uncapped" -- an uncapped caller must never widen a
+    /// configured bound.
+    /// </summary>
+    internal static int? MinCap(int? requested, int? configured) => (requested, configured) switch
+    {
+        (null, null) => null,
+        (null, { } c) => c,
+        ({ } r, null) => r,
+        ({ } r, { } c) => Math.Min(r, c),
+    };
+
     public Task<IReadOnlyList<Blocking.WaitingTaskFact>> GetWaitingTasksAsync(CancellationToken cancellationToken) =>
         ExecuteAsync(
             "sessions.waiting_tasks",
