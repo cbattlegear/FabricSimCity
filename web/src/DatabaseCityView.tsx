@@ -27,7 +27,8 @@ import {
   type FacilityTraffic,
 } from './cityFacilityTraffic'
 import { AddressBook } from './AddressPanel'
-import { buildAddressBook, type AddressEntry } from './addressBook'
+import { buildAddressBook, queryAddressId, type AddressEntry } from './addressBook'
+import { familyOnMap, placedObjectIds, splitQueryFamiliesByMap } from './queryFamilyMapping'
 import { resolveSidebarMode } from './sidebarMode'
 import { CityLoadingScreen } from './CityLoadingScreen'
 import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
@@ -564,12 +565,37 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     }
   }, [])
 
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null)
+
   /**
    * Draws a ranked family's own plan on the map. The family row already carries the workload
    * evidence; this reads the one plan behind it so the same evidence becomes a route through the
    * buildings it named, instead of requiring the operator to rediscover it in the plan finder.
+   *
+   * Selecting the family's address is part of *drawing* it, not part of clicking a list row, and
+   * that is why `setSelectedAddressId` is here rather than in `openAddress`. There are three
+   * callers -- the address book, the live query feed, and the ranked families table -- and only
+   * the first used to set it, so the other two left the rail in a different state from the one the
+   * list produced for the very same family.
+   *
+   * The divergence is invisible in the success case and only in the success case: `buildCityRoute`
+   * never returns null, so a plan that arrives always swaps the rail over to `RoutePanel`, which
+   * covers the address book whether or not a row underneath it is highlighted. What it is *not*
+   * invisible in is everything either side of that moment, and those are the states a live feed
+   * spends most of its time in:
+   *
+   * - **While the two fetches are in flight.** `fetchQueryFamily` then `fetchPlan`, against Query
+   *   Store, is not instant. The address book is still up for all of it, and the list highlighted
+   *   the row immediately when the click came from the list and never when it came from the feed.
+   * - **When the family cannot be drawn at all.** Query Store retaining no compiled plan is an
+   *   ordinary outcome, not an error case; `activePlan` stays null, the rail stays on the address
+   *   book, and the two paths then differ permanently rather than for a few hundred milliseconds.
+   * - **Over a stale place card.** `selectedFacility` is derived from `selectedAddressId`, so with
+   *   a facility card open a feed click left that card sitting over the rail describing something
+   *   the user had just navigated away from. This is the one a reader actually notices.
    */
   const showFamilyOnMap = useCallback(async (family: DatabaseCityQueryFamily) => {
+    setSelectedAddressId(queryAddressId(family.familyId))
     setRouteError(null)
     setMappingFamilyId(family.familyId)
     const controller = new AbortController()
@@ -609,23 +635,30 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     [visibleObjects, page?.topQueryFamilies, facilities, cityPlan],
   )
 
-  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null)
-
   /**
    * One click on an address does what that kind of address means: a table selects its building, a
    * query draws its plan across the city, and a facility selects the facility. All three then show
    * their place card over the list, which is the pattern every web map uses.
+   *
+   * The query branch delegates the selection to `showFamilyOnMap` rather than setting it here and
+   * calling on: setting it in both places would work today and would quietly re-open the way for
+   * the two paths to drift apart, because the list would go on highlighting rows whether or not
+   * the shared path still did.
    */
   const openAddress = useCallback((entry: AddressEntry) => {
-    setSelectedAddressId(entry.id)
-    if (entry.kind === 'table') {
-      selectObject(entry.targetId)
-      return
-    }
     if (entry.kind === 'query') {
       const family = page?.topQueryFamilies.find(candidate => candidate.familyId === entry.targetId)
-      if (family) void showFamilyOnMap(family)
+      // No family behind the id means nothing to draw, so select the row and stop; leaving the
+      // selection unset here would make a stale place card outlive a click that did land.
+      if (!family) {
+        setSelectedAddressId(entry.id)
+        return
+      }
+      void showFamilyOnMap(family)
+      return
     }
+    setSelectedAddressId(entry.id)
+    if (entry.kind === 'table') selectObject(entry.targetId)
   }, [page?.topQueryFamilies, selectObject, showFamilyOnMap])
 
   const selectedFacility = selectedAddressId?.startsWith('facility:')
@@ -1134,6 +1167,19 @@ function LegendDrawer({
   selectedObject: DatabaseCityObject | null
   vehicles: VehicleRoster
 }) {
+  /*
+   * Default off, per the request, and the state is local because nothing outside this table reads
+   * it. The address book's own "Query families" group is deliberately *not* filtered by it: that
+   * group is a search index, and a family you searched for by name disappearing because the page
+   * it lives on is not loaded would be a worse answer than listing it with the per-entry note it
+   * already carries ("Plans named no object in this database").
+   */
+  const [showUnmappedFamilies, setShowUnmappedFamilies] = useState(false)
+  const placedIds = useMemo(() => placedObjectIds(objects), [objects])
+  const familySplit = useMemo(
+    () => splitQueryFamiliesByMap(page.topQueryFamilies, placedIds, showUnmappedFamilies),
+    [page.topQueryFamilies, placedIds, showUnmappedFamilies],
+  )
   return (
     <details className="sidebar-drawer">
       <summary>Legend &amp; evidence</summary>
@@ -1354,22 +1400,46 @@ function LegendDrawer({
         <section className="city-workload" aria-labelledby="city-workload-title">
           <div className="section-heading">
             <div><h2 id="city-workload-title">Top query-family exposure</h2>
-              <p>Backend-ranked top 12; no browser-side 100k layout</p></div>
+              <p>Backend-ranked top {page.topQueryFamilies.length}; no browser-side 100k layout</p></div>
           </div>
+          {/*
+            * Below the heading rather than inside it, deliberately. `.section-heading` is shared by
+            * six sections in this file and is asserted on by `mobileLayout.test.ts`; putting a
+            * control in it would mean restyling a rule those guards are pinned to, for one caller.
+            */}
+          <label className="workload-filter">
+            <input
+              type="checkbox"
+              checked={showUnmappedFamilies}
+              onChange={event => setShowUnmappedFamilies(event.currentTarget.checked)}
+            />
+            {familySplit.toggleLabel}
+          </label>
           <div className="table-scroll"><table>
             <thead><tr><th>Family</th><th>Executions</th><th>CPU µs</th><th>Duration µs</th><th>Reads (8-KiB)</th><th>Attribution</th><th>Map</th></tr></thead>
-            <tbody>{page.topQueryFamilies.map(family => <tr key={family.familyId}>
+            <tbody>{familySplit.shown.map(family => <tr key={family.familyId}>
               <th scope="row">{family.familyId}<small>{family.queryHash} · {family.evidence.source}</small></th>
               <td>{family.executionCount}</td><td>{family.totalCpuMicroseconds}</td>
               <td>{family.totalDurationMicroseconds}</td><td>{family.totalLogicalReads8KiBPages}</td>
               <td>{family.confidence}<small>{family.rationale}</small></td>
-              <td className="map-cell"><button
-                type="button"
-                disabled={mappingFamilyId === family.familyId}
-                aria-label={`Draw the plan for ${family.familyId} on the map`}
-                onClick={() => void onShowFamily(family)}
-              >{mappingFamilyId === family.familyId ? 'Reading plan…' : 'Show on map'}</button>
-                {activePlanFamilyId === family.familyId && <small>Drawn on the map</small>}</td>
+              <td className="map-cell">{familyOnMap(family, placedIds) ? <>
+                <button
+                  type="button"
+                  disabled={mappingFamilyId === family.familyId}
+                  aria-label={`Draw the plan for ${family.familyId} on the map`}
+                  onClick={() => void onShowFamily(family)}
+                >{mappingFamilyId === family.familyId ? 'Reading plan…' : 'Show on map'}</button>
+                {activePlanFamilyId === family.familyId && <small>Drawn on the map</small>}
+              </> : <span className="map-cell-none">Nothing on this map<small>
+                {/*
+                  * Only reachable with the toggle on, and it is the whole reason the toggle is
+                  * default-off: the control it replaces looked identical to a working one and
+                  * spent two fetches to draw a route with no stop on it.
+                  */}
+                {family.objectIds.length === 0
+                  ? 'Its plans named no object in this database.'
+                  : `Its plans named ${family.objectIds.length} object(s), none of them on this bounded page.`}
+              </small></span>}</td>
             </tr>)}</tbody>
             <tfoot><tr><th scope="row">Other workload ({page.otherWorkload.familyCount ?? 'count unavailable'} families)</th>
               <td>{page.otherWorkload.executionCount ?? 'Unavailable'}</td><td>{page.otherWorkload.totalCpuMicroseconds ?? 'Unavailable'}</td>
@@ -1378,6 +1448,7 @@ function LegendDrawer({
               <td>Aggregate only<small>{page.otherWorkload.evidence.reason}</small></td>
               <td>Not a single query<small>An aggregate has no one plan to draw.</small></td></tr></tfoot>
           </table></div>
+          <p className="hud-note">{familySplit.reason}</p>
         </section>
 
         <section className="topology city-routes" aria-labelledby="city-routes-title">
