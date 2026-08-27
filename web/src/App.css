@@ -1535,8 +1535,82 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  *
  * `:not()` rather than `:where()` inside `:has()`, and for the same reason as the drawer budget: an
  * engine without `:has()` drops this rule entirely and lands on the 22vh cap, which always fits.
+ *
+ * The second clause arrived with the accordion below. "Directory closed" used to mean "nothing else
+ * is claiming the column", and it stopped meaning that once an open drawer could claim it: the feed
+ * held its lifted, content-sized height while the legend beside it was squeezed, which is the
+ * opposite of what the reader asked for by opening the legend. Any open region now takes the lift
+ * away. It is `:not(:has(.sidebar-drawer[open]))` and not a `>` chain because the drawers sit inside
+ * `.sidebar-drawers` on the desktop rail and are direct children only in the sheet.
  */
-.map-sidebar:has(> .sidebar-directory:not([open])) .sidebar-feed { max-height: none; }
+.map-sidebar:has(> .sidebar-directory:not([open])):not(:has(.sidebar-drawer[open])) .sidebar-feed { max-height: none; }
+
+
+/* --- The rail accordion -------------------------------------------------------------------- */
+/*
+ * One region open at a time, and the open one gets the column.
+ *
+ * The rail holds four collapsible regions -- the directory, live activity, the plan finder and the
+ * legend -- against one fixed height, and until now any number of them could be open at once. The
+ * budget above is what that arrangement needed: a fixed allowance divided between however many
+ * drawers were open, so that none of them could floor at a size the others could not afford.
+ *
+ * Dividing it was never the same thing as making it readable. Measured at 1440x900 on
+ * `AdventureWorks` with all four open, the three drawers held **18px of body each** against 134px,
+ * 81px and 84,953px of content, while the directory held 178px against 11,712px. The rail reported
+ * **0 unreachable pixels** throughout, because every one of those bodies is an `overflow: auto`
+ * scroller and an 18px scroller clips nothing at all -- it simply cannot be read. That is the
+ * failure this file warns about twice, reached by a third route.
+ *
+ * So the fix is not a better division. With only one region open there is nothing to divide: the
+ * open one takes the column and the other three cost a 35px summary apiece. `sidebarAccordion.ts`
+ * enforces that in React, because four `<details>` elements cannot enforce it between themselves.
+ *
+ * This is the `.sidebar-directory` shape applied to all four, and its two halves both matter:
+ *
+ * - `max-height: none` because the region is no longer competing with a peer that also needs room.
+ *   The caps above stay in place for the closed state and for an unwrapped drawer (the atlas).
+ * - `min-height: 2.75rem` because a flex item's *automatic* minimum is its content clamped by its
+ *   own definite `max-height`, and lifting the cap therefore lifts the floor to the whole 84,953px
+ *   legend. Naming a floor replaces that; `::details-content { min-height: 0 }` above then routes
+ *   the shrink into `.sidebar-drawer-body`, which already scrolls. It is *not* `0`: that is the
+ *   10px-drawer defect, and the floor is what keeps the summary you click on inside the box.
+ *
+ * `[open]` and not `:not([open])`, throughout. `ownRule()` in `mobileLayout.test.ts` matches a
+ * selector part ending in the one asked for, optionally followed by a pseudo-class -- so
+ * `.sidebar-drawer:not([open])` reads to it as `.sidebar-drawer`, and being later in the file it
+ * would silently retarget every existing assertion about the base drawer at this override. An
+ * attribute selector is invisible to that helper, so the base rules keep their guards.
+ *
+ * Scoped to `.sidebar-drawers >` rather than written on `.sidebar-drawer`, so the atlas -- whose
+ * drawer has no wrapper -- stays byte-identical, exactly as the `46vh` cap fallback intends.
+ */
+.sidebar-directory[open],
+.sidebar-drawers > .sidebar-drawer[open] {
+  flex: 1 1 auto;
+  min-height: 2.75rem;
+  max-height: none;
+}
+
+/*
+ * The wrapper has to ask for the column too, or the drawer inside it cannot be given one.
+ *
+ * `.sidebar-drawers` is `flex: 0 1 auto` with a `max-height` budget, so an open drawer inside it can
+ * only ever divide what the wrapper already holds -- 34vh, the number that produced the 18px bodies.
+ * `is-open` is set by the component when the open region is one of these three.
+ *
+ * The floor is explicit and is arithmetic, not taste: two collapsed siblings at 35px each (34px of
+ * summary plus their 1px `border-top`, measured) plus the open drawer's own 2.75rem floor is 114px,
+ * so 7.25rem is the smallest value that cannot clip a summary. The wrapper is `overflow: visible`,
+ * so anything lower spills its drawers back out of a rail that is `overflow: hidden` -- the #63
+ * defect one level out, which is why the base wrapper names no `min-height: 0` and this names a real
+ * number instead. Add a fourth drawer to the wrapper and this has to go up by 2.1875rem.
+ */
+.sidebar-drawers.is-open {
+  flex: 1 1 auto;
+  min-height: 7.25rem;
+  max-height: none;
+}
 
 
 /* --- Live query feed ----------------------------------------------------------------------- */
@@ -1911,6 +1985,25 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
    * source order lets it win; written into the first one it would silently lose.
    */
   .sidebar-place-card.is-full { flex: none; }
+
+  /*
+   * The accordion's grants are a desktop mechanism and have to be handed back here.
+   *
+   * `flex: 1 1 auto` on an open region outweighs `.map-sidebar > *` and `.sidebar-drawers > *` on
+   * specificity -- `.sidebar-directory[open]` scores (0,2,0) and `.sidebar-drawers >
+   * .sidebar-drawer[open]` scores (0,3,0) against their (0,1,0) -- so without this the one open
+   * region would grow and shrink inside a sheet where nothing else does. `min-height` goes back to
+   * `auto` for the same reason: the sheet has no fixed column to floor against.
+   *
+   * This override matches on the same selectors so specificity ties, and it lives in this second
+   * narrow block so source order settles it. Written into the first one it would silently lose --
+   * the base rules it overrides are declared after that block.
+   *
+   * `max-height` is deliberately not repeated: the grouped rule above already sets `none` on both,
+   * and so does the accordion, so the sheet's caps are lifted either way.
+   */
+  .sidebar-directory[open],
+  .sidebar-drawers > .sidebar-drawer[open] { flex: none; min-height: auto; }
 
   /*
    * The sheet's contract runs on `.map-sidebar > *`, a direct-child selector, so the drawer wrapper
