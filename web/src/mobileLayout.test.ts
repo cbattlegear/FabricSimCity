@@ -455,6 +455,105 @@ describe('the sidebar column scrolls its own overflow', () => {
    * the fieldset, because a fieldset's box is measured from its rendered legend's top. The geometry
    * looked correct while the pixels did not, and only a screenshot settled it.
    */
+  /**
+   * The address book is now a disclosure, because the live feed took the rail's default subject.
+   *
+   * That makes it the fourth `<details>` in this layout and it inherits every trap the drawers
+   * already documented: the floor lives on `::details-content`, never on the `<details>` itself,
+   * and a rule written into the wrong `@media` block loses on source order without failing.
+   */
+  it('collapses the address book behind a disclosure rather than dropping it', () => {
+    const address = readFileSync(new URL('./AddressPanel.tsx', import.meta.url), 'utf8')
+    expect(address, 'the address book is no longer a <details>')
+      .toMatch(/<details\s[\s\S]{0,120}?className="sidebar-directory"/)
+    expect(address, 'the disclosure has no summary to click').toMatch(/<summary/)
+    expect(desktopRule('.sidebar-directory'), '.sidebar-directory has no rule at all').not.toBeNull()
+  })
+
+  /*
+   * The 10px-drawer defect, transplanted. `min-height: 0` on the <details> shrinks the box that
+   * holds the summary, so the control you click to open the directory gets clipped away and the
+   * address book becomes unreachable rather than merely closed.
+   */
+  it('never shrinks the directory past its own summary', () => {
+    const own = rules().filter((one) => one.selector.split(',')
+      .some((part) => part.trim() === '.sidebar-directory'))
+    expect(own.length, 'no .sidebar-directory rule to check').toBeGreaterThan(0)
+    for (const rule of own) {
+      expect(rule.body, 'a .sidebar-directory rule sets min-height: 0').not.toMatch(/min-height:\s*0/)
+    }
+    // The floor belongs on the box that is actually the flex item.
+    expect(css).toMatch(/\.sidebar-directory::details-content \{[^}]*min-height:\s*0/)
+    expect(css).toMatch(/\.sidebar-directory > summary \{[^}]*flex:\s*none/)
+  })
+
+  /*
+   * `::details-content` is `display: block` with `min-height: auto`, so it floors on its own content
+   * however hard the column pushes. Making it a flex column is what lets the shrink reach the
+   * scroller inside, which is the only reason the directory can give way at all.
+   */
+  it('lets the shrink reach the scroller inside the directory', () => {
+    const content = ownRule('.sidebar-directory::details-content')
+    expect(content, '.sidebar-directory::details-content has no rule').not.toBeNull()
+    expect(content).toMatch(/display:\s*flex/)
+    expect(content).toMatch(/flex-direction:\s*column/)
+  })
+
+  /*
+   * A definite max-height is what gives the directory a bounded automatic minimum, so it cannot
+   * floor at the full height of a 60-object address list and push the feed out of the rail.
+   */
+  it('caps the open directory so a long address list cannot evict the feed', () => {
+    expect(desktopRule('.sidebar-directory')).toMatch(/max-height:\s*\d+(?:\.\d+)?vh/)
+  })
+
+  /*
+   * The point of collapsing it: with the directory shut there is nothing competing for the rail, so
+   * the feed should take the space rather than sitting at its own cap with dead air beneath it.
+   *
+   * `:has()` and not `:where()` inside it -- `:has()` takes a relative selector list, `:where()` a
+   * complex one, so a leading combinator inside `:where()` is dropped by forgiving parsing and the
+   * rule silently matches everything.
+   */
+  it('gives the feed the rail back when the directory is closed', () => {
+    const lifted = css.match(/\.map-sidebar:has\(> \.sidebar-directory:not\(\[open\]\)\)[^{]*\{[^}]*\}/)
+    expect(lifted, 'no rule lifts the feed cap when the directory is closed').not.toBeNull()
+    expect(lifted![0]).toMatch(/max-height:\s*none/)
+    expect(lifted![0], 'a :where() inside :has() is dropped by forgiving parsing')
+      .not.toMatch(/:where\(/)
+  })
+
+  /*
+   * Source order, the trap AGENTS.md calls out: base sidebar rules sit after the FIRST
+   * max-width:860px block, so a narrow override written into that block loses to them silently.
+   *
+   * `lastNarrowRuleFor` is no use here because it only matches a selector that owns its own brace,
+   * and this override rides in a comma group with the other capped sections. Comparing raw offsets
+   * is the same check without that assumption.
+   */
+  it('declares the directory narrow override after the base rule it overrides', () => {
+    const base = css.indexOf('\n.sidebar-directory {')
+    expect(base, 'no base .sidebar-directory rule').toBeGreaterThan(-1)
+
+    const override = css.lastIndexOf('.sidebar-directory,')
+    expect(override, 'no grouped narrow override for .sidebar-directory').toBeGreaterThan(-1)
+    expect(override, 'the narrow override is declared before the rule it overrides')
+      .toBeGreaterThan(base)
+
+    // And specifically inside the last narrow block, not merely later in the file.
+    const lastSheetBlock = css.lastIndexOf(`@media (max-width: ${SHEET}px)`)
+    expect(override, 'the override is not in the last narrow block').toBeGreaterThan(lastSheetBlock)
+  })
+
+  /*
+   * In the sheet the rail's caps are lifted wholesale, because the sheet scrolls as one column
+   * instead of dividing a fixed height. A directory left capped at a fraction of the viewport there
+   * would scroll inside a page that is already scrolling.
+   */
+  it('lifts the directory cap in the bottom sheet', () => {
+    expect(narrowRule('.sidebar-directory')).toMatch(/max-height:\s*none/)
+  })
+
   it('gives the layers panel a heading rather than a legend in its border', () => {
     expect(city, 'the layers panel is back to a fieldset/legend').not.toMatch(/<legend>/)
     expect(city, 'the layers panel is no longer a labelled group')
