@@ -1,6 +1,6 @@
 import type { DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { IncidentPlacement, IncidentPlacementBasis } from './cityIncidentPlacement'
-import type { LiveRequest } from './liveContracts'
+import type { LiveQueryEvent } from './liveQueryFeed'
 
 /**
  * Which vehicles are on the roads, and what each one is.
@@ -19,6 +19,13 @@ import type { LiveRequest } from './liveContracts'
  *   workload to fill an empty street, because an empty street is a finding: it means nothing was
  *   sampled here, which is not the same as nothing having run here. The live sampler runs on a 2–5 s
  *   cadence, so a query that starts and finishes between two samples never appears at all.
+ * - **A vehicle leaves the kerb when its execution *arrives*, not when the query started.** The
+ *   roster is built from {@link LiveQueryEvent}s, so a car's position is a function of how long that
+ *   execution has been *in the feed* — which is what the scrolling list beside the map is showing.
+ *   The two are the same event seen twice, which is the entire point: a row appears, a car sets off.
+ *   It is not a claim about progress. `sys.dm_exec_requests` reports no percentage complete for an
+ *   arbitrary statement, so the distance a car has covered says how long it has been watched and
+ *   nothing whatever about how much of the query is left.
  * - **The join is `query_hash`, and only `query_hash`.** `sys.dm_exec_requests.query_hash` and
  *   `sys.query_store_query.query_hash` are the same `binary(8)`, rendered to the same string by both
  *   collectors. A request whose hash matches no family on this page gets no vehicle and is *counted*
@@ -57,6 +64,34 @@ export const SEMI_FLOOR_BYTES = 536_870_912n
  * thing on this map worth interrupting a reader for.
  */
 export const VEHICLE_CAP = 120
+
+/**
+ * World units a vehicle covers per second.
+ *
+ * Invented, and shared with the scene so the roster and the renderer agree on where a car is. It is
+ * a drawing speed chosen to read well at map scale — nothing measures how fast a query "travels".
+ */
+export const VEHICLE_SPEED = 13
+
+/**
+ * The largest invented delay between an execution arriving and its car pulling away, in seconds.
+ *
+ * Several executions routinely arrive in the same sample, and any two of them on the same road would
+ * otherwise start at the same instant from the same kerb and be drawn as one vehicle. The delay is
+ * deterministic per execution, so a car does not jump when the roster is rebuilt, and it is small
+ * enough that the list and the departure still read as the same event.
+ */
+export const VEHICLE_LAUNCH_STAGGER_SECONDS = 1.2
+
+/**
+ * How long a car may linger after its execution left the sample, in seconds.
+ *
+ * A car normally retires the moment it reaches the end of its road, which is the visible answer to
+ * "that query is gone". This is the backstop for the case where it cannot: if the live channel drops,
+ * no further sample arrives, and without a deadline the last cars would sit on the map indefinitely
+ * looking like current traffic.
+ */
+export const VEHICLE_RETIRE_SECONDS = 45
 
 export interface VehiclePoint {
   readonly x: number
@@ -104,39 +139,61 @@ export interface Vehicle {
   readonly id: string
   readonly sessionId: number
   readonly familyId: string
+  /** The feed row this vehicle is. Same identity the scrolling list uses, so hovering can pair them. */
+  readonly eventId: string
+  /** Arrival order in the feed. Ascending, never reused; the newest car has the highest ordinal. */
+  readonly ordinal: number
   /** The drawn road this vehicle travels. */
   readonly routeId: string
   readonly class: VehicleClass
   /** The road's centreline, in the direction the vehicle travels. */
   readonly points: readonly VehiclePoint[]
   /**
-   * Where along the route this vehicle starts, 0–1.
+   * Seconds of travel this vehicle had already done when the roster was built.
    *
-   * Invented, and deterministic from the session and family so the same request sits in the same
-   * place from one sample to the next instead of teleporting back to the kerb every few seconds.
-   * It encodes nothing: SQL Server does not report how far through a statement a request is.
+   * Measured from the moment the execution entered the feed, less its invented launch stagger, and
+   * floored at zero — a car that has not yet been released is waiting at the kerb rather than
+   * standing somewhere down the road. The scene adds its own elapsed time on top of this, so the
+   * position is recomputed from wall-clock age on every rebuild and cannot drift.
    */
-  readonly phase: number
+  readonly elapsedSeconds: number
+  /**
+   * The value {@link elapsedSeconds} had when the execution stopped being sampled, or null while it
+   * is still in the feed.
+   *
+   * A car that is still being sampled loops its road; one whose query has gone finishes the lap it
+   * was on and stops. Recording the elapsed time at that moment rather than a bare flag is what
+   * keeps the transition continuous — clamping a car that was half way round its third lap to the
+   * end of the road would teleport it.
+   */
+  readonly finishedAfterSeconds: number | null
   /** Non-null exactly when the request is blocked. A blocked vehicle does not move. */
   readonly blockedAt: VehicleStop | null
 }
 
 export interface VehicleRoster {
   readonly vehicles: readonly Vehicle[]
-  /** Sampled rows carrying a request status — the population a vehicle could have come from. */
-  readonly sampledRunning: number
   /**
-   * Running requests whose `query_hash` matched no family on this page. Real work, drawn nowhere,
+   * Feed rows the roster considered — every execution this browser has observed and not yet retired.
+   *
+   * The population a vehicle could have come from. Larger than the number still running, because a
+   * car whose query has gone keeps driving until it reaches the end of its road.
+   */
+  readonly observedExecutions: number
+  /**
+   * Observed executions whose `query_hash` matched no family on this page. Real work, drawn nowhere,
    * counted here so the gap between the street and the DMV is visible rather than silent.
    */
   readonly unmatchedHash: number
-  /** Matched requests whose family names no road this page drew, so there is nothing to drive. */
+  /** Matched executions whose family names no road this page drew, so there is nothing to drive. */
   readonly noRoad: number
   /** Vehicles the cap dropped. */
   readonly capped: number
   readonly cap: number
+  /** Cars whose execution has gone and which have finished their road, so they left the map. */
+  readonly retired: number
   /**
-   * False when no sampled running request carried a `query_hash` field at all.
+   * False when no observed execution carried a `query_hash` field at all.
    *
    * That is what an API build older than the field looks like, and it produces an empty roster which
    * is indistinguishable from an idle instance. The reader has to be told which of the two they are
@@ -149,26 +206,35 @@ export interface VehicleRoster {
 
 export const EMPTY_ROSTER: VehicleRoster = {
   vehicles: [],
-  sampledRunning: 0,
+  observedExecutions: 0,
   unmatchedHash: 0,
   noRoad: 0,
   capped: 0,
   cap: VEHICLE_CAP,
+  retired: 0,
   hashReported: false,
   reason: 'No live snapshot has been received, so nothing is claimed about what is running now.',
 }
 
 export interface VehicleInput {
   /**
-   * The live snapshot's request rows, or null when there is no snapshot. Optional at runtime the
-   * way `cityIncidents.ts` treats `deadlocks`: a tab left open across a deployment can be handed a
-   * payload from a build that predates the field this reads.
+   * The observed executions, newest first, or null when no snapshot has been folded in yet.
+   *
+   * Optional at runtime the way `cityIncidents.ts` treats `deadlocks`: a tab left open across a
+   * deployment can be handed a payload from a build that predates the field this reads.
    */
-  readonly requests: readonly LiveRequest[] | null
+  readonly events: readonly LiveQueryEvent[] | null
   readonly families: readonly DatabaseCityQueryFamily[]
   readonly roads: readonly VehicleRoad[]
   /** Incident placements keyed by the session they were pinned for. */
   readonly blocked: ReadonlyMap<number, IncidentPlacement>
+  /**
+   * Epoch ms to age the feed against.
+   *
+   * Passed in rather than read from a clock so the roster stays pure and so every car in one rebuild
+   * is aged against the same instant.
+   */
+  readonly now: number
 }
 
 const STOP_RATIONALE: Readonly<Record<IncidentPlacementBasis | 'unpinned', string>> = {
@@ -190,8 +256,8 @@ const STOP_RATIONALE: Readonly<Record<IncidentPlacementBasis | 'unpinned', strin
  * reader can see rather than the straight line between two lots that nothing draws.
  */
 export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
-  const { requests, families, roads, blocked } = input
-  if (!requests) return EMPTY_ROSTER
+  const { events, families, roads, blocked, now } = input
+  if (!events) return EMPTY_ROSTER
 
   const familyByHash = new Map<string, DatabaseCityQueryFamily>()
   for (const family of families) {
@@ -201,33 +267,26 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
   }
 
   const roadByFamily = bestRoadPerFamily(roads)
+  const familyById = new Map(families.map(family => [family.familyId, family]))
 
-  let sampledRunning = 0
+  let observedExecutions = 0
   let unmatchedHash = 0
   let noRoad = 0
+  let retired = 0
   let hashReported = false
   const built: Vehicle[] = []
-  const elapsedBySession = new Map<number, number>()
-  // One vehicle per session and family. A session can hold several requests at once under MARS, and
-  // they are the same session driving the same street; two overlapping vehicles would read as two
-  // sessions.
-  const seen = new Set<string>()
 
-  for (const request of requests) {
-    // Idle sessions are sampled on purpose and are not running requests.
-    if (request.requestStatus === null || request.requestStatus === undefined) continue
-    sampledRunning += 1
-    const elapsed = request.totalElapsedMs ?? -1
-    elapsedBySession.set(request.sessionId, Math.max(elapsedBySession.get(request.sessionId) ?? -1, elapsed))
+  for (const event of events) {
+    observedExecutions += 1
+    // `false` is a payload with no such field; a null hash is the engine reporting none.
+    if (event.hashReported) hashReported = true
 
-    // `undefined` is a payload with no such field; `null` is the engine reporting no hash.
-    if (request.queryHash !== undefined) hashReported = true
-    const hash = normalizeHash(request.queryHash ?? null)
-    if (!hash) {
-      unmatchedHash += 1
-      continue
-    }
-    const family = familyByHash.get(hash)
+    // The family is resolved in the feed so the list and the map can never name different families
+    // for one execution. Falling back to the hash covers a family that only became resolvable after
+    // this page loaded another slice of the catalogue.
+    const family = event.familyId
+      ? familyById.get(event.familyId)
+      : (event.queryHash ? familyByHash.get(event.queryHash) : undefined)
     if (!family) {
       unmatchedHash += 1
       continue
@@ -239,29 +298,43 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
       continue
     }
 
-    const id = `request:${request.sessionId}:${family.familyId}`
-    if (seen.has(id)) continue
-    seen.add(id)
+    const stagger = phaseOf(event.sessionId, event.id) * VEHICLE_LAUNCH_STAGGER_SECONDS
+    const elapsedSeconds = Math.max(0, (now - event.firstSeenAt) / 1000 - stagger)
+    const finishedAfterSeconds =
+      event.endedAt === null ? null : Math.max(0, (event.endedAt - event.firstSeenAt) / 1000 - stagger)
 
-    const phase = phaseOf(request.sessionId, family.familyId)
+    const fraction = travelledFraction(road.polyline, elapsedSeconds, finishedAfterSeconds)
+    if (finishedAfterSeconds !== null) {
+      // Reaching the end of the road is how a car says its query is gone. The deadline is only for
+      // the case where no further sample will ever arrive to retire it.
+      const overdue = event.endedAt !== null && now - event.endedAt >= VEHICLE_RETIRE_SECONDS * 1000
+      if (fraction >= 1 || overdue) {
+        retired += 1
+        continue
+      }
+    }
+
     built.push({
-      id,
-      sessionId: request.sessionId,
+      id: `request:${event.id}`,
+      sessionId: event.sessionId,
       familyId: family.familyId,
+      eventId: event.id,
+      ordinal: event.ordinal,
       routeId: road.routeId,
       class: vehicleClass(family),
       points: road.polyline,
-      phase,
-      blockedAt: stopFor(request, road, blocked, phase),
+      elapsedSeconds,
+      finishedAfterSeconds,
+      blockedAt: stopFor(event, road, blocked, fraction),
     })
   }
 
-  // A stopped vehicle outranks a moving one, then the longest-running request, then the session id
-  // so the same sample always truncates the same tail.
+  // A stopped vehicle outranks a moving one, then the most recent arrival, so the cap drops the
+  // oldest traffic rather than the newest — the newest is what the reader just watched appear.
   built.sort(
     (left, right) =>
       Number(right.blockedAt !== null) - Number(left.blockedAt !== null)
-      || (elapsedBySession.get(right.sessionId) ?? -1) - (elapsedBySession.get(left.sessionId) ?? -1)
+      || right.ordinal - left.ordinal
       || left.sessionId - right.sessionId
       || left.familyId.localeCompare(right.familyId),
   )
@@ -269,21 +342,44 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
   const vehicles = built.slice(0, VEHICLE_CAP)
   return {
     vehicles,
-    sampledRunning,
+    observedExecutions,
     unmatchedHash,
     noRoad,
     capped: built.length - vehicles.length,
     cap: VEHICLE_CAP,
+    retired,
     hashReported,
     reason: rosterReason({
-      sampledRunning,
+      observedExecutions,
       drawn: vehicles.length,
       unmatchedHash,
       noRoad,
       capped: built.length - vehicles.length,
+      retired,
       hashReported,
     }),
   }
+}
+
+/**
+ * How far along its road a vehicle is, 0–1, **by arc length**.
+ *
+ * A car whose execution is still being sampled laps its road, because nothing measures how much of a
+ * statement is left and a car that stopped at the end would be claiming the query had finished. Once
+ * the execution leaves the sample the car completes the lap it is on and stops — the laps it had
+ * already done are subtracted so the change of rule is continuous rather than a jump.
+ */
+export function travelledFraction(
+  points: readonly VehiclePoint[],
+  elapsedSeconds: number,
+  finishedAfterSeconds: number | null,
+): number {
+  const length = polylineLength(points)
+  if (length <= 0) return 0
+  const travelled = (Math.max(0, elapsedSeconds) * VEHICLE_SPEED) / length
+  if (finishedAfterSeconds === null) return travelled % 1
+  const lapsWhenFinished = Math.floor((Math.max(0, finishedAfterSeconds) * VEHICLE_SPEED) / length)
+  return Math.min(1, Math.max(0, travelled - lapsWhenFinished))
 }
 
 /**
@@ -357,23 +453,21 @@ function busier(candidate: VehicleRoad, incumbent: VehicleRoad): boolean {
 }
 
 /** Only a *blocked* request is stopped. Holding a lock nobody waits behind is just work. */
-function isBlocked(request: LiveRequest): boolean {
-  return request.blocking.blockingSessionId !== null || request.blocking.sentinel !== 'None'
-}
-
 function stopFor(
-  request: LiveRequest,
+  event: LiveQueryEvent,
   road: VehicleRoad,
   blocked: ReadonlyMap<number, IncidentPlacement>,
-  phase: number,
+  fraction: number,
 ): VehicleStop | null {
-  if (!isBlocked(request)) return null
+  // A car whose execution has already left the sample is not blocked now, whatever it was doing when
+  // it was last seen. It finishes its road rather than being frozen by a block that is over.
+  if (!event.blocked || event.endedAt !== null) return null
 
   // Where it would have been standing had nothing stopped it. Used whenever the pin cannot honestly
   // move it, so a halt never teleports a vehicle to a place no measurement put it.
-  const inPlace = pointAt(road.polyline, phase)
+  const inPlace = pointAt(road.polyline, fraction)
 
-  const placement = blocked.get(request.sessionId)
+  const placement = blocked.get(event.sessionId)
   if (!placement) {
     return { ...inPlace, basis: null, pinnedRouteId: null, rationale: STOP_RATIONALE.unpinned }
   }
@@ -395,7 +489,8 @@ function stopFor(
  * A stable 0–1 offset from the session and one other key.
  *
  * FNV-1a over the two, so it is deterministic across reloads and across machines, and spreads
- * neighbouring session ids rather than clustering them at one end of the road.
+ * neighbouring session ids rather than clustering them at one end of the road. Used only to stagger
+ * departures — see {@link VEHICLE_LAUNCH_STAGGER_SECONDS}. It encodes nothing about the query.
  */
 export function phaseOf(sessionId: number, key: string): number {
   let hash = 0x811c9dc5
@@ -470,25 +565,26 @@ export function polylineLength(points: readonly VehiclePoint[]): number {
  * capped away. Only one of those is "the instance is quiet".
  */
 function rosterReason(counts: {
-  sampledRunning: number
+  observedExecutions: number
   drawn: number
   unmatchedHash: number
   noRoad: number
   capped: number
+  retired: number
   hashReported: boolean
 }): string {
   const parts: string[] = []
-  if (counts.sampledRunning === 0) {
+  if (counts.observedExecutions === 0) {
     parts.push(
-      'No request was running in the last sample. The sampler runs every few seconds, so a query that started and finished between two samples never appears.',
+      'No request has been running in any sample so far. The sampler runs every few seconds, so a query that started and finished between two samples never appears.',
     )
   } else if (!counts.hashReported) {
     parts.push(
-      `${counts.sampledRunning} running ${plural(counts.sampledRunning, 'request')} sampled, but this snapshot carries no query_hash at all — it came from an API build that predates the field, so no request can be matched to a query family. An empty road here is a missing field, not an idle instance.`,
+      `${counts.observedExecutions} observed ${plural(counts.observedExecutions, 'execution')}, but this snapshot carries no query_hash at all — it came from an API build that predates the field, so no request can be matched to a query family. An empty road here is a missing field, not an idle instance.`,
     )
   } else {
     parts.push(
-      `${counts.drawn} of ${counts.sampledRunning} sampled running ${plural(counts.sampledRunning, 'request')} drawn.`,
+      `${counts.drawn} of ${counts.observedExecutions} observed ${plural(counts.observedExecutions, 'execution')} drawn.`,
     )
   }
   if (counts.hashReported && counts.unmatchedHash > 0) {
@@ -502,6 +598,11 @@ function rosterReason(counts: {
   if (counts.capped > 0) {
     parts.push(`${counts.capped} beyond the ${VEHICLE_CAP}-vehicle cap ${plural(counts.capped, 'is', 'are')} not drawn.`)
   }
+  if (counts.retired > 0) {
+    parts.push(
+      `${counts.retired} finished ${plural(counts.retired, 'its', 'their')} road after leaving the sample and ${plural(counts.retired, 'has', 'have')} left the map. Leaving the sample means the request was gone when the collector next looked, not that it succeeded.`,
+    )
+  }
   return parts.join(' ')
 }
 
@@ -511,8 +612,8 @@ function plural(count: number, one: string, many?: string): string {
 
 /** What the folded, one-line summary of a roster says. Never "idle" unless that is what was measured. */
 export function vehicleSummaryLabel(roster: VehicleRoster): string {
-  if (roster.sampledRunning > 0 && !roster.hashReported) return 'Not matchable'
-  if (roster.vehicles.length > 0) return `${roster.vehicles.length} running`
-  if (roster.sampledRunning > 0) return `${roster.sampledRunning} unplaced`
+  if (roster.observedExecutions > 0 && !roster.hashReported) return 'Not matchable'
+  if (roster.vehicles.length > 0) return `${roster.vehicles.length} driving`
+  if (roster.observedExecutions > 0) return `${roster.observedExecutions} unplaced`
   return 'None sampled'
 }

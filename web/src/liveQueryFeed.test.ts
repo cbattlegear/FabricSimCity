@@ -1,0 +1,467 @@
+import { describe, expect, it } from 'vitest'
+import {
+  advanceQueryFeed,
+  liveQuerySummaryLabel,
+  queryEventId,
+  EMPTY_QUERY_FEED,
+  LIVE_QUERY_FEED_CAP,
+} from './liveQueryFeed'
+import type { DatabaseCityQueryFamily } from './databaseCityContracts'
+import type { LiveIncidentSnapshot, LiveRequest } from './liveContracts'
+
+/**
+ * The feed is the only surface on this page that claims to be a log of *events*, and every way it
+ * can be wrong is a way it can be wrong quietly. Two executions folded into one row look exactly
+ * like a calm instance. An arrival time taken from `start_time` rather than from the sample makes an
+ * hour-old query look like it just began. A departed row that reads as "finished" invents an outcome
+ * the DMVs never reported.
+ *
+ * This is a new module with no previous version to revert to, so each guard below was
+ * mutation-checked instead — the implementation was changed to the obvious wrong version and the
+ * guard watched to fail. The mutations are named in the comments so the check is repeatable.
+ */
+
+const T0 = 1_700_000_000_000
+
+function request(over: Partial<LiveRequest> = {}): LiveRequest {
+  return {
+    requestId: 'req:51:0',
+    sessionId: 51,
+    loginName: null,
+    hostName: null,
+    programName: null,
+    sessionStatus: 'running',
+    requestStatus: 'running',
+    command: 'SELECT',
+    waitType: null,
+    waitTimeMs: null,
+    waitResource: null,
+    blocking: { blockingSessionId: null, sentinel: 'None' },
+    requestStartTime: '2024-01-01T00:00:00Z',
+    totalElapsedMs: 100,
+    cpuTimeMs: 10,
+    reads: null,
+    writes: null,
+    logicalReads8KiBPages: null,
+    openTransactionCount: null,
+    databaseId: null,
+    databaseName: 'Shop',
+    currentStatementText: 'SELECT 1',
+    batchText: 'EXEC dbo.Everything',
+    availability: 'Available',
+    availabilityReason: null,
+    planState: 'Available',
+    planReason: null,
+    queryHash: 'AABBCCDDEEFF0011',
+    ...over,
+  } as LiveRequest
+}
+
+function snapshot(requests: LiveRequest[]): LiveIncidentSnapshot {
+  return { requests } as LiveIncidentSnapshot
+}
+
+function family(over: Partial<DatabaseCityQueryFamily> = {}): DatabaseCityQueryFamily {
+  return {
+    familyId: 'fam-1',
+    queryHash: 'AABBCCDDEEFF0011',
+    displayName: 'SELECT …',
+    executionCount: 10,
+    totalCpuMs: 1,
+    totalDurationMs: 1,
+    totalLogicalReads: '1',
+    objectIds: ['obj-1'],
+    ...over,
+  } as DatabaseCityQueryFamily
+}
+
+const families = [family()]
+
+/** Fold a run of samples, one second apart, starting at T0. */
+function fold(samples: (LiveIncidentSnapshot | null)[], step = 1_000) {
+  let feed = EMPTY_QUERY_FEED
+  samples.forEach((sample, index) => {
+    feed = advanceQueryFeed(feed, sample, families, T0 + index * step)
+  })
+  return feed
+}
+
+describe('an arrival is an observation, and the row says whose clock it is on', () => {
+  /*
+   * The single most important assertion in this file.
+   *
+   * Mutation checked: `firstSeenAt: Date.parse(request.requestStartTime)` — the obvious "use the
+   * real start time" shortcut — passes every ordering test here and fails only this one. It is also
+   * what would make an hour-old statement launch its car from a point it never drove to.
+   */
+  it('times an arrival by when this browser sampled it, not by when the query started', () => {
+    const old = request({ requestStartTime: '2020-06-01T00:00:00Z' })
+    const feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([old]), families, T0)
+    expect(feed.events[0].firstSeenAt).toBe(T0)
+    // The engine's own value survives beside it, because the row shows both.
+    expect(feed.events[0].startedAt).toBe('2020-06-01T00:00:00Z')
+    expect(Date.parse(feed.events[0].startedAt!)).toBeLessThan(feed.events[0].firstSeenAt)
+  })
+
+  it('says in plain words that arrival is an observation and departure is not success', () => {
+    const feed = fold([snapshot([request()])])
+    expect(feed.reason).toMatch(/first sampled the execution, not when the query started/i)
+    expect(feed.reason).toMatch(/not that it succeeded/i)
+  })
+})
+
+describe('the list is newest first, and stays put between samples', () => {
+  /*
+   * Mutation checked: sorting by `firstSeenAt` instead of by ordinal shuffles rows that share a
+   * millisecond on every re-render, which is the jitter that makes a scrolling list unreadable.
+   */
+  it('puts a later arrival above an earlier one', () => {
+    const feed = fold([
+      snapshot([request({ requestId: 'req:51:0' })]),
+      snapshot([request({ requestId: 'req:51:0' }), request({ sessionId: 52, requestId: 'req:52:0' })]),
+    ])
+    expect(feed.events.map(event => event.sessionId)).toEqual([52, 51])
+  })
+
+  it('keeps two executions that arrived in the same sample in the order the sample listed them', () => {
+    const feed = fold([snapshot([
+      request({ sessionId: 51, requestId: 'req:51:0' }),
+      request({ sessionId: 52, requestId: 'req:52:0' }),
+      request({ sessionId: 53, requestId: 'req:53:0' }),
+    ])])
+    // All three share `firstSeenAt`; the ordinal is what separates them.
+    expect(new Set(feed.events.map(event => event.firstSeenAt)).size).toBe(1)
+    expect(feed.events.map(event => event.sessionId)).toEqual([53, 52, 51])
+    expect(feed.events.map(event => event.ordinal)).toEqual([3, 2, 1])
+  })
+
+  it('never reuses an ordinal, so a row can be identified by it for as long as it is shown', () => {
+    const feed = fold([
+      snapshot([request()]),
+      snapshot([]),
+      snapshot([request({ sessionId: 52, requestId: 'req:52:0' })]),
+    ])
+    expect(new Set(feed.events.map(event => event.ordinal)).size).toBe(feed.events.length)
+    expect(feed.nextOrdinal).toBeGreaterThan(Math.max(...feed.events.map(event => event.ordinal)))
+  })
+
+  it('does not re-announce a request that is still running', () => {
+    const feed = fold([snapshot([request()]), snapshot([request()]), snapshot([request()])])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.observed).toBe(1)
+    expect(feed.events[0].firstSeenAt).toBe(T0)
+    expect(feed.events[0].lastSeenAt).toBe(T0 + 2_000)
+  })
+})
+
+describe('identity is the session, the request and the start time together', () => {
+  it('builds the key out of all three', () => {
+    expect(queryEventId(request())).toBe('51|req:51:0|2024-01-01T00:00:00Z')
+  })
+
+  /*
+   * Mutation checked: keying on `requestId` alone folds these two into one row that keeps the first
+   * arrival time and never scrolls — a session running a statement a second forever would show as a
+   * single quiet query. This is the failure that makes a churning instance look calm.
+   */
+  it('separates two executions a session ran in turn under the same request id', () => {
+    const first = request({ requestStartTime: '2024-01-01T00:00:00Z' })
+    const second = request({ requestStartTime: '2024-01-01T00:00:05Z' })
+    const feed = fold([snapshot([first]), snapshot([second])])
+    expect(feed.events).toHaveLength(2)
+    expect(feed.observed).toBe(2)
+    expect(feed.events[0].firstSeenAt).toBe(T0 + 1_000)
+    expect(feed.events[1].firstSeenAt).toBe(T0)
+  })
+
+  it('separates two sessions that happen to share a request id and a start time', () => {
+    const feed = fold([snapshot([
+      request({ sessionId: 51, requestId: 'req:51:0' }),
+      request({ sessionId: 77, requestId: 'req:77:0' }),
+    ])])
+    expect(feed.events).toHaveLength(2)
+  })
+
+  it('collapses a duplicate row inside one sample rather than double-counting it', () => {
+    // The same execution listed twice by one collection would otherwise arrive twice.
+    const feed = fold([snapshot([request(), request()])])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.observed).toBe(1)
+  })
+})
+
+describe('a departure means the row was gone from the next sample and nothing more', () => {
+  it('marks a row ended at the sample that no longer carried it', () => {
+    const feed = fold([snapshot([request()]), snapshot([])])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.events[0].endedAt).toBe(T0 + 1_000)
+    expect(feed.running).toBe(0)
+  })
+
+  /*
+   * Mutation checked: dropping ended rows from `merged` empties the list the instant a query
+   * finishes, so the reader never sees what just ran — which is most of what a live feed is for.
+   */
+  it('keeps a departed row in the list, so the reader can still read what ran', () => {
+    const feed = fold([snapshot([request()]), snapshot([]), snapshot([]), snapshot([])])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.events[0].endedAt).toBe(T0 + 1_000)
+  })
+
+  /*
+   * MARS and long-running requests can be missing from one sample and present in the next.
+   *
+   * Mutation checked: leaving `endedAt` set when a row reappears leaves the list claiming a query
+   * ended while it is visibly still running in the same sample.
+   */
+  it('un-ends a row that reappears, rather than treating it as a new execution', () => {
+    const feed = fold([snapshot([request()]), snapshot([]), snapshot([request()])])
+    expect(feed.events).toHaveLength(1)
+    expect(feed.observed).toBe(1)
+    expect(feed.events[0].endedAt).toBeNull()
+    expect(feed.events[0].firstSeenAt).toBe(T0)
+  })
+
+  it('counts only rows in the latest sample as running', () => {
+    const feed = fold([
+      snapshot([request({ sessionId: 51, requestId: 'req:51:0' })]),
+      snapshot([request({ sessionId: 52, requestId: 'req:52:0' })]),
+    ])
+    expect(feed.events).toHaveLength(2)
+    expect(feed.running).toBe(1)
+    expect(feed.events.find(event => event.sessionId === 52)!.endedAt).toBeNull()
+  })
+})
+
+describe('a quiet channel is not evidence that anything stopped', () => {
+  /*
+   * Mutation checked: treating a null snapshot as an empty one ends every row on the page the moment
+   * a reconnect drops one poll, which then retires every car and empties the city — a rendering of
+   * the browser's network, presented as a rendering of the server.
+   */
+  it('leaves the feed untouched when no snapshot arrived', () => {
+    const withRows = fold([snapshot([request()])])
+    const after = advanceQueryFeed(withRows, null, families, T0 + 60_000)
+    expect(after).toBe(withRows)
+    expect(after.events[0].endedAt).toBeNull()
+    expect(after.samples).toBe(1)
+  })
+
+  it('starts from an empty feed that says nothing has been sampled yet', () => {
+    expect(EMPTY_QUERY_FEED.events).toHaveLength(0)
+    expect(EMPTY_QUERY_FEED.samples).toBe(0)
+    expect(EMPTY_QUERY_FEED.reason).toMatch(/no live sample has been received/i)
+    expect(liveQuerySummaryLabel(EMPTY_QUERY_FEED)).toBe('Awaiting first sample')
+  })
+
+  /*
+   * Mutation checked: reporting an empty sample with the same sentence as an unopened channel loses
+   * the only distinction that matters between "we have not looked" and "we looked and saw nothing".
+   */
+  it('distinguishes a sample that saw nothing from never having sampled', () => {
+    const sampled = fold([snapshot([])])
+    expect(sampled.samples).toBe(1)
+    expect(sampled.reason).not.toBe(EMPTY_QUERY_FEED.reason)
+    expect(sampled.reason).toMatch(/never observed at all/i)
+    expect(liveQuerySummaryLabel(sampled)).toBe('None sampled')
+  })
+})
+
+describe('an idle session is not an execution', () => {
+  /*
+   * Issue #79 again, one layer up. Mutation checked: dropping the `requestStatus === null` guard
+   * fills the feed with every connected application, whether or not it is doing anything.
+   */
+  it('skips a session holding no request', () => {
+    const feed = fold([snapshot([request({ requestStatus: null })])])
+    expect(feed.events).toHaveLength(0)
+    expect(feed.observed).toBe(0)
+  })
+
+  it('lists a session that holds one', () => {
+    const feed = fold([snapshot([request({ requestStatus: 'suspended' })])])
+    expect(feed.events).toHaveLength(1)
+  })
+})
+
+describe('what the row says it ran', () => {
+  it('prefers the executing statement over the whole batch', () => {
+    const feed = fold([snapshot([request()])])
+    expect(feed.events[0].text).toBe('SELECT 1')
+  })
+
+  it('falls back to the batch only when no statement was isolated', () => {
+    const feed = fold([snapshot([request({ currentStatementText: null })])])
+    expect(feed.events[0].text).toBe('EXEC dbo.Everything')
+  })
+
+  /*
+   * Mutation checked: leaving `text` as '' when neither is available renders an empty row, which
+   * reads as a query that ran nothing rather than as text the sample could not retrieve.
+   */
+  it('says why the text is missing rather than showing an empty query', () => {
+    const feed = fold([snapshot([request({ currentStatementText: null, batchText: null })])])
+    expect(feed.events[0].text).toBeNull()
+    expect(feed.events[0].textReason).toMatch(/no statement or batch text/i)
+  })
+
+  it('treats whitespace-only text as absent', () => {
+    const feed = fold([snapshot([request({ currentStatementText: '   ', batchText: '\n\t' })])])
+    expect(feed.events[0].text).toBeNull()
+  })
+
+  it('picks up text that a later sample managed to retrieve', () => {
+    const feed = fold([
+      snapshot([request({ currentStatementText: null, batchText: null })]),
+      snapshot([request()]),
+    ])
+    expect(feed.events[0].text).toBe('SELECT 1')
+    expect(feed.events[0].textReason).toBe('')
+  })
+})
+
+describe('the family is resolved once, in the feed, so the list and the map agree', () => {
+  it('matches on query_hash across case and an 0x prefix', () => {
+    const feed = fold([snapshot([request({ queryHash: '0xaabbccddeeff0011' })])])
+    expect(feed.events[0].queryHash).toBe(feed.events[0].queryHash!.toUpperCase())
+    expect(feed.events[0].familyId).toBe('fam-1')
+  })
+
+  /*
+   * Mutation checked: falling back to `families[0]` on a miss labels every unmatched execution with
+   * an unrelated family and then drives its car down that family's road — a caption and a picture
+   * that agree with each other and with nothing else.
+   */
+  it('leaves an unmatched hash unrouted instead of inventing a family', () => {
+    const feed = fold([snapshot([request({ queryHash: 'FFFF000000000001' })])])
+    expect(feed.events[0].familyId).toBeNull()
+    expect(feed.reason).toMatch(/matched no query family/i)
+  })
+
+  it('rejects the all-zero sentinel rather than matching everything to it', () => {
+    const feed = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request({ queryHash: '0000000000000000' })]),
+      [family({ queryHash: '0000000000000000' })],
+      T0,
+    )
+    expect(feed.events[0].queryHash).toBeNull()
+    expect(feed.events[0].familyId).toBeNull()
+  })
+
+  /*
+   * The catalogue pages in behind the feed, so a family that was absent when the query arrived can
+   * become resolvable a sample later.
+   *
+   * Mutation checked: resolving only on arrival leaves an execution permanently unrouted because of
+   * when it happened to turn up relative to a page load, which is not a fact about the workload.
+   */
+  it('resolves a family that only became available after the row arrived', () => {
+    let feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), [], T0)
+    expect(feed.events[0].familyId).toBeNull()
+    feed = advanceQueryFeed(feed, snapshot([request()]), families, T0 + 1_000)
+    expect(feed.events[0].familyId).toBe('fam-1')
+  })
+
+  it('does not un-resolve a family when a later page no longer lists it', () => {
+    let feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), families, T0)
+    feed = advanceQueryFeed(feed, snapshot([request()]), [], T0 + 1_000)
+    expect(feed.events[0].familyId).toBe('fam-1')
+  })
+
+  /*
+   * Mutation checked: deriving `hashReported` from `queryHash !== null` cannot tell an API build
+   * older than the field from an engine that simply did not hash the statement, and the feed then
+   * blames the workload for a missing column.
+   */
+  it('distinguishes an API build older than query_hash from an unhashed statement', () => {
+    const older = request()
+    delete (older as { queryHash?: unknown }).queryHash
+    const missing = fold([snapshot([older])])
+    expect(missing.events[0].hashReported).toBe(false)
+    expect(missing.reason).toMatch(/predates the field/i)
+
+    const unhashed = fold([snapshot([request({ queryHash: null })])])
+    expect(unhashed.events[0].hashReported).toBe(true)
+    expect(unhashed.reason).not.toMatch(/predates the field/i)
+  })
+})
+
+describe('a block is reported on the row, and only on evidence', () => {
+  it('does not flag a request that merely holds a lock', () => {
+    const feed = fold([snapshot([request()])])
+    expect(feed.events[0].blocked).toBe(false)
+    expect(feed.blocked).toBe(0)
+  })
+
+  it('flags a named blocker', () => {
+    const feed = fold([snapshot([request({ blocking: { blockingSessionId: 52, sentinel: 'None' } })])])
+    expect(feed.events[0].blocked).toBe(true)
+    expect(liveQuerySummaryLabel(feed)).toBe('1 running · 1 blocked')
+  })
+
+  it('flags a sentinel with no session behind it', () => {
+    const feed = fold([snapshot([
+      request({ blocking: { blockingSessionId: null, sentinel: 'OrphanedDistributedTransaction' } }),
+    ])])
+    expect(feed.events[0].blocked).toBe(true)
+  })
+
+  it('clears the flag on the sample that shows the block released', () => {
+    const feed = fold([
+      snapshot([request({ blocking: { blockingSessionId: 52, sentinel: 'None' } })]),
+      snapshot([request()]),
+    ])
+    expect(feed.events[0].blocked).toBe(false)
+  })
+
+  it('does not count a departed row as still blocked', () => {
+    const feed = fold([
+      snapshot([request({ blocking: { blockingSessionId: 52, sentinel: 'None' } })]),
+      snapshot([]),
+    ])
+    expect(feed.blocked).toBe(0)
+    expect(liveQuerySummaryLabel(feed)).toBe('1 seen · none running')
+  })
+})
+
+describe('the feed is capped, and says what scrolled past', () => {
+  function manySamples(count: number) {
+    let feed = EMPTY_QUERY_FEED
+    for (let index = 0; index < count; index += 1) {
+      feed = advanceQueryFeed(
+        feed,
+        snapshot([request({ sessionId: 100 + index, requestId: `req:${100 + index}:0` })]),
+        families,
+        T0 + index * 1_000,
+      )
+    }
+    return feed
+  }
+
+  /*
+   * Mutation checked: dropping the `.slice` grows the list without bound, which is a leak on a page
+   * meant to be left open, and reports `dropped` as 0 so a truncated feed reads as a complete one.
+   */
+  it('keeps the newest arrivals and counts the ones it dropped', () => {
+    const feed = manySamples(LIVE_QUERY_FEED_CAP + 7)
+    expect(feed.events).toHaveLength(LIVE_QUERY_FEED_CAP)
+    expect(feed.observed).toBe(LIVE_QUERY_FEED_CAP + 7)
+    expect(feed.dropped).toBe(7)
+    expect(feed.cap).toBe(LIVE_QUERY_FEED_CAP)
+    expect(feed.reason).toMatch(new RegExp(`scrolled past the ${LIVE_QUERY_FEED_CAP}-row cap`))
+  })
+
+  it('drops the oldest, not the newest', () => {
+    const feed = manySamples(LIVE_QUERY_FEED_CAP + 7)
+    const ordinals = feed.events.map(event => event.ordinal)
+    expect(ordinals[0]).toBe(LIVE_QUERY_FEED_CAP + 7)
+    expect(Math.min(...ordinals)).toBe(8)
+  })
+
+  it('does not double-count the same overflow on every later sample', () => {
+    const feed = manySamples(LIVE_QUERY_FEED_CAP + 3)
+    const settled = advanceQueryFeed(feed, snapshot([]), families, T0 + 1_000_000)
+    expect(settled.dropped).toBe(3)
+  })
+})

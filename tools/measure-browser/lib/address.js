@@ -239,6 +239,27 @@ export async function sidebarGeometry(page) {
       /** The address list's scroller: the section that gave way to 0px in #65. */
       scroll: read('.sidebar-scroll'),
       placeCard: read('.sidebar-place-card'),
+      /*
+       * The live query feed, which is a rail region and not a drawer.
+       *
+       * Measured separately for the reason `eachDrawer` exists: it competes with the address list
+       * for the rail's slack, and "the column does not overflow" says nothing about whether a feed
+       * can show a whole entry. `rowsVisible` is the number that actually answers that -- as a
+       * fourth drawer this read 0.4 rows at rest while every overflow number was 0.
+       */
+      feed: read('.sidebar-feed'),
+      feedBody: (() => {
+        const body = document.querySelector('.sidebar-feed-body')
+        if (!body) return null
+        const row = document.querySelector('.query-ticker-row')
+        const rowHeight = row ? row.getBoundingClientRect().height : null
+        return {
+          ...readElement(body),
+          rows: document.querySelectorAll('.query-ticker-row').length,
+          rowHeight,
+          rowsVisible: rowHeight ? Math.round((body.clientHeight / rowHeight) * 10) / 10 : null,
+        }
+      })(),
       drawers: read('.sidebar-drawers'),
       drawerCap: (() => {
         const wrapper = document.querySelector('.sidebar-drawers')

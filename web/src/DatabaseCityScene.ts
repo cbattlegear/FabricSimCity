@@ -59,11 +59,13 @@ import {
   buildVehicleRoster,
   pointAt,
   polylineLength,
+  travelledFraction,
+  VEHICLE_CAP,
   type Vehicle,
   type VehicleClass,
   type VehicleRoster,
 } from './cityVehicles'
-import type { LiveRequest } from './liveContracts'
+import type { LiveQueryEvent } from './liveQueryFeed'
 
 export type CityLayerToggles = {
   traffic: boolean
@@ -199,13 +201,14 @@ export type DatabaseCitySceneController = {
   /** Live incident pins, placed on the road between the parties rather than on a roof. */
   setIncidents(markers: readonly IncidentMarker[]): void
   /**
-   * The sampled live requests and the page's query families, from which the vehicle roster is built.
+   * The observed live executions and the page's query families, from which the vehicle roster is
+   * built.
    *
    * Deliberately not a roster: the roster has to be joined against the roads *as this scene drew
    * them*, and only the scene has those polylines. The result comes back out through
    * `onVehicleRoster` so the legend can disclose what was dropped and why.
    */
-  setVehicles(requests: readonly LiveRequest[] | null, families: readonly DatabaseCityQueryFamily[]): void
+  setVehicles(events: readonly LiveQueryEvent[] | null, families: readonly DatabaseCityQueryFamily[]): void
   /**
    * Where one incident pin ended up and which rung of the placement ladder put it there, or null
    * when it is not drawn. The popup states the rung, because a pin on the measured road between two
@@ -1144,6 +1147,14 @@ export function createDatabaseCityScene(
    * measurement behind a mode switch is a way of not reporting it.
    */
   const vehicleGroup = new THREE.Group()
+  /**
+   * The fading light trails behind moving vehicles.
+   *
+   * Its own group rather than a child of {@link vehicleGroup}, because `buildVehicles()` clears that
+   * group wholesale on every live sample and the trail mesh is allocated once for the life of the
+   * scene. Drawn after the roads and before the vehicles.
+   */
+  const vehicleTrailGroup = new THREE.Group()
   const routeGroup = new THREE.Group()
   const selectionGroup = new THREE.Group()
   // Labels are their own layer, but facility labels nest so they disappear with the facilities they
@@ -1164,6 +1175,7 @@ export function createDatabaseCityScene(
     roadHighlightGroup,
     buildingGroup,
     infrastructureGroup,
+    vehicleTrailGroup,
     vehicleGroup,
     routeGroup,
     selectionGroup,
@@ -1204,8 +1216,17 @@ export function createDatabaseCityScene(
   let vehicleHandle = 0
   /** Animated time consumed so far, in ms. Only ever advanced by the vehicle loop. */
   let vehicleClock = 0
+  /**
+   * The value {@link vehicleClock} held when the roster was last rebuilt.
+   *
+   * A vehicle's {@link Vehicle.elapsedSeconds} is measured from the wall clock at that rebuild, so
+   * the animation adds only the time since. Recomputing the offset from wall-clock age on every
+   * rebuild is what keeps the traffic correct under `prefers-reduced-motion`, where the loop never
+   * runs and `vehicleClock` never moves: the cars still advance, one step per live sample.
+   */
+  let vehicleClockAtBuild = 0
   let vehicleKit: AssetKit | null = null
-  let currentRequests: readonly LiveRequest[] | null = null
+  let currentEvents: readonly LiveQueryEvent[] | null = null
   let currentFamilies: readonly DatabaseCityQueryFamily[] = []
   let vehicleRoster: VehicleRoster | null = null
   let vehicleBatches: VehicleBatch[] = []
@@ -1632,14 +1653,18 @@ export function createDatabaseCityScene(
     unknown: { width: 2.6, height: 2.6, length: 2.6 },
   }
 
-  /**
+  /*
    * How fast a vehicle travels, in world units per second — the same speed for all five classes.
    *
    * Speed is *not* a channel. SQL Server reports nothing about how fast a request is progressing, so
    * a faster-moving vehicle would be a claim nobody measured, and it would also fight the one claim
    * that is real: size. Everything drives at one speed and differs only in size.
+   *
+   * The number itself lives in `cityVehicles.ts` beside {@link travelledFraction}, because the roster
+   * has to know it too: it is what decides when a finished car has reached the end of its road and
+   * can leave the map. Two copies would drift, and the symptom would be cars vanishing early or
+   * lingering — neither of which looks like a bug in a constant.
    */
-  const VEHICLE_SPEED = 13
 
   /** Vehicles sit a hair above the road ribbon so they never z-fight with it. */
   const VEHICLE_Y = 0.06
@@ -1755,6 +1780,198 @@ export function createDatabaseCityScene(
   const vehicleQuaternion = new THREE.Quaternion()
   const vehicleScale = new THREE.Vector3()
 
+  /*
+   * The light trail behind a moving vehicle.
+   *
+   * A car appearing in the live list is the one moment on this map that is worth catching out of the
+   * corner of an eye, and a 4 m shell a few pixels long on a whole-city framing does not catch one.
+   * The trail is what makes the arrival legible: a short ribbon along the road the car has just
+   * covered, brightest at the bumper and fading to nothing behind it, plus a brief flare over the
+   * first few seconds after it pulls away so a new arrival reads as *new* and then settles.
+   *
+   * What it is, precisely: **the road surface that vehicle covered in roughly the last two seconds**.
+   * That is a statement about the drawing, not about the query. It is not exhaust, not throughput,
+   * not progress; a longer trail means the car has been on screen long enough to have one, and
+   * nothing else. The length is fixed for every class for the same reason the speed is — see
+   * `VEHICLE_SPEED` — so the ribbon never becomes a second, contradictory size channel.
+   *
+   * Three constraints shape the implementation, and all three are load-bearing:
+   *
+   * - **It must not touch the shadow map.** The vehicle loop runs for as long as anything is
+   *   executing on the instance, so anything it dirties per frame is dirtied indefinitely. The mesh
+   *   neither casts nor receives, exactly like the vehicles it follows, and nothing here sets
+   *   `needsUpdate`. See `shadowInvalidation.test.ts`.
+   * - **It is one mesh, allocated once.** A mesh per vehicle would add up to 120 draw calls and 120
+   *   allocations to every live sample. This is a single pre-allocated buffer sized for the cap,
+   *   rewritten in place each frame and bounded with `setDrawRange`, so the trail costs one draw call
+   *   whether there is one car or the full 120.
+   * - **It is normal-blended, not additive.** Map mode draws a printed basemap on near-white paper,
+   *   where an additive ribbon is exactly invisible. Alpha rides in a four-component vertex colour
+   *   and the colour itself inverts with the view mode, the same way the vehicle ladder does.
+   *
+   * Under `prefers-reduced-motion` the group is hidden outright. A trail is a claim about the last
+   * two seconds of motion, and where there is no motion there is nothing for it to be about.
+   */
+  const TRAIL_SEGMENTS = 12
+  /** How far back along the road the ribbon reaches, in world units — about two seconds of travel. */
+  const TRAIL_SPAN = 26
+  /** Ribbon width at the bumper, in world units. Close to a car's width, so it reads as its wake. */
+  const TRAIL_WIDTH = 1.9
+  /** Opacity at the bumper once a vehicle has settled. Deliberately low: this is a garnish. */
+  const TRAIL_ALPHA = 0.32
+  /** How long a newly released vehicle's trail stays brightened, in seconds. */
+  const TRAIL_FLARE_SECONDS = 2.6
+  /** How much brighter, at the instant of release. */
+  const TRAIL_FLARE_GAIN = 2.4
+  const TRAIL_CITY_COLOR = new THREE.Color(0x86e2ff)
+  /** A printed basemap has no glow, so the trail inverts to ink the way the vehicle ladder does. */
+  const TRAIL_MAP_COLOR = new THREE.Color(0x2b7f9e)
+  /** What the bumper end of a city-mode trail is tinted toward, so the leading edge reads as bright. */
+  const TRAIL_HIGHLIGHT = new THREE.Color(0xffffff)
+  const TRAIL_VERTICES = VEHICLE_CAP * TRAIL_SEGMENTS * 6
+  /** Just above the road ribbon and just below the vehicles, so it z-fights with neither. */
+  const TRAIL_Y = 0.05
+
+  const trailPositions = new Float32Array(TRAIL_VERTICES * 3)
+  const trailColors = new Float32Array(TRAIL_VERTICES * 4)
+  const trailGeometry = new THREE.BufferGeometry()
+  trailGeometry.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3))
+  // Four components, so alpha is per-vertex. three reads the itemSize and compiles the shader with
+  // USE_COLOR_ALPHA; a three-component attribute would drop the fade silently and leave a flat slab.
+  trailGeometry.setAttribute('color', new THREE.BufferAttribute(trailColors, 4))
+  trailGeometry.setDrawRange(0, 0)
+  const trailMaterial = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    // Written into the colour buffer but not the depth buffer: overlapping trails blend instead of
+    // punching holes in one another, and nothing behind them is occluded by a garnish.
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+  })
+  const trailMesh = new THREE.Mesh(trailGeometry, trailMaterial)
+  trailMesh.castShadow = false
+  trailMesh.receiveShadow = false
+  // The ribbon is rewritten every frame and spans the whole plan, so a bounding sphere would have to
+  // be recomputed as often as the vertices are. Culling one draw call is not worth that.
+  trailMesh.frustumCulled = false
+  trailMesh.renderOrder = 2
+  trailMesh.visible = false
+  vehicleTrailGroup.add(trailMesh)
+  disposables.add(trailGeometry)
+
+  const trailSampleX = new Float64Array(TRAIL_SEGMENTS + 1)
+  const trailSampleZ = new Float64Array(TRAIL_SEGMENTS + 1)
+  const trailNormalX = new Float64Array(TRAIL_SEGMENTS + 1)
+  const trailNormalZ = new Float64Array(TRAIL_SEGMENTS + 1)
+  const trailPoint = { x: 0, z: 0 }
+  const trailColor = new THREE.Color()
+
+  /** The point a given **distance** along a polyline. Distance rather than 0–1, so no length recompute. */
+  function pointAtDistance(points: readonly { x: number; z: number }[], distance: number): void {
+    if (points.length === 0) {
+      trailPoint.x = 0
+      trailPoint.z = 0
+      return
+    }
+    let walked = 0
+    for (let index = 1; index < points.length; index += 1) {
+      const from = points[index - 1]
+      const to = points[index]
+      const segment = Math.hypot(to.x - from.x, to.z - from.z)
+      if (walked + segment >= distance) {
+        const along = segment === 0 ? 0 : (distance - walked) / segment
+        trailPoint.x = from.x + (to.x - from.x) * along
+        trailPoint.z = from.z + (to.z - from.z) * along
+        return
+      }
+      walked += segment
+    }
+    const last = points[points.length - 1]
+    trailPoint.x = last.x
+    trailPoint.z = last.z
+  }
+
+  /**
+   * Rewrites the trail ribbon for every moving vehicle.
+   *
+   * Returns the number of vertices written, which bounds the draw. Stopped vehicles get nothing: a
+   * blocked request is not moving, so there is no recent road behind it to draw and a trail there
+   * would read as motion that is not happening.
+   */
+  function writeTrails(seconds: number, magnify: number): number {
+    let vertex = 0
+    const flat = viewMode === 'map'
+    const base = flat ? TRAIL_MAP_COLOR : TRAIL_CITY_COLOR
+    const halfWidth = (TRAIL_WIDTH * magnify) / 2
+
+    for (const batch of vehicleBatches) {
+      for (let index = 0; index < batch.moving; index += 1) {
+        const vehicle = batch.vehicles[index]
+        const length = batch.routeLengths[index]
+        if (length <= 0) continue
+        if (vertex + TRAIL_SEGMENTS * 6 > TRAIL_VERTICES) return vertex
+
+        const elapsed = vehicle.elapsedSeconds + seconds
+        // A vehicle still waiting out its launch stagger has covered no road, so it has no wake.
+        if (elapsed <= 0) continue
+        const head = travelledFraction(vehicle.points, elapsed, vehicle.finishedAfterSeconds) * length
+        const tail = Math.max(0, head - TRAIL_SPAN)
+        if (head - tail < 0.01) continue
+
+        for (let step = 0; step <= TRAIL_SEGMENTS; step += 1) {
+          pointAtDistance(vehicle.points, tail + ((head - tail) * step) / TRAIL_SEGMENTS)
+          trailSampleX[step] = trailPoint.x
+          trailSampleZ[step] = trailPoint.z
+        }
+        for (let step = 0; step <= TRAIL_SEGMENTS; step += 1) {
+          const before = Math.max(0, step - 1)
+          const after = Math.min(TRAIL_SEGMENTS, step + 1)
+          const dx = trailSampleX[after] - trailSampleX[before]
+          const dz = trailSampleZ[after] - trailSampleZ[before]
+          const span = Math.hypot(dx, dz)
+          // A degenerate step collapses to zero width rather than picking an arbitrary normal, so a
+          // doubled-back polyline produces nothing visible instead of a stray triangle.
+          trailNormalX[step] = span === 0 ? 0 : (-dz / span) * halfWidth
+          trailNormalZ[step] = span === 0 ? 0 : (dx / span) * halfWidth
+        }
+
+        const flare = elapsed < TRAIL_FLARE_SECONDS
+          ? 1 + (TRAIL_FLARE_GAIN - 1) * (1 - elapsed / TRAIL_FLARE_SECONDS)
+          : 1
+        const headAlpha = TRAIL_ALPHA * flare
+
+        for (let step = 0; step < TRAIL_SEGMENTS; step += 1) {
+          const near = step
+          const far = step + 1
+          // Quad corners: two rows of two, wound as two triangles.
+          const corners = [near, near, far, near, far, far] as const
+          const sides = [-1, 1, 1, -1, 1, -1] as const
+          for (let corner = 0; corner < 6; corner += 1) {
+            const at = corners[corner]
+            const side = sides[corner]
+            const offset = vertex * 3
+            trailPositions[offset] = trailSampleX[at] + trailNormalX[at] * side
+            trailPositions[offset + 1] = TRAIL_Y
+            trailPositions[offset + 2] = trailSampleZ[at] + trailNormalZ[at] * side
+            const ramp = at / TRAIL_SEGMENTS
+            trailColor.copy(base)
+            // Whiter at the bumper, so the leading edge reads as the bright end even where the
+            // alpha ramp alone would not separate it from the road under it.
+            if (!flat) trailColor.lerp(TRAIL_HIGHLIGHT, ramp * 0.45)
+            const colorOffset = vertex * 4
+            trailColors[colorOffset] = trailColor.r
+            trailColors[colorOffset + 1] = trailColor.g
+            trailColors[colorOffset + 2] = trailColor.b
+            trailColors[colorOffset + 3] = headAlpha * ramp * ramp
+            vertex += 1
+          }
+        }
+      }
+    }
+    return vertex
+  }
+
   /**
    * Writes every vehicle's instance matrix for the current `vehicleClock` and camera.
    *
@@ -1764,7 +1981,13 @@ export function createDatabaseCityScene(
    * the cost of the draw calls it is preparing.
    */
   function placeVehicles() {
-    if (vehicleBatches.length === 0) return
+    if (vehicleBatches.length === 0) {
+      // The roster drained. The ribbon holds the last frame's vertices, so it has to be hidden here
+      // or the trails of vehicles that have left the map keep being drawn.
+      trailMesh.visible = false
+      trailGeometry.setDrawRange(0, 0)
+      return
+    }
 
     /*
      * One shared magnification for every vehicle, deliberately.
@@ -1785,7 +2008,9 @@ export function createDatabaseCityScene(
       VEHICLE_MAX_GROWTH,
     )
     vehicleScale.setScalar(magnify)
-    const seconds = vehicleClock / 1000
+    // Time since the roster was built, not since the scene started: the roster already carries each
+    // vehicle's age in wall-clock seconds, recomputed from the feed on every rebuild.
+    const seconds = (vehicleClock - vehicleClockAtBuild) / 1000
 
     for (const batch of vehicleBatches) {
       for (let index = 0; index < batch.vehicles.length; index += 1) {
@@ -1800,7 +2025,11 @@ export function createDatabaseCityScene(
           yaw = batch.stoppedYaw[index]
         } else {
           const length = batch.routeLengths[index]
-          const travelled = length > 0 ? (vehicle.phase + (seconds * VEHICLE_SPEED) / length) % 1 : vehicle.phase
+          const travelled = travelledFraction(
+            vehicle.points,
+            vehicle.elapsedSeconds + seconds,
+            vehicle.finishedAfterSeconds,
+          )
           const at = pointAt(vehicle.points, travelled)
           x = at.x
           z = at.z
@@ -1813,6 +2042,23 @@ export function createDatabaseCityScene(
       }
       for (const mesh of batch.meshes) mesh.instanceMatrix.needsUpdate = true
     }
+
+    /*
+     * Trails last, so they are written from the same clock the vehicles were placed from.
+     *
+     * Skipped wholesale under `prefers-reduced-motion`: the vehicle loop never starts there, so
+     * every car stands still between samples and a wake behind a stationary shell would be drawing
+     * motion that is not happening.
+     */
+    if (reducedMotion) {
+      trailMesh.visible = false
+      return
+    }
+    const written = writeTrails(seconds, magnify)
+    trailGeometry.setDrawRange(0, written)
+    trailGeometry.attributes.position.needsUpdate = true
+    trailGeometry.attributes.color.needsUpdate = true
+    trailMesh.visible = written > 0
   }
 
   /**
@@ -1874,11 +2120,13 @@ export function createDatabaseCityScene(
       polyline: entry.polyline,
     }))
     vehicleRoster = buildVehicleRoster({
-      requests: currentRequests,
+      events: currentEvents,
       families: currentFamilies,
       roads,
       blocked: blockedPlacements,
+      now: Date.now(),
     })
+    vehicleClockAtBuild = vehicleClock
     buildVehicles()
     options.onVehicleRoster?.(vehicleRoster)
   }
@@ -3066,8 +3314,8 @@ export function createDatabaseCityScene(
       refreshVehicles()
       requestRender()
     },
-    setVehicles(requests, families) {
-      currentRequests = requests
+    setVehicles(events, families) {
+      currentEvents = events
       currentFamilies = families
       refreshVehicles()
       requestRender()
@@ -3187,6 +3435,7 @@ export function createDatabaseCityScene(
       controls.dispose()
       for (const geometry of disposables) geometry.dispose()
       disposables.clear()
+      trailMaterial.dispose()
       for (const material of Object.values(materials)) material.dispose()
       for (const material of archetypeMaterials.values()) material.dispose()
       for (const material of roadMaterials.values()) material.dispose()
