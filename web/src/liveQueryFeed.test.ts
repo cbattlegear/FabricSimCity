@@ -428,6 +428,19 @@ describe('a block is reported on the row, and only on evidence', () => {
     expect(feed.events[0].blocked).toBe(false)
   })
 
+  it('does not read blocking_session_id 0 as a blocker', () => {
+    /*
+     * Zero means "nothing is blocking this" -- sys.dm_exec_requests reports it for every ordinary
+     * running request, so a predicate that only checks for null badges the whole sample as blocked.
+     * The map could never agree: an unblocked request holds no lock resource, so there was no pin
+     * to draw beside the row, and the feed and the city contradicted each other on every sample.
+     */
+    const feed = fold([snapshot([request({ blocking: { blockingSessionId: 0, sentinel: 'None' } })])])
+    expect(feed.events[0].blocked).toBe(false)
+    expect(feed.blocked).toBe(0)
+    expect(liveQuerySummaryLabel(feed)).toBe('1 running')
+  })
+
   it('does not count a departed row as still blocked', () => {
     const feed = fold([
       snapshot([request({ blocking: { blockingSessionId: 52, sentinel: 'None' } })]),

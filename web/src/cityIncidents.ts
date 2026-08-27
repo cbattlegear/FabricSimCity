@@ -1,5 +1,6 @@
 import type { DatabaseCityObject } from './databaseCityContracts'
-import type { DeadlockResource, DeadlockSample, LiveIncidentSnapshot, LiveRequest, LockResource, WaitingTask } from './liveContracts'
+import type { BlockingReference, DeadlockResource, DeadlockSample, LiveIncidentSnapshot, LiveRequest, LockResource, WaitingTask } from './liveContracts'
+import { isBlockedReference } from './liveIncidents'
 
 /**
  * Turns a live snapshot into map pins.
@@ -191,26 +192,51 @@ const NOT_OBSERVED: IncidentProjection = {
 }
 
 /** Only a *blocked* waiter is an incident. Holding a lock nobody waits behind is just work. */
-function isBlocked(blocking: { blockingSessionId: number | null; sentinel: string }): boolean {
-  return blocking.blockingSessionId !== null || blocking.sentinel !== 'None'
+function isBlocked(blocking: BlockingReference): boolean {
+  return isBlockedReference(blocking)
+}
+
+/**
+ * The database segment shared by every object id on this page, lowercased.
+ *
+ * City object ids are addressed by name — `primary/database/SimCitySmall/object/901578250` — while
+ * a lock resource carries a per-instance `database_id`. The two cannot be compared, so the page
+ * states its own database from the ids it already holds and the live sample is matched against that
+ * by name instead. Null when the page is empty or the ids are not in that shape, which switches the
+ * numeric join off rather than guessing.
+ */
+function pageDatabaseName(objects: readonly DatabaseCityObject[]): string | null {
+  for (const object of objects) {
+    const match = /\/database\/([^/]+)\/object\//.exec(object.objectId)
+    if (match) return match[1].toLocaleLowerCase()
+  }
+  return null
 }
 
 function objectKeys(object: DatabaseCityObject): string[] {
-  return [
+  const keys = [
     object.objectId.toLocaleLowerCase(),
     `${object.schemaName}.${object.name}`.toLocaleLowerCase(),
   ]
+  const numeric = numericObjectId(object.objectId)
+  if (numeric !== null) keys.push(`object/${numeric}`)
+  return keys
 }
 
-function lockKeys(lock: LockResource): string[] {
-  const keys: string[] = []
-  if (lock.schemaName && lock.objectName) {
-    keys.push(`${lock.schemaName}.${lock.objectName}`.toLocaleLowerCase())
-  }
-  if (lock.databaseId !== null && lock.objectId !== null) {
-    keys.push(`${lock.databaseId}/object/${lock.objectId}`.toLocaleLowerCase())
-  }
-  return keys
+/**
+ * The trailing `object_id` in a city object id such as
+ * `primary/database/SimCitySmall/object/901578250`.
+ *
+ * This exists because an `OBJECT:`/`TAB:` lock is the one form the parser resolves with **no
+ * catalog lookup at all** — it reads the ids straight out of the wait resource text and leaves
+ * `schemaName`/`objectName` empty by design. So the name join those locks would need is never
+ * populated, and a table-level block could only ever be matched numerically.
+ */
+function numericObjectId(objectId: string): string | null {
+  const marker = objectId.lastIndexOf('/object/')
+  if (marker < 0) return null
+  const tail = objectId.slice(marker + '/object/'.length)
+  return /^\d+$/.test(tail) ? tail : null
 }
 
 function waitMs(value: number | string | null): number | null {
@@ -271,6 +297,48 @@ export function projectIncidents(
   // One marker per object: the worst wait wins the pin, and the rest become detail lines.
   const byObject = new Map<string, IncidentMarker>()
 
+  /*
+   * Which database each sampled session was running in, and which one this page draws.
+   *
+   * Needed because an `OBJECT:` lock resolves to a bare `object_id`, and an `object_id` is unique
+   * only inside its own database — instance-wide it is just a number, and two databases on the same
+   * server routinely reuse one. `sys.dm_os_waiting_tasks` reports no database at all, so a waiting
+   * task borrows its own session's request: a task is a worker inside a request, and both are in
+   * the same sample.
+   */
+  const databaseBySession = new Map<number, string>()
+  for (const request of snapshot.requests) {
+    if (request.databaseName) {
+      databaseBySession.set(request.sessionId, request.databaseName.toLocaleLowerCase())
+    }
+  }
+  const pageDatabase = pageDatabaseName(objects)
+
+  /**
+   * The loaded object a resolved lock names, or null when this page cannot place it.
+   *
+   * The name join is tried first and needs no gate: `schemaName`/`objectName` are only ever
+   * populated by the `sessions.lock_resource_objects` probe, which ran against one database. The
+   * numeric join is the fallback for the `OBJECT:`/`TAB:` forms the parser reads straight out of
+   * the wait-resource text without any lookup — those carry no names at all, so before this existed
+   * a table-level block could never match a building and was counted off-map every time.
+   *
+   * The numeric key deliberately does not carry `lock.databaseId`. That field is a per-instance
+   * `database_id` like `6`, while a city object id is addressed by name, so pairing them built a
+   * key of the form `6/object/901578250` that no object id could match under any circumstance.
+   * The database is established here by name instead, which is a check the key could never be.
+   */
+  function resolveLockObject(lock: LockResource, sessionId: number): string | null {
+    if (lock.schemaName && lock.objectName) {
+      const named = byKey.get(`${lock.schemaName}.${lock.objectName}`.toLocaleLowerCase())
+      if (named) return named
+    }
+    if (lock.objectId === null) return null
+    const sessionDatabase = databaseBySession.get(sessionId)
+    if (pageDatabase === null || sessionDatabase !== pageDatabase) return null
+    return byKey.get(`object/${lock.objectId}`.toLocaleLowerCase()) ?? null
+  }
+
   // Which loaded object each sampled session is itself waiting on. A blocking session that appears
   // in the sample as a waiter of its own — the middle of an A→B→C chain — is the one case where the
   // block's *other* end can be named, and it is what lets the pin sit on the road between them.
@@ -278,7 +346,7 @@ export function projectIncidents(
   const noteSessionObject = (source: LiveRequest | WaitingTask) => {
     const lock = source.lockResource
     if (!lock || lock.status !== 'Resolved') return
-    const objectId = lockKeys(lock).map(key => byKey.get(key)).find(Boolean)
+    const objectId = resolveLockObject(lock, source.sessionId)
     if (objectId) objectBySession.set(source.sessionId, objectId)
   }
   for (const request of snapshot.requests) noteSessionObject(request)
@@ -299,7 +367,7 @@ export function projectIncidents(
       return
     }
 
-    const objectId = lockKeys(lock).map(key => byKey.get(key)).find(Boolean)
+    const objectId = resolveLockObject(lock, source.sessionId)
     if (!objectId) {
       offPageCount += 1
       return
@@ -370,7 +438,7 @@ export function projectIncidents(
    * server never looked" -- but both are "not observed", and neither is "no deadlocks".
    */
   const deadlockSample = snapshot.deadlocks as DeadlockSample | undefined
-  const deadlockMarkers = deadlockSample ? projectDeadlocks(deadlockSample, byKey) : []
+  const deadlockMarkers = deadlockSample ? projectDeadlocks(deadlockSample, byKey, pageDatabase) : []
   markers.push(...deadlockMarkers)
   markers.sort((left, right) => left.objectId.localeCompare(right.objectId) || left.id.localeCompare(right.id))
 
@@ -417,14 +485,25 @@ export function projectIncidents(
 function projectDeadlocks(
   sample: DeadlockSample,
   byKey: ReadonlyMap<string, string>,
+  pageDatabase: string | null,
 ): IncidentMarker[] {
   if (sample.status !== 'Available' && sample.status !== 'Stale') return []
 
   const markers: IncidentMarker[] = []
   for (const graph of sample.graphs) {
     const victims = new Set(graph.victimProcessIds)
+    /*
+     * Whether this graph happened in the database the page is drawing.
+     *
+     * Gates the numeric fallback in `resolveDeadlockObject` for the same reason the live path is
+     * gated: an `object_id` is unique only inside its database, and a graph read from
+     * `system_health` is instance-wide. A deadlock between two other databases' tables is real, is
+     * counted in `retainedCount`, and must not be pinned onto a building here.
+     */
+    const inPageDatabase = pageDatabase !== null && graph.processes.some(
+      process => (process.databaseName ?? '').toLocaleLowerCase() === pageDatabase)
     const resolved = graph.resources
-      .map(resource => ({ resource, objectId: resolveDeadlockObject(resource, byKey) }))
+      .map(resource => ({ resource, objectId: resolveDeadlockObject(resource, byKey, inPageDatabase) }))
       .filter((entry): entry is { resource: DeadlockResource; objectId: string } => entry.objectId !== null)
     if (resolved.length === 0) continue
 
@@ -478,18 +557,31 @@ function projectDeadlocks(
  * `schema.object` keys the page already builds. `associatedObjectId` gives the same second chance
  * the live lock-resource probe gets. A resource kind that names no object — an `exchangeEvent` is
  * parallelism inside one query — resolves to null, which is correct and not a failure.
+ *
+ * `inPageDatabase` gates the numeric fallback only. The name join is safe ungated because a
+ * three-part name is a name; an `object_id` is unique only inside its own database and needs the
+ * caller to have established which database this graph ran in.
  */
 function resolveDeadlockObject(
   resource: DeadlockResource,
   byKey: ReadonlyMap<string, string>,
+  inPageDatabase: boolean,
 ): string | null {
   const keys: string[] = []
   if (resource.objectName) {
     const parts = resource.objectName.split('.').filter(part => part.length > 0)
     if (parts.length >= 2) keys.push(parts.slice(-2).join('.').toLocaleLowerCase())
   }
-  if (resource.databaseId !== null && resource.associatedObjectId !== null) {
-    keys.push(`${resource.databaseId}/object/${resource.associatedObjectId}`.toLocaleLowerCase())
+  if (inPageDatabase && resource.associatedObjectId !== null) {
+    /*
+     * Deliberately not keyed by `resource.databaseId`.
+     *
+     * That was the previous shape, `<database_id>/object/<id>`, and it could never match: a city
+     * object id is addressed by name (`primary/database/CityDb/object/200`), never by the
+     * per-instance number a deadlock graph reports. The database is checked by the caller instead,
+     * against the graph's own processes, which is a check the key could not be.
+     */
+    keys.push(`object/${resource.associatedObjectId}`.toLocaleLowerCase())
   }
   for (const key of keys) {
     const objectId = byKey.get(key)

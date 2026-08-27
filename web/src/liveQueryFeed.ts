@@ -1,6 +1,7 @@
 import { normalizeHash } from './cityVehicles'
 import type { DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { LiveIncidentSnapshot, LiveRequest } from './liveContracts'
+import { isBlockedReference } from './liveIncidents'
 
 /**
  * The running list of individual query executions, folded out of successive live samples.
@@ -323,7 +324,7 @@ export function queryEventId(request: LiveRequest): string {
 
 /** Only a *blocked* request is stopped. Holding a lock nobody waits behind is just work. */
 function isBlocked(request: LiveRequest): boolean {
-  return request.blocking.blockingSessionId !== null || request.blocking.sentinel !== 'None'
+  return isBlockedReference(request.blocking)
 }
 
 /**
