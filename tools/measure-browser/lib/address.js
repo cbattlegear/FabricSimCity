@@ -101,11 +101,77 @@ export async function clickFirstEntry(page) {
   }
 }
 
+/**
+ * Puts the sidebar into the state that has produced every layout defect this column has had.
+ *
+ * An empty plan finder is a short form, and a closed drawer costs its summary and nothing else,
+ * so a column measured in its resting state hides the case that matters. The worst case is every
+ * drawer open over real rows with a place card holding its own share of the same rail -- which is
+ * exactly the arrangement #65 was measured in.
+ *
+ * Every interaction here is a trusted `locator.click()`. A summary that cannot be clicked because
+ * its drawer was squeezed under it is the defect, so reaching this state has to fail loudly rather
+ * than be forced through with `element.click()`.
+ */
+export async function openSidebarWorstCase(page, { populatePlanFinder = true } = {}) {
+  const steps = []
+  const drawers = page.locator('.sidebar-drawer')
+  const count = await drawers.count()
+  for (let index = 0; index < count; index += 1) {
+    const drawer = drawers.nth(index)
+    const summary = drawer.locator('> summary')
+    const label = (await summary.textContent())?.trim() ?? `drawer ${index}`
+    if (await drawer.evaluate(element => element.open)) {
+      steps.push({ step: `open "${label}"`, ok: true, ms: 0, note: 'already open' })
+      continue
+    }
+    const startedAt = Date.now()
+    try {
+      await summary.click({ timeout: 5000 })
+      steps.push({ step: `open "${label}"`, ok: true, ms: Date.now() - startedAt })
+    } catch (reason) {
+      steps.push({ step: `open "${label}"`, ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
+    }
+  }
+
+  /*
+   * An empty search term lists everything, which is the reliable way to fill the finder: Query
+   * Store's capture mode decides whether any particular term matches anything, and a finder that
+   * came back empty is a short form that hides every height defect in that drawer.
+   */
+  if (populatePlanFinder) {
+    const submit = page.getByRole('button', { name: 'Route it' })
+    const startedAt = Date.now()
+    try {
+      await submit.click({ timeout: 5000 })
+      await page.locator('.hud-results li').first().waitFor({ state: 'visible', timeout: 30000 })
+      steps.push({ step: 'populate plan finder', ok: true, ms: Date.now() - startedAt })
+    } catch (reason) {
+      steps.push({ step: 'populate plan finder', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
+    }
+  }
+
+  return steps
+}
+
+/** Opens a place card by selecting an address, so the card competes for the rail like the rest. */
+export async function openPlaceCard(page) {
+  const entry = page.locator('.address-entry').first()
+  const startedAt = Date.now()
+  try {
+    await entry.waitFor({ state: 'visible', timeout: 10000 })
+    await entry.click({ timeout: 5000 })
+    await page.locator('.sidebar-place-card').waitFor({ state: 'visible', timeout: 5000 })
+    return { step: 'open place card', ok: true, ms: Date.now() - startedAt }
+  } catch (reason) {
+    return { step: 'open place card', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] }
+  }
+}
+
 /** Heights of the sections that give way, so "no overflow" is never quoted on its own. */
 export async function sidebarGeometry(page) {
   return page.evaluate(() => {
-    const read = (selector) => {
-      const element = document.querySelector(selector)
+    const readElement = (element) => {
       if (!element) return null
       const style = getComputedStyle(element)
       const overflowY = style.overflowY
@@ -127,11 +193,45 @@ export async function sidebarGeometry(page) {
         unreachablePx: scrollable ? 0 : overshoot,
       }
     }
+    const read = (selector) => readElement(document.querySelector(selector))
+
+    /*
+     * Each drawer separately, not just the wrapper.
+     *
+     * The wrapper's own overflow says nothing about how its budget was divided, and a division
+     * that squeezes one drawer to its summary is the #63 defect wearing the wrapper's clean
+     * numbers. The label is the summary text so a share can be attributed to the drawer that got
+     * it, and `open` is recorded because a closed drawer costs its summary and nothing else.
+     */
+    const drawerList = [...document.querySelectorAll('.sidebar-drawer')].map((drawer, index) => {
+      const summary = drawer.querySelector(':scope > summary')
+      const body = drawer.querySelector(':scope > .sidebar-drawer-body')
+      return {
+        index,
+        label: summary?.textContent?.trim() ?? `drawer ${index}`,
+        open: drawer.open,
+        summaryHeight: summary ? Math.round(summary.getBoundingClientRect().height) : null,
+        maxHeight: getComputedStyle(drawer).maxHeight,
+        ...readElement(drawer),
+        body: readElement(body),
+      }
+    })
     return {
       sidebar: read('.map-sidebar'),
+      /** The address list's scroller: the section that gave way to 0px in #65. */
       scroll: read('.sidebar-scroll'),
       placeCard: read('.sidebar-place-card'),
       drawers: read('.sidebar-drawers'),
+      drawerCap: (() => {
+        const wrapper = document.querySelector('.sidebar-drawers')
+        if (!wrapper) return null
+        const style = getComputedStyle(wrapper)
+        return {
+          budget: style.getPropertyValue('--sidebar-drawer-budget').trim() || null,
+          cap: style.getPropertyValue('--sidebar-drawer-cap').trim() || null,
+        }
+      })(),
+      eachDrawer: drawerList,
     }
   })
 }

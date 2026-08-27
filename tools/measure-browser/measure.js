@@ -15,7 +15,14 @@
 import { writeFileSync } from 'node:fs'
 import { VIEWPORTS, launch, cityUrl, openCity, addressCounts, instrument } from './lib/city.js'
 import { orbit, nudgeOrbit } from './lib/orbit.js'
-import { typeSearch, clearSearch, clickFirstEntry, sidebarGeometry } from './lib/address.js'
+import {
+  typeSearch,
+  clearSearch,
+  clickFirstEntry,
+  sidebarGeometry,
+  openSidebarWorstCase,
+  openPlaceCard,
+} from './lib/address.js'
 
 function parseArgs(argv) {
   const args = {
@@ -30,6 +37,8 @@ function parseArgs(argv) {
     label: null,
     screenshot: null,
     clock: null,
+    size: null,
+    skipOrbit: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
@@ -45,6 +54,8 @@ function parseArgs(argv) {
       case '--screenshot': args.screenshot = value; index += 1; break
       case '--clock': args.clock = value; index += 1; break
       case '--orbit-seconds': args.orbitSeconds = Number(value); index += 1; break
+      case '--size': args.size = value; index += 1; break
+      case '--skip-orbit': args.skipOrbit = true; break
       case '--headless': args.headed = false; break
       case '--headed': args.headed = true; break
       case '--help':
@@ -53,6 +64,8 @@ function parseArgs(argv) {
   --origin <url>        Where the app is served. Default http://127.0.0.1:5080
   --database <id>       City to open. Default primary/database/SimCityLoad
   --viewport rail|sheet|both   Which side of the 860px breakpoint. Default both
+  --size <WxH>          Measure one custom viewport instead, e.g. 1115x800
+  --skip-orbit          Skip the orbit and frame-cost passes (layout runs only)
   --mode city|map       Initial view mode. Default city
   --term <text>         What to type into the address book. Default "orders"
   --orbit-seconds <n>   Length of the orbit drag. Default 4
@@ -91,10 +104,25 @@ async function measureViewport(context, viewport, args) {
   const load = await openCity(page, url)
 
   const counts = await addressCounts(page)
-  const geometry = await sidebarGeometry(page)
+  const geometry = { resting: await sidebarGeometry(page) }
 
-  const dragOrbit = await orbit(page, { seconds: args.orbitSeconds })
-  const buttonOrbit = await nudgeOrbit(page)
+  /*
+   * Three states, measured in the order a reader reaches them.
+   *
+   * `resting` is the column as it loads, with every drawer closed. That is the state a casual
+   * check sees and the one that has never had a defect in it. `drawersOpen` opens every drawer
+   * over real rows, and `worstCase` adds a place card so all three claims on the rail are live at
+   * once -- which is the arrangement #63 and #65 were both found in. Quoting only the first is how
+   * a squeezed column gets signed off.
+   */
+  const sidebarSteps = await openSidebarWorstCase(page)
+  geometry.drawersOpen = await sidebarGeometry(page)
+  const placeCardStep = await openPlaceCard(page)
+  sidebarSteps.push(placeCardStep)
+  geometry.worstCase = await sidebarGeometry(page)
+
+  const dragOrbit = args.skipOrbit ? null : await orbit(page, { seconds: args.orbitSeconds })
+  const buttonOrbit = args.skipOrbit ? null : await nudgeOrbit(page)
 
   /*
    * Captured last, and deliberately so.
@@ -130,6 +158,7 @@ async function measureViewport(context, viewport, args) {
     load,
     addressBook: counts,
     sidebarGeometry: geometry,
+    sidebarSteps,
     orbit: dragOrbit,
     buttonOrbit,
     search,
@@ -149,33 +178,37 @@ function report(result) {
   out.push(line('load to settled', `${(result.load.loadMs / 1000).toFixed(1)} s`))
   out.push(line('GPU', result.load.renderer ?? 'unknown'))
 
-  out.push('\n  -- orbit (trusted drag) --')
-  out.push(line('drag length', `${result.orbit.dragSeconds} s`))
-  out.push(line('frames sampled (steady / total)', `${result.orbit.frames} / ${result.orbit.sampled}`))
-  out.push(line('first frame CPU ms', result.orbit.firstFrameCpuMs))
-  out.push(line('CPU ms/frame median | p95 | max',
-    `${result.orbit.cpuMsPerFrame.median} | ${result.orbit.cpuMsPerFrame.p95} | ${result.orbit.cpuMsPerFrame.max}`))
-  out.push(line('  shadow pass ms/frame median',
-    `${result.orbit.shadowPassMsPerFrame.median} (max ${result.orbit.shadowPassMsPerFrame.max})`))
-  out.push(line('frame interval ms median | p95',
-    `${result.orbit.frameIntervalMs.median} | ${result.orbit.frameIntervalMs.p95}`))
-  out.push(line('fps (from median interval)', result.orbit.fps))
-  out.push(line('draw calls/frame median | max',
-    `${result.orbit.drawCalls.median} | ${result.orbit.drawCalls.max}`))
-  out.push(line('  of which offscreen (shadow)',
-    `${result.orbit.offscreenDrawCalls.median} | ${result.orbit.offscreenDrawCalls.max}`))
-  out.push(line('triangles/frame median',
-    `${result.orbit.trianglesPerFrame.median?.toLocaleString?.() ?? result.orbit.trianglesPerFrame.median}`))
-  out.push(line('  of which offscreen (shadow)',
-    `${result.orbit.offscreenTriangles.median?.toLocaleString?.() ?? result.orbit.offscreenTriangles.median}`))
+  if (result.orbit) {
+    out.push('\n  -- orbit (trusted drag) --')
+    out.push(line('drag length', `${result.orbit.dragSeconds} s`))
+    out.push(line('frames sampled (steady / total)', `${result.orbit.frames} / ${result.orbit.sampled}`))
+    out.push(line('first frame CPU ms', result.orbit.firstFrameCpuMs))
+    out.push(line('CPU ms/frame median | p95 | max',
+      `${result.orbit.cpuMsPerFrame.median} | ${result.orbit.cpuMsPerFrame.p95} | ${result.orbit.cpuMsPerFrame.max}`))
+    out.push(line('  shadow pass ms/frame median',
+      `${result.orbit.shadowPassMsPerFrame.median} (max ${result.orbit.shadowPassMsPerFrame.max})`))
+    out.push(line('frame interval ms median | p95',
+      `${result.orbit.frameIntervalMs.median} | ${result.orbit.frameIntervalMs.p95}`))
+    out.push(line('fps (from median interval)', result.orbit.fps))
+    out.push(line('draw calls/frame median | max',
+      `${result.orbit.drawCalls.median} | ${result.orbit.drawCalls.max}`))
+    out.push(line('  of which offscreen (shadow)',
+      `${result.orbit.offscreenDrawCalls.median} | ${result.orbit.offscreenDrawCalls.max}`))
+    out.push(line('triangles/frame median',
+      `${result.orbit.trianglesPerFrame.median?.toLocaleString?.() ?? result.orbit.trianglesPerFrame.median}`))
+    out.push(line('  of which offscreen (shadow)',
+      `${result.orbit.offscreenTriangles.median?.toLocaleString?.() ?? result.orbit.offscreenTriangles.median}`))
+  }
 
-  out.push('\n  -- orbit (trusted clicks on Rotate left) --')
-  out.push(line('presses', result.buttonOrbit.presses))
-  out.push(line('trusted click ms each', result.buttonOrbit.trustedClickMs.join(', ')))
-  out.push(line('CPU ms/frame median | max',
-    `${result.buttonOrbit.cpuMsPerFrame.median} | ${result.buttonOrbit.cpuMsPerFrame.max}`))
-  out.push(line('draw calls/frame median',
-    `${result.buttonOrbit.drawCalls.median} (offscreen ${result.buttonOrbit.offscreenDrawCalls.median})`))
+  if (result.buttonOrbit) {
+    out.push('\n  -- orbit (trusted clicks on Rotate left) --')
+    out.push(line('presses', result.buttonOrbit.presses))
+    out.push(line('trusted click ms each', result.buttonOrbit.trustedClickMs.join(', ')))
+    out.push(line('CPU ms/frame median | max',
+      `${result.buttonOrbit.cpuMsPerFrame.median} | ${result.buttonOrbit.cpuMsPerFrame.max}`))
+    out.push(line('draw calls/frame median',
+      `${result.buttonOrbit.drawCalls.median} (offscreen ${result.buttonOrbit.offscreenDrawCalls.median})`))
+  }
 
   out.push('\n  -- address book --')
   out.push(line('entries rendered', result.addressBook.entries))
@@ -194,19 +227,55 @@ function report(result) {
   out.push(line('entries after clearing', result.cleared.entriesAfter.entries))
 
   out.push('\n  -- reachability --')
-  for (const [name, box] of Object.entries(result.sidebarGeometry)) {
-    if (!box) { out.push(line(name, 'not present')); continue }
-    out.push(line(name, `${box.clientHeight}px visible, ${box.scrollHeight}px content, `
-      + `overflow ${box.overflowY}, ${box.unreachablePx}px unreachable`
-      + (box.scrollExtentPx ? `, ${box.scrollExtentPx}px scrollable` : '')))
+  for (const step of result.sidebarSteps ?? []) {
+    out.push(line(`  ${step.step}`, step.ok
+      ? `ok${step.note ? ` (${step.note})` : ` in ${step.ms} ms`}`
+      : `FAILED: ${step.error}`))
   }
+  for (const [state, boxes] of Object.entries(result.sidebarGeometry)) {
+    out.push(`\n  [${state}]`)
+    for (const [name, box] of Object.entries(boxes)) {
+      if (name === 'eachDrawer' || name === 'drawerCap') continue
+      if (!box) { out.push(line(name, 'not present')); continue }
+      out.push(line(name, `${box.clientHeight}px visible, ${box.scrollHeight}px content, `
+        + `overflow ${box.overflowY}, ${box.unreachablePx}px unreachable`
+        + (box.scrollExtentPx ? `, ${box.scrollExtentPx}px scrollable` : '')))
+    }
+    if (boxes.drawerCap) {
+      out.push(line('drawer budget / cap', `${boxes.drawerCap.budget || '—'} / ${boxes.drawerCap.cap || '—'}`))
+    }
+    for (const drawer of boxes.eachDrawer ?? []) {
+      out.push(line(`  drawer "${drawer.label}"`,
+        `${drawer.open ? 'open' : 'closed'}, ${drawer.clientHeight}px visible, `
+        + `${drawer.scrollHeight}px content, summary ${drawer.summaryHeight}px, `
+        + `max-height ${drawer.maxHeight}, ${drawer.unreachablePx}px unreachable`))
+      if (drawer.body) {
+        out.push(line('    body', `${drawer.body.clientHeight}px visible, ${drawer.body.scrollHeight}px content, `
+          + `overflow ${drawer.body.overflowY}, ${drawer.body.unreachablePx}px unreachable`))
+      }
+    }
+  }
+  out.push('')
   out.push(line('trusted click on first entry',
     result.trustedEntryClick.ok ? `passed in ${result.trustedEntryClick.ms} ms` : `FAILED: ${result.trustedEntryClick.error}`))
   return out.join('\n')
 }
 
 const args = parseArgs(process.argv.slice(2))
-const wanted = args.viewport === 'both' ? [VIEWPORTS.rail, VIEWPORTS.sheet] : [VIEWPORTS[args.viewport]]
+/*
+ * `--size` measures one arbitrary viewport instead of the two presets. 1115x800 is the size
+ * `AGENTS.md` prescribes for the drawer budget, and it is neither of them: it is a rail, but a
+ * short one, which is where a budget that fits at 1440x900 stops fitting.
+ */
+const custom = args.size
+  ? (() => {
+    const match = /^(\d+)x(\d+)$/.exec(args.size)
+    if (!match) throw new Error(`--size wants WxH, e.g. 1115x800; got ${args.size}`)
+    return [{ name: args.size, width: Number(match[1]), height: Number(match[2]) }]
+  })()
+  : null
+const wanted = custom
+  ?? (args.viewport === 'both' ? [VIEWPORTS.rail, VIEWPORTS.sheet] : [VIEWPORTS[args.viewport]])
 if (wanted.some(viewport => !viewport)) throw new Error(`Unknown viewport ${args.viewport}`)
 
 const { browser, context } = await launch({ headed: args.headed })

@@ -1,5 +1,5 @@
 import type { DatabaseCityObject } from './databaseCityContracts'
-import type { LiveIncidentSnapshot, LiveRequest, LockResource, WaitingTask } from './liveContracts'
+import type { DeadlockResource, DeadlockSample, LiveIncidentSnapshot, LiveRequest, LockResource, WaitingTask } from './liveContracts'
 
 /**
  * Turns a live snapshot into map pins.
@@ -14,11 +14,19 @@ import type { LiveIncidentSnapshot, LiveRequest, LockResource, WaitingTask } fro
  * to be drawn — so it is reported as an off-map count rather than pinned to the wrong lot.
  */
 
-export type IncidentSeverity = 'blocked' | 'waiting' | 'deadlock'
+export type IncidentSeverity = 'blocked' | 'waiting' | 'cycle' | 'deadlock'
 
 export interface IncidentMarker {
   readonly id: string
   readonly objectId: string
+  /**
+   * Other loaded objects this same incident named — the object a blocking session was itself
+   * waiting on, or the second resource in a recorded deadlock. Used to put the pin on the road
+   * *between* the two rather than on one of them; see {@link ./cityIncidentPlacement}. Usually
+   * empty for a plain block, because a session that holds a lock and waits for nothing never
+   * appears in the waiting DMVs and so names no object.
+   */
+  readonly counterpartObjectIds: readonly string[]
   readonly severity: IncidentSeverity
   /** One line naming what is happening. Never a judgement, always the observation. */
   readonly headline: string
@@ -46,6 +54,23 @@ export interface IncidentProjection {
    * or a lock-resource probe that never ran. The UI must say "not observed", not "none".
    */
   readonly probeReported: boolean
+  /**
+   * What the `system_health` deadlock reader reported, kept apart from `probeReported` because the
+   * two subsystems fail independently: blocking comes from the request and waiting-task DMVs and
+   * deadlocks come from an extended-events session that Azure SQL Database does not have at all.
+   *
+   * `observed` false means the reader did not run or could not run, and the UI must render "not
+   * observed" rather than "no deadlocks" — those are different claims and only one of them is
+   * supported. `retainedCount` is the count before any cap, so a capped list is never read as a
+   * calmer instance.
+   */
+  readonly deadlocks: {
+    readonly observed: boolean
+    readonly graphCount: number
+    readonly retainedCount: number
+    readonly pinnedCount: number
+    readonly reason: string
+  }
   /** Why the projection is empty or partial, in the collector's own words. */
   readonly reason: string
 }
@@ -87,13 +112,47 @@ export function incidentDemandsAttention(projection: IncidentProjection): boolea
   return !projection.probeReported
     || projection.markers.length > 0
     || incidentUnpinnedCount(projection) > 0
+    || !projection.deadlocks.observed
+    || projection.deadlocks.retainedCount > 0
 }
+
+/**
+ * What a folded, one-line summary of the deadlock reader says.
+ *
+ * "Not observed" and "none in window" are the two claims that must never be collapsed into each
+ * other. The first means the reader could not run — Azure SQL Database has no `system_health`
+ * session, and a login without `VIEW SERVER STATE` cannot read one that exists. The second means it
+ * ran and the retained window held nothing, which still does not mean the instance never deadlocks,
+ * because `system_health` rolls its files over.
+ */
+export function deadlockSummaryLabel(projection: IncidentProjection): string {
+  const { observed, graphCount, retainedCount } = projection.deadlocks
+  if (!observed) return 'Not observed'
+  if (retainedCount === 0) return 'None in window'
+  if (retainedCount > graphCount) return `${graphCount} of ${retainedCount} retained`
+  return `${graphCount} retained`
+}
+
+/** The tone class for {@link deadlockSummaryLabel}. */
+export function deadlockSummaryTone(projection: IncidentProjection): 'is-alert' | 'is-unknown' | '' {
+  if (!projection.deadlocks.observed) return 'is-unknown'
+  return projection.deadlocks.retainedCount > 0 ? 'is-alert' : ''
+}
+
+const DEADLOCKS_NOT_OBSERVED = {
+  observed: false,
+  graphCount: 0,
+  retainedCount: 0,
+  pinnedCount: 0,
+  reason: 'The system_health deadlock reader has not reported, so nothing is claimed about deadlocks.',
+} as const
 
 const NOT_OBSERVED: IncidentProjection = {
   markers: [],
   offPageCount: 0,
   unresolved: [],
   probeReported: false,
+  deadlocks: DEADLOCKS_NOT_OBSERVED,
   reason: 'No live snapshot has been received, so nothing is claimed about current activity.',
 }
 
@@ -152,6 +211,7 @@ export function projectIncidents(
       offPageCount: 0,
       unresolved: [],
       probeReported: false,
+      deadlocks: DEADLOCKS_NOT_OBSERVED,
       reason: `Live collection reported ${snapshot.status}: ${snapshot.reason}`,
     }
   }
@@ -177,6 +237,19 @@ export function projectIncidents(
   // One marker per object: the worst wait wins the pin, and the rest become detail lines.
   const byObject = new Map<string, IncidentMarker>()
 
+  // Which loaded object each sampled session is itself waiting on. A blocking session that appears
+  // in the sample as a waiter of its own — the middle of an A→B→C chain — is the one case where the
+  // block's *other* end can be named, and it is what lets the pin sit on the road between them.
+  const objectBySession = new Map<number, string>()
+  const noteSessionObject = (source: LiveRequest | WaitingTask) => {
+    const lock = source.lockResource
+    if (!lock || lock.status !== 'Resolved') return
+    const objectId = lockKeys(lock).map(key => byKey.get(key)).find(Boolean)
+    if (objectId) objectBySession.set(source.sessionId, objectId)
+  }
+  for (const request of snapshot.requests) noteSessionObject(request)
+  for (const task of snapshot.waitingTasks) noteSessionObject(task)
+
   const consider = (
     source: LiveRequest | WaitingTask,
     kind: 'request' | 'task',
@@ -200,8 +273,9 @@ export function projectIncidents(
 
     const duration = waitMs(kind === 'request' ? (source as LiveRequest).waitTimeMs : (source as WaitingTask).waitDurationMs)
     const inCycle = sessionsInCycle.has(source.sessionId)
-    const severity: IncidentSeverity = inCycle ? 'deadlock' : 'blocked'
+    const severity: IncidentSeverity = inCycle ? 'cycle' : 'blocked'
     const blocker = source.blocking.blockingSessionId
+    const blockerObjectId = blocker === null ? undefined : objectBySession.get(blocker)
     const details = [
       formatMs(duration),
       `wait type ${source.waitType ?? 'not reported'}`,
@@ -217,6 +291,7 @@ export function projectIncidents(
     const marker: IncidentMarker = {
       id: `${kind}:${source.sessionId}:${objectId}`,
       objectId,
+      counterpartObjectIds: blockerObjectId && blockerObjectId !== objectId ? [blockerObjectId] : [],
       severity,
       headline: inCycle
         ? `Session ${source.sessionId} is in a wait cycle here`
@@ -234,31 +309,159 @@ export function projectIncidents(
       return
     }
     // A cycle outranks a plain block; otherwise the longer wait keeps the pin.
-    const promote = marker.severity === 'deadlock' && existing.severity !== 'deadlock'
-    byObject.set(objectId, promote ? { ...marker, details: [...marker.details, ...existing.details] } : {
-      ...existing,
-      details: [...existing.details, ...marker.details],
+    const promote = marker.severity === 'cycle' && existing.severity !== 'cycle'
+    const merged = promote
+      ? { ...marker, details: [...marker.details, ...existing.details] }
+      : { ...existing, details: [...existing.details, ...marker.details] }
+    byObject.set(objectId, {
+      ...merged,
+      counterpartObjectIds: [...new Set([...existing.counterpartObjectIds, ...marker.counterpartObjectIds])],
     })
   }
 
   for (const request of snapshot.requests) consider(request, 'request')
   for (const task of snapshot.waitingTasks) consider(task, 'task')
   markers.push(...byObject.values())
-  markers.sort((left, right) => left.objectId.localeCompare(right.objectId))
+
+  /*
+   * `deadlocks` is optional at runtime even though the contract declares it.
+   *
+   * A snapshot served by an older build of the API predates the reader entirely, and a browser tab
+   * left open across a deployment will hand exactly that to this function. Absent is not the same as
+   * `Unsupported` -- one means "this instance has no system_health session", the other means "this
+   * server never looked" -- but both are "not observed", and neither is "no deadlocks".
+   */
+  const deadlockSample = snapshot.deadlocks as DeadlockSample | undefined
+  const deadlockMarkers = deadlockSample ? projectDeadlocks(deadlockSample, byKey) : []
+  markers.push(...deadlockMarkers)
+  markers.sort((left, right) => left.objectId.localeCompare(right.objectId) || left.id.localeCompare(right.id))
+
+  const deadlocksObserved = deadlockSample?.status === 'Available' || deadlockSample?.status === 'Stale'
 
   return {
     markers,
     offPageCount,
     unresolved,
     probeReported,
+    deadlocks: !deadlockSample
+      ? DEADLOCKS_NOT_OBSERVED
+      : {
+        observed: deadlocksObserved,
+        graphCount: deadlocksObserved ? deadlockSample.graphs.length : 0,
+        retainedCount: deadlocksObserved ? deadlockSample.totalRetainedCount : 0,
+        pinnedCount: deadlockMarkers.length,
+        reason: deadlocksObserved
+          ? deadlockSample.reason
+          : `The system_health deadlock reader reported ${deadlockSample.status}: ${deadlockSample.reason}`,
+      },
     reason: probeReported
       ? snapshot.reason
       : 'No sampled request or task carried a lock resource, so no blocking is claimed either way.',
   }
 }
 
+/**
+ * Turns recorded deadlock graphs into crash pins.
+ *
+ * These are the only markers on this map that report a deadlock, because they are the only evidence
+ * of one that exists: `sys.dm_exec_requests` cannot show a deadlock, since the engine has already
+ * chosen a victim and rolled it back before anything could sample it. A cycle in the *live* wait
+ * graph is a different and weaker observation and keeps its own, weaker severity.
+ *
+ * A graph is pinned only when at least one of its resources names an object this page has loaded.
+ * A deadlock between two tables in another database is real and is counted in `retainedCount`; it
+ * has nowhere to be drawn here, and drawing it anywhere would be a lie about where it happened.
+ *
+ * The anchor is what the **victim** was waiting for when it was chosen, because that is the request
+ * the engine killed. The other loaded objects in the graph become counterparts, so the pin lands on
+ * the road between them.
+ */
+function projectDeadlocks(
+  sample: DeadlockSample,
+  byKey: ReadonlyMap<string, string>,
+): IncidentMarker[] {
+  if (sample.status !== 'Available' && sample.status !== 'Stale') return []
+
+  const markers: IncidentMarker[] = []
+  for (const graph of sample.graphs) {
+    const victims = new Set(graph.victimProcessIds)
+    const resolved = graph.resources
+      .map(resource => ({ resource, objectId: resolveDeadlockObject(resource, byKey) }))
+      .filter((entry): entry is { resource: DeadlockResource; objectId: string } => entry.objectId !== null)
+    if (resolved.length === 0) continue
+
+    const victimResource = resolved.find(entry => entry.resource.waiters.some(waiter => victims.has(waiter.processId)))
+    const anchor = victimResource ?? resolved[0]
+    const counterparts = [...new Set(resolved.map(entry => entry.objectId))].filter(id => id !== anchor.objectId)
+
+    const victimProcesses = graph.processes.filter(process => process.isVictim || victims.has(process.id))
+    const victimSessions = victimProcesses
+      .map(process => process.sessionId)
+      .filter((sessionId): sessionId is number => sessionId !== null)
+
+    const details = [
+      `recorded at ${graph.occurredAt}`,
+      victimSessions.length > 0
+        ? `victim session ${victimSessions.join(', ')} was rolled back by the engine`
+        : 'the graph named no victim session id',
+      `${graph.processes.length} process(es) over ${graph.resources.length} resource(s)`,
+      ...resolved.map(entry =>
+        `${entry.resource.resourceKind} on ${entry.resource.objectName ?? 'an unnamed object'}: `
+        + `${entry.resource.owners.length} owner(s), ${entry.resource.waiters.length} waiter(s)`,
+      ),
+    ]
+    if (!victimResource) {
+      details.push('The victim\'s own resource is not on this page, so the pin is anchored to another resource from the same graph.')
+    }
+    if (!graph.includesSqlText) {
+      details.push('Statement text was not requested for this graph, so the statements are absent rather than empty.')
+    }
+    details.push('This is history: the engine resolved this deadlock before it could be sampled live, and it is dated from when it happened rather than from this snapshot.')
+
+    markers.push({
+      id: `deadlock:${graph.id}:${anchor.objectId}`,
+      objectId: anchor.objectId,
+      counterpartObjectIds: counterparts,
+      severity: 'deadlock',
+      headline: `A deadlock was recorded here at ${graph.occurredAt}`,
+      details,
+      source: 'the system_health extended-events session, read on its own slower interval',
+      observedAt: sample.collectedAt ?? graph.occurredAt,
+    })
+  }
+  return markers
+}
+
+/**
+ * The loaded object one deadlock resource names, or null.
+ *
+ * `objectName` is the engine's three-part name, so the trailing two parts are matched against the
+ * `schema.object` keys the page already builds. `associatedObjectId` gives the same second chance
+ * the live lock-resource probe gets. A resource kind that names no object — an `exchangeEvent` is
+ * parallelism inside one query — resolves to null, which is correct and not a failure.
+ */
+function resolveDeadlockObject(
+  resource: DeadlockResource,
+  byKey: ReadonlyMap<string, string>,
+): string | null {
+  const keys: string[] = []
+  if (resource.objectName) {
+    const parts = resource.objectName.split('.').filter(part => part.length > 0)
+    if (parts.length >= 2) keys.push(parts.slice(-2).join('.').toLocaleLowerCase())
+  }
+  if (resource.databaseId !== null && resource.associatedObjectId !== null) {
+    keys.push(`${resource.databaseId}/object/${resource.associatedObjectId}`.toLocaleLowerCase())
+  }
+  for (const key of keys) {
+    const objectId = byKey.get(key)
+    if (objectId) return objectId
+  }
+  return null
+}
+
 export const SEVERITY_LABELS: Record<IncidentSeverity, string> = {
   blocked: 'Blocked waiter',
   waiting: 'Waiting',
-  deadlock: 'Wait cycle',
+  cycle: 'Wait cycle',
+  deadlock: 'Recorded deadlock',
 }

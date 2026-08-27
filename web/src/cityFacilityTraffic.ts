@@ -291,6 +291,68 @@ export function routeWaitCategory(category: string): WaitCategoryRouting {
   return match ? WAIT_CATEGORY_ROUTING[match] : UNRECOGNIZED
 }
 
+/** One facility's share of the captured waiting attributed to a single object. */
+export interface FacilityShare {
+  readonly facility: FacilityKind
+  readonly label: string
+  /** Exact captured milliseconds for this object and facility, as a lossless base-10 string. */
+  readonly waitMilliseconds: string
+  /** Fraction of this object's attributed waiting, in 0..1. */
+  readonly share: number
+}
+
+/**
+ * Where one object's captured waiting queued, by facility, descending.
+ *
+ * The six-hue lanes that used to draw this on the map are gone: the map now says how congested a
+ * road is and nothing more, which is the whole point of a GPS colour. The measurement is not gone
+ * with them — this is what puts it back where a reader actually asks the question, in the road's
+ * hover readout and beside the object, and it is the same per-object per-facility total the
+ * evidence table prints.
+ *
+ * Shared lanes are deliberately excluded. A multi-object family's wait belongs to no single object,
+ * and folding it in here would hand one building time that was never attributed to it — the exact
+ * thing {@link FacilityTraffic.sharedLanes} exists to prevent.
+ */
+export function facilityShares(objectId: string, traffic: FacilityTraffic): FacilityShare[] {
+  const totals = new Map<FacilityKind, { label: string; milliseconds: bigint }>()
+  let overall = 0n
+  for (const lane of traffic.lanes) {
+    if (lane.objectId !== objectId) continue
+    const milliseconds = toBigInt(lane.waitMilliseconds) ?? 0n
+    if (milliseconds <= 0n) continue
+    const existing = totals.get(lane.facility)
+    totals.set(lane.facility, {
+      label: lane.facilityLabel,
+      milliseconds: (existing?.milliseconds ?? 0n) + milliseconds,
+    })
+    overall += milliseconds
+  }
+  if (overall <= 0n) return []
+  return [...totals.entries()]
+    .map(([facility, entry]) => ({
+      facility,
+      label: entry.label,
+      waitMilliseconds: entry.milliseconds.toString(),
+      share: Number(entry.milliseconds) / Number(overall),
+    }))
+    .sort((left, right) => right.share - left.share || left.facility.localeCompare(right.facility))
+}
+
+/**
+ * The facility mix as one short phrase, or null when nothing was attributed to this object.
+ *
+ * Null is not "no waiting happened": it is "no ranked query family carried wait-category evidence
+ * naming this object", and the caller must not render it as a quiet building.
+ */
+export function facilityMixLabel(shares: readonly FacilityShare[]): string | null {
+  if (shares.length === 0) return null
+  return shares
+    .slice(0, 3)
+    .map(entry => `${entry.label.toLocaleLowerCase()} ${Math.round(entry.share * 100)}%`)
+    .join(', ')
+}
+
 const CONFIDENCE_RANK: Readonly<Record<QueryAttributionConfidence, number>> = {
   Confirmed: 2,
   Probable: 1,

@@ -68,10 +68,11 @@ function road(routeId: string, fromObjectId: string, toId: string, executions: n
     confidence: 'Confirmed',
     pattern: 'solid',
     width: 2,
-    grade: 'low',
+    grade: 'free',
     color: 0,
     executions,
     waitShare: null,
+    delayPerExecution: null,
     familyIds: [],
     rationale: 'test',
   }
