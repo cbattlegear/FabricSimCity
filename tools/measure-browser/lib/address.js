@@ -120,6 +120,44 @@ export async function clickFirstEntry(page) {
 }
 
 /**
+ * Opens the "City directory" disclosure, which is where the address book now lives.
+ *
+ * The book used to be an always-rendered region of the rail, and every reader of it here --
+ * `addressCounts`, `sidebarGeometry`'s `scroll`, `clickFirstEntry`, `openPlaceCard` and the whole
+ * address-book pass in `measure.js` -- still queries `.sidebar-scroll` and `.address-entry`
+ * directly. Wrapping it in a collapsed `<details class="sidebar-directory">` did not remove those
+ * nodes: `::details-content` hides them with `content-visibility`, so they stay in the DOM,
+ * `querySelector` still finds them, and `clientHeight` reads 0.
+ *
+ * That is the worst possible shape for a measurement harness, because both halves lie quietly.
+ * `sidebarGeometry` reported `scroll 0px visible, 9936px content` -- which is the exact signature
+ * of the #65 squeezed-to-nothing column -- while the real cause was a disclosure nobody had
+ * opened. And the address-book pass died on `locator('.address-entry').first()` resolving to a
+ * *hidden* element for the full 120s budget, so a 5-minute run ended with "address book pass
+ * failed: Timeout" and no typing numbers, no trusted click.
+ *
+ * The click is trusted for the usual reason: a summary that cannot be reached because something
+ * covers it is a defect this pass exists to catch, not an obstacle to force past.
+ */
+export async function openDirectory(page) {
+  const directory = page.locator('.sidebar-directory')
+  if ((await directory.count()) === 0) {
+    return { step: 'open city directory', ok: true, ms: 0, note: 'no directory disclosure in this view' }
+  }
+  if (await directory.evaluate(element => element.open)) {
+    return { step: 'open city directory', ok: true, ms: 0, note: 'already open' }
+  }
+  const startedAt = Date.now()
+  try {
+    await directory.locator('> summary').click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    await page.locator('.sidebar-scroll').waitFor({ state: 'visible', timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    return { step: 'open city directory', ok: true, ms: Date.now() - startedAt }
+  } catch (reason) {
+    return { step: 'open city directory', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] }
+  }
+}
+
+/**
  * Puts the sidebar into the state that has produced every layout defect this column has had.
  *
  * An empty plan finder is a short form, and a closed drawer costs its summary and nothing else,
@@ -133,6 +171,13 @@ export async function clickFirstEntry(page) {
  */
 export async function openSidebarWorstCase(page, { populatePlanFinder = true } = {}) {
   const steps = []
+  /*
+   * The directory first, because the address book is part of the worst case rather than a
+   * separate concern: an open book is what competes with the drawers and the place card for the
+   * rail's slack, and a collapsed one hands the column back all of that space. Measuring
+   * "every drawer open" over a *closed* book measures a column carrying less than it does in use.
+   */
+  steps.push(await openDirectory(page))
   const drawers = page.locator('.sidebar-drawer')
   const count = await drawers.count()
   for (let index = 0; index < count; index += 1) {
@@ -177,6 +222,7 @@ export async function openPlaceCard(page) {
   const entry = page.locator('.address-entry').first()
   const startedAt = Date.now()
   try {
+    await openDirectory(page)
     await entry.waitFor({ state: 'visible', timeout: 10000 })
     await entry.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
     await page.locator('.sidebar-place-card').waitFor({ state: 'visible', timeout: TRUSTED_CLICK_TIMEOUT_MS })
@@ -236,6 +282,20 @@ export async function sidebarGeometry(page) {
     })
     return {
       sidebar: read('.map-sidebar'),
+      /*
+       * Whether the address book's disclosure is open, recorded next to `scroll`.
+       *
+       * Without this a 0px `.sidebar-scroll` is unattributable: it reads identically whether the
+       * column squeezed the list to nothing (the #65 defect) or the reader simply never opened
+       * the "City directory" disclosure it now lives inside. One of those is a bug and the other
+       * is the resting state, and the harness quoted the defect's numbers for the resting state
+       * until this was here.
+       */
+      directory: (() => {
+        const element = document.querySelector('.sidebar-directory')
+        if (!element) return null
+        return { open: element.open, ...readElement(element) }
+      })(),
       /** The address list's scroller: the section that gave way to 0px in #65. */
       scroll: read('.sidebar-scroll'),
       placeCard: read('.sidebar-place-card'),
