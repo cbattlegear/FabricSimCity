@@ -524,7 +524,13 @@ def pavilion():
 
 
 def parked_car():
-    """Parked only. A moving vehicle would imply flow, and flow is evidence."""
+    """Decoration. A parked car dresses a car park and says nothing about the database.
+
+    It used to be parked because "a moving vehicle would imply flow, and flow is evidence". Flow is
+    still evidence — what changed is that the city now *has* the evidence. A moving vehicle is a
+    sampled running request and lives in the vehicle kit below; this one stays parked because it is
+    scattered by a block's seed and measures nothing.
+    """
     a = Asset("parked_car")
     a.body.frustum((1.82, 4.3), (1.74, 4.1), 0.62, (0.0, 0.0, 0.42))
     a.body.frustum((1.66, 2.3), (1.4, 1.75), 0.52, (0.0, -0.2, 1.04))
@@ -582,6 +588,98 @@ SCENERY = (
 
 
 # --------------------------------------------------------------------------------------------------
+# Vehicles
+#
+# Unlike everything else in this file, these are NOT decoration, and they are exported to their own
+# kit for that reason. One of these on a road means a live sampled request was running when the
+# sampler last looked, and which of the four it is comes from the estimated bytes that request's plan
+# moves. The geometry still measures nothing — the *choice* of which asset to draw is the evidence,
+# and that choice is made in `web/src/cityVehicles.ts` from `planDataVolume`.
+#
+# Keeping them out of `scenery.glb` keeps the one distinction the feature turns on legible: scenery
+# is decoration and losing it costs a console line, whereas losing these would silently stop drawing
+# live requests, which looks exactly like an idle server.
+#
+# Every vehicle runs along +Y, is centred on X, and sits on z=0 — the convention `parked_car` already
+# uses — so the renderer points one down a road by yawing it and doing nothing else.
+#
+# The four have to be told apart at a shallow overhead camera at a few pixels tall, and the channel
+# that survives that is LENGTH: 1.77m, 4.20m, 6.02m, 12.24m. Height and the cab/box step are
+# secondary cues that only pay off when the camera is close.
+# --------------------------------------------------------------------------------------------------
+
+def bike():
+    """The smallest class. Thin, short and mostly air, so it reads as slight at a glance."""
+    a = Asset("vehicle_bike")
+    for y in (-0.56, 0.56):
+        a.metal.cyl(0.33, 0.33, 0.05, (0.0, y, 0.33), (0.0, math.pi / 2.0, 0.0), segments=12)
+    a.body.box((0.07, 1.02, 0.06), (0.0, 0.0, 0.62))
+    a.body.box((0.07, 0.06, 0.46), (0.0, -0.36, 0.5), (0.24, 0.0, 0.0))
+    a.body.box((0.07, 0.06, 0.5), (0.0, 0.34, 0.46), (-0.3, 0.0, 0.0))
+    a.trim.box((0.1, 0.3, 0.07), (0.0, 0.2, 0.94))
+    a.metal.box((0.52, 0.06, 0.05), (0.0, -0.5, 0.98))
+    return a
+
+
+def car():
+    """A moving car, deliberately the same silhouette as `parked_car`. The only thing separating a
+    live query from decoration is that this one moves — which is the honest distinction, because the
+    two really are the same object doing different jobs."""
+    a = Asset("vehicle_car")
+    a.body.frustum((1.78, 4.2), (1.7, 4.0), 0.6, (0.0, 0.0, 0.4))
+    a.body.frustum((1.62, 2.24), (1.36, 1.7), 0.5, (0.0, -0.2, 1.0))
+    a.glass.box((1.46, 0.05, 0.36), (0.0, -1.3, 1.2))
+    a.glass.box((1.38, 0.05, 0.32), (0.0, 0.9, 1.2))
+    for sign in (-1.0, 1.0):
+        a.glass.box((0.04, 1.86, 0.32), (sign * 0.76, -0.2, 1.2))
+    for x in (-0.82, 0.82):
+        for y in (-1.38, 1.38):
+            a.metal.cyl(0.33, 0.33, 0.23, (x, y, 0.33), (0.0, math.pi / 2.0, 0.0), segments=10)
+    return a
+
+
+def van():
+    """A box van: a low cab with a tall square box behind it. The step between the two is the cue
+    that separates it from a car when the camera is looking straight down and length is foreshortened."""
+    a = Asset("vehicle_van")
+    a.body.frustum((2.14, 1.9), (2.02, 1.78), 1.42, (0.0, -2.02, 0.42))
+    a.body.box((2.24, 4.3, 2.16), (0.0, 0.86, 1.36))
+    a.trim.box((2.3, 0.14, 2.22), (0.0, -1.24, 1.36))
+    a.trim.box((2.28, 0.1, 0.16), (0.0, 3.0, 1.9))
+    a.glass.box((1.86, 0.05, 0.6), (0.0, -2.94, 1.5))
+    for sign in (-1.0, 1.0):
+        a.glass.box((0.04, 1.0, 0.5), (sign * 0.98, -2.36, 1.46))
+    for x in (-1.0, 1.0):
+        for y in (-2.24, 1.5):
+            a.metal.cyl(0.44, 0.44, 0.3, (x, y, 0.44), (0.0, math.pi / 2.0, 0.0), segments=10)
+    return a
+
+
+def semi_truck():
+    """The largest class: a tractor and a long trailer with a visible break between them. Length
+    alone carries the class at map scale, so the articulation gap is kept wide enough to survive
+    being a few pixels tall."""
+    a = Asset("vehicle_semi_truck")
+    a.body.frustum((2.42, 2.5), (2.3, 2.34), 2.5, (0.0, -5.0, 0.62))
+    a.trim.box((2.46, 0.16, 2.5), (0.0, -3.78, 1.87))
+    a.glass.box((2.06, 0.05, 0.74), (0.0, -6.2, 2.32))
+    for sign in (-1.0, 1.0):
+        a.glass.box((0.04, 1.2, 0.62), (sign * 1.12, -5.4, 2.26))
+    a.metal.box((1.5, 1.1, 0.34), (0.0, -3.3, 1.06))
+    a.body.box((2.5, 8.6, 2.72), (0.0, 1.4, 1.86))
+    a.trim.box((2.56, 0.12, 2.78), (0.0, 5.64, 1.86))
+    for sign in (-1.0, 1.0):
+        a.trim.box((0.08, 8.4, 0.14), (sign * 1.27, 1.4, 3.16))
+    for x in (-1.06, 1.06):
+        for y in (-6.02, -3.44, 3.6, 4.72):
+            a.metal.cyl(0.52, 0.52, 0.34, (x, y, 0.52), (0.0, math.pi / 2.0, 0.0), segments=10)
+    return a
+
+
+VEHICLES = (bike, car, van, semi_truck)
+
+
+# --------------------------------------------------------------------------------------------------
 # Export
 # --------------------------------------------------------------------------------------------------
 
@@ -630,6 +728,14 @@ def generate(out_dir):
     for builder in SCENERY:
         scenery.extend(builder().build(bevel=0.02))
     reports.append(export(scenery, os.path.join(out_dir, "scenery.glb")))
+
+    clear_scene()
+    vehicles = []
+    # A finer bevel than the scenery kit's 0.02: a bike frame member is 0.06m thick, and 0.02 of
+    # bevel rounds it away entirely.
+    for builder in VEHICLES:
+        vehicles.extend(builder().build(bevel=0.015))
+    reports.append(export(vehicles, os.path.join(out_dir, "vehicles.glb")))
     return reports
 
 

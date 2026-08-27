@@ -142,6 +142,45 @@ column, so they are the case where the caps compete.
 budget. It shrinks freely, so it does not overflow the rail, but it is squeezed hard: measured at
 1115×800 with a place card open and both drawers open, it holds 81px and scrolls its own content.
 
+## The city scene renders on demand, and the shadow map is not automatic
+
+`DatabaseCityScene.ts` does not run a permanent `requestAnimationFrame` loop. It renders when
+something changed, and `shadowMap.autoUpdate` is **off** — issue #90 measured the shadow pass at
+948 draw calls and 7.6 ms *per frame*, all of it redrawing shadows for a city that had not moved.
+Shadows are re-rendered by setting `shadowMap.needsUpdate = true` at the few moments the scene's
+contents or its light actually change, never on camera movement.
+
+That makes the shadow cost invisible in the usual places. `renderer.info.render.calls` folds the
+shadow pass in with the visible one, and a frame time taken while nothing is animating measures a
+scene that is not rendering at all. Use `tools/measure-browser`, which counts submissions off the
+WebGL context and splits them by bound framebuffer, so **offscreen draw calls are the shadow pass**.
+`median 0` with an occasional `max 948` is the shape that means "on demand and still working";
+a steady 948 means something re-armed it and a steady 0 means shadows were switched off entirely.
+
+Two consequences for any loop added later — both fail silently, and both are pinned by
+`shadowInvalidation.test.ts`:
+
+- **A new loop gets its own handle.** There are now three (`animationHandle` for the render-on-
+  demand pass, `dampingHandle` for orbit inertia, `vehicleHandle` for live vehicles). Reusing one
+  handle for two loops means whichever `cancelAnimationFrame` runs last silently orphans the other,
+  which then runs forever with nothing able to stop it. Cancel every handle in `dispose()`.
+- **A loop that moves objects must not invalidate the shadow map.** Vehicles animate every frame,
+  so a single `shadowMap.needsUpdate = true` inside `runVehicleLoop` re-arms the whole 948-call
+  pass on every frame and gives back exactly what #90 removed. Vehicles are therefore excluded from
+  shadow casting outright (`castShadow = false`), which is also why they need no invalidation.
+
+A loop must also **stop on its own** when there is nothing left to move — an empty roster ends the
+loop rather than scheduling an idle frame forever. Measure that, do not reason about it: an
+always-scheduled callback that does no work looks identical in a screenshot and identical in the
+test suite, and shows up only as a machine that never goes idle.
+
+`shadowInvalidation.test.ts` guards this by slicing `DatabaseCityScene.ts` as **source text** and
+asserting a region does not mention `needsUpdate`. Two traps follow from that. It strips comments
+first (`code()`), because otherwise a doc comment *explaining* the rule reads as a violation of it.
+And each slice is bounded by a named anchor further down the file, so **adding a function between
+two anchors silently extends the slice above it** and the guard starts asserting about code it was
+never written for. Check the anchors when you add anything near a loop.
+
 ## NuGet lock files move together
 
 The repo uses Central Package Management (`Directory.Packages.props`) with `packages.lock.json`
@@ -164,13 +203,19 @@ Do not weaken `--locked-mode` in CI to get around this. It is a supply-chain con
 
 ```powershell
 dotnet build SqlSimCity.slnx -c Release        # 0 warnings expected
-dotnet test SqlSimCity.slnx -c Release         # 1,301 tests
-npm test                                       # 609 probe-catalog tests
-cd web; npm ci; npm run build; npm test -- --run   # 775 tests / 45 files
+dotnet test SqlSimCity.slnx -c Release         # 1,363 tests
+npm test                                       # 626 probe-catalog tests
+cd web; npm ci; npm run build; npm test -- --run   # 922 tests / 48 files
 npm run typecheck
 ```
 
 Those counts are the baselines to compare against. Investigate any delta rather than accepting it.
+
+`npm run typecheck` and `npm run build` are not the same check. `typecheck` covers the app
+sources; `build` runs `tsc -b` over the whole project graph, which is the first thing that reads
+the `*.test.ts` files. A test that constructs a contract value with a string literal outside its
+union type passes the suite — Vitest strips types — passes `typecheck`, and fails the build. Run
+`npm run build` before pushing, not only at release time.
 
 The root `npm test` is easy to miss because the web suite is the one usually meant by "the
 frontend tests". It validates `sql/manifest.json` against the probe files, and it is what pins

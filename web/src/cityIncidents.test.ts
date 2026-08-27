@@ -9,8 +9,10 @@ import {
   incidentSummaryTone,
   incidentUnpinnedCount,
   projectIncidents,
+  stopsTraffic,
 } from './cityIncidents'
 import type { DatabaseCityObject } from './databaseCityContracts'
+import type { IncidentSeverity } from './cityIncidents'
 import type {
   DeadlockGraph,
   DeadlockParticipant,
@@ -347,6 +349,29 @@ describe('projectIncidents · severity and merging', () => {
     expect(projection.markers[0].details.join(' ')).toContain('session 51')
   })
 
+  it('keeps every blocked session on the merged pin, so no vehicle is stranded', () => {
+    /*
+     * The merge picks one marker to survive and folds the other's prose into it. Its *session ids*
+     * have to survive as a union rather than as the winner's list, because `sessionIds` is what
+     * `DatabaseCityScene` uses to decide which live requests halt at this pin. Take the winner's
+     * list alone and session 52 is measurably blocked, is described in the pin's own details, and
+     * its vehicle drives past the incident it is stuck at.
+     */
+    const projection = projectIncidents(
+      snapshotOf({
+        requests: [
+          { sessionId: 51, lockResource: lock(), blockingSessionId: 60 },
+          { sessionId: 52, lockResource: lock(), blockingSessionId: 60 },
+        ],
+        cycleSessionIds: [52],
+      }),
+      objects)
+    expect(projection.markers).toHaveLength(1)
+    // 52 promoted the pin to a cycle, so it is the winner; 51 is the one at risk of being dropped.
+    expect(projection.markers[0].severity).toBe('cycle')
+    expect([...projection.markers[0].sessionIds].sort((a, b) => a - b)).toEqual([51, 52])
+  })
+
   it('orders markers stably so the map does not reshuffle between samples', () => {
     const spec: SnapshotSpec = {
       requests: [
@@ -363,8 +388,37 @@ describe('projectIncidents · severity and merging', () => {
   })
 })
 
-describe('projectIncidents · provenance', () => {
-  it('names its source and observation time on every marker', () => {
+describe('stopsTraffic · only a live block can halt a vehicle', () => {
+  /*
+   * All four severities, deliberately exhaustive. Three describe something happening on the
+   * instance right now; `deadlock` describes something the engine already finished.
+   *
+   * The failure this pins is silent. A recorded graph names its participants by session id, and
+   * SQL Server recycles session ids, so by the time the graph is readable a live session carrying
+   * one of those numbers is almost certainly an unrelated request that inherited it. Stop a
+   * vehicle there and the page asserts a currently-running query is caught in a deadlock that is
+   * over and was never its own — which looks entirely plausible on screen.
+   */
+  const cases: ReadonlyArray<readonly [IncidentSeverity, boolean, string]> = [
+    ['blocked', true, 'a live block: the blocker and the waiter are both still on the instance'],
+    ['waiting', true, 'a live wait: sampled from a task that has not been granted its lock'],
+    ['cycle', true, 'a live wait cycle: weaker evidence than a graph, but the sessions are current'],
+    ['deadlock', false, 'a recorded graph: already resolved, and its session ids may have been reused'],
+  ]
+
+  it.each(cases)('%s → %s (%s)', (severity, expected) => {
+    expect(stopsTraffic({ severity })).toBe(expected)
+  })
+
+  it('covers every severity the type allows', () => {
+    // If a fifth severity is added, this fails rather than letting it default to "stops traffic"
+    // by never being considered at all.
+    expect(cases.map(([severity]) => severity).sort())
+      .toEqual(Object.keys(SEVERITY_LABELS).sort())
+  })
+})
+
+describe('projectIncidents · provenance', () => {  it('names its source and observation time on every marker', () => {
     const projection = projectIncidents(
       snapshotOf({ requests: [{ sessionId: 51, lockResource: lock(), blockingSessionId: 60 }] }),
       objects)

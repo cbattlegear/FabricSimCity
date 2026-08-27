@@ -32,6 +32,7 @@ import { resolveSidebarMode } from './sidebarMode'
 import { CityLoadingScreen } from './CityLoadingScreen'
 import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
 import { incidentDemandsAttention, incidentSummaryLabel, projectIncidents } from './cityIncidents'
+import { EMPTY_ROSTER, vehicleSummaryLabel, type VehicleRoster } from './cityVehicles'
 import { IncidentSummary } from './IncidentPopup'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
@@ -319,7 +320,16 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     }
     setOpenIncidentId(markerId)
   }, [incidents])
-  const families = page?.topQueryFamilies ?? []
+  const families = useMemo(() => page?.topQueryFamilies ?? [], [page])
+
+  /*
+   * What the scene made of the live sample, reported back so the legend can disclose it.
+   *
+   * The roster is not computed here because the join needs the roads as the scene actually drew
+   * them. Reproducing that decision in the view would give the legend a second, subtly different
+   * answer to the same question — the classic case of a caption that disagrees with its picture.
+   */
+  const [vehicleRoster, setVehicleRoster] = useState<VehicleRoster>(EMPTY_ROSTER)
   const facilityTraffic = useMemo(
     () => projectFacilityTraffic(families, visibleObjects),
     [families, visibleObjects])
@@ -790,6 +800,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                   mappingFamilyId={mappingFamilyId}
                   onShowFamily={showFamilyOnMap}
                   selectedObject={selected}
+                  vehicles={vehicleRoster}
                 />}
               </div>
             </>
@@ -842,6 +853,9 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           liveStatus={liveStatus}
           feedState={feedState}
           incidents={incidents}
+          liveRequests={snapshot?.snapshot?.requests ?? null}
+          families={families}
+          onVehicleRoster={setVehicleRoster}
           openIncidentId={openIncidentId}
           onOpenIncident={setOpenIncidentId}
           incidentFocus={incidentFocus}
@@ -887,6 +901,7 @@ function LegendDrawer({
   mappingFamilyId,
   onShowFamily,
   selectedObject,
+  vehicles,
 }: {
   page: DatabaseCityPage
   objects: readonly DatabaseCityObject[]
@@ -906,6 +921,7 @@ function LegendDrawer({
   mappingFamilyId: string | null
   onShowFamily: (family: DatabaseCityQueryFamily) => void | Promise<void>
   selectedObject: DatabaseCityObject | null
+  vehicles: VehicleRoster
 }) {
   return (
     <details className="sidebar-drawer">
@@ -917,6 +933,35 @@ function LegendDrawer({
           <span><i className="legend-unknown">×</i> unknown, nonquantitative size</span>
           <span><i className="legend-route" /> confidence-graded co-reference, never row flow</span>
         </div>
+
+        <div className="city-legend vehicle-ladder" aria-label="Live vehicle size key">
+          <span><i className="legend-vehicle is-bike" /> bike · under 64 KiB</span>
+          <span><i className="legend-vehicle is-car" /> car · 64 KiB to 8 MiB</span>
+          <span><i className="legend-vehicle is-van" /> van · 8 MiB to 512 MiB</span>
+          <span><i className="legend-vehicle is-semi" /> semi · 512 MiB and above</span>
+          <span><i className="legend-vehicle is-unknown" /> unknown · the plans did not say</span>
+        </div>
+
+        <p className="mapping-note">
+          <strong>Vehicles are what is running right now.</strong> One vehicle is one row of{' '}
+          <code>sys.dm_exec_requests</code> that was executing when the collector last sampled, matched
+          to a query family by <code>query_hash</code> and placed on the busiest road that family
+          already draws. Its size maps the bytes that family&apos;s retained execution plans estimate
+          it moves per execution — the four cut points above are an invented ladder, chosen so each
+          rung is a rough order of magnitude, and only the ordering between them is evidence. Every
+          vehicle drives at the same speed, because nothing in the engine reports how fast a request
+          is progressing; speed here would be decoration dressed as a measurement. A vehicle stops
+          only where a live block pinned its own session, and it stops on the street it was already
+          driving: it never changes road to reach a pin, because the pin&apos;s placement is a claim
+          about the blocked object, not about this request&apos;s route. Recorded deadlock graphs stop
+          nothing, since the sessions they name were already killed before anything could be sampled.{' '}
+          <strong>Grey cubes are not small queries.</strong> A cube means the retained plans never
+          stated both a row count and a row width, so no size was measured; it sits on no rung, which
+          is why it has no length to read. <strong>An empty street means nothing was sampled on it,
+          not that nothing ran on it</strong> — the feed takes a periodic snapshot, so a query that
+          began and finished between two samples was never seen at all.{' '}
+          {vehicleSummaryLabel(vehicles)}
+        </p>
 
         <p className="mapping-note">
           <strong>What encodes evidence.</strong> Building footprint maps exact reserved 8-KiB pages

@@ -627,6 +627,20 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 /* Outlined, like the wireframe cap it stands for: an amount that was never measured for one object. */
 .legend-shared { border: 2px solid #e2a957; }
 .legend-route { height: 2px; background: repeating-linear-gradient(90deg, #bdc8d0 0 5px, transparent 5px 8px); }
+/*
+ * The vehicle key, drawn to scale.
+ *
+ * Widths are the four shells' real lengths (1.77 / 4.2 / 6.0 / 12.24 m) at one shared ratio, so the
+ * key states the same thing the map does. Writing round numbers here instead would make the key
+ * disagree with the city it is explaining.
+ */
+.legend-vehicle { display: inline-block; height: 6px; background: #7fb2e0; }
+.legend-vehicle.is-bike { width: 3px; }
+.legend-vehicle.is-car { width: 8px; }
+.legend-vehicle.is-van { width: 11px; }
+.legend-vehicle.is-semi { width: 22px; }
+/* Square and grey, because an unmeasured volume has no length to put on the ladder. */
+.legend-vehicle.is-unknown { width: 8px; height: 8px; background: #6b7a89; }
 .city-schema-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); border: 1px solid #293847; background: #0b121a; }
 .city-schema-strip div { padding: 12px 16px; border-right: 1px solid #293847; }
 .city-schema-strip span { display: block; }

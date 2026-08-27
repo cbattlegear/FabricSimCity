@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
-import type { DatabaseCityObject } from './databaseCityContracts'
+import type { DatabaseCityObject, DatabaseCityQueryFamily } from './databaseCityContracts'
 import { ARTERIAL_WIDTH, streetPitch, streetRoute, type CityLot, type CityPlan, type StreetClass } from './cityPlan'
 import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
 import { assignQueryRoutes } from './cityQueryTraffic'
@@ -17,7 +17,7 @@ import {
 import { ribbonGeometry, ribbonPositions } from './mapRibbon'
 import { type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
 import { facilityShell, facilitySlots } from './cityFacilityShells'
-import { LANDMARK_ASSETS, loadCityAssets, type AssetRole, type CityAssets, type SceneryAsset } from './cityAssets'
+import { LANDMARK_ASSETS, loadCityAssets, loadVehicleAssets, type AssetKit, type AssetRole, type CityAssets, type SceneryAsset, type VehicleAsset } from './cityAssets'
 import {
   buildingLabelText,
   buildingLabelWorldHeight,
@@ -52,8 +52,18 @@ import {
   type TimeOfDay,
 } from './timeOfDay'
 import type { LandUse, TerrainBlock } from './cityTerrain'
+import { stopsTraffic } from './cityIncidents'
 import type { IncidentMarker } from './cityIncidents'
 import { placeIncident, type IncidentPlacement } from './cityIncidentPlacement'
+import {
+  buildVehicleRoster,
+  pointAt,
+  polylineLength,
+  type Vehicle,
+  type VehicleClass,
+  type VehicleRoster,
+} from './cityVehicles'
+import type { LiveRequest } from './liveContracts'
 
 export type CityLayerToggles = {
   traffic: boolean
@@ -189,6 +199,14 @@ export type DatabaseCitySceneController = {
   /** Live incident pins, placed on the road between the parties rather than on a roof. */
   setIncidents(markers: readonly IncidentMarker[]): void
   /**
+   * The sampled live requests and the page's query families, from which the vehicle roster is built.
+   *
+   * Deliberately not a roster: the roster has to be joined against the roads *as this scene drew
+   * them*, and only the scene has those polylines. The result comes back out through
+   * `onVehicleRoster` so the legend can disclose what was dropped and why.
+   */
+  setVehicles(requests: readonly LiveRequest[] | null, families: readonly DatabaseCityQueryFamily[]): void
+  /**
    * Where one incident pin ended up and which rung of the placement ladder put it there, or null
    * when it is not drawn. The popup states the rung, because a pin on the measured road between two
    * named objects and a pin at an object's kerb are different claims.
@@ -229,6 +247,11 @@ type SceneOptions = {
   onHoverRoad?: (routeId: string | null) => void
   /** Fired with an incident marker id when its pin is clicked, and with null when a click misses. */
   onSelectIncident?: (incidentId: string | null) => void
+  /**
+   * Fired whenever the vehicle roster is rebuilt — on a new live sample, and also when the roads
+   * underneath it are redrawn, because a vehicle is only ever placed on a road this scene drew.
+   */
+  onVehicleRoster?: (roster: VehicleRoster) => void
 }
 
 export function createDatabaseCityScene(
@@ -508,6 +531,40 @@ export function createDatabaseCityScene(
       metalness: 0.3,
       flatShading: true,
     }),
+
+    /*
+     * Live vehicles.
+     *
+     * Deliberately *not* the kit materials the parked cars use, even though a driving car and a
+     * parked one are the same silhouette. A parked car is decoration and a driving one is a sampled
+     * running request, and the two must not be confusable — least of all under reduced motion, where
+     * the vehicle stands still and motion can no longer tell them apart. So live vehicles are the
+     * one bright, near-white thing on a street, and everything decorative around them is the cool
+     * blue-grey of the kit.
+     */
+    vehicleBody: new THREE.MeshStandardMaterial({ color: 0xe8eef4, roughness: 0.45, flatShading: true }),
+    vehicleTrim: new THREE.MeshStandardMaterial({ color: 0xb4c2cf, roughness: 0.5, flatShading: true }),
+    vehicleGlass: new THREE.MeshStandardMaterial({
+      color: 0x5f7f97,
+      emissive: 0x16303f,
+      roughness: 0.28,
+      flatShading: true,
+    }),
+    vehicleMetal: new THREE.MeshStandardMaterial({
+      color: 0x4c565f,
+      roughness: 0.5,
+      metalness: 0.4,
+      flatShading: true,
+    }),
+    /*
+     * The vehicle drawn when the retained plans did not state how much data one execution moves.
+     *
+     * Featureless and grey on purpose. Every authored vehicle carries a length that means something,
+     * so an unknown drawn as any of them would be read as that band; a shape that is on none of the
+     * rungs is the only honest way to say the ladder was never entered. It is not a bicycle: absent
+     * means "the plans did not say", which is not "this query moves very little".
+     */
+    vehicleUnknown: new THREE.MeshStandardMaterial({ color: 0x99a3ab, roughness: 0.78 }),
   }
 
   /*
@@ -675,6 +732,8 @@ export function createDatabaseCityScene(
     roadPin: 0xf4f9ff, roadPinOffMap: 0xb0bcc7, selection: 0xffd479, selectionPin: 0xffd479,
     kitBody: 0x5b7a8c, kitTrim: 0x93a1ae, kitGlass: 0xd8e8f4, kitMetal: 0x8b98a4,
     kitTrunk: 0x5b4634, kitLeaf: 0x4f7f4a, kitWater: 0x2f6d8c,
+    vehicleBody: 0xe8eef4, vehicleTrim: 0xb4c2cf, vehicleGlass: 0x5f7f97, vehicleMetal: 0x4c565f,
+    vehicleUnknown: 0x99a3ab,
   }
   const MAP_COLORS: Record<string, number> = {
     unknown: 0x9aa4ac, window: 0xdfe6ec, trim: 0xb9bdc2, index: 0x63b9a6, unknownIndex: 0xa8b0b6,
@@ -690,12 +749,16 @@ export function createDatabaseCityScene(
     kitBody: MAP_PALETTE.facility, kitTrim: MAP_PALETTE.facilityEdge, kitGlass: 0xdfe6ec,
     kitMetal: MAP_PALETTE.facilityEdge, kitTrunk: 0x9aa892, kitLeaf: MAP_PALETTE.park,
     kitWater: MAP_PALETTE.water,
+    // A near-white vehicle disappears on a printed basemap, so the whole ladder inverts to the dark
+    // ink a basemap uses for a moving thing. The unknown stays a mid grey in both modes.
+    vehicleBody: 0x263238, vehicleTrim: 0x546069, vehicleGlass: 0x7d8b95, vehicleMetal: 0x39424a,
+    vehicleUnknown: 0x8a8f94,
   }
   /** Emissive glow is a night-city effect. Map mode has no light source to glow against. */
   const CITY_EMISSIVE: Record<string, number> = {
     window: 0x2f4f6a, exposure: 0x3a2400, facilityFill: 0x11455c, facilityAlert: 0x4a0f0a,
     routePin: 0x0d5f70, roadPin: 0x5d7183, roadPinOffMap: 0x39434d, selectionPin: 0x6b4a06,
-    kitGlass: 0x2f4f6a,
+    kitGlass: 0x2f4f6a, vehicleGlass: 0x16303f,
   }
 
   let viewMode: MapViewMode = 'city'
@@ -819,6 +882,7 @@ export function createDatabaseCityScene(
     incidentPickable.length = 0
     incidentAnchors.clear()
     incidentPlacements.clear()
+    blockedPlacements.clear()
     if (!plan) return
 
     // The roads as they were actually drawn, so a pin lands on the ribbon a reader can see rather
@@ -856,6 +920,18 @@ export function createDatabaseCityScene(
       incidentPickable.push(pin)
       incidentAnchors.set(marker.id, new THREE.Vector3(placement.x, y + INCIDENT_PIN_WORLD * 0.5, placement.z))
       incidentPlacements.set(marker.id, placement)
+      /*
+       * Remember where each *live* block was pinned, so a blocked request's vehicle can stop at the
+       * same point rather than computing its own answer from the same inputs and drifting from it.
+       *
+       * Which markers qualify is `stopsTraffic`'s rule, not this loop's — see `cityIncidents.ts`
+       * for why a recorded deadlock graph is excluded and a live wait cycle is not. It lives there
+       * so all four severities can be covered by a test; a conditional here could only be pinned by
+       * asserting on source text.
+       */
+      if (stopsTraffic(marker)) {
+        for (const sessionId of marker.sessionIds) blockedPlacements.set(sessionId, placement)
+      }
     }
   }
 
@@ -1063,6 +1139,11 @@ export function createDatabaseCityScene(
   roadCasingGroup.visible = false
   const roadHighlightGroup = new THREE.Group()
   const infrastructureGroup = new THREE.Group()
+  /**
+   * Live vehicles. Drawn in both view modes, because a running query is a measurement and hiding a
+   * measurement behind a mode switch is a way of not reporting it.
+   */
+  const vehicleGroup = new THREE.Group()
   const routeGroup = new THREE.Group()
   const selectionGroup = new THREE.Group()
   // Labels are their own layer, but facility labels nest so they disappear with the facilities they
@@ -1083,6 +1164,7 @@ export function createDatabaseCityScene(
     roadHighlightGroup,
     buildingGroup,
     infrastructureGroup,
+    vehicleGroup,
     routeGroup,
     selectionGroup,
     labelGroup,
@@ -1111,6 +1193,26 @@ export function createDatabaseCityScene(
   let assets: CityAssets | null = null
   let animationHandle = 0
   let renderRequested = false
+  /*
+   * Vehicle state.
+   *
+   * `vehicleHandle` is deliberately *not* `animationHandle`. The damping loop zeroes that handle the
+   * moment the camera settles, so a vehicle loop sharing it would either refuse to start (the guard
+   * sees a non-zero handle) or leave a second, never-terminating rAF chain running behind it. Two
+   * loops, two handles, each responsible for stopping itself.
+   */
+  let vehicleHandle = 0
+  /** Animated time consumed so far, in ms. Only ever advanced by the vehicle loop. */
+  let vehicleClock = 0
+  let vehicleKit: AssetKit | null = null
+  let currentRequests: readonly LiveRequest[] | null = null
+  let currentFamilies: readonly DatabaseCityQueryFamily[] = []
+  let vehicleRoster: VehicleRoster | null = null
+  let vehicleBatches: VehicleBatch[] = []
+  /** Vehicles that are not stopped. Zero means there is nothing to animate and the loop must end. */
+  let movingVehicles = 0
+  /** Placements keyed by the session they were pinned for, so a blocked vehicle stops at its pin. */
+  const blockedPlacements = new Map<number, IncidentPlacement>()
   const layers: CityLayerToggles = {
     traffic: true,
     paths: false,
@@ -1241,6 +1343,10 @@ export function createDatabaseCityScene(
       camera.updateProjectionMatrix()
     }
     applyLabelLegibility(height, width)
+    // Vehicles are positioned here rather than in their own loop so that every frame — including a
+    // camera-only one — leaves them where the current clock says they are, at a size the current
+    // zoom can read. See the vehicle block for why the clock is not the wall clock.
+    placeVehicles()
     // The sky follows the camera across the plan but stays pinned to the ground plane in height, so
     // its horizon is the city's horizon. Centring it on the camera instead puts the horizon at eye
     // level, which from an aerial view means the whole background is the *under* side of the dome.
@@ -1300,6 +1406,57 @@ export function createDatabaseCityScene(
       animationHandle = moving ? requestAnimationFrame(step) : 0
     }
     animationHandle = requestAnimationFrame(step)
+  }
+
+  /**
+   * The one continuous frame loop in this scene, and the reason it is safe.
+   *
+   * Rendering here is on demand: `scheduleFrame` coalesces to a single frame and then stops, and the
+   * only other loop — {@link runDampingLoop} — ends as soon as the camera settles. A loop that runs
+   * while vehicles are moving is a genuine exception to that, so it is bounded three ways.
+   *
+   * - **It has its own handle.** `animationHandle` is zeroed by the damping loop the instant damping
+   *   settles, so a vehicle loop sharing it would either refuse to start (the `!== 0` guard sees the
+   *   damping loop's handle) or, worse, be silently orphaned when damping zeroed the handle out from
+   *   under it — leaving a second rAF chain that nothing can ever cancel, including `dispose()`.
+   * - **It stops itself.** The guard is re-tested every frame, so the loop ends on the frame after
+   *   the last moving vehicle goes away, whether that is because the roster emptied, because every
+   *   remaining request is blocked, or because the scene was disposed.
+   * - **It calls `draw()` directly.** Not `requestRender()`, which would set
+   *   `renderer.shadowMap.needsUpdate` on every single frame and re-arm the 948-draw-call shadow
+   *   pass issue #90 removed. Nothing under this loop casts a shadow, so nothing it does can
+   *   invalidate a shadow map, and it must not claim otherwise.
+   *
+   * Under `prefers-reduced-motion` it never starts at all. The vehicles are still drawn, still sized
+   * by class, and still stopped where they are blocked — they simply stand at their phase offsets.
+   * The roster's own disclosure is what carries the information; motion is a garnish on it.
+   */
+  const runVehicleLoop = () => {
+    if (vehicleHandle !== 0 || disposed || reducedMotion || movingVehicles === 0) return
+    let previous = performance.now()
+    const step = (now: number) => {
+      if (disposed || movingVehicles === 0) {
+        vehicleHandle = 0
+        return
+      }
+      /*
+       * Clamped, because a backgrounded tab stops servicing rAF and hands back the whole gap on the
+       * frame it resumes. Without the clamp every vehicle would jump a random distance down its road
+       * the moment you switched back, which looks like a measurement changing when nothing was
+       * re-sampled.
+       */
+      vehicleClock += Math.min(now - previous, 100)
+      previous = now
+      draw()
+      vehicleHandle = requestAnimationFrame(step)
+    }
+    vehicleHandle = requestAnimationFrame(step)
+  }
+
+  const stopVehicleLoop = () => {
+    if (vehicleHandle === 0) return
+    cancelAnimationFrame(vehicleHandle)
+    vehicleHandle = 0
   }
 
   controls.addEventListener('change', () => {
@@ -1403,6 +1560,329 @@ export function createDatabaseCityScene(
     }
   }
 
+  /*
+   * ----------------------------------------------------------------------------------------------
+   * Live vehicles.
+   *
+   * One vehicle is one row of `sys.dm_exec_requests` that was running when the sampler last looked.
+   * Which of the five shells it gets comes from the estimated bytes its plan moves; `cityVehicles.ts`
+   * owns that decision and the join behind it, and everything below is drawing.
+   *
+   * Three properties of this block are load-bearing and all three fail silently:
+   *
+   * 1. Vehicles **never cast or receive shadows**, and nothing here ever sets
+   *    `renderer.shadowMap.needsUpdate`. Issue #90 removed a 948-draw-call, 7.6 ms shadow pass that
+   *    was being re-armed on every frame; a moving caster would re-arm it once per frame forever,
+   *    which is strictly worse than what #90 fixed. A vehicle is roughly two metres tall on a city
+   *    that is hundreds of metres across, so the shadow it would cast is not worth one draw call,
+   *    let alone the whole pass.
+   * 2. The loop below uses **its own handle**, `vehicleHandle`, and stops itself the moment the
+   *    roster empties. See {@link runVehicleLoop}.
+   * 3. Positions are recomputed inside {@link draw}, from `vehicleClock` rather than from the wall
+   *    clock. A camera-only frame therefore redraws the vehicles exactly where they already were,
+   *    instead of skipping the update (which would leave them lagging the camera) or advancing them
+   *    (which would make an idle city drift whenever you panned it).
+   * ----------------------------------------------------------------------------------------------
+   */
+
+  /** Which authored shell each class is drawn with. `unknown` deliberately has none — see below. */
+  const VEHICLE_ASSET_BY_CLASS: Record<VehicleClass, VehicleAsset | null> = {
+    bike: 'vehicle_bike',
+    car: 'vehicle_car',
+    van: 'vehicle_van',
+    semiTruck: 'vehicle_semi_truck',
+    unknown: null,
+  }
+
+  const VEHICLE_MATERIALS: Record<AssetRole, THREE.Material> = {
+    body: materials.vehicleBody,
+    trim: materials.vehicleTrim,
+    glass: materials.vehicleGlass,
+    metal: materials.vehicleMetal,
+    // The vehicle kit carries no organic roles; these exist only to satisfy the role contract.
+    trunk: materials.vehicleTrim,
+    leaf: materials.vehicleTrim,
+    water: materials.vehicleGlass,
+  }
+
+  /**
+   * The world size of each shell, in metres, measured off the exported `vehicles.glb`.
+   *
+   * Length is the channel that survives at map scale — the four are 1.8 m, 4.2 m, 6.0 m and 12.2 m,
+   * so each is roughly twice the one below it and the ladder stays legible when a vehicle is a few
+   * pixels long. These numbers are duplicated here rather than derived from the geometry's bounding
+   * box because the procedural fallback has to reproduce them when the kit fails to load, and a
+   * fallback that silently changed the ladder would be worse than no fallback at all.
+   */
+  const VEHICLE_SIZE: Record<VehicleClass, { width: number; height: number; length: number }> = {
+    bike: { width: 0.52, height: 1.0, length: 1.77 },
+    car: { width: 1.87, height: 1.48, length: 4.2 },
+    van: { width: 2.3, height: 2.45, length: 6.02 },
+    semiTruck: { width: 2.62, height: 3.23, length: 12.24 },
+    /*
+     * A cube, and on purpose.
+     *
+     * Every one of the four above says something with its length. An unknown has no length to say —
+     * `planDataVolume` is absent, which means the retained plans never stated both a row count and a
+     * row size, and that is not the same claim as "this query moves very little". Drawing it as any
+     * of the four would put it on a rung it was never measured onto, and drawing it at some size
+     * between two rungs would invite a reader to interpolate. A shape whose length, width and height
+     * are all equal has no length channel to read, which is the only honest shape available.
+     */
+    unknown: { width: 2.6, height: 2.6, length: 2.6 },
+  }
+
+  /**
+   * How fast a vehicle travels, in world units per second — the same speed for all five classes.
+   *
+   * Speed is *not* a channel. SQL Server reports nothing about how fast a request is progressing, so
+   * a faster-moving vehicle would be a claim nobody measured, and it would also fight the one claim
+   * that is real: size. Everything drives at one speed and differs only in size.
+   */
+  const VEHICLE_SPEED = 13
+
+  /** Vehicles sit a hair above the road ribbon so they never z-fight with it. */
+  const VEHICLE_Y = 0.06
+
+  /**
+   * The shortest a bicycle may be allowed to get on screen, in CSS pixels.
+   *
+   * Framed on a whole city, 1.77 m projects to well under a pixel and the smallest class simply
+   * vanishes — and an empty street is *already* meaningful here (nothing was sampled on it), so a
+   * vehicle that disappears through being small tells the reader something false.
+   */
+  const VEHICLE_MIN_PX = 7
+
+  /** Growth is capped so a bicycle never inflates into something that reads as a truck. */
+  const VEHICLE_MAX_GROWTH = 9
+
+  type VehicleBatch = {
+    readonly klass: VehicleClass
+    /** Moving vehicles first, then stopped ones; `moving` is where the second run begins. */
+    readonly vehicles: readonly Vehicle[]
+    readonly moving: number
+    readonly meshes: readonly THREE.InstancedMesh[]
+    /** Arc length of each vehicle's route, precomputed so the loop does no O(points) work per frame. */
+    readonly routeLengths: readonly number[]
+    /** Fixed heading for the stopped tail, computed once because a stopped vehicle does not turn. */
+    readonly stoppedYaw: readonly number[]
+  }
+
+  function buildVehicles() {
+    clearGroup(vehicleGroup)
+    vehicleBatches = []
+    movingVehicles = 0
+
+    const roster = vehicleRoster
+    if (!roster || roster.vehicles.length === 0) {
+      // Nothing to animate. The loop must not be left running over an empty roster.
+      stopVehicleLoop()
+      return
+    }
+
+    const byClass = new Map<VehicleClass, Vehicle[]>()
+    for (const vehicle of roster.vehicles) {
+      const list = byClass.get(vehicle.class)
+      if (list) list.push(vehicle)
+      else byClass.set(vehicle.class, [vehicle])
+    }
+
+    for (const [klass, unordered] of byClass) {
+      // Moving first so the animation loop can walk a prefix and leave the stopped tail alone.
+      const vehicles = [...unordered].sort(
+        (left, right) => Number(left.blockedAt !== null) - Number(right.blockedAt !== null)
+          || left.id.localeCompare(right.id),
+      )
+      const moving = vehicles.filter(vehicle => vehicle.blockedAt === null).length
+      movingVehicles += moving
+
+      const meshes: THREE.InstancedMesh[] = []
+      const asset = VEHICLE_ASSET_BY_CLASS[klass]
+      const kit = vehicleKit
+      if (asset && kit?.has(asset)) {
+        for (const role of kit.roles(asset)) {
+          const geometry = kit.geometry(asset, role)
+          if (!geometry) continue
+          // Kit geometry is shared across every rebuild, so it is deliberately not tracked for disposal.
+          meshes.push(new THREE.InstancedMesh(geometry, VEHICLE_MATERIALS[role], vehicles.length))
+        }
+      }
+      if (meshes.length === 0) {
+        /*
+         * The kit did not load, or this is the unknown class, which has no authored shell.
+         *
+         * Either way a box at the class's real dimensions keeps the ladder intact, which matters far
+         * more than the silhouette: the reader is being told how much data a query moves, and a
+         * plain box of the right length says that as well as a modelled truck does.
+         */
+        const size = VEHICLE_SIZE[klass]
+        const geometry = track(new THREE.BoxGeometry(size.width, size.height, size.length))
+        // Authored shells sit on y=0; a box is centred on its origin, so it is lifted to match.
+        geometry.translate(0, size.height / 2, 0)
+        const material = klass === 'unknown' ? materials.vehicleUnknown : materials.vehicleBody
+        meshes.push(new THREE.InstancedMesh(geometry, material, vehicles.length))
+      }
+
+      for (const mesh of meshes) {
+        // See the block comment above: this is the line that keeps the #90 shadow pass disarmed.
+        mesh.castShadow = false
+        mesh.receiveShadow = false
+        // A vehicle's bounding sphere is computed from geometry sitting at the origin, so three.js
+        // would cull the whole batch the moment the origin left frame.
+        mesh.frustumCulled = false
+        mesh.renderOrder = 5
+        vehicleGroup.add(mesh)
+      }
+
+      vehicleBatches.push({
+        klass,
+        vehicles,
+        moving,
+        meshes,
+        routeLengths: vehicles.map(vehicle => polylineLength(vehicle.points)),
+        stoppedYaw: vehicles.map(vehicle =>
+          vehicle.blockedAt ? headingNear(vehicle.points, vehicle.blockedAt) : 0),
+      })
+    }
+
+    placeVehicles()
+    if (movingVehicles > 0) runVehicleLoop()
+    else stopVehicleLoop()
+  }
+
+  const vehicleMatrix = new THREE.Matrix4()
+  const vehiclePosition = new THREE.Vector3()
+  const vehicleQuaternion = new THREE.Quaternion()
+  const vehicleScale = new THREE.Vector3()
+
+  /**
+   * Writes every vehicle's instance matrix for the current `vehicleClock` and camera.
+   *
+   * Called from {@link draw}, not from the animation loop, so that a frame caused by anything at all
+   * — a camera nudge, a resize, a live tick — leaves the vehicles correctly placed and correctly
+   * sized. At the 120-vehicle cap this is at most a few hundred matrix composes, which is far below
+   * the cost of the draw calls it is preparing.
+   */
+  function placeVehicles() {
+    if (vehicleBatches.length === 0) return
+
+    /*
+     * One shared magnification for every vehicle, deliberately.
+     *
+     * The whole point of the four shells is the ratio between their lengths, so the minimum size is
+     * enforced by scaling them all by the same factor rather than by clamping each one. Clamping per
+     * class would flatten the ladder at exactly the zoom levels where the reader most needs it: the
+     * bicycle would grow to the floor while the truck stayed put, and at a wide enough framing every
+     * class would end up the same length.
+     */
+    const distance = camera.position.distanceTo(controls.target)
+    const magnify = labelScreenScale(
+      VEHICLE_SIZE.bike.length,
+      distance,
+      camera.fov,
+      Math.max(canvas.clientHeight, 1),
+      VEHICLE_MIN_PX,
+      VEHICLE_MAX_GROWTH,
+    )
+    vehicleScale.setScalar(magnify)
+    const seconds = vehicleClock / 1000
+
+    for (const batch of vehicleBatches) {
+      for (let index = 0; index < batch.vehicles.length; index += 1) {
+        const vehicle = batch.vehicles[index]
+        const stop = vehicle.blockedAt
+        let x: number
+        let z: number
+        let yaw: number
+        if (stop) {
+          x = stop.x
+          z = stop.z
+          yaw = batch.stoppedYaw[index]
+        } else {
+          const length = batch.routeLengths[index]
+          const travelled = length > 0 ? (vehicle.phase + (seconds * VEHICLE_SPEED) / length) % 1 : vehicle.phase
+          const at = pointAt(vehicle.points, travelled)
+          x = at.x
+          z = at.z
+          yaw = headingAt(vehicle.points, travelled, length)
+        }
+        vehiclePosition.set(x, VEHICLE_Y, z)
+        vehicleQuaternion.setFromAxisAngle(UP, yaw)
+        vehicleMatrix.compose(vehiclePosition, vehicleQuaternion, vehicleScale)
+        for (const mesh of batch.meshes) mesh.setMatrixAt(index, vehicleMatrix)
+      }
+      for (const mesh of batch.meshes) mesh.instanceMatrix.needsUpdate = true
+    }
+  }
+
+  /**
+   * The yaw that points a shell down its route at `t`.
+   *
+   * The kit is authored nose-first along **+Z** (Blender's +Y forward, turned by the exporter's
+   * y-up conversion), so a yaw of `atan2(dx, dz)` about the up axis aims it along the segment. A
+   * vehicle facing backwards is the visible symptom of getting that convention wrong.
+   */
+  function headingAt(points: readonly { x: number; z: number }[], t: number, length: number): number {
+    if (points.length < 2 || length <= 0) return 0
+    // A metre of lookahead: long enough not to be swamped by floating-point noise on a short
+    // segment, short enough to follow a bend rather than cutting across it.
+    const step = Math.min(0.5, 1 / length)
+    const behind = pointAt(points, Math.max(0, t - step))
+    const ahead = pointAt(points, Math.min(1, t + step))
+    const dx = ahead.x - behind.x
+    const dz = ahead.z - behind.z
+    if (dx === 0 && dz === 0) return 0
+    return Math.atan2(dx, dz)
+  }
+
+  /** The heading of whichever segment passes closest to a stopped vehicle's halt point. */
+  function headingNear(points: readonly { x: number; z: number }[], at: { x: number; z: number }): number {
+    if (points.length < 2) return 0
+    let best = 0
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (let index = 1; index < points.length; index += 1) {
+      const from = points[index - 1]
+      const to = points[index]
+      const dx = to.x - from.x
+      const dz = to.z - from.z
+      const lengthSquared = dx * dx + dz * dz
+      const along = lengthSquared === 0
+        ? 0
+        : Math.min(1, Math.max(0, ((at.x - from.x) * dx + (at.z - from.z) * dz) / lengthSquared))
+      const measured = Math.hypot(from.x + dx * along - at.x, from.z + dz * along - at.z)
+      if (measured < bestDistance) {
+        bestDistance = measured
+        best = dx === 0 && dz === 0 ? best : Math.atan2(dx, dz)
+      }
+    }
+    return best
+  }
+
+  /**
+   * Rebuilds the roster from whatever has most recently been measured, and redraws it.
+   *
+   * Called both when a new live sample arrives and when the **roads** change, because a vehicle is
+   * only ever placed on a road this scene drew: a re-plan that moves a street has to move the
+   * traffic on it, and a road that stops being drawn has to lose its vehicles rather than leave them
+   * driving over open ground.
+   */
+  function refreshVehicles() {
+    const roads = [...roadPaths.values()].map(entry => ({
+      routeId: entry.road.routeId,
+      familyIds: entry.road.familyIds,
+      executions: entry.road.executions,
+      polyline: entry.polyline,
+    }))
+    vehicleRoster = buildVehicleRoster({
+      requests: currentRequests,
+      families: currentFamilies,
+      roads,
+      blocked: blockedPlacements,
+    })
+    buildVehicles()
+    options.onVehicleRoster?.(vehicleRoster)
+  }
+
   type Placer = (
     asset: SceneryAsset,
     x: number,
@@ -1411,7 +1891,6 @@ export function createDatabaseCityScene(
     scale: number | THREE.Vector3,
     y?: number,
   ) => void
-
   /** What grows on each kind of ground. One recipe per land use, all seeded from the block. */
   function dressBlock(block: TerrainBlock, place: Placer) {
     const random = seededStream(block.seed)
@@ -2491,6 +2970,24 @@ export function createDatabaseCityScene(
     }
   })
 
+  /*
+   * The vehicle kit is fetched on its own promise, and that separation is the whole point.
+   *
+   * `loadCityAssets` resolves a single `Promise.all` over the landmark and scenery kits, so any one
+   * of them rejecting resolves the lot to null. Scenery is decoration — losing it costs the map some
+   * trees. Vehicles are a measurement of what is running right now, and a failure to fetch a bush
+   * must not be able to delete it. Keeping this on its own promise means the two failure modes stay
+   * independent in the direction that matters.
+   */
+  void loadVehicleAssets().then(loaded => {
+    if (disposed || !loaded) return
+    vehicleKit = loaded
+    // Rebuild rather than return early on an empty roster: an empty roster is exactly the state the
+    // procedural fallback was drawn in, and it must be replaced when the shells arrive.
+    buildVehicles()
+    requestRender()
+  })
+
   return {
     setObjects(objects, cityPlan) {
       plan = cityPlan
@@ -2520,6 +3017,8 @@ export function createDatabaseCityScene(
     setRoads(roads) {
       currentRoads = roads
       if (plan) buildRoads(roads, plan)
+      // Vehicles drive the roads as drawn, so a re-graded network re-homes the traffic on it.
+      refreshVehicles()
       requestRender()
     },
     setTraffic(traffic) {
@@ -2562,6 +3061,15 @@ export function createDatabaseCityScene(
     setIncidents(markers) {
       currentIncidents = markers
       buildIncidents(markers)
+      // The pins just moved, and a blocked vehicle stops at its pin. Rebuilding the roster here is
+      // what keeps the two the same measurement rather than two that happen to agree.
+      refreshVehicles()
+      requestRender()
+    },
+    setVehicles(requests, families) {
+      currentRequests = requests
+      currentFamilies = families
+      refreshVehicles()
       requestRender()
     },
     incidentPlacement(id) {
@@ -2667,6 +3175,7 @@ export function createDatabaseCityScene(
     dispose() {
       disposed = true
       if (animationHandle !== 0) cancelAnimationFrame(animationHandle)
+      if (vehicleHandle !== 0) cancelAnimationFrame(vehicleHandle)
       if (hoverHandle !== 0) cancelAnimationFrame(hoverHandle)
       resize.disconnect()
       stopWatchingClock()

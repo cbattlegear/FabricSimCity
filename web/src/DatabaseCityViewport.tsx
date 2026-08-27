@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import type { DatabaseCityObject } from './databaseCityContracts'
+import type { DatabaseCityObject, DatabaseCityQueryFamily } from './databaseCityContracts'
 import {
   createDatabaseCityScene,
   type CameraNudge,
@@ -16,6 +16,8 @@ import type { MapViewMode } from './mapStyle'
 import type { IncidentProjection } from './cityIncidents'
 import type { IncidentPlacement } from './cityIncidentPlacement'
 import type { LiveFeedConnectionState } from './liveIncidents'
+import type { LiveRequest } from './liveContracts'
+import type { VehicleRoster } from './cityVehicles'
 import { IncidentPopup } from './IncidentPopup'
 import { MapTray, useNarrowViewport, type TrayItem } from './MapTray'
 
@@ -55,6 +57,18 @@ type Props = {
   feedState?: LiveFeedConnectionState
   /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
+  /**
+   * The requests the sampler saw running, and the families they are matched against.
+   *
+   * Passed as the two raw inputs rather than as a finished roster because the join needs the roads
+   * *as drawn*, which only the scene knows: a vehicle is placed on a road this scene put down, and a
+   * family whose road was not drawn has nowhere to drive. The scene reports what it made of them
+   * through {@link onVehicleRoster}.
+   */
+  liveRequests?: readonly LiveRequest[] | null
+  families?: readonly DatabaseCityQueryFamily[]
+  /** What the scene actually drew, so the legend can disclose it honestly. */
+  onVehicleRoster?: (roster: VehicleRoster) => void
   /**
    * The incident whose popup is open, owned by the view rather than by this component.
    *
@@ -132,6 +146,9 @@ export function DatabaseCityViewport({
   liveStatus,
   feedState,
   incidents,
+  liveRequests = null,
+  families,
+  onVehicleRoster,
   openIncidentId = null,
   onOpenIncident,
   incidentFocus = null,
@@ -157,6 +174,16 @@ export function DatabaseCityViewport({
     [onOpenIncident],
   )
 
+  /*
+   * The roster callback is held in a ref rather than passed straight into the scene options.
+   *
+   * The scene is created once and torn down only when its own inputs change; putting a caller's
+   * callback in that effect's dependencies would rebuild the entire city — assets, plan, roads and
+   * all — whenever the parent happened to re-render with a fresh closure.
+   */
+  const vehicleRosterRef = useRef(onVehicleRoster)
+  vehicleRosterRef.current = onVehicleRoster
+
   useEffect(() => {
     if (!canvasRef.current) return
     let controller: DatabaseCitySceneController
@@ -167,6 +194,7 @@ export function DatabaseCityViewport({
         onHoverRoad: setHoveredRoadId,
         onSelectIncident: openIncident,
         onCameraChange: () => setHeading(sceneRef.current?.heading() ?? 0),
+        onVehicleRoster: roster => vehicleRosterRef.current?.(roster),
       })
     } catch {
       setUnavailable(true)
@@ -189,6 +217,10 @@ export function DatabaseCityViewport({
   useEffect(() => sceneRef.current?.setLayers(layers), [layers])
   useEffect(() => sceneRef.current?.setViewMode(viewMode), [viewMode])
   useEffect(() => sceneRef.current?.setIncidents(incidents?.markers ?? []), [incidents])
+  useEffect(
+    () => sceneRef.current?.setVehicles(liveRequests ?? null, families ?? []),
+    [liveRequests, families],
+  )
 
   // Opening a pin from the sidebar centres its object first, because a marker outside the frustum
   // projects to nothing and would open a popup the reader never sees.
