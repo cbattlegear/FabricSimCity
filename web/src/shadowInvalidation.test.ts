@@ -200,6 +200,54 @@ describe('the shadow map is invalidated by whatever changed what casts', () => {
     expect(build).not.toMatch(/receiveShadow = true/)
     expect(build).not.toMatch(/needsUpdate\s*=\s*true;?\s*$/m)
   })
+
+  /*
+   * And nothing the *trail* does can dirty it either.
+   *
+   * The trail is a single ribbon mesh rewritten in place on every frame of the vehicle loop, so it
+   * is the one piece of geometry in this scene that genuinely changes 60 times a second. That makes
+   * it the most dangerous possible caster: `castShadow = true` here would re-arm a 948-caster pass
+   * on every frame *and* be justified-looking, because the geometry really did change. It is
+   * excluded outright instead, which is also why `writeTrails` needs no invalidation of its own.
+   *
+   * Bounded by `const trailSampleX` rather than by the end of the file, so this stays a statement
+   * about the mesh's setup and does not silently grow to cover whatever is added below it. The
+   * geometry rewrite that follows is guarded by the vehicle-loop assertions above.
+   */
+  it('never lets the vehicle trail cast or receive a shadow', () => {
+    const from = scene.indexOf('const TRAIL_SEGMENTS')
+    const to = scene.indexOf('const trailSampleX')
+    expect(from, 'the trail constants have been renamed and this guard now covers nothing')
+      .toBeGreaterThan(-1)
+    expect(to, 'the trail scratch buffers have been renamed and this slice is unbounded')
+      .toBeGreaterThan(from)
+    const trail = code(scene.slice(from, to))
+    expect(trail).toMatch(/trailMesh\.castShadow = false/)
+    expect(trail).toMatch(/trailMesh\.receiveShadow = false/)
+    expect(trail).not.toMatch(/castShadow = true/)
+    expect(trail).not.toMatch(/receiveShadow = true/)
+    expect(trail).not.toMatch(/needsUpdate/)
+  })
+
+  /*
+   * The trail is written from inside the frame loop, and writing it must not schedule anything.
+   *
+   * `writeTrails` runs per frame and touches `BufferAttribute.needsUpdate` — the *attribute's* flag,
+   * which is how a rewritten buffer is uploaded to the GPU and has nothing to do with the shadow
+   * map. That collision of names is the trap: this guard names the renderer's flag specifically, so
+   * the legitimate upload is allowed and `renderer.shadowMap.needsUpdate` is not.
+   */
+  it('writes the trail without scheduling a frame or a shadow pass', () => {
+    const from = scene.indexOf('function writeTrails(')
+    const to = scene.indexOf('function placeVehicles()')
+    expect(from, 'writeTrails has been renamed and this guard now covers nothing').toBeGreaterThan(-1)
+    expect(to, 'placeVehicles has been renamed and this slice is unbounded').toBeGreaterThan(from)
+    const write = code(scene.slice(from, to))
+    expect(write).toMatch(/trailPositions\[/)
+    expect(write).not.toMatch(/shadowMap/)
+    expect(write).not.toMatch(/requestRender\(\)/)
+    expect(write).not.toMatch(/scheduleFrame\(\)/)
+  })
 })
 
 /**

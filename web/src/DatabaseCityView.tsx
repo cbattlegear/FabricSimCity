@@ -33,6 +33,12 @@ import { CityLoadingScreen } from './CityLoadingScreen'
 import { MapShell, SidebarHeader, StatusChip, ViewModeTile, type MapViewMode } from './MapShell'
 import { incidentDemandsAttention, incidentSummaryLabel, projectIncidents } from './cityIncidents'
 import { EMPTY_ROSTER, vehicleSummaryLabel, type VehicleRoster } from './cityVehicles'
+import {
+  advanceQueryFeed,
+  EMPTY_QUERY_FEED,
+  liveQuerySummaryLabel,
+  type LiveQueryFeed,
+} from './liveQueryFeed'
 import { IncidentSummary } from './IncidentPopup'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
@@ -105,6 +111,14 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   const [loadedCount, setLoadedCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<LiveIncidentResponse | null>(null)
+  /**
+   * The scrolling log of individual executions, folded out of successive samples.
+   *
+   * Held here rather than in the viewport because it *accumulates*: a snapshot is a list of what was
+   * running at one instant, and the feed is the difference between successive instants. Anything
+   * further down the tree sees one snapshot at a time and could never build it.
+   */
+  const [queryFeed, setQueryFeed] = useState<LiveQueryFeed>(EMPTY_QUERY_FEED)
   const [feedState, setFeedState] = useState<LiveFeedConnectionState>('disconnected')
   const [planQuery, setPlanQuery] = useState('')
   const [planChoices, setPlanChoices] = useState<PlanChoice[]>([])
@@ -216,6 +230,26 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
 
   useEffect(() => subscribeToLiveIncidents(setSnapshot, setFeedState), [])
 
+  /*
+   * One fold per sample, and only per sample.
+   *
+   * `families` is deliberately not a dependency. It grows as bounded pages of the catalogue arrive,
+   * and re-running the fold on that would re-observe a snapshot this browser has already counted —
+   * inflating the sample count and, worse, making "how many executions have I seen" a function of
+   * how fast the city loaded. A family that becomes resolvable later is picked up by the next
+   * sample, a few seconds away, which is soon enough for a row that will be on screen for a minute.
+   */
+  const familiesRef = useRef<readonly DatabaseCityQueryFamily[]>([])
+  useEffect(() => {
+    const live = snapshot?.snapshot
+    if (!live) return
+    setQueryFeed(previous => advanceQueryFeed(previous, live, familiesRef.current, Date.now()))
+  }, [snapshot])
+
+  // A different database is a different city; carrying the previous one's arrivals into it would put
+  // cars on roads that were never drawn for them.
+  useEffect(() => setQueryFeed(EMPTY_QUERY_FEED), [databaseId])
+
   useEffect(() => {
     headingRef.current?.focus()
   }, [databaseId])
@@ -321,6 +355,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     setOpenIncidentId(markerId)
   }, [incidents])
   const families = useMemo(() => page?.topQueryFamilies ?? [], [page])
+  familiesRef.current = families
 
   /*
    * What the scene made of the live sample, reported back so the legend can disclose it.
@@ -589,6 +624,39 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     setRouteError(null)
   }, [])
 
+  const liveQueryFeed = (
+    /*
+     * The live query feed, and the first thing under the place card in the rail.
+     *
+     * A region rather than a drawer, which is the whole point. As a fourth `<details>` in the shared
+     * drawer budget it was measured at 1115x800 holding 26px of body at rest and 5px with everything
+     * open -- a third of one row -- because a budget divided evenly between peers cannot express that
+     * one of them is the surface the view exists for. Here it sits beside the address list as the
+     * rail's other scrolling region, with its own floor, and the drawers keep their own budget.
+     *
+     * Always open, because a log nobody can see is not a log, and this one answers "what is happening
+     * right now" where every drawer below answers "what happened over the retained window".
+     *
+     * It is also the map's own caption. A row appearing is the same event as a car pulling away on
+     * the road that query's family graded, so a reader who sees movement out of the corner of an eye
+     * has somewhere to look to find out what moved.
+     */
+    <section className="sidebar-feed" aria-labelledby="live-query-feed-title">
+      <h2 className="sidebar-feed-head" id="live-query-feed-title">
+        Live queries
+        <span className="drawer-badge">{liveQuerySummaryLabel(queryFeed)}</span>
+      </h2>
+      <div className="sidebar-feed-body">
+        <LiveQueryTicker
+          feed={queryFeed}
+          families={families}
+          activeFamilyId={activePlan?.choice.familyId ?? null}
+          onShowFamily={showFamilyOnMap}
+        />
+      </div>
+    </section>
+  )
+
   const liveActivityDrawer = (
     /*
      * Live activity is a drawer, not a map tray item.
@@ -734,6 +802,8 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
         <div className={`sidebar-place-card${route ? ' is-full' : ''}`}>{placeCard}</div>
       )}
 
+      {sidebarMode.showsAddressBook && liveQueryFeed}
+
       {sidebarMode.showsAddressBook && (
         <AddressBook
           entries={addressEntries}
@@ -853,7 +923,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           liveStatus={liveStatus}
           feedState={feedState}
           incidents={incidents}
-          liveRequests={snapshot?.snapshot?.requests ?? null}
+          liveQueries={queryFeed.events}
           families={families}
           onVehicleRoster={setVehicleRoster}
           openIncidentId={openIncidentId}
@@ -872,6 +942,128 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
       {banners}
     </MapShell>
   )
+}
+
+/**
+ * The scrolling log of executions the live sampler has observed, newest first.
+ *
+ * This is the only surface on the page that is a *log* rather than an aggregate, and everything
+ * about it follows from that. It is ordered by arrival and by nothing else — a cheap query gets the
+ * same row as an expensive one — because a feed sorted by cost is a leaderboard with a clock on it,
+ * and the question this answers is "what just happened", not "what is worst".
+ *
+ * Three things it is careful never to imply:
+ *
+ * - **The time shown is when this browser first saw the execution, not when it started.** Both are
+ *   rendered, and the row says which is which, because a statement that had been running for an hour
+ *   before you opened the page would otherwise appear to have started the moment you looked.
+ * - **A row that stops updating is one that left the sample.** Nothing in the DMVs distinguishes a
+ *   commit from a rollback from a `KILL` after the fact, so the row is marked "gone" and claims
+ *   nothing further. It keeps its place in the list rather than vanishing, so a reader who looked
+ *   away for two seconds can still see what went past.
+ * - **The list is not the workload.** The sampler runs every few seconds; an execution that begins
+ *   and ends between two samples is never observed. That is what the note under the list carries,
+ *   and it is why an empty feed is never captioned "idle".
+ *
+ * A row whose family was matched is a button, because that is the same query the map has a road for:
+ * clicking it routes the plan across the city, which is where its car is already driving. A row with
+ * no matched family is plain text, since there is nothing to route to and a dead button that looked
+ * live would be worse than none.
+ */
+function LiveQueryTicker({
+  feed,
+  families,
+  activeFamilyId,
+  onShowFamily,
+}: {
+  feed: LiveQueryFeed
+  families: readonly DatabaseCityQueryFamily[]
+  activeFamilyId: string | null
+  onShowFamily: (family: DatabaseCityQueryFamily) => void | Promise<void>
+}) {
+  const byId = useMemo(
+    () => new Map(families.map(family => [family.familyId, family])),
+    [families],
+  )
+
+  return (
+    <div className="query-ticker">
+      {feed.events.length === 0 && (
+        <p className="hud-note">
+          Nothing sampled yet. The collector looks every few seconds, so a query that starts and
+          finishes between two looks never appears here at all.
+        </p>
+      )}
+      {feed.events.length > 0 && (
+        /*
+         * `aria-live` is off, explicitly.
+         *
+         * A busy instance appends to this list every couple of seconds, and announcing each arrival
+         * would make the page unusable with a screen reader while saying nothing a reader can act
+         * on. The note below carries the same information in a form that can be read at leisure, and
+         * the address book remains the navigable catalogue.
+         */
+        <ol className="query-ticker-list" aria-live="off">
+          {feed.events.map(event => {
+            const family = event.familyId ? byId.get(event.familyId) ?? null : null
+            const label = event.text ?? event.textReason
+            const body = (
+              <>
+                <span className="query-ticker-head">
+                  <span className="query-ticker-when">{clockTime(event.firstSeenAt)}</span>
+                  <span className="query-ticker-where">
+                    {event.databaseName ?? 'database not reported'}
+                    {' · '}
+                    session {event.sessionId}
+                    {' · '}
+                    {event.command ?? 'command not reported'}
+                    {event.waitType ? ` · waiting on ${event.waitType}` : ''}
+                  </span>
+                  {event.blocked && event.endedAt === null && (
+                    <span className="query-ticker-flag is-blocked">blocked</span>
+                  )}
+                  {event.endedAt !== null && <span className="query-ticker-flag is-gone">gone</span>}
+                </span>
+                <code className={`query-ticker-text${event.text ? '' : ' is-absent'}`}>{label}</code>
+              </>
+            )
+            return (
+              <li
+                key={event.id}
+                className={[
+                  'query-ticker-row',
+                  event.endedAt === null ? 'is-live' : 'is-gone',
+                  event.blocked && event.endedAt === null ? 'is-blocked' : '',
+                  family && family.familyId === activeFamilyId ? 'is-routed' : '',
+                ].filter(Boolean).join(' ')}
+              >
+                {family
+                  ? (
+                    <button
+                      type="button"
+                      aria-pressed={family.familyId === activeFamilyId}
+                      title={`Route this query's captured plan across the city (family ${family.familyId})`}
+                      onClick={() => void onShowFamily(family)}
+                    >
+                      {body}
+                    </button>
+                  )
+                  : <div className="query-ticker-inert">{body}</div>}
+              </li>
+            )
+          })}
+        </ol>
+      )}
+      <p className="hud-note">{feed.reason}</p>
+    </div>
+  )
+}
+
+/** Wall-clock time of an observation, to the second. The date is never in doubt in a live feed. */
+function clockTime(epochMs: number): string {
+  const at = new Date(epochMs)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`
 }
 
 /**

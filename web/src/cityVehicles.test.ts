@@ -6,16 +6,20 @@ import {
   phaseOf,
   pointAt,
   polylineLength,
+  travelledFraction,
   vehicleClass,
   vehicleSummaryLabel,
   CAR_FLOOR_BYTES,
   SEMI_FLOOR_BYTES,
   VAN_FLOOR_BYTES,
   VEHICLE_CAP,
+  VEHICLE_LAUNCH_STAGGER_SECONDS,
+  VEHICLE_RETIRE_SECONDS,
+  VEHICLE_SPEED,
   type VehicleRoad,
 } from './cityVehicles'
 import type { DatabaseCityQueryFamily } from './databaseCityContracts'
-import type { LiveRequest } from './liveContracts'
+import type { LiveQueryEvent } from './liveQueryFeed'
 import type { IncidentPlacement } from './cityIncidentPlacement'
 
 /**
@@ -43,38 +47,39 @@ function family(over: Partial<DatabaseCityQueryFamily> = {}): DatabaseCityQueryF
   } as DatabaseCityQueryFamily
 }
 
-function request(over: Partial<LiveRequest> = {}): LiveRequest {
+/** A fixed observation instant, so every age in this file is arithmetic rather than a real clock. */
+const NOW = 1_700_000_000_000
+
+/**
+ * One observed execution, as the live feed would hand it over.
+ *
+ * `queryHash` arrives already normalized, because the feed normalizes it — the roster looks the
+ * event's hash up verbatim and normalizes only the *family* side. Hash-format drift on the request
+ * side is therefore the feed's test, not this one.
+ */
+function event(over: Partial<LiveQueryEvent> = {}): LiveQueryEvent {
   return {
-    requestId: 'r1',
+    id: '51|req:51:0|2024-01-01T00:00:00Z',
+    ordinal: 1,
     sessionId: 51,
-    loginName: null,
-    hostName: null,
-    programName: null,
-    sessionStatus: 'running',
-    requestStatus: 'running',
-    command: 'SELECT',
-    waitType: null,
-    waitTimeMs: null,
-    waitResource: null,
-    blocking: { blockingSessionId: null, sentinel: 'None' },
-    requestStartTime: null,
-    totalElapsedMs: 100,
-    cpuTimeMs: null,
-    reads: null,
-    writes: null,
-    logicalReads8KiBPages: null,
-    openTransactionCount: null,
-    databaseId: null,
+    requestId: 'req:51:0',
+    startedAt: '2024-01-01T00:00:00Z',
+    firstSeenAt: NOW,
+    lastSeenAt: NOW,
+    endedAt: null,
     databaseName: null,
-    currentStatementText: null,
-    batchText: null,
-    availability: 'Available',
-    availabilityReason: null,
-    planState: 'Available',
-    planReason: null,
+    command: 'SELECT',
+    text: null,
+    textReason: 'The sample returned no statement text.',
     queryHash: 'AABBCCDDEEFF0011',
+    familyId: null,
+    hashReported: true,
+    blocked: false,
+    waitType: null,
+    elapsedMs: 100,
+    cpuMs: null,
     ...over,
-  } as LiveRequest
+  }
 }
 
 /** A straight 100-unit road running east, named by one family. */
@@ -178,15 +183,16 @@ describe('byte parsing survives values a JSON number would not', () => {
 describe('the join is query_hash and only query_hash', () => {
   it('drives a vehicle down the road its matched family graded', () => {
     const roster = buildVehicleRoster({
-      requests: [request()],
+      events: [event()],
       families: [family({ planDataVolume: volume('1000') })],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(1)
     expect(roster.vehicles[0].routeId).toBe('route-1')
     expect(roster.vehicles[0].class).toBe('bike')
-    expect(roster.sampledRunning).toBe(1)
+    expect(roster.observedExecutions).toBe(1)
     expect(roster.unmatchedHash).toBe(0)
   })
 
@@ -196,35 +202,38 @@ describe('the join is query_hash and only query_hash', () => {
    */
   it('counts an unmatched hash instead of inventing a family for it', () => {
     const roster = buildVehicleRoster({
-      requests: [request({ queryHash: '00FF00FF00FF00FF' })],
+      events: [event({ queryHash: '00FF00FF00FF00FF' })],
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(0)
     expect(roster.unmatchedHash).toBe(1)
-    expect(roster.sampledRunning).toBe(1)
+    expect(roster.observedExecutions).toBe(1)
     expect(roster.reason).toMatch(/matched no query family/i)
   })
 
   it('counts a matched family that names no drawn road, separately from an unmatched hash', () => {
     const roster = buildVehicleRoster({
-      requests: [request()],
+      events: [event()],
       families: [family()],
       roads: [road({ familyIds: ['fam-other'] })],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(0)
     expect(roster.noRoad).toBe(1)
     expect(roster.unmatchedHash).toBe(0)
   })
 
-  it('matches across case and an 0x prefix, which cannot make two hashes equal', () => {
+  it('normalizes the family side of the join, so a rendering difference cannot empty the roads', () => {
     const roster = buildVehicleRoster({
-      requests: [request({ queryHash: '0xaabbccddeeff0011' })],
-      families: [family()],
+      events: [event()],
+      families: [family({ queryHash: '0xaabbccddeeff0011' })],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(1)
     expect(normalizeHash('0xaabb')).toBe(normalizeHash('AABB'))
@@ -234,43 +243,242 @@ describe('the join is query_hash and only query_hash', () => {
   it('rejects the all-zero sentinel rather than making it a family everyone shares', () => {
     expect(normalizeHash('0000000000000000')).toBeNull()
     const roster = buildVehicleRoster({
-      requests: [request({ queryHash: '0000000000000000' })],
+      // The feed normalizes the sentinel to null before the roster ever sees it; a family that
+      // rendered it verbatim must still not become the family every unhashed request matches.
+      events: [event({ queryHash: null })],
       families: [family({ queryHash: '0000000000000000' })],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(0)
     expect(roster.unmatchedHash).toBe(1)
   })
+
+  /*
+   * The feed resolves a family once, and the roster honours that answer.
+   *
+   * Mutation checked: re-deriving the family from the hash and ignoring `familyId` puts the vehicle
+   * on the *other* family's road, so the scrolling list and the map would name different queries for
+   * one execution — the caption disagreeing with the picture.
+   */
+  it('uses the family the feed already resolved rather than re-deriving one', () => {
+    const roster = buildVehicleRoster({
+      events: [event({ familyId: 'fam-2', queryHash: 'AABBCCDDEEFF0011' })],
+      families: [family(), family({ familyId: 'fam-2', queryHash: 'BBBB000000000001' })],
+      roads: [road({ routeId: 'one' }), road({ routeId: 'two', familyIds: ['fam-2'] })],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    expect(roster.vehicles).toHaveLength(1)
+    expect(roster.vehicles[0].familyId).toBe('fam-2')
+    expect(roster.vehicles[0].routeId).toBe('two')
+  })
 })
 
-describe('only a sampled running request becomes a vehicle', () => {
-  /*
-   * Issue #79. Mutation checked: deleting the `requestStatus === null` guard draws a vehicle for an
-   * idle session and pushes `sampledRunning` to 1, which would put traffic on a quiet server.
-   */
-  it('produces nothing for an idle session holding no request', () => {
-    const roster = buildVehicleRoster({
-      requests: [request({ requestStatus: null })],
+describe('a vehicle is released when its execution arrives in the feed', () => {
+  function rosterAt(ageMs: number, over: Partial<LiveQueryEvent> = {}) {
+    return buildVehicleRoster({
+      events: [event({ firstSeenAt: NOW - ageMs, ...over })],
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
-    expect(roster.vehicles).toHaveLength(0)
-    expect(roster.sampledRunning).toBe(0)
-    expect(roster.unmatchedHash).toBe(0)
-    expect(roster.reason).toMatch(/no request was running/i)
+  }
+
+  /*
+   * The whole point of the rewrite, and the thing a hashed phase offset used to get wrong.
+   *
+   * Mutation checked: restoring `elapsedSeconds = phaseOf(...) * something` — a position that does
+   * not depend on the arrival time at all — passes every other test in this file and fails these
+   * two, which is the difference between "a car sets off when its query turns up" and "a car is
+   * standing somewhere arbitrary on a road for reasons nobody can see".
+   */
+  it('starts a just-arrived execution at the kerb rather than part way down the road', () => {
+    const vehicle = rosterAt(0).vehicles[0]
+    expect(vehicle.elapsedSeconds).toBe(0)
+    const at = pointAt(vehicle.points, travelledFraction(vehicle.points, vehicle.elapsedSeconds, null))
+    expect(at.x).toBeCloseTo(0)
   })
 
-  it('says so when no sampled row carried a query hash at all', () => {
-    // An API build older than the field. Indistinguishable from a quiet server unless disclosed.
-    const older = request()
-    delete (older as { queryHash?: unknown }).queryHash
+  it('advances a vehicle in proportion to how long its execution has been in the feed', () => {
+    const early = rosterAt(2_000).vehicles[0]
+    const later = rosterAt(4_000).vehicles[0]
+    expect(later.elapsedSeconds).toBeGreaterThan(early.elapsedSeconds)
+    expect(later.elapsedSeconds - early.elapsedSeconds).toBeCloseTo(2, 5)
+  })
+
+  /*
+   * Mutation checked: dropping the stagger puts two executions that arrived in the same sample at
+   * exactly the same point of the same road, where they draw as one vehicle and the reader is shown
+   * one query instead of two.
+   */
+  it('staggers two executions that arrived in the same sample, by a bounded invented delay', () => {
     const roster = buildVehicleRoster({
-      requests: [older],
+      events: [
+        event({ id: 'a', ordinal: 1, sessionId: 51, firstSeenAt: NOW - 5_000 }),
+        event({ id: 'b', ordinal: 2, sessionId: 52, firstSeenAt: NOW - 5_000 }),
+      ],
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
+    })
+    const [first, second] = roster.vehicles
+    expect(first.elapsedSeconds).not.toBe(second.elapsedSeconds)
+    expect(Math.abs(first.elapsedSeconds - second.elapsedSeconds))
+      .toBeLessThanOrEqual(VEHICLE_LAUNCH_STAGGER_SECONDS)
+  })
+
+  it('never gives a vehicle a negative head start, however the stagger falls', () => {
+    for (let session = 50; session < 200; session += 1) {
+      const vehicle = rosterAt(0, { id: `s${session}`, sessionId: session }).vehicles[0]
+      expect(vehicle.elapsedSeconds, `session ${session}`).toBeGreaterThanOrEqual(0)
+    }
+  })
+})
+
+describe('a vehicle whose execution has gone finishes its road and leaves', () => {
+  /** A road long enough that a car takes a while to cross it, so laps are observable. */
+  const longRoad = road({ polyline: [{ x: 0, z: 0 }, { x: 1_000, z: 0 }] })
+
+  function rosterAt(firstSeenAgoMs: number, endedAgoMs: number | null) {
+    return buildVehicleRoster({
+      events: [event({
+        firstSeenAt: NOW - firstSeenAgoMs,
+        endedAt: endedAgoMs === null ? null : NOW - endedAgoMs,
+      })],
+      families: [family()],
+      roads: [longRoad],
+      blocked: noBlocks,
+      now: NOW,
+    })
+  }
+
+  it('keeps driving a still-sampled execution', () => {
+    const vehicle = rosterAt(5_000, null).vehicles[0]
+    expect(vehicle.finishedAfterSeconds).toBeNull()
+  })
+
+  it('records where a departed execution was when it left, rather than a bare flag', () => {
+    // 20s in, gone at 10s. Both numbers survive so the car can carry on from where it was.
+    const vehicle = rosterAt(20_000, 10_000).vehicles[0]
+    expect(vehicle.finishedAfterSeconds).not.toBeNull()
+    expect(vehicle.finishedAfterSeconds!).toBeLessThan(vehicle.elapsedSeconds)
+    expect(vehicle.elapsedSeconds - vehicle.finishedAfterSeconds!).toBeCloseTo(10, 5)
+  })
+
+  /*
+   * Mutation checked: clamping a departed car with `Math.min(1, travelled)` instead of subtracting
+   * the laps it had already done teleports a car that was half way round its third lap to the end of
+   * the road at the instant its query left the sample.
+   */
+  it('finishes the lap it was on instead of jumping to the end of the road', () => {
+    const length = polylineLength(longRoad.polyline)
+    // Long enough to be part way through a later lap when it ends.
+    const ranFor = (length * 2.5) / VEHICLE_SPEED
+    const vehicle = buildVehicleRoster({
+      events: [event({ firstSeenAt: NOW - ranFor * 1_000, endedAt: NOW })],
+      families: [family()],
+      roads: [longRoad],
+      blocked: noBlocks,
+      now: NOW,
+    }).vehicles[0]
+    const stillRunning = travelledFraction(vehicle.points, vehicle.elapsedSeconds, null)
+    const departed = travelledFraction(vehicle.points, vehicle.elapsedSeconds, vehicle.finishedAfterSeconds)
+    expect(departed).toBeCloseTo(stillRunning, 5)
+    expect(departed).toBeLessThan(1)
+  })
+
+  /*
+   * Mutation checked: never retiring a finished car leaves it parked at the end of its road forever,
+   * so a page left open overnight fills the city with traffic that stopped hours ago.
+   */
+  it('retires a car once it has reached the end of its road', () => {
+    const length = polylineLength(longRoad.polyline)
+    const wellPast = ((length / VEHICLE_SPEED) + 30) * 1_000
+    const roster = buildVehicleRoster({
+      events: [event({ firstSeenAt: NOW - wellPast, endedAt: NOW - wellPast + 1 })],
+      families: [family()],
+      roads: [longRoad],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    expect(roster.vehicles).toHaveLength(0)
+    expect(roster.retired).toBe(1)
+    expect(roster.reason).toMatch(/not that it succeeded/i)
+  })
+
+  /*
+   * The backstop, for the case where no further sample will ever arrive to retire it.
+   *
+   * Mutation checked: dropping the deadline leaves a car crawling a very long road indefinitely
+   * after the live channel has dropped, which reads as current traffic on a connection that is dead.
+   */
+  it('retires a long-overdue car even if it has not reached the end', () => {
+    const endless = road({ polyline: [{ x: 0, z: 0 }, { x: 1_000_000, z: 0 }] })
+    const roster = buildVehicleRoster({
+      events: [event({
+        firstSeenAt: NOW - (VEHICLE_RETIRE_SECONDS + 5) * 1_000,
+        endedAt: NOW - (VEHICLE_RETIRE_SECONDS + 1) * 1_000,
+      })],
+      families: [family()],
+      roads: [endless],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    expect(roster.vehicles).toHaveLength(0)
+    expect(roster.retired).toBe(1)
+  })
+})
+
+describe('every observed execution gets its own vehicle', () => {
+  /*
+   * The old roster collapsed a session's concurrent requests into one vehicle, because they all sat
+   * at the same hashed phase and would have overlapped. Arrival time separates them instead, so each
+   * execution is drawn — which is what a feed of executions has to mean.
+   */
+  it('draws two executions of the same family on one session as two vehicles', () => {
+    const roster = buildVehicleRoster({
+      events: [
+        event({ id: 'a', ordinal: 1, firstSeenAt: NOW - 6_000 }),
+        event({ id: 'b', ordinal: 2, firstSeenAt: NOW - 2_000 }),
+      ],
+      families: [family()],
+      roads: [road()],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    expect(roster.vehicles).toHaveLength(2)
+    expect(new Set(roster.vehicles.map(vehicle => vehicle.id)).size).toBe(2)
+    // Different arrivals, so they are at different points of the road rather than stacked.
+    expect(roster.vehicles[0].elapsedSeconds).not.toBe(roster.vehicles[1].elapsedSeconds)
+  })
+
+  it('keeps one vehicle per family when a session runs two different queries', () => {
+    const roster = buildVehicleRoster({
+      events: [
+        event({ id: 'a', ordinal: 1 }),
+        event({ id: 'b', ordinal: 2, queryHash: 'BBBB000000000001' }),
+      ],
+      families: [family(), family({ familyId: 'fam-2', queryHash: 'BBBB000000000001' })],
+      roads: [road({ familyIds: ['fam-1', 'fam-2'] })],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    expect(roster.vehicles).toHaveLength(2)
+    expect(new Set(roster.vehicles.map(vehicle => vehicle.familyId)).size).toBe(2)
+  })
+
+  it('says so when no observed execution carried a query hash at all', () => {
+    // An API build older than the field. Indistinguishable from a quiet server unless disclosed.
+    const roster = buildVehicleRoster({
+      events: [event({ hashReported: false, queryHash: null })],
+      families: [family()],
+      roads: [road()],
+      blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.hashReported).toBe(false)
     expect(roster.vehicles).toHaveLength(0)
@@ -280,10 +488,11 @@ describe('only a sampled running request becomes a vehicle', () => {
 
   it('distinguishes an old API from an engine that reported no hash', () => {
     const roster = buildVehicleRoster({
-      requests: [request({ queryHash: null })],
+      events: [event({ hashReported: true, queryHash: null })],
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     // The field was present and null, so the API is current — the engine simply did not hash it.
     expect(roster.hashReported).toBe(true)
@@ -293,49 +502,21 @@ describe('only a sampled running request becomes a vehicle', () => {
 
   it('returns the empty roster when no snapshot has arrived, which is not the same as an idle one', () => {
     const roster = buildVehicleRoster({
-      requests: null,
+      events: null,
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(0)
-    expect(roster.sampledRunning).toBe(0)
+    expect(roster.observedExecutions).toBe(0)
     expect(roster.reason).toMatch(/no live snapshot/i)
-  })
-})
-
-describe('a session gets one vehicle per family, however many requests it holds', () => {
-  /*
-   * MARS. Mutation checked: removing the `seen` set draws two vehicles at the same phase on the same
-   * road, which renders as two sessions and is unfalsifiable from the map.
-   */
-  it('collapses several MARS requests on one session and family to one vehicle', () => {
-    const roster = buildVehicleRoster({
-      requests: [request({ requestId: 'r1' }), request({ requestId: 'r2' }), request({ requestId: 'r3' })],
-      families: [family()],
-      roads: [road()],
-      blocked: noBlocks,
-    })
-    expect(roster.vehicles).toHaveLength(1)
-    // The rows were still sampled, and the disclosure still counts all three.
-    expect(roster.sampledRunning).toBe(3)
-  })
-
-  it('keeps one vehicle per family when a session runs two different queries', () => {
-    const roster = buildVehicleRoster({
-      requests: [request(), request({ requestId: 'r2', queryHash: 'BBBB000000000001' })],
-      families: [family(), family({ familyId: 'fam-2', queryHash: 'BBBB000000000001' })],
-      roads: [road({ familyIds: ['fam-1', 'fam-2'] })],
-      blocked: noBlocks,
-    })
-    expect(roster.vehicles).toHaveLength(2)
-    expect(new Set(roster.vehicles.map(vehicle => vehicle.familyId)).size).toBe(2)
   })
 })
 
 describe('the roster is capped, and says what the cap dropped', () => {
   const many = Array.from({ length: VEHICLE_CAP + 25 }, (_, index) =>
-    request({ requestId: `r${index}`, sessionId: 100 + index, totalElapsedMs: index }))
+    event({ id: `e${index}`, ordinal: index + 1, sessionId: 100 + index, firstSeenAt: NOW - index * 10 }))
 
   /*
    * Mutation checked: dropping the `.slice(0, VEHICLE_CAP)` draws all 145 and leaves `capped` at 0,
@@ -343,34 +524,54 @@ describe('the roster is capped, and says what the cap dropped', () => {
    */
   it('draws no more than the cap and counts the remainder', () => {
     const roster = buildVehicleRoster({
-      requests: many,
+      events: many,
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(VEHICLE_CAP)
     expect(roster.capped).toBe(25)
     expect(roster.cap).toBe(VEHICLE_CAP)
-    expect(roster.sampledRunning).toBe(VEHICLE_CAP + 25)
+    expect(roster.observedExecutions).toBe(VEHICLE_CAP + 25)
     expect(roster.reason).toMatch(/25 beyond the 120-vehicle cap/)
+  })
+
+  /*
+   * Mutation checked: sorting by ordinal *ascending* drops the newest arrivals, which are precisely
+   * the ones the reader just watched appear in the list beside the map.
+   */
+  it('drops the oldest arrivals rather than the newest', () => {
+    const roster = buildVehicleRoster({
+      events: many,
+      families: [family()],
+      roads: [road()],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    const ordinals = roster.vehicles.map(vehicle => vehicle.ordinal)
+    expect(Math.max(...ordinals)).toBe(VEHICLE_CAP + 25)
+    expect(Math.min(...ordinals)).toBe(26)
   })
 
   /*
    * Mutation checked: removing the blocked-first term from the comparator drops the blocked vehicle
    * off the end, hiding the one thing on this map worth interrupting a reader for.
    */
-  it('keeps a blocked request ahead of the cap however short-running it is', () => {
-    const blockedRequest = request({
-      requestId: 'blocked',
+  it('keeps a blocked execution ahead of the cap however recently it arrived', () => {
+    const blockedEvent = event({
+      id: 'blocked',
+      ordinal: 0,
       sessionId: 9_999,
-      totalElapsedMs: 0,
-      blocking: { blockingSessionId: 52, sentinel: 'None' },
+      firstSeenAt: NOW - 60_000,
+      blocked: true,
     })
     const roster = buildVehicleRoster({
-      requests: [...many, blockedRequest],
+      events: [...many, blockedEvent],
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(VEHICLE_CAP)
     expect(roster.vehicles[0].sessionId).toBe(9_999)
@@ -378,33 +579,60 @@ describe('the roster is capped, and says what the cap dropped', () => {
   })
 
   it('truncates the same tail for the same sample, so a redraw is not a reshuffle', () => {
-    const input = { requests: many, families: [family()], roads: [road()], blocked: noBlocks }
+    const input = { events: many, families: [family()], roads: [road()], blocked: noBlocks, now: NOW }
     const first = buildVehicleRoster(input)
-    const second = buildVehicleRoster({ ...input, requests: [...many].reverse() })
+    const second = buildVehicleRoster({ ...input, events: [...many].reverse() })
     expect(second.vehicles.map(v => v.id)).toEqual(first.vehicles.map(v => v.id))
   })
 })
 
 describe('a blocked vehicle stops, and only on evidence it is entitled to', () => {
-  const blockedRequest = request({ blocking: { blockingSessionId: 52, sentinel: 'None' } })
+  // Aged, so "where it would have been standing" is a real point down the road rather than the kerb.
+  const blockedEvent = event({ blocked: true, firstSeenAt: NOW - 3_000 })
 
   function rosterWith(placement: IncidentPlacement | null) {
     return buildVehicleRoster({
-      requests: [blockedRequest],
+      events: [blockedEvent],
       families: [family()],
       roads: [road()],
       blocked: placement ? new Map([[51, placement]]) : noBlocks,
+      now: NOW,
     })
   }
 
-  it('does not stop a request that is merely running', () => {
+  /** Where a vehicle would be if nothing had stopped it — the roster's own arithmetic, replayed. */
+  function standingPoint(vehicle: { points: readonly { x: number; z: number }[]; elapsedSeconds: number; finishedAfterSeconds: number | null }) {
+    return pointAt(
+      vehicle.points,
+      travelledFraction(vehicle.points, vehicle.elapsedSeconds, vehicle.finishedAfterSeconds),
+    )
+  }
+
+  it('does not stop an execution that is merely running', () => {
     const roster = buildVehicleRoster({
-      requests: [request()],
+      events: [event()],
       families: [family()],
       roads: [road()],
       blocked: noBlocks,
+      now: NOW,
     })
     // Holding a lock nobody is waiting behind is just work, and work moves.
+    expect(roster.vehicles[0].blockedAt).toBeNull()
+  })
+
+  /*
+   * Mutation checked: keeping a departed execution frozen at its block leaves a car parked at a
+   * contention that is over, and it never reaches the end of its road to be retired — so the map
+   * accumulates permanent monuments to blocks that finished.
+   */
+  it('releases a vehicle whose blocked execution has left the sample', () => {
+    const roster = buildVehicleRoster({
+      events: [event({ blocked: true, firstSeenAt: NOW - 3_000, endedAt: NOW - 1_000 })],
+      families: [family()],
+      roads: [road()],
+      blocked: new Map([[51, { x: 30, z: 40, basis: 'sharedRoad', routeId: 'route-1', rationale: 'pinned' }]]),
+      now: NOW,
+    })
     expect(roster.vehicles[0].blockedAt).toBeNull()
   })
 
@@ -429,7 +657,8 @@ describe('a blocked vehicle stops, and only on evidence it is entitled to', () =
     const vehicle = rosterWith({
       x: 30, z: 40, basis: 'frontage', routeId: null, rationale: 'no road reaches it',
     }).vehicles[0]
-    const standing = pointAt(vehicle.points, vehicle.phase)
+    const standing = standingPoint(vehicle)
+    expect(standing.x).toBeGreaterThan(0)
     expect(vehicle.blockedAt?.x).toBeCloseTo(standing.x)
     expect(vehicle.blockedAt?.z).toBeCloseTo(standing.z)
     expect(vehicle.blockedAt?.basis).toBe('frontage')
@@ -444,35 +673,23 @@ describe('a blocked vehicle stops, and only on evidence it is entitled to', () =
     expect(vehicle.blockedAt).not.toBeNull()
     expect(vehicle.blockedAt?.basis).toBeNull()
     expect(vehicle.blockedAt?.pinnedRouteId).toBeNull()
-    const standing = pointAt(vehicle.points, vehicle.phase)
+    const standing = standingPoint(vehicle)
     expect(vehicle.blockedAt?.x).toBeCloseTo(standing.x)
     expect(vehicle.blockedAt?.z).toBeCloseTo(standing.z)
-  })
-
-  it('stops on the sentinel alone, when the blocker itself was never identified', () => {
-    // spid -2: an orphaned distributed transaction holds the lock, so there is no session to name.
-    const vehicle = buildVehicleRoster({
-      requests: [request({
-        blocking: { blockingSessionId: null, sentinel: 'OrphanedDistributedTransaction' },
-      })],
-      families: [family()],
-      roads: [road()],
-      blocked: noBlocks,
-    }).vehicles[0]
-    expect(vehicle.blockedAt).not.toBeNull()
   })
 })
 
 describe('a vehicle takes the busiest road its family named', () => {
   it('prefers more captured executions', () => {
     const roster = buildVehicleRoster({
-      requests: [request()],
+      events: [event()],
       families: [family()],
       roads: [
         road({ routeId: 'quiet', executions: 2 }),
         road({ routeId: 'busy', executions: 900 }),
       ],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles[0].routeId).toBe('busy')
   })
@@ -480,10 +697,10 @@ describe('a vehicle takes the busiest road its family named', () => {
   it('breaks a tie by route id rather than by input order', () => {
     const roads = [road({ routeId: 'b', executions: 5 }), road({ routeId: 'a', executions: 5 })]
     const forward = buildVehicleRoster({
-      requests: [request()], families: [family()], roads, blocked: noBlocks,
+      events: [event()], families: [family()], roads, blocked: noBlocks, now: NOW,
     })
     const backward = buildVehicleRoster({
-      requests: [request()], families: [family()], roads: [...roads].reverse(), blocked: noBlocks,
+      events: [event()], families: [family()], roads: [...roads].reverse(), blocked: noBlocks, now: NOW,
     })
     expect(forward.vehicles[0].routeId).toBe('a')
     expect(backward.vehicles[0].routeId).toBe('a')
@@ -491,45 +708,75 @@ describe('a vehicle takes the busiest road its family named', () => {
 
   it('ignores a degenerate road with nothing to drive along', () => {
     const roster = buildVehicleRoster({
-      requests: [request()],
+      events: [event()],
       families: [family()],
       roads: [road({ routeId: 'stub', executions: 900, polyline: [{ x: 1, z: 1 }] })],
       blocked: noBlocks,
+      now: NOW,
     })
     expect(roster.vehicles).toHaveLength(0)
     expect(roster.noRoad).toBe(1)
   })
 })
 
-describe('phase is stable, invented, and encodes nothing', () => {
+describe('the launch stagger is stable, invented, and encodes nothing', () => {
   /*
-   * Mutation checked: `Math.random()` for the phase passes every other test here and fails this one,
-   * which is the difference between a vehicle keeping its place between samples and teleporting to
-   * the kerb every few seconds.
+   * Mutation checked: `Math.random()` for the stagger passes every other test here and fails this
+   * one, which is the difference between a vehicle keeping its place between samples and jittering
+   * back and forth along its road every few seconds.
    */
-  it('puts the same request in the same place on every rebuild', () => {
+  it('gives the same execution the same delay on every rebuild', () => {
     expect(phaseOf(51, 'fam-1')).toBe(phaseOf(51, 'fam-1'))
     expect(phaseOf(51, 'fam-1')).not.toBe(phaseOf(52, 'fam-1'))
     expect(phaseOf(51, 'fam-1')).not.toBe(phaseOf(51, 'fam-2'))
   })
 
-  it('stays inside the route', () => {
+  it('stays inside its bound, so a departure is never delayed noticeably', () => {
     for (let sessionId = 50; sessionId < 400; sessionId += 1) {
       const phase = phaseOf(sessionId, 'fam-1')
       expect(phase).toBeGreaterThanOrEqual(0)
       expect(phase).toBeLessThan(1)
     }
+    expect(VEHICLE_LAUNCH_STAGGER_SECONDS).toBeLessThan(3)
   })
 
   it('spreads neighbouring session ids instead of clustering them', () => {
-    // Consecutive spids are the common case; a phase that tracked them would bunch every vehicle at
-    // one end of the road and read as a queue that nothing measured.
+    // Consecutive spids are the common case; a stagger that tracked them would release every vehicle
+    // in one burst and undo the separation it exists to provide.
     const phases = Array.from({ length: 40 }, (_, i) => phaseOf(50 + i, 'fam-1'))
     const halves = phases.filter(phase => phase < 0.5).length
     expect(halves).toBeGreaterThan(8)
     expect(halves).toBeLessThan(32)
   })
 })
+
+describe('how far along the road a vehicle is', () => {
+  const straight = [{ x: 0, z: 0 }, { x: 130, z: 0 }]
+
+  it('is elapsed distance over route length while the execution is still sampled', () => {
+    // 130 units at 13 u/s is ten seconds a lap.
+    expect(travelledFraction(straight, 0, null)).toBeCloseTo(0)
+    expect(travelledFraction(straight, 5, null)).toBeCloseTo(0.5)
+    expect(travelledFraction(straight, 10, null)).toBeCloseTo(0)
+    expect(travelledFraction(straight, 12.5, null)).toBeCloseTo(0.25)
+  })
+
+  it('completes at most one more lap once the execution has gone', () => {
+    // Departed at 25s — two full laps and a half — so it runs on to the end of that third lap.
+    expect(travelledFraction(straight, 25, 25)).toBeCloseTo(0.5)
+    expect(travelledFraction(straight, 27.5, 25)).toBeCloseTo(0.75)
+    expect(travelledFraction(straight, 30, 25)).toBeCloseTo(1)
+    expect(travelledFraction(straight, 300, 25)).toBe(1)
+  })
+
+  it('survives a degenerate road and a negative clock without producing NaN', () => {
+    expect(travelledFraction([], 5, null)).toBe(0)
+    expect(travelledFraction([{ x: 1, z: 1 }], 5, null)).toBe(0)
+    expect(travelledFraction(straight, -5, null)).toBe(0)
+    expect(Number.isFinite(travelledFraction(straight, 5, -5))).toBe(true)
+  })
+})
+
 
 describe('travelling a polyline is by arc length, not by vertex', () => {
   // A dogleg whose two segments are 30 and 70 units long: an index-based walk puts the midpoint at
@@ -560,28 +807,46 @@ describe('travelling a polyline is by arc length, not by vertex', () => {
   })
 })
 
-describe('the roster says why it is empty, since five causes look identical on the map', () => {
+describe('the roster says why it is empty, since six causes look identical on the map', () => {
   it.each([
-    ['no request was running', { requests: [] as LiveRequest[], families: [family()], roads: [road()] }],
+    ['No request has been running', { events: [] as LiveQueryEvent[], families: [family()], roads: [road()] }],
     ['predates the field', {
-      requests: [(() => { const r = request(); delete (r as { queryHash?: unknown }).queryHash; return r })()],
+      events: [event({ hashReported: false, queryHash: null })],
       families: [family()], roads: [road()],
     }],
     ['matched no query family', {
-      requests: [request({ queryHash: 'FFFF000000000001' })], families: [family()], roads: [road()],
+      events: [event({ queryHash: 'FFFF000000000001' })], families: [family()], roads: [road()],
     }],
     ['names no road drawn', {
-      requests: [request()], families: [family()], roads: [road({ familyIds: ['other'] })],
+      events: [event()], families: [family()], roads: [road({ familyIds: ['other'] })],
     }],
   ])('distinguishes "%s"', (fragment, input) => {
-    const roster = buildVehicleRoster({ ...input, blocked: noBlocks })
+    const roster = buildVehicleRoster({ ...input, blocked: noBlocks, now: NOW })
     expect(roster.vehicles).toHaveLength(0)
     expect(roster.reason).toMatch(new RegExp(fragment, 'i'))
   })
 
+  /*
+   * The distinction the feed made necessary. "Nothing running" and "everything that was running has
+   * since finished its road" are the same empty map, and only one of them means a quiet instance.
+   */
+  it('distinguishes an idle instance from one whose traffic has all arrived and left', () => {
+    const idle = buildVehicleRoster({
+      events: [], families: [family()], roads: [road()], blocked: noBlocks, now: NOW,
+    })
+    const finished = buildVehicleRoster({
+      events: [event({ firstSeenAt: NOW - 120_000, endedAt: NOW - 119_000 })],
+      families: [family()], roads: [road()], blocked: noBlocks, now: NOW,
+    })
+    expect(idle.vehicles).toHaveLength(0)
+    expect(finished.vehicles).toHaveLength(0)
+    expect(idle.reason).not.toBe(finished.reason)
+    expect(finished.reason).toMatch(/left the map/i)
+  })
+
   it('never leaves the reason blank', () => {
     const roster = buildVehicleRoster({
-      requests: [request()], families: [family()], roads: [road()], blocked: noBlocks,
+      events: [event()], families: [family()], roads: [road()], blocked: noBlocks, now: NOW,
     })
     expect(roster.reason.length).toBeGreaterThan(0)
   })

@@ -16,7 +16,7 @@ import type { MapViewMode } from './mapStyle'
 import type { IncidentProjection } from './cityIncidents'
 import type { IncidentPlacement } from './cityIncidentPlacement'
 import type { LiveFeedConnectionState } from './liveIncidents'
-import type { LiveRequest } from './liveContracts'
+import type { LiveQueryEvent } from './liveQueryFeed'
 import type { VehicleRoster } from './cityVehicles'
 import { IncidentPopup } from './IncidentPopup'
 import { MapTray, useNarrowViewport, type TrayItem } from './MapTray'
@@ -58,14 +58,18 @@ type Props = {
   /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
   /**
-   * The requests the sampler saw running, and the families they are matched against.
+   * The executions the live feed has observed, newest first, and the families they are matched
+   * against.
+   *
+   * The same list the sidebar's live query feed is scrolling, so a row appearing there and a car
+   * pulling away here are one event rather than two that happen to coincide.
    *
    * Passed as the two raw inputs rather than as a finished roster because the join needs the roads
    * *as drawn*, which only the scene knows: a vehicle is placed on a road this scene put down, and a
    * family whose road was not drawn has nowhere to drive. The scene reports what it made of them
    * through {@link onVehicleRoster}.
    */
-  liveRequests?: readonly LiveRequest[] | null
+  liveQueries?: readonly LiveQueryEvent[] | null
   families?: readonly DatabaseCityQueryFamily[]
   /** What the scene actually drew, so the legend can disclose it honestly. */
   onVehicleRoster?: (roster: VehicleRoster) => void
@@ -146,7 +150,7 @@ export function DatabaseCityViewport({
   liveStatus,
   feedState,
   incidents,
-  liveRequests = null,
+  liveQueries = null,
   families,
   onVehicleRoster,
   openIncidentId = null,
@@ -218,8 +222,8 @@ export function DatabaseCityViewport({
   useEffect(() => sceneRef.current?.setViewMode(viewMode), [viewMode])
   useEffect(() => sceneRef.current?.setIncidents(incidents?.markers ?? []), [incidents])
   useEffect(
-    () => sceneRef.current?.setVehicles(liveRequests ?? null, families ?? []),
-    [liveRequests, families],
+    () => sceneRef.current?.setVehicles(liveQueries ?? null, families ?? []),
+    [liveQueries, families],
   )
 
   // Opening a pin from the sidebar centres its object first, because a marker outside the frustum

@@ -382,7 +382,7 @@ describe('the sidebar column scrolls its own overflow', () => {
    */
   it('lets the capped sections shrink inside the desktop rail', () => {
     expect(desktopRule('.sidebar-place-card'), '.sidebar-place-card lost its height cap')
-      .toMatch(/max-height:\s*34vh/)
+      .toMatch(/max-height:\s*16vh/)
     // The drawer reads its cap from the wrapper's budget instead of writing 46vh itself; see the
     // shared-budget suite below for why, and for the 46vh fallback that keeps an unwrapped drawer
     // -- the atlas -- exactly as it was.
@@ -477,8 +477,8 @@ describe('the sidebar column scrolls its own overflow', () => {
    * and nothing else -- and 414px of the selected object's measured evidence was reachable only by
    * scrolling a 72px window. 47px at 1280x720; 81px at 1115x800, which is the case AGENTS.md already
    * described. Leaving the minimum at `auto` floors the card at its content clamped by its own cap:
-   * 306px, 245px and 272px at those three sizes, with the six-row evidence list fully on screen at
-   * 1440x900.
+   * 252px, 202px and 224px at those three sizes, with five rows of the evidence list on screen at
+   * 1440x900 and the rest reachable inside the card's own scroller.
    *
    * Checked at every width, like the drawer's ban: a narrow override would reach the same element.
    */
@@ -493,7 +493,7 @@ describe('the sidebar column scrolls its own overflow', () => {
     // The floor is only a floor because the cap is definite; without it the card would floor on its
     // full content instead and overflow the rail.
     expect(desktopRule('.sidebar-place-card'), '.sidebar-place-card lost the cap its floor depends on')
-      .toMatch(/max-height:\s*34vh/)
+      .toMatch(/max-height:\s*16vh/)
   })
 
   /**
@@ -508,18 +508,21 @@ describe('the sidebar column scrolls its own overflow', () => {
    * needed, and an engine without `:has()` still applies this one -- where the widened-cap rule
    * above drops out and leaves every drawer on the third share, which is the safe direction.
    *
-   * 24vh rather than the 16vh two drawers shared. A third drawer does not make the region cheaper:
-   * 16vh three ways is 42.6px at an 800px viewport, a 35px summary and a 7.6px body, which overflows
-   * nothing and is unreadable -- the "necessary, not sufficient" failure again. Measured at 1115x800
-   * with all three open: 64px each, 29px of body, address list 117px, 0px unreachable.
+   * 18vh rather than the 16vh two drawers shared or the 24vh three did. Another drawer does not make
+   * the region cheaper: 16vh three ways is 42.6px at an 800px viewport, a 35px summary and a 7.6px
+   * body, which overflows nothing and is unreadable -- the "necessary, not sufficient" failure again.
+   * 24vh four ways reproduced it exactly: measured at 1115x800 the live query feed held 15px of body
+   * at rest and 12px with everything open, and widening to 28vh only took that to 26px and 5px. The
+   * feed is a region of its own now (see `.sidebar-feed`), so these three are reference material
+   * again and the budget goes back down -- the 10vh released pays for the feed's floor instead.
    */
   it('makes an open place card take its share from the drawers', () => {
     const yielded = desktopRule('.sidebar-drawers.is-yielding')
     expect(yielded, 'the drawers do not yield to an open place card').not.toBeNull()
     expect(yielded, 'the yielded budget is not smaller than the default')
-      .toMatch(/--sidebar-drawer-budget:\s*24vh/)
+      .toMatch(/--sidebar-drawer-budget:\s*18vh/)
     // The default the drawers keep when no card is open, which this reduces from.
-    expect(desktopRule('.sidebar-drawers')).toMatch(/--sidebar-drawer-budget:\s*46vh/)
+    expect(desktopRule('.sidebar-drawers')).toMatch(/--sidebar-drawer-budget:\s*34vh/)
     // Still a share of a budget, so each drawer keeps flooring at min(content, cap) and its summary
     // stays inside that: measured 72px and 58px against a 35px summary.
     expect(desktopRule('.sidebar-drawer')).toMatch(/max-height:\s*var\(--sidebar-drawer-cap,\s*46vh\)/)
@@ -691,7 +694,7 @@ describe('three drawers in one rail share one height budget', () => {
   it('caps the wrapper rather than each drawer', () => {
     const wrapper = desktopRule('.sidebar-drawers')
     expect(wrapper, '.sidebar-drawers has no rule at all').not.toBeNull()
-    expect(wrapper, 'the budget is not declared').toMatch(/--sidebar-drawer-budget:\s*46vh/)
+    expect(wrapper, 'the budget is not declared').toMatch(/--sidebar-drawer-budget:\s*34vh/)
     expect(wrapper, 'the wrapper does not cap at the budget')
       .toMatch(/max-height:\s*var\(--sidebar-drawer-budget\)/)
     expect(wrapper, 'the wrapper cannot shrink into the rail').toMatch(/flex:\s*0\s+1\s+auto/)
@@ -726,55 +729,85 @@ describe('three drawers in one rail share one height budget', () => {
   })
 
   /**
-   * `:has()` widens, it never narrows, and it is written without `:where()`.
+   * `:has()` relaxes the share, it never tightens it, and it is written without `:where()`.
    *
-   * The default is the tightest share -- three open -- which always fits, and the conditional rules
-   * relax it as drawers close. That direction is the whole safety argument: `:not()` takes a
-   * *non-forgiving* selector list, so an engine without `:has()` invalidates and drops both widening
-   * rules and lands on the third share.
+   * The default is the tightest share -- all three open -- which always fits, and the conditional
+   * rules relax it for smaller open counts. That direction is the whole safety argument: neither
+   * `:has()` nor the `:not()` around it is forgiving, so an engine without `:has()` invalidates and
+   * drops every conditional rule and lands on the third share.
    *
-   * `:where()` inside `:has()` inverts that, dangerously. `:has()` takes a relative selector list, in
-   * which a selector may begin with a combinator; `:where()` takes a *complex* selector list, in which
-   * it may not. So `:where(> .sidebar-drawer[open] ~ ...)` has its argument dropped by forgiving
-   * parsing rather than failing -- Chromium reads the rule back as literally `:not(:has(:where()))`,
-   * an empty list matches nothing, `:not()` is therefore always true, and the widened cap applies with
-   * both drawers open. Verified by reading `selectorText` off the parsed `CSSStyleSheet`: the
-   * `:where()` form matched all three fixtures including both-open, the plain form matched only the
-   * two that should widen. In the browser, with the real rule: 0 matches with both drawers open, 1
-   * with one open.
+   * Each conditional matches exactly one open count -- `:has(N)` and not `:has(N+1)` -- so no two of
+   * them ever apply to the same element and neither source order nor specificity decides between
+   * them. This is not tidiness. A plain run of `:not(:has(N open))` rules, widening as drawers close,
+   * is silently broken, because `:has()` takes its specificity from its argument: the three-link
+   * chain scores (0,7,0) and the two-link (0,5,0), so the tightest rule outranks every rule meant to
+   * relax it no matter what order they are written in. Measured in Chromium at 1115x800 with two of
+   * four drawers open, the cap came back `calc((24vh - 2.5rem) / 3)` -- the three-open share -- and
+   * one open drawer got the same, 50.7px against a 35px summary.
+   *
+   * `:where()` would flatten that specificity, and must still not be used. `:has()` takes a relative
+   * selector list, in which a selector may begin with a combinator; `:where()` takes a *complex*
+   * selector list, in which it may not. So `:where(> .sidebar-drawer[open] ~ ...)` has its argument
+   * dropped by forgiving parsing rather than failing, and Chromium reads the rule back with an empty
+   * list. Verified by reading `selectorText` off the parsed `CSSStyleSheet`.
    */
-  it('widens the cap as drawers close instead of narrowing it as they open', () => {
-    const conditionals = rules().filter((one) => /^\.sidebar-drawers:not\(:has\(/.test(one.selector))
-    expect(conditionals.length, 'both conditional cap rules are needed for three drawers').toBe(2)
+  it('relaxes the cap for smaller open counts without letting the rules compete', () => {
+    const conditionals = rules().filter((one) => /^\.sidebar-drawers:has\(/.test(one.selector))
+    expect(conditionals.length, 'two conditional cap rules are needed for three drawers').toBe(2)
     for (const rule of conditionals) {
-      expect(rule.selector, ':where() drops its argument here and inverts the rule')
+      expect(rule.selector, ':where() drops its argument here and breaks the rule')
         .not.toMatch(/:where\(/)
     }
 
-    const [twoOpen, oneOpen] = conditionals
-    expect(twoOpen.selector).toContain(
-      ':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open]))')
-    expect(twoOpen.body, 'two drawers must divide the budget less the third summary')
-      .toMatch(/--sidebar-drawer-cap:\s*calc\(\(var\(--sidebar-drawer-budget\)\s*-\s*2\.5rem\)\s*\/\s*2\)/)
+    const chain = (count: number) =>
+      `> ${Array.from({ length: count }, () => '.sidebar-drawer[open]').join(' ~ ')}`
+    /** Exactly `count` open: has that many, and does not have one more. */
+    const exactly = (count: number) =>
+      `.sidebar-drawers:has(${chain(count)}):not(:has(${chain(count + 1)}))`
 
-    expect(oneOpen.selector)
-      .toContain(':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open]))')
+    const [oneOpen, twoOpen] = conditionals
+
+    expect(oneOpen.selector, 'the lone-drawer rule does not match exactly one open drawer')
+      .toBe(exactly(1))
     expect(oneOpen.body, 'a lone drawer may spend the budget less two collapsed summaries')
-      .toMatch(/--sidebar-drawer-cap:\s*calc\(var\(--sidebar-drawer-budget\)\s*-\s*5rem\)/)
+      .toMatch(/--sidebar-drawer-cap:\s*calc\(var\(--sidebar-drawer-budget\)\s*-\s*4\.375rem\)/)
+
+    expect(twoOpen.selector, 'the two-drawer rule does not match exactly two open drawers')
+      .toBe(exactly(2))
+    expect(twoOpen.body, 'two drawers must divide the budget less the third summary')
+      .toMatch(/--sidebar-drawer-cap:\s*calc\(\(var\(--sidebar-drawer-budget\)\s*-\s*2\.1875rem\)\s*\/\s*2\)/)
 
     /*
-     * Source order, not specificity. Both conditionals match when exactly one drawer is open --
-     * neither `~` chain is present -- and a `:not(:has())` selector has the same specificity either
-     * way, so the lone-drawer rule only wins by coming last. Swap them and one open drawer silently
-     * gets the two-drawer share.
+     * The allowance is per *collapsed* summary, and a collapsed summary costs 35px -- 2.1875rem
+     * against this stylesheet's 16px root. Not 34px: `box-sizing` is `border-box` and every drawer
+     * carries a 1px `border-top`, so its border box is the 34px summary plus that rule. Under-pricing
+     * it by that 1px puts the region over its budget in a rail that is `overflow: hidden` -- measured
+     * at 1115x800, 3px of the column out of reach with one drawer open and 2px with two. Over-pricing
+     * it, as the 2.5rem this rule used to, spends 5px a drawer that nothing ever claims, so the
+     * region costs less than its budget and the address list jumps whenever a drawer opens. Exact is
+     * the only value that does neither.
      */
+    for (const [index, rule] of conditionals.entries()) {
+      const closed = 2 - index
+      const allowance = Number(/-\s*([\d.]+)rem/.exec(rule.body)?.[1])
+      expect(allowance, `the ${index + 1}-open rule does not spend a summary allowance`).not.toBeNaN()
+      expect(allowance, `the ${index + 1}-open rule misprices ${closed} collapsed summaries`)
+        .toBeCloseTo(closed * (35 / 16), 5)
+    }
+    /*
+     * And the 1px the allowance pays for is really there and really inside the box. Change either and
+     * the arithmetic above is wrong by a pixel per closed drawer, which is a clipped rail rather than
+     * a visible mistake.
+     */
+    expect(desktopRule('.sidebar-drawer'), 'the drawer lost the border the allowance prices in')
+      .toMatch(/border-top:\s*1px\s+solid/)
     expect(
-      css.indexOf(':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open])) {'),
-      'the lone-drawer rule must come after the two-drawer rule it relaxes',
-    ).toBeGreaterThan(
-      css.indexOf(':not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open]))'))
-    // And both come after the base rule they relax, or they would lose on source order.
-    expect(css.indexOf('.sidebar-drawers:not('), 'the conditional rule is not in the stylesheet')
+      readFileSync(new URL('./index.css', import.meta.url), 'utf8'),
+      'nothing sets border-box, so the cap no longer includes that border',
+    ).toMatch(/\*\s*\{[^}]*box-sizing:\s*border-box/)
+
+    // And all of them come after the base rule they relax, or they would lose on source order.
+    expect(css.indexOf('.sidebar-drawers:has('), 'the conditional rule is not in the stylesheet')
       .toBeGreaterThan(css.indexOf('\n.sidebar-drawers {'))
   })
 
@@ -792,6 +825,100 @@ describe('three drawers in one rail share one height budget', () => {
     expect(wrapped, 'the legend drawer is outside the budget').toContain('<LegendDrawer')
     // The metric stays outside: it is `flex: none` and shrinking it was never the problem.
     expect(wrapped).not.toContain('sidebar-metric')
+    /*
+     * And the live query feed is deliberately *not* in it. As a fourth drawer sharing this budget it
+     * measured 26px of body at rest and 5px with everything open at 1115x800 -- a fraction of one
+     * 54px row -- because an evenly divided budget cannot say that one surface is the primary one.
+     * It is a region of its own now; see `.sidebar-feed`.
+     */
+    expect(wrapped, 'the live query feed is back inside the drawer budget that starved it')
+      .not.toContain('liveQueryFeed')
+  })
+
+  /**
+   * The feed is the rail's other scrolling region, and it takes its space like one.
+   *
+   * `flex: 1 1 auto` sizes it from content so a column with room to spare is unchanged, and both
+   * bounds are load-bearing against the same failure in opposite directions. The feed's content is
+   * the whole 60-row log, an order of magnitude taller than the address list beside it, and flex
+   * distributes shrink in proportion to base size: without the floor the address list absorbs almost
+   * all of it and hits 0px before the feed gives up anything, and without the cap the feed claims its
+   * full content height and does the same thing harder. 132px is the head plus two whole 54px rows.
+   */
+  it('gives the live query feed a floor and a ceiling of its own', () => {
+    const feed = desktopRule('.sidebar-feed')
+    expect(feed, '.sidebar-feed has no rule at all').not.toBeNull()
+    expect(feed, 'the feed does not take its space from content').toMatch(/flex:\s*1\s+1\s+auto/)
+    expect(feed, 'the feed has no floor, so the address list pays for the whole squeeze')
+      .toMatch(/min-height:\s*162px/)
+    expect(feed, 'the feed has no ceiling, so it claims the rail')
+      .toMatch(/max-height:\s*22vh/)
+    // A column, or the shrink never reaches the scroller inside.
+    expect(feed).toMatch(/display:\s*flex/)
+    expect(feed).toMatch(/flex-direction:\s*column/)
+
+    /*
+     * The scroller is the body, not the region: the head stays pinned while the log moves under it,
+     * and `min-height: 0` is what lets the body shrink into a scroller at all in a flex column.
+     */
+    const body = desktopRule('.sidebar-feed-body')
+    expect(body, '.sidebar-feed-body has no rule at all').not.toBeNull()
+    expect(body, 'the feed body cannot shrink, so the region overflows instead of scrolling')
+      .toMatch(/min-height:\s*0/)
+    expect(body, 'the feed body does not scroll').toMatch(/overflow:\s*auto/)
+    expect(desktopRule('.sidebar-feed-head'), 'the feed head would shrink with the log')
+      .toMatch(/flex:\s*none/)
+  })
+
+  /**
+   * No CSS-wide keyword inside a `font` shorthand, anywhere in the stylesheet.
+   *
+   * `inherit` is not a legal *component* of a shorthand -- only a whole value -- so `font: 600
+   * .74rem/1.2 inherit` is invalid and the entire declaration is dropped, while a bare `font:
+   * inherit` is perfectly fine and is used all over this file to stop buttons from opting out of the
+   * page's type. Nothing errors and nothing overflows; the element simply keeps whatever it
+   * inherited, which for an `h2` is the UA's 1.5em bold. Measured at 1115x800 that took the feed's
+   * head to 94px of the region's 131 and left the log 36px -- two thirds of one row, with every
+   * reachability number clean.
+   *
+   * Checked across the whole file rather than on the one rule that had it, because the failure is
+   * invisible at the point of writing and the file already contained a second instance.
+   */
+  it('never puts a CSS-wide keyword inside a font shorthand', () => {
+    const wide = /\b(?:inherit|initial|unset|revert|revert-layer)\b/
+    const offenders = rules()
+      .flatMap((one) => (one.body.match(/(?:^|[;{])\s*font:\s*[^;}]+/g) ?? [])
+        .map((match) => ({
+          selector: one.selector,
+          value: match.replace(/^[\s;{]*font:\s*/, '').trim(),
+        })))
+      // A whole value that is just the keyword is legal; a keyword beside anything else is not.
+      .filter(({ value }) => wide.test(value) && !/^(?:inherit|initial|unset|revert|revert-layer)$/.test(value))
+    expect(offenders, 'a font shorthand names a CSS-wide keyword, so the whole declaration is dropped')
+      .toEqual([])
+  })
+
+  /**
+   * The feed sits above the address book and below the place card, and renders with the address book.
+   *
+   * Ordering is what ties a row appearing to a car pulling away on the map: it is the first thing
+   * under the card, so a reader who catches movement out of the corner of an eye has somewhere to
+   * look. It is gated on the same condition as the address book because a full-takeover route card
+   * owns the whole rail, and a feed wedged beside it would be the squeeze this change just undid.
+   */
+  it('renders the feed as a rail region beside the address list', () => {
+    const declaration = cityMarkup.indexOf('const liveQueryFeed =')
+    expect(declaration, 'there is no live query feed').toBeGreaterThan(-1)
+    expect(cityMarkup.slice(declaration, cityMarkup.indexOf('</section>', declaration)),
+      'the feed is no longer a region of the rail')
+      .toMatch(/<section className="sidebar-feed"/)
+
+    const rendered = cityMarkup.indexOf('{sidebarMode.showsAddressBook && liveQueryFeed}')
+    expect(rendered, 'the feed does not render with the address book').toBeGreaterThan(-1)
+    expect(rendered, 'the feed is not above the address book')
+      .toBeLessThan(cityMarkup.indexOf('<AddressBook'))
+    expect(rendered, 'the feed is not below the place card')
+      .toBeGreaterThan(cityMarkup.indexOf('className={`sidebar-place-card'))
   })
 
   /**
@@ -812,15 +939,15 @@ describe('three drawers in one rail share one height budget', () => {
    * the wrapper existed rather than re-patched around it.
    *
    * The load-bearing part is subtle: custom properties inherit through `display: contents`, so the
-   * drawers below go on inheriting `--sidebar-drawer-cap` -- a 15.3vh third-share, *tighter* than the
-   * 46vh that predates this change. `max-height: none` in the same block is the only thing discarding
-   * it. Weaken that override and the sheet's drawers do not return to their old cap, they get a worse
-   * one, which is why it is pinned here as well as in the sheet suite above.
+   * drawers below go on inheriting `--sidebar-drawer-cap` -- an 11.5vh quarter-share, *tighter* than
+   * the 46vh that predates this change. `max-height: none` in the same block is the only thing
+   * discarding it. Weaken that override and the sheet's drawers do not return to their old cap, they
+   * get a worse one, which is why it is pinned here as well as in the sheet suite above.
    */
   it('dissolves the wrapper in the narrow sheet', () => {
     expect(narrowRule('.sidebar-drawers'), '.sidebar-drawers has no narrow rule')
       .toMatch(/display:\s*contents/)
-    expect(narrowRule('.sidebar-drawer'), 'the inherited third-share cap is no longer discarded')
+    expect(narrowRule('.sidebar-drawer'), 'the inherited quarter-share cap is no longer discarded')
       .toMatch(/max-height:\s*none/)
     // In the last block, or a media query with no extra specificity loses to the base rule.
     const block = css.lastIndexOf(`@media (max-width: ${SHEET}px)`)

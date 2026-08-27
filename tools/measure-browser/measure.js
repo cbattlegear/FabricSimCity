@@ -413,7 +413,14 @@ function report(result) {
       if (!box) { out.push(line(name, 'not present')); continue }
       out.push(line(name, `${box.clientHeight}px visible, ${box.scrollHeight}px content, `
         + `overflow ${box.overflowY}, ${box.unreachablePx}px unreachable`
-        + (box.scrollExtentPx ? `, ${box.scrollExtentPx}px scrollable` : '')))
+        + (box.scrollExtentPx ? `, ${box.scrollExtentPx}px scrollable` : '')
+        /*
+         * The number that says whether the feed is a feed. Zero unreachable pixels is necessary and
+         * not sufficient: as a drawer this read 0.4 rows with every overflow number clean.
+         */
+        + (box.rowsVisible !== undefined && box.rowsVisible !== null
+          ? `, ${box.rowsVisible} of ${box.rows} rows visible at ${box.rowHeight.toFixed(1)}px`
+          : '')))
     }
     if (boxes.drawerCap) {
       out.push(line('drawer budget / cap', `${boxes.drawerCap.budget || '—'} / ${boxes.drawerCap.cap || '—'}`))

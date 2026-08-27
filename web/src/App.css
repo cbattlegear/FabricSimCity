@@ -45,7 +45,7 @@
   gap: 9px;
   margin-bottom: 12px;
   color: #8be7ce;
-  font: 700 0.82rem/1 inherit;
+  font-weight: 700; font-size: 0.82rem; line-height: 1;
   letter-spacing: -0.01em;
 }
 
@@ -371,10 +371,19 @@
  * `overflow: hidden` -- 66px of it unreachable at 1440x900, 121px at 1280x720, which is the #63
  * defect rebuilt one section over. 34vh floors it at 306px, which holds the title and the whole
  * six-row evidence list at 1440x900, and leaves the rail whole.
+ *
+ * 16vh rather than that 34vh since the live query feed joined the rail. Because the card floors, it
+ * is the one section that does not participate in the squeeze, so its cap sets what everything below
+ * it may have: measured at 1115x800 the card sat at its full 272px while the feed -- the surface this
+ * view now exists to show -- held 15px of body and the address list held 69px. Giving 18vh back moves
+ * 144px from a card that scrolls its own overflow to two regions that had nothing left to scroll.
+ * At 800px the card floors at 128px, which is title, kind and two rows of evidence, and it scrolls
+ * the rest. The last 2vh of that went to the feed's floor rather than the address list; see
+ * `.sidebar-feed` for why two whole rows there is worth 14px here.
  */
 .sidebar-place-card {
   flex: 0 1 auto;
-  max-height: 34vh;
+  max-height: 16vh;
   display: flex;
   flex-direction: column;
   padding: 12px 12px 0;
@@ -732,7 +741,7 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 .hud-field input:focus-visible { outline: 2px solid #72f4c4; outline-offset: 1px; }
 form.hud-field { gap: 6px; }
 form.hud-field label { display: grid; gap: 5px; }
-form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; background: #72f4c4; border: 0; font: 600 .72rem/1 inherit; cursor: pointer; }
+form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; background: #72f4c4; border: 0; font-weight: 600; font-size: .72rem; line-height: 1; cursor: pointer; }
 .hud-results { list-style: none; margin: 0; padding: 4px; max-height: 34vh; overflow: auto; display: grid; gap: 3px; }
 .hud-results button { display: grid; gap: 2px; width: 100%; padding: 6px 8px; text-align: left; color: #dbe7f0; background: transparent; border: 1px solid transparent; cursor: pointer; font: inherit; }
 .hud-results button:hover { border-color: #3b4b5b; background: #101c27; }
@@ -982,7 +991,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   padding: 3px 0 4px;
   background: rgba(8, 12, 18, 0.78);
   color: #f0f5f9;
-  font: 600 .68rem/1 inherit;
+  font-weight: 600; font-size: .68rem; line-height: 1;
   letter-spacing: .04em;
   text-align: center;
 }
@@ -1215,7 +1224,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   border-radius: 999px;
   background: #0f2620;
   color: #8be7ce;
-  font: 600 .74rem/1 inherit;
+  font-weight: 600; font-size: .74rem; line-height: 1;
   cursor: pointer;
 }
 .place-card-actions button:hover { border-color: #72f4c4; }
@@ -1240,27 +1249,26 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * So the budget moves up one level. The wrapper takes the 46vh, and the drawers inside divide it
  * via `--sidebar-drawer-cap`. The region then costs the column what a single drawer costs today.
  *
- * The share is `budget / openCount`, and the count is three because the city column now stacks Live
- * activity, the plan finder and the legend. The arithmetic that has to hold is
- * `cap x openCount + 34.5px x closedCount <= budget`, since every closed drawer still spends its
+ * The share is `budget / openCount`, and the count is four because the city column now stacks the
+ * live query feed, Live activity, the plan finder and the legend. The arithmetic that has to hold is
+ * `cap x openCount + 35px x closedCount <= budget`, since every closed drawer still spends its
  * summary; raising the cap and trusting shrink to sort it out does not work, for the reason above.
  *
- * The default is the *tightest* share -- all three open -- and the `:has()` rules below widen it as
- * drawers close. That direction is deliberate: `:not()` takes a non-forgiving selector list, so an
- * engine without `:has()` drops both widening rules entirely and lands on the third share, which
- * always fits. Getting this backwards reintroduces the overflow, so do not add `:where()` around the
- * argument to "hold the specificity down": `:has()` takes a *relative* selector list and `:where()`
- * takes a *complex* one, which may not begin with a combinator, so `:where(> ...)` has its argument
- * discarded by forgiving parsing. Chromium then reports the selector back as literally
- * `:not(:has(:where()))` -- an empty list matches nothing, `:not()` is therefore always true, and
- * the widened cap applies unconditionally. Verified by reading `selectorText` off the parsed
+ * The default is the *tightest* share -- all three open -- and the `:has()` rules below relax it for
+ * the counts below that. That direction is deliberate: neither `:has()` nor `:not()` is forgiving
+ * here, so an engine without `:has()` drops every one of those rules and lands on the third share,
+ * which always fits. Getting this backwards reintroduces the overflow, so do not add `:where()`
+ * around the argument to "hold the specificity down": `:has()` takes a *relative* selector list and
+ * `:where()` takes a *complex* one, which may not begin with a combinator, so `:where(> ...)` has its
+ * argument discarded by forgiving parsing. Chromium then reports the selector back with an empty
+ * list, which matches nothing at all. Verified by reading `selectorText` off the parsed
  * `CSSStyleSheet`, not by reasoning about it.
  *
  * No `min-height: 0` here either. The wrapper is `overflow: visible`, so a shrinkable wrapper would
  * simply spill its drawers back out of the clipped rail -- the #63 defect, one level out.
  */
 .sidebar-drawers {
-  --sidebar-drawer-budget: 46vh;
+  --sidebar-drawer-budget: 34vh;
   --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) / 3);
   flex: 0 1 auto;
   display: flex;
@@ -1268,16 +1276,39 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   max-height: var(--sidebar-drawer-budget);
 }
 /*
- * At most two drawers open: the two may divide the budget less the third's collapsed summary
- * (34.5px). Written before the one-open rule on purpose -- both match when one drawer is open, and
- * a media query adds no specificity, so source order is what picks the winner.
+ * Fewer open drawers may spend the collapsed summaries' share of the budget (35px each, measured).
+ *
+ * 35px, not the 34px the summary reports. `box-sizing` is `border-box` and every drawer carries a
+ * 1px `border-top`, so a collapsed drawer's border box is 34px of summary plus that rule. Pricing it
+ * at 34 leaves the region 1px over its budget per closed drawer and the rail is `overflow: hidden`:
+ * measured at 1115x800, one open drawer put 3px of the column out of reach and two put 2px. The old
+ * three-drawer allowance of 2.5rem hid this by over-paying 5px a drawer, which is also why the region
+ * used to cost less than its budget and the address list moved every time a drawer opened.
+ *
+ * Each rule matches exactly one open count, so neither source order nor specificity decides between
+ * them -- they never compete. That is not tidiness. The obvious form, a run of `:not(:has(N open))`
+ * rules widening as drawers close, is silently broken: `:has()` takes its specificity from its
+ * argument, so the three-link chain scores (0,7,0) and the two-link (0,5,0), and the tightest rule
+ * outranks every rule meant to relax it. Measured at 1115x800 with two of four drawers open, the cap
+ * came back as `calc((24vh - 2.5rem) / 3)` -- the three-open share -- and one open drawer got the
+ * same. Written this way there is no cascade to get wrong, and adding a fourth drawer means adding a
+ * rule rather than re-deriving an ordering.
+ *
+ * Still no `:where()` anywhere inside these. `:has()` takes a *relative* selector list, in which a
+ * selector may begin with a combinator; `:where()` takes a *complex* one, in which it may not. So
+ * `:where(> .sidebar-drawer[open] ~ ...)` has its argument dropped by forgiving parsing rather than
+ * failing -- Chromium reads the rule back as literally `:has(:where())`, which matches nothing here
+ * and would leave every count on the base share.
+ *
+ * The base share above stays the tightest one, so an engine without `:has()` drops both of these
+ * (`:not()` is non-forgiving, and a bare `:has()` is invalid there too) and lands on the third
+ * share, which always fits.
  */
-.sidebar-drawers:not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open])) {
-  --sidebar-drawer-cap: calc((var(--sidebar-drawer-budget) - 2.5rem) / 2);
+.sidebar-drawers:has(> .sidebar-drawer[open]):not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open])) {
+  --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) - 4.375rem);
 }
-/* Only one drawer open: it may spend the budget less the other two collapsed summaries. */
-.sidebar-drawers:not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open])) {
-  --sidebar-drawer-cap: calc(var(--sidebar-drawer-budget) - 5rem);
+.sidebar-drawers:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open]):not(:has(> .sidebar-drawer[open] ~ .sidebar-drawer[open] ~ .sidebar-drawer[open])) {
+  --sidebar-drawer-cap: calc((var(--sidebar-drawer-budget) - 2.1875rem) / 2);
 }
 
 /*
@@ -1292,12 +1323,15 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * unreachable -- a column that does not overflow and is still useless. Yielding here instead holds
  * the list at 231px and 141px.
  *
- * 24vh, not the 16vh that two drawers shared. A third drawer does not make the region cheaper, and
- * 16vh divided three ways is 42.6px per drawer at an 800px viewport -- a 35px summary and a 7.6px
- * body, which overflows nothing and can be read by nobody. That is the failure this file already
- * warns about twice: zero unreachable pixels is necessary and not sufficient. 24vh gives each of
- * three open drawers 64px, the same 29px of body two drawers had at 16vh, and it is measured, not
- * reasoned -- see the numbers in the pull request that introduced Live activity.
+ * 18vh, not the 16vh that two drawers shared, nor the 24vh that three did while the feed was one of
+ * them. Another drawer does not make the region cheaper, and 16vh divided three ways is 42.6px per
+ * drawer at an 800px viewport -- a 35px summary and a 7.6px body, which overflows nothing and can be
+ * read by nobody. That is the failure this file already warns about twice: zero unreachable pixels is
+ * necessary and not sufficient. 24vh reproduced it with four drawers -- measured at 1115x800, the
+ * live query feed held 15px of body at rest and 12px with everything open, and 28vh only took that to
+ * 26px and 5px. The feed is a region of its own now (see `.sidebar-feed`) and these three are back to
+ * being reference material, so the budget goes back down and the 10vh released pays for the feed's
+ * floor rather than for a fourth equal share that helped nobody.
  *
  * A modifier the markup sets rather than `.sidebar-place-card ~ .sidebar-drawers`, which would do
  * the same job in CSS alone. That selector ends in `.sidebar-drawers`, and `ownRule()` in
@@ -1307,11 +1341,11 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * there to find (`.sidebar-brand .sidebar-mark`). A class the component owns is cheaper than either.
  *
  * The drawers keep flooring at `min(content, cap)`, so each summary stays inside its share and
- * clickable: measured at 1115x800, three open drawers hold 63px each against a 35px summary, and
- * the one open at rest holds 75px.
+ * clickable. Because the collapsed-summary allowance now matches the measured 34px, the region costs
+ * the budget at every open count rather than less, so the address list holds still as drawers open.
  */
 .sidebar-drawers.is-yielding {
-  --sidebar-drawer-budget: 24vh;
+  --sidebar-drawer-budget: 18vh;
 }
 
 /*
@@ -1372,6 +1406,197 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+
+/* --- Live query feed ----------------------------------------------------------------------- */
+/*
+ * The rail's second scrolling region, and a peer of the address list rather than a drawer.
+ *
+ * It began as a fourth `<details>` in `.sidebar-drawers`, which is the obvious place for it and the
+ * wrong one. That budget divides evenly between peers, and it has no way to say that one of them is
+ * the surface the view exists for: measured at 1115x800 with a place card open, the feed held 26px
+ * of body at rest and 5px with every drawer open -- a fraction of one 54px row, in a list that
+ * scrolled its whole 2,300px perfectly and could never show a single whole entry. Compacting the row
+ * did not touch that, because the row was never what was too big.
+ *
+ * So it takes its space the way `.sidebar-scroll` does, and pays for it out of the place card (34vh
+ * to 16vh) and the drawers (28vh to 18vh when a card is open) rather than out of the address list.
+ *
+ * `flex: 1 1 auto` with `min-height` is the whole mechanism, and both halves matter:
+ *
+ * - The basis is content, so with room to spare the feed is simply as tall as it needs to be, and
+ *   only a column that overflows shrinks it -- the same reasoning as `.sidebar-scroll` above.
+ * - `min-height: 162px` is the floor, and it is a floor rather than the automatic content minimum
+ *   because the content minimum here is the whole 60-row log. Without it the feed and the address
+ *   list shrink in proportion to their content, and this list is the larger of the two by an order
+ *   of magnitude -- so flex hands nearly all the shrink to the address list, drives it to 0px, and
+ *   only then comes back for the feed. 162px is the 45px head plus two whole 57.3px rows plus the
+ *   1px border, all measured: enough that a row arriving reads as an arrival rather than as a
+ *   flicker at a clipped edge. Measured at 1115x800 the feed sits exactly on this floor in every
+ *   state and not only the worst one, so the floor is the number that ships -- 148px there gave 1.8
+ *   rows, which clips the second. The 14px it costs comes from the place card, whose cap drops from
+ *   18vh to 16vh in the same change, so the address list holds at 77px rather than paying for it.
+ * - `max-height: 22vh` stops the other side of the same trade. A feed sized purely from content
+ *   would claim its full 2,300px, take the shrink out of the address list first for the same reason,
+ *   and leave the rail with a log and nothing to navigate by.
+ *
+ * The scroller is the body, not this element, so the head stays pinned while the log moves under it.
+ */
+.sidebar-feed {
+  flex: 1 1 auto;
+  min-height: 162px;
+  max-height: 22vh;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #1c2733;
+}
+
+.sidebar-feed-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 12px 7px;
+  /*
+   * Longhands, not `font: 600 .74rem/1.2 inherit`. A CSS-wide keyword is not a legal component of a
+   * shorthand, so that `inherit` invalidates the whole declaration and it is dropped -- leaving the
+   * UA's `h2` size, which is 1.5em and bold. Measured at 1115x800 the badge then wrapped to three
+   * lines and the head took 94px of the region's 131, leaving the log 36px. It fails silently in
+   * exactly the way this file's other measurements warn about: nothing errors, the column does not
+   * overflow, and the feed shows two thirds of one row.
+   */
+  font-size: .74rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: #d6e4f0;
+}
+
+.sidebar-feed-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+
+/* --- Live query ticker --------------------------------------------------------------------- */
+/*
+ * A log, not a table, and styled to read as one.
+ *
+ * The list is ordered by arrival and by nothing else, so nothing here may imply a ranking: no row
+ * is emphasised over another by size or weight, and the only colour that varies is the state rail
+ * on the left, which encodes running / blocked / gone. A feed that highlighted the expensive rows
+ * would be a leaderboard with a clock on it, which is the thing the legend's exposure table already
+ * is and the thing this is deliberately not.
+ *
+ * Rows are `content-visibility: auto` because the list is capped at 60 and a busy instance rewrites
+ * it every couple of seconds, next to a WebGL canvas that is trying to hold a frame budget.
+ *
+ * Two lines, and as tight as two lines go. A row is what the reader watches arrive, so its height is
+ * what decides how much of the feed is a feed: at three lines the row measured 81.8px, so even the
+ * 132px floor `.sidebar-feed` guarantees would have shown one row and a sliver. Folding the session
+ * and command up into the timestamp line takes the row to 54px without dropping a field, which is
+ * two whole rows inside that floor and five in the 22vh the region takes when the rail has room.
+ */
+.query-ticker { display: grid; }
+.query-ticker-list { list-style: none; margin: 0; padding: 0 8px 4px; display: grid; gap: 2px; }
+.query-ticker-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 54px;
+}
+.query-ticker-row > button,
+.query-ticker-inert {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 5px 8px 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  /*
+   * The state rail. `box-shadow` rather than `border-left`, so a state change never reflows the row
+   * -- rows change state while the list is being read, and a 3px width change would shuffle every
+   * line of wrapped SQL below it.
+   */
+  box-shadow: inset 3px 0 0 #26384a;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.query-ticker-row > button { cursor: pointer; }
+.query-ticker-row > button:hover { background: #101c27; }
+.query-ticker-row > button[aria-pressed='true'] { border-color: #33705f; background: #0f2029; }
+.query-ticker-row.is-live > button,
+.query-ticker-row.is-live .query-ticker-inert { box-shadow: inset 3px 0 0 #4ea9f5; }
+.query-ticker-row.is-blocked > button,
+.query-ticker-row.is-blocked .query-ticker-inert { box-shadow: inset 3px 0 0 #f5a04e; }
+/*
+ * A departed row stays legible rather than being faded into decoration. It is still the record of
+ * what ran, and "gone" is said in words on the row itself -- an opacity ramp would be a second,
+ * weaker way of saying it that a reader could easily take for "less important".
+ */
+.query-ticker-row.is-gone > button,
+.query-ticker-row.is-gone .query-ticker-inert { box-shadow: inset 3px 0 0 #2b3a48; }
+
+.query-ticker-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: #8fa5b7;
+  font: .64rem/1.25 ui-monospace, Consolas, monospace;
+}
+.query-ticker-when { color: #c6d4e0; }
+.query-ticker-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.query-ticker-flag {
+  margin-left: auto;
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: .6rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.query-ticker-flag.is-blocked { color: #f7c98f; background: #33240f; }
+.query-ticker-flag.is-gone { color: #93a8ba; background: #16202a; }
+/*
+ * Two lines of statement text, then an ellipsis. A feed row is a glance, and the plan finder and
+ * the place card are where a whole statement is read -- but the first line of a batch is almost
+ * never the distinguishing part of it, so one line would be a worse trade than it looks.
+ */
+.query-ticker-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  color: #dbe5ed;
+  font: .68rem/1.35 ui-monospace, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+/* Absent text is a sentence about the sample, not SQL, so it is not set as code. */
+.query-ticker-text.is-absent { color: #8fa5b7; font-style: italic; font-family: inherit; }
+
+/*
+ * One arrival flash, and only for a new row.
+ *
+ * The map already announces an arrival with a light trail; this is the same event in the list, so
+ * the two read as one thing. It runs once and does not repeat, because a list that pulses is a list
+ * nobody can read a long statement in.
+ */
+@keyframes query-ticker-arrive {
+  from { background: #14293a; }
+  to { background: transparent; }
+}
+.query-ticker-row.is-live > button,
+.query-ticker-row.is-live .query-ticker-inert {
+  animation: query-ticker-arrive 1.6s ease-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .query-ticker-row.is-live > button,
+  .query-ticker-row.is-live .query-ticker-inert { animation: none; }
 }
 
 
@@ -1545,6 +1770,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
    * here any more, and a 46vh cap on a scrolling section would only reintroduce a nested scroller.
    */
   .sidebar-place-card,
+  .sidebar-feed,
   .sidebar-drawer { max-height: none; }
 
   /*
@@ -1563,7 +1789,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
    * the wrapper existed. `.tray-open` uses the same idiom.
    *
    * Custom properties still inherit through `display: contents`, so the drawers below go on
-   * inheriting `--sidebar-drawer-cap` -- a 15.33vh third-share by default, and the share tracks the
+   * inheriting `--sidebar-drawer-cap` -- a 6vh third-share by default, and the share tracks the
    * open count, so it is tighter still than the half-share two drawers inherited and far tighter
    * than the 46vh that predates the wrapper. That is harmless only because `max-height: none` above
    * discards it. Weaken that override and the sheet's drawers do not merely return to their old cap,
@@ -1576,6 +1802,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
    * you drag over the address list expecting the sheet to move and the list consumes it instead.
    */
   .sidebar-scroll,
+  .sidebar-feed-body,
   .sidebar-drawer-body,
   .sidebar-place-card .detail,
   .sidebar-place-card .place-card { overflow: visible; }

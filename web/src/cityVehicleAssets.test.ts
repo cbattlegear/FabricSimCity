@@ -182,7 +182,14 @@ describe('the exported vehicle kit contains what the scene asks for', () => {
     // Kept in step with VEHICLE_SIZE in DatabaseCityScene.ts, so a fallback box is the same size as
     // the shell it replaces and the ladder does not change when the network does.
     const scene = readFileSync(new URL('./DatabaseCityScene.ts', import.meta.url), 'utf8')
-    const table = scene.slice(scene.indexOf('const VEHICLE_SIZE'), scene.indexOf('const VEHICLE_SPEED'))
+    // Both anchors are asserted before slicing. `indexOf` returns -1 for a renamed anchor, and
+    // `slice(-1, …)` or `slice(…, -1)` silently widens the window to most of the file, at which
+    // point this stops testing the fallback table and starts passing on anything.
+    const from = scene.indexOf('const VEHICLE_SIZE')
+    const to = scene.indexOf('const VEHICLE_Y')
+    expect(from).toBeGreaterThan(-1)
+    expect(to).toBeGreaterThan(from)
+    const table = scene.slice(from, to)
     for (const [asset, key] of [
       ['vehicle_bike', 'bike'], ['vehicle_car', 'car'],
       ['vehicle_van', 'van'], ['vehicle_semi_truck', 'semiTruck'],
