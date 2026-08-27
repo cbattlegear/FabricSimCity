@@ -508,6 +508,35 @@ describe('the sidebar column scrolls its own overflow', () => {
   })
 
   /*
+   * The cap above is not enough on its own, and pairing it with an explicit floor is what fixes the
+   * defect this guards.
+   *
+   * A flex item's *automatic* minimum is its content size clamped by its own definite `max-height`.
+   * So with `min-height: auto` the cap acted as a floor as well as a ceiling: a directory holding a
+   * 60-entry address list floored at the whole 62vh and could not give way at all, and the rail
+   * overflowed behind `overflow: hidden`. Measured with the directory open, 249px of the column was
+   * unreachable at 1440x900 and 271px at 1115x800 -- the AGENTS.md clipping signature. Naming a
+   * floor replaces the automatic minimum, and the same six states then measure 0 unreachable.
+   *
+   * `.sidebar-feed` never had this problem because it already names an explicit `min-height`, which
+   * is what made the asymmetry easy to miss.
+   *
+   * The floor has to be small enough to be a floor rather than a second cap, and large enough that
+   * the summary can never be clipped -- the 10px-drawer invariant, guarded separately above.
+   */
+  it('gives the directory an explicit floor so its cap cannot become one', () => {
+    const own = desktopRule('.sidebar-directory')
+    expect(own, '.sidebar-directory has no rule at all').not.toBeNull()
+    const floor = own!.match(/min-height:\s*([\d.]+)rem/)
+    expect(floor, '.sidebar-directory names no explicit min-height, so it floors at its max-height')
+      .not.toBeNull()
+    const rem = Number(floor![1])
+    expect(rem, 'the directory floor is a second cap, not a floor').toBeLessThan(6)
+    expect(rem, 'the directory floor is too low to keep the summary clickable')
+      .toBeGreaterThanOrEqual(2.5)
+  })
+
+  /*
    * The point of collapsing it: with the directory shut there is nothing competing for the rail, so
    * the feed should take the space rather than sitting at its own cap with dead air beneath it.
    *

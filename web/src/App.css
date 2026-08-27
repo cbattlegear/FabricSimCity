@@ -1430,8 +1430,25 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  *   leaves; closed, `::details-content` is not generated at all and the summary is the only box, so
  *   the whole element collapses to 35px and the feed takes the column instead.
  */
+/*
+ * The address book, collapsed by default so the live feed is what the column opens on.
+ *
+ * `min-height` is explicit and deliberately small. A flex item's *automatic* minimum is its content
+ * size clamped by its own definite `max-height`, so with `min-height: auto` this box floored at the
+ * full 62vh cap and could not give way at all: measured at 1440x900 with the directory open, 249px
+ * of the rail was unreachable behind `overflow: hidden`, and 271px at 1115x800. Naming a floor
+ * replaces that automatic minimum and lets flex shrink the directory to whatever the column can
+ * actually spare, while `::details-content { min-height: 0 }` below routes the shrink down into
+ * `.sidebar-scroll`, which is already an `overflow: auto` scroller.
+ *
+ * The floor is a little above the summary's own height so the disclosure control can never be
+ * clipped -- that is the 10px-drawer defect, and it is the one thing a floor here has to guarantee.
+ * `max-height` stays a ceiling for tall viewports rather than a target; the real size is settled by
+ * shrinking against `.sidebar-feed`, which floors at its own explicit 162px.
+ */
 .sidebar-directory {
   flex: 1 1 auto;
+  min-height: 2.75rem;
   max-height: 62vh;
   display: flex;
   flex-direction: column;
