@@ -117,7 +117,22 @@ public sealed record ShowplanNodeV1(
     bool Parallel,
     ShowplanObjectV1? ObjectReference,
     string? Predicate,
-    IReadOnlyList<ShowplanWarningV1> Warnings);
+    IReadOnlyList<ShowplanWarningV1> Warnings,
+
+    /// <summary>
+    /// The optimizer's <c>AvgRowSize</c> for the rows this operator emits, in bytes.
+    /// <para>
+    /// Appended rather than placed next to <see cref="EstimatedRows"/> so that every existing
+    /// construction site keeps compiling; the ordering here carries no meaning.
+    /// </para>
+    /// <para>
+    /// Null means the plan did not state a row size for this operator, never that its rows are
+    /// free. Multiplied by <see cref="EstimatedRows"/> it gives the bytes the optimizer expected to
+    /// move through this operator -- an estimate made at compile time, not a measurement of any
+    /// execution.
+    /// </para>
+    /// </summary>
+    decimal? EstimatedRowSizeBytes = null);
 
 public sealed record NormalizedShowplanV1(
     string SchemaVersion,

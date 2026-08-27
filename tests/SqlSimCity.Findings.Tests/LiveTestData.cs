@@ -23,6 +23,7 @@ internal static class LiveTestData
             fileIo ?? new FileIoSampleV1([], DataStatus.Unknown, "Not sampled in test."),
             new SchedulerPressureV1([], DataStatus.Unknown, "Not sampled in test."),
             logSpace ?? new LogSpaceUsageV1(null, null, null, DataStatus.Unknown, "Not sampled in test."),
+            new DeadlockSampleV1([], 0, null, DataStatus.Unknown, "Not sampled in test."),
             new CollectionDiagnosticsV1(1, Now, Now.AddSeconds(-2), 5, 0, 0, []));
 
     internal static BlockingGraphV1 EmptyGraph() =>

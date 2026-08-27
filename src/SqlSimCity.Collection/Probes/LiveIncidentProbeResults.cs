@@ -41,7 +41,16 @@ public sealed record ActiveRequestRow(
     int VisibleSessionCount,
     int SelectionRank,
     int? BatchTextLength,
-    int? CurrentStatementTextLength);
+    int? CurrentStatementTextLength,
+    /// <summary>
+    /// <c>sys.dm_exec_requests.query_hash</c> as the raw <c>binary(8)</c> the engine reported, or
+    /// null when this row has no request or the engine reported no hash. Kept as bytes all the way
+    /// to the collector on purpose: the probe never formats it, so exactly one converter renders it
+    /// to text and it cannot drift out of step with the Query Store side it is joined to.
+    /// </summary>
+    byte[]? QueryHash = null,
+    /// <summary><c>sys.dm_exec_requests.query_plan_hash</c>, on the same terms as <see cref="QueryHash"/>.</summary>
+    byte[]? QueryPlanHash = null);
 
 /// <summary>Row shape for <c>sessions.memory_grants</c>.</summary>
 public sealed record MemoryGrantRow(
@@ -144,3 +153,25 @@ public sealed record SchedulerRow(
 
 /// <summary>Row shape for <c>space.log_space_usage</c>.</summary>
 public sealed record LogSpaceRow(decimal TotalLogSizeMb, decimal UsedLogSpaceMb, decimal UsedLogSpacePercent);
+
+/// <summary>
+/// One row of <c>sessions.deadlock_graphs</c>: a deadlock the engine already resolved and recorded,
+/// still in its XML form. Shredding it is the collector's job, not the probe's -- the graph's
+/// element set is the engine's to extend, and parsing it in T-SQL would bake today's shape into the
+/// catalog.
+/// <para>
+/// <see cref="VisibleDeadlockCount"/> is the count before <c>@MaxGraphs</c> was applied and is
+/// identical on every row, so a capped result is never read as a calmer instance.
+/// </para>
+/// </summary>
+public sealed record DeadlockGraphRow(
+    string DeadlockId,
+    DateTimeOffset OccurredAt,
+    int ProcessCount,
+    int ResourceCount,
+    int VictimCount,
+    bool IncludesSqlText,
+    string DeadlockXml,
+    int DeadlockXmlLength,
+    int VisibleDeadlockCount,
+    int SelectionRank);

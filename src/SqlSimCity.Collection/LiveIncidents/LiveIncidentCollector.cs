@@ -35,9 +35,17 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
     private readonly CounterEpochTracker<int> _cpuUsageTracker = new();
     private readonly CounterEpochTracker<int> _schedulerDelayTracker = new();
     private readonly EnginePlatform? _configuredPlatform;
+    private readonly TimeSpan _deadlockRefreshInterval;
+    private readonly int? _maxDeadlockGraphs;
+    private readonly bool _includeDeadlockSqlText;
+    private readonly SecureDeadlockGraphParser _deadlockParser = new();
     private Dictionary<string, LiveRequestV1> _previousRequests = new(StringComparer.Ordinal);
     private long _epochMarkerTicks;
     private DateTimeOffset? _previousSampleAt;
+
+    // The deadlock sample is the one subsystem that is not re-read every cycle, so the last one is
+    // held and reused. It carries its own CollectedAt, so reusing it never backdates or freshens it.
+    private DeadlockSampleV1? _lastDeadlockSample;
 
     public LiveIncidentCollector(
         ILiveIncidentProbeExecutor probes,
@@ -45,7 +53,10 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         string displayName,
         TimeProvider? timeProvider = null,
         TimeSpan? freshnessWindow = null,
-        EnginePlatform? configuredPlatform = null)
+        EnginePlatform? configuredPlatform = null,
+        TimeSpan? deadlockRefreshInterval = null,
+        int? maxDeadlockGraphs = 25,
+        bool includeDeadlockSqlText = false)
     {
         ArgumentNullException.ThrowIfNull(probes);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetId);
@@ -56,6 +67,9 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         _timeProvider = timeProvider ?? TimeProvider.System;
         _freshnessWindow = freshnessWindow ?? TimeSpan.FromSeconds(10);
         _configuredPlatform = configuredPlatform;
+        _deadlockRefreshInterval = deadlockRefreshInterval ?? TimeSpan.FromSeconds(60);
+        _maxDeadlockGraphs = maxDeadlockGraphs;
+        _includeDeadlockSqlText = includeDeadlockSqlText;
     }
 
     public async Task<LiveIncidentSnapshotV1> CollectAsync(long sequence, CancellationToken cancellationToken)
@@ -178,6 +192,15 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
 
         _previousSampleAt = now;
 
+        // Deliberately does not contribute to anyOperationalSuccess. A reused deadlock sample is
+        // evidence from an earlier cycle, and letting it prove this cycle reached the server would
+        // let a disconnected snapshot report itself Available on the strength of cached data.
+        var deadlocks = await CollectDeadlocksAsync(platform, now, cancellationToken).ConfigureAwait(false);
+        if (deadlocks.Status != DataStatus.Available)
+        {
+            unavailable.Add(new UnavailableFieldV1("deadlocks", deadlocks.Status, deadlocks.Reason));
+        }
+
         var completedAt = _timeProvider.GetUtcNow();
         // A real local source-observed timestamp is only meaningful when this cycle actually
         // produced genuine operational evidence (requirement 7); otherwise it stays null rather
@@ -227,6 +250,7 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
             fileIo,
             scheduler,
             logSpace,
+            deadlocks,
             diagnostics);
     }
 
@@ -410,6 +434,12 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         BatchTextTruncation = DescribeTextTruncation(row.BatchText, row.BatchTextLength, "batch text"),
         CurrentStatementTextTruncation = DescribeTextTruncation(
             row.CurrentStatementText, row.CurrentStatementTextLength, "current statement text"),
+        // Rendered by the same converter the Query Store collector uses, so the two sides of the
+        // join cannot disagree about case or an 0x prefix. They are joined by string equality and a
+        // mismatch would produce no matches at all, which is indistinguishable from an idle
+        // instance -- so the shared converter is the guard, not a runtime check.
+        QueryHash = QueryHashFormat.ToJoinKey(row.QueryHash),
+        QueryPlanHash = QueryHashFormat.ToJoinKey(row.QueryPlanHash),
     };
 
     private static MemoryGrantV1 MapMemoryGrant(MemoryGrantRow row) => new(
@@ -430,6 +460,149 @@ public sealed class LiveIncidentCollector : ILiveIncidentCollector
         row.TimeoutSec,
         row.WaitTimeMs?.ToString(CultureInfo.InvariantCulture),
         row.BatchText);
+
+    /// <summary>
+    /// Reads deadlocks recorded by the <c>system_health</c> session, at most once per
+    /// <c>DeadlockRefreshSeconds</c>, reusing the previous sample in between.
+    /// <para>
+    /// The reuse is safe precisely because a deadlock is historical. Every other subsystem here
+    /// describes the instance as it is right now and would be wrong if it were a cycle old; a
+    /// recorded deadlock happened when it happened, and re-reading it more often would not make it
+    /// any more current. The sample carries its own <c>CollectedAt</c> so its age is always the age
+    /// of the read, never the age of the snapshot around it.
+    /// </para>
+    /// </summary>
+    private async Task<DeadlockSampleV1> CollectDeadlocksAsync(
+        EnginePlatform platform, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (_deadlockRefreshInterval <= TimeSpan.Zero)
+        {
+            return new DeadlockSampleV1([], 0, null, DataStatus.Unsupported,
+                "Recorded-deadlock collection is disabled by configuration " +
+                "(LiveIncidents:SampleBounds:DeadlockRefreshSeconds is 0), so no deadlock evidence was read. " +
+                "This is a local choice, not a statement about the instance.");
+        }
+
+        // Reuse until the interval elapses. The comparison is against the sample's own collection
+        // time, so a sample is never held longer than the interval regardless of cycle jitter.
+        //
+        // This is checked ahead of the platform gates below, and deliberately so. A cached sample
+        // was read from this instance and the deadlocks in it happened; whether *this* cycle managed
+        // to determine the platform has no bearing on that. Testing platform first would let a
+        // transient identity-probe blip replace recorded history with Unknown, which is the same
+        // "history disappears on a blip" failure the catch block further down exists to prevent.
+        // The gates cannot be starved by this: neither of them ever populates the cache, so a
+        // disabled or Azure-scoped collector has nothing here to return.
+        if (_lastDeadlockSample is { CollectedAt: { } lastCollectedAt } cached
+            && now - lastCollectedAt < _deadlockRefreshInterval)
+        {
+            return cached;
+        }
+
+        if (platform == EnginePlatform.Unknown)
+        {
+            // The interval has elapsed and the platform is unknown, so a refresh cannot be
+            // attempted. That is a failed refresh like any other: what was already read is still
+            // true, so it is returned with its own timestamp and the reason disclosed alongside.
+            return NotRefreshed(DataStatus.Unknown,
+                "The engine platform could not be determined this cycle, so no deadlock probe was attempted: " +
+                "the system_health session is server-scoped and does not exist on Azure SQL Database, and " +
+                "guessing could query a view that is not there.");
+        }
+
+        if (platform == EnginePlatform.AzureSqlDatabase)
+        {
+            return new DeadlockSampleV1([], 0, null, DataStatus.Unsupported,
+                "Azure SQL Database has no system_health Extended Events session, and its Extended Events " +
+                "views are database-scoped (sys.dm_xe_database_sessions) rather than the server-scoped ones " +
+                "this session lives in. Deadlocks are therefore not observed here. This is not the same as " +
+                "no deadlocks having occurred.");
+        }
+
+        try
+        {
+            var rows = await _probes.GetDeadlockGraphsAsync(
+                azureScoped: false,
+                sinceUtc: null,
+                maxGraphs: _maxDeadlockGraphs is > 0 ? _maxDeadlockGraphs : null,
+                includeSqlText: _includeDeadlockSqlText,
+                cancellationToken).ConfigureAwait(false);
+
+            var graphs = new List<DeadlockGraphV1>(rows.Count);
+            var unparseable = 0;
+            foreach (var row in rows)
+            {
+                try
+                {
+                    graphs.Add(_deadlockParser.Parse(
+                        row.DeadlockId, row.OccurredAt, row.DeadlockXml, row.IncludesSqlText, cancellationToken));
+                }
+                catch (System.Xml.XmlException)
+                {
+                    // One malformed graph must not discard the deadlocks that parsed. It is counted
+                    // and disclosed in the reason instead, because silently returning a shorter list
+                    // is exactly the "quieter instance" failure this subsystem exists to avoid.
+                    unparseable++;
+                }
+            }
+
+            // The probe reports the pre-cap count identically on every row, so any row carries it.
+            // With no rows there is nothing retained, and 0 is the true count rather than a default.
+            var totalRetained = rows.Count > 0 ? rows[0].VisibleDeadlockCount : 0;
+
+            var reason = graphs.Count == 0 && unparseable == 0
+                ? "No deadlock is retained in the system_health event files that were read. The session rolls " +
+                  "its files over, so this is an observation window rather than a guarantee that none occurred."
+                : $"Read {graphs.Count} of {totalRetained} deadlock graph(s) retained in the system_health event files.";
+            if (unparseable > 0)
+            {
+                reason += $" {unparseable} further graph(s) could not be parsed and are omitted from the list but counted here.";
+            }
+
+            var sample = new DeadlockSampleV1(graphs, totalRetained, now, DataStatus.Available, reason);
+            _lastDeadlockSample = sample;
+            return sample;
+        }
+        catch (ProbeExecutionException ex)
+        {
+            var (status, reason) = Classify(ex);
+            return NotRefreshed(status, reason, forgetOnFailure: true);
+        }
+    }
+
+    /// <summary>
+    /// Answers a cycle in which the deadlock sample could not be refreshed.
+    /// <para>
+    /// A failed refresh does not invalidate what was already read: the deadlocks in the last sample
+    /// still happened. It is returned with its original timestamp and its original
+    /// <see cref="DataStatus.Available"/> status, and the reason the refresh did not happen is
+    /// disclosed alongside, so a transient permission, timeout or platform-detection blip does not
+    /// make recorded history disappear from the map.
+    /// </para>
+    /// </summary>
+    /// <param name="forgetOnFailure">
+    /// Whether to discard the cache when there is nothing worth keeping. Set for probe failures, so
+    /// a subsequent recovery re-reads immediately rather than honouring an interval measured from a
+    /// sample that no longer exists. Left clear when the probe was never attempted.
+    /// </param>
+    private DeadlockSampleV1 NotRefreshed(DataStatus status, string reason, bool forgetOnFailure = false)
+    {
+        if (_lastDeadlockSample is { Status: DataStatus.Available, Graphs.Count: > 0 } previous)
+        {
+            return previous with
+            {
+                Reason = previous.Reason +
+                    $" This sample was not refreshed on the most recent attempt ({status}: {reason}); it is reported with its original collection time.",
+            };
+        }
+
+        if (forgetOnFailure)
+        {
+            _lastDeadlockSample = null;
+        }
+
+        return new DeadlockSampleV1([], 0, null, status, reason);
+    }
 
     private async Task<TempdbUsageV1> CollectTempdbAsync(
         EnginePlatform platform, List<SampleTruncationV1> truncations, CancellationToken cancellationToken)

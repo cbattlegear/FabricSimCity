@@ -151,6 +151,33 @@ public sealed record DatabaseCityWaitAttributionV1(
         "No compiled plan cost estimate was available for this family, so its wait time is not apportioned.");
 }
 
+/// <summary>One object's share of the estimated bytes a query family's plans move per execution.</summary>
+public sealed record DatabaseCityObjectDataVolumeV1(string ObjectId, string EstimatedBytesPerExecution);
+
+/// <summary>
+/// How many bytes one execution of this query family was expected to move, from the optimizer's own
+/// per-operator row counts and row sizes in the compiled plans Query Store retained.
+/// <para>
+/// This is an estimate the optimizer made when it compiled the plan, against the statistics that
+/// existed then -- not a measurement of any execution. A plan whose cardinality estimate is wrong
+/// produces a volume that is wrong by the same factor, and nothing here detects that.
+/// </para>
+/// <para>
+/// Values are decimal strings for the same reason every other total in this contract is: the
+/// product of a row count and a row size routinely exceeds what a JSON number survives intact, and
+/// a figure silently rounded on the way to the browser is worse than no figure.
+/// </para>
+/// <para>
+/// The whole record is absent when no retained plan stated both a row count and a row size. Absent
+/// means "the plans did not say", never "this family moves no data".
+/// </para>
+/// </summary>
+public sealed record DatabaseCityPlanDataVolumeV1(
+    string EstimatedBytesPerExecution,
+    IReadOnlyList<DatabaseCityObjectDataVolumeV1> ByObject,
+    int PlansRead,
+    string Rationale);
+
 public sealed record DatabaseCityQueryFamilyV1(
     string FamilyId,
     string QueryHash,
@@ -170,6 +197,13 @@ public sealed record DatabaseCityQueryFamilyV1(
     /// estimated plan cost. Modelled, not measured; see <see cref="DatabaseCityWaitAttributionV1"/>.
     /// </summary>
     public DatabaseCityWaitAttributionV1 WaitAttribution { get; init; } = DatabaseCityWaitAttributionV1.None;
+
+    /// <summary>
+    /// Estimated bytes one execution of this family moves, per object. Null when no retained plan
+    /// stated both a row count and a row size -- which is "the plans did not say", not "no data".
+    /// Modelled, not measured; see <see cref="DatabaseCityPlanDataVolumeV1"/>.
+    /// </summary>
+    public DatabaseCityPlanDataVolumeV1? PlanDataVolume { get; init; }
 }
 
 public sealed record DatabaseCityWorkloadAggregateV1(

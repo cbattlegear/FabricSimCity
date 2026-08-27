@@ -57,6 +57,44 @@ public sealed class LiveIncidentsSampleBoundsOptions
     /// connection count; the cap keeps the heaviest allocators.
     /// </summary>
     public int MaxTempdbRows { get; set; } = 1_000;
+
+    /// <summary>
+    /// Maximum deadlock graphs carried in one snapshot; <c>0</c> for no cap. The snapshot always
+    /// reports the pre-cap count, so a capped list is never read as a calmer instance.
+    /// </summary>
+    public int MaxDeadlockGraphs { get; set; } = 25;
+
+    /// <summary>
+    /// How often the recorded-deadlock evidence is re-read, in seconds; <c>0</c> disables deadlock
+    /// collection entirely.
+    /// <para>
+    /// This is a separate interval rather than the sampler's own cadence because the two costs are
+    /// not comparable. Reading deadlocks means scanning the <c>system_health</c> session's event
+    /// files: measured on SQL Server 2022 (<c>tools/measure</c>), a full scan of the default
+    /// four-file set read 38,319 events in 0.70-1.11 s, against a 2-5 s sampling cycle. Running it
+    /// per cycle would spend a fifth to a half of every cycle on evidence that changes far more
+    /// slowly than the rest of the snapshot. The sample is refreshed on this interval and reused in
+    /// between, and it carries its own collection timestamp so its age is never read as the
+    /// snapshot's.
+    /// </para>
+    /// <para>
+    /// Lowering this does not make a deadlock appear sooner than the engine recorded it; deadlocks
+    /// are historical either way. It only shortens the delay between the engine writing one and this
+    /// application reading it.
+    /// </para>
+    /// </summary>
+    public int DeadlockRefreshSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Whether recorded deadlock graphs are fetched with participant statement text.
+    /// <para>
+    /// Off by default, which is the opposite of the live request probe. A live request's text is
+    /// what an operator is looking at when they ask what is running now; a deadlock graph carries a
+    /// whole submitted batch for every participant of an event that already finished, and nobody
+    /// asked for it interactively. Turning it on is a deliberate choice to retain that text.
+    /// </para>
+    /// </summary>
+    public bool IncludeDeadlockSqlText { get; set; }
 }
 
 /// <summary>

@@ -160,6 +160,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         var crossDatabase = new SortedSet<string>(StringComparer.Ordinal);
         var unresolved = new SortedSet<string>(StringComparer.Ordinal);
         var costs = new PlanCostAccumulator();
+        var volumes = new PlanDataVolumeAccumulator();
         var hydrated = 0;
         var skipped = 0;
         var unreadable = 0;
@@ -214,6 +215,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             crossDatabase.UnionWith(planRemote);
             routes.AddPlan(planLocal, planRemote);
             costs.AddPlan(PlanCostAttribution.Split(showplan), index, plan.RuntimeCounted);
+            volumes.AddPlan(PlanDataVolume.Split(showplan), index);
         }
 
         var objectIds = local.Concat(crossDatabase).ToArray();
@@ -236,6 +238,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             {
                 WaitMillisecondsByCategory = waits,
                 WaitAttribution = costs.Build(counters.TotalWaitMilliseconds),
+                PlanDataVolume = volumes.Build(),
             },
             hydrated,
             // Totals belong to one building only when the plans named that building and nothing
@@ -600,6 +603,124 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             SortedDictionary<string, decimal> Shares,
             decimal Elsewhere,
             decimal Nowhere);
+    }
+
+    /// <summary>
+    /// Collects the estimated per-execution data volume across a family's compiled plans.
+    /// <para>
+    /// Plans are averaged rather than summed, for the same reason the cost split averages them: each
+    /// retained plan describes the whole query, so summing would multiply the query's data volume by
+    /// however many plans Query Store happens to be holding. The average is the estimate for "one
+    /// execution", which is what a vehicle on the map represents.
+    /// </para>
+    /// <para>
+    /// Bytes falling on objects this page does not draw are kept out of the per-object list but
+    /// stay in the total and are disclosed in the rationale. The total answers "how much data does
+    /// this query move", which is true regardless of what this page happens to draw; dropping those
+    /// bytes would make a query that reads mostly off-page look small.
+    /// </para>
+    /// </summary>
+    private sealed class PlanDataVolumeAccumulator
+    {
+        private readonly List<PlanVolume> _plans = [];
+        private int _plansWithoutRowSize;
+
+        public void AddPlan(PlanDataVolumeSplit split, PageObjectIndex index)
+        {
+            if (!split.HasVolume)
+            {
+                _plansWithoutRowSize++;
+                return;
+            }
+
+            var onPage = new SortedDictionary<string, decimal>(StringComparer.Ordinal);
+            var elsewhere = 0m;
+            foreach (var entry in split.Objects)
+            {
+                if (index.Resolve(entry.Reference) is { Kind: ReferenceKind.OnPage, Value: { } objectId })
+                    onPage[objectId] = onPage.GetValueOrDefault(objectId) + entry.EstimatedBytes;
+                else
+                    elsewhere += entry.EstimatedBytes;
+            }
+
+            _plans.Add(new PlanVolume(onPage, elsewhere, split.TotalBytes, split.OperatorsMissingRowSize));
+        }
+
+        public DatabaseCityPlanDataVolumeV1? Build()
+        {
+            // Null, not zero. No plan stating a row size is "the plans did not say"; publishing 0
+            // bytes would put the smallest vehicle on the map for a query that may move gigabytes.
+            if (_plans.Count == 0) return null;
+
+            var totals = new SortedDictionary<string, decimal>(StringComparer.Ordinal);
+            var total = 0m;
+            var elsewhere = 0m;
+            var partialPlans = 0;
+            foreach (var plan in _plans)
+            {
+                foreach (var (objectId, bytes) in plan.OnPage)
+                    totals[objectId] = totals.GetValueOrDefault(objectId) + bytes;
+                total += plan.TotalBytes;
+                elsewhere += plan.Elsewhere;
+                if (plan.OperatorsMissingRowSize > 0) partialPlans++;
+            }
+
+            var divisor = _plans.Count;
+            var byObject = totals
+                .Select(entry => new DatabaseCityObjectDataVolumeV1(entry.Key, Bytes(entry.Value / divisor)))
+                .ToArray();
+
+            return new DatabaseCityPlanDataVolumeV1(
+                Bytes(total / divisor),
+                byObject,
+                divisor,
+                Describe(byObject.Length, total / divisor, elsewhere / divisor, divisor, partialPlans, _plansWithoutRowSize));
+        }
+
+        /// <summary>
+        /// Renders to a whole number of bytes. A fractional byte is an artifact of averaging across
+        /// plans, not something the optimizer claimed, and rounding it away here keeps the published
+        /// figure in the unit it is named in.
+        /// </summary>
+        private static string Bytes(decimal value) =>
+            decimal.Round(value, 0, MidpointRounding.AwayFromZero).ToString("0", CultureInfo.InvariantCulture);
+
+        private static string Describe(
+            int onPageObjects,
+            decimal total,
+            decimal elsewhere,
+            int plans,
+            int partialPlans,
+            int plansWithoutRowSize)
+        {
+            var parts = new List<string>(5)
+            {
+                $"Estimated from row counts and row sizes in {Plans(plans)} retained for this family, averaged across them because each describes the whole query.",
+            };
+
+            parts.Add(onPageObjects == 0
+                ? "None of those bytes are read from an object this page draws."
+                : $"{Bytes(total - elsewhere)} of {Bytes(total)} byte(s) per execution are read from {onPageObjects.ToString(CultureInfo.InvariantCulture)} object(s) this page draws.");
+
+            if (elsewhere > 0m)
+                parts.Add($"{Bytes(elsewhere)} byte(s) are read from objects this page does not draw; they are counted in the total but not placed on a building.");
+            if (partialPlans > 0)
+                parts.Add($"{Plans(partialPlans)} named an object through an operator that stated no row size, so the figure understates those reads.");
+            if (plansWithoutRowSize > 0)
+                parts.Add($"A further {Plans(plansWithoutRowSize)} stated no row size at all and contributed nothing.");
+
+            parts.Add("These are the optimizer's compile-time estimates against the statistics that existed then, not a measurement of any execution.");
+            return string.Join(" ", parts);
+        }
+
+        private static string Plans(int count) =>
+            count == 1 ? "1 compiled plan" : $"{count.ToString(CultureInfo.InvariantCulture)} compiled plans";
+
+        private sealed record PlanVolume(
+            SortedDictionary<string, decimal> OnPage,
+            decimal Elsewhere,
+            decimal TotalBytes,
+            int OperatorsMissingRowSize);
     }
 
     private sealed class ExposureTotals

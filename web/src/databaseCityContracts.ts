@@ -115,6 +115,31 @@ export interface DatabaseCityWaitAttribution {
   rationale: string
 }
 
+/** One object's share of the estimated bytes a family's plans move per execution. */
+export interface DatabaseCityObjectDataVolume {
+  objectId: string
+  estimatedBytesPerExecution: string
+}
+
+/**
+ * How many bytes one execution of this query family was expected to move, from the optimizer's own
+ * per-operator row counts and row sizes.
+ *
+ * This is an estimate made when the plan was compiled, against the statistics that existed then --
+ * not a measurement of any execution. A plan whose cardinality estimate is wrong produces a volume
+ * wrong by the same factor, and nothing here detects that. `rationale` says so, and anything drawn
+ * from these numbers has to repeat it.
+ *
+ * Byte counts are decimal strings because the product of a row count and a row size routinely
+ * exceeds what a JSON number survives intact.
+ */
+export interface DatabaseCityPlanDataVolume {
+  estimatedBytesPerExecution: string
+  byObject: DatabaseCityObjectDataVolume[]
+  plansRead: number
+  rationale: string
+}
+
 export interface DatabaseCityQueryFamily {
   familyId: string
   queryHash: string
@@ -139,6 +164,16 @@ export interface DatabaseCityQueryFamily {
    * absent means "not apportioned", never "nothing waited".
    */
   waitAttribution?: DatabaseCityWaitAttribution | null
+
+  /**
+   * Estimated bytes one execution of this family moves, per object, from the optimizer's own row
+   * counts and row sizes in the compiled plans Query Store retained.
+   *
+   * Absent means no retained plan stated both a row count and a row size -- "the plans did not
+   * say", never "this family moves no data". A consumer sizing anything by this must render the
+   * absent case as unknown rather than as the smallest bucket.
+   */
+  planDataVolume?: DatabaseCityPlanDataVolume | null
 }
 
 export interface DatabaseCityWorkloadAggregate {

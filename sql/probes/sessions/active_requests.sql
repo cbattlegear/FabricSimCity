@@ -41,6 +41,18 @@
 --   database_id/database_name use the active request database when present and the session's
 --   current database for an idle row, allowing a per-database atlas to count idle sessions without
 --   assigning them to database zero or treating them as unknown.
+--   query_hash and query_plan_hash are returned raw, as the binary(8) the engine reports, and are
+--   never formatted here. They are the same values Query Store stores as
+--   sys.query_store_query.query_hash and sys.query_store_plan.query_plan_hash, which is what lets a
+--   consumer join "this session is running something right now" to the query family Query Store
+--   already attributed to a set of tables. Rendering them to text is the application's job precisely
+--   so both sides can share one converter (Convert.ToHexString) and cannot silently disagree about
+--   case or an 0x prefix; a formatting difference produces zero matches and looks exactly like a
+--   quiet server. NULL means the row carries no request, or that the engine reported no hash for it
+--   (it does not hash every request -- a plain batch with no statement in cache can report
+--   0x0000000000000000, which the application must treat as "no hash" rather than as a family whose
+--   hash happens to be zero). NULL is never "unknown query": it is the absence of a request or of a
+--   hash, and a consumer must not fall back to matching on text.
 -- Bounding, and why it is disclosed rather than silent: an instance's session count and its batch
 --   text are both unbounded by anything this probe controls, so an uncapped result set is
 --   unbounded too. Measured against SQL Server 2022 (tools/measure), 5,009 idle sessions produced
@@ -89,6 +101,8 @@ WITH visible AS (
         r.writes,
         r.logical_reads,            -- 8-KiB pages
         r.open_transaction_count,
+        r.query_hash,               -- binary(8); joins to sys.query_store_query.query_hash
+        r.query_plan_hash,          -- binary(8); joins to sys.query_store_plan.query_plan_hash
         COALESCE(r.database_id, s.database_id) AS database_id,
         DB_NAME(COALESCE(r.database_id, s.database_id)) AS database_name,
         r.sql_handle,
@@ -131,6 +145,8 @@ SELECT
     v.writes,
     v.logical_reads,
     v.open_transaction_count,
+    v.query_hash,
+    v.query_plan_hash,
     v.database_id,
     v.database_name,
     v.visible_session_count,

@@ -598,11 +598,11 @@ public sealed class SqlQueryStoreIncrementalSource(
             false, false, false, false);
     private static string Id(object value) => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "0";
     private static long ParseInt64(string value) => long.Parse(value, CultureInfo.InvariantCulture);
-    private static string Hash(object value) => value is byte[] bytes ? Convert.ToHexString(bytes) : Id(value);
+    private static string Hash(object value) => value is byte[] bytes ? QueryHashFormat.Render(bytes) : Id(value);
     private static string? NullableString(object value) =>
         value is DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
     private static string? NullableHex(object value) =>
-        value is DBNull ? null : value is byte[] bytes ? Convert.ToHexString(bytes) : Id(value);
+        value is DBNull ? null : value is byte[] bytes ? QueryHashFormat.Render(bytes) : Id(value);
     private static bool Bool(object value) => Convert.ToBoolean(value, CultureInfo.InvariantCulture);
     private static BigInteger Big(object value) =>
         BigInteger.Parse(Convert.ToString(value, CultureInfo.InvariantCulture) ?? "0", CultureInfo.InvariantCulture);

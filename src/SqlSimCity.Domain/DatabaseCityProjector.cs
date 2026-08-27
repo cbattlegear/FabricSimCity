@@ -47,6 +47,12 @@ public sealed record DatabaseCityQueryEvidence(
     /// to estimated plan cost. The split is modelled; only the total it divides is measured.
     /// </summary>
     public DatabaseCityWaitAttributionV1 WaitAttribution { get; init; } = DatabaseCityWaitAttributionV1.None;
+
+    /// <summary>
+    /// Estimated bytes one execution of this family moves, per object, from the optimizer's own row
+    /// counts and row sizes. Null when no retained plan stated both. Modelled, not measured.
+    /// </summary>
+    public DatabaseCityPlanDataVolumeV1? PlanDataVolume { get; init; }
 }
 
 public sealed record DatabaseCityWorkloadProjection(

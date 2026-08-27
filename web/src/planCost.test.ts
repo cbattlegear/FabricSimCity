@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { EMPTY_PLAN_COST, planCostSplit, referenceKey, unquote } from './planCost'
+import {
+  EMPTY_PLAN_COST,
+  EMPTY_PLAN_DATA_VOLUME,
+  planCostSplit,
+  planDataVolumeSplit,
+  referenceKey,
+  unquote,
+} from './planCost'
 import type { NormalizedShowplan, ShowplanNode, ShowplanObjectReference } from './contracts'
 
 function reference(table: string, index: string | null = null): ShowplanObjectReference {
@@ -226,5 +233,181 @@ describe('planCostSplit', () => {
       showplan([node(0, null, { objectReference: reference('Orders') })]),
     )
     expect(split).toBe(EMPTY_PLAN_COST)
+  })
+})
+
+function bytesOf(split: ReturnType<typeof planDataVolumeSplit>, table: string): number {
+  const match = split.objects.find(entry => entry.reference.table === `[${table}]`)
+  return match ? match.bytes : 0
+}
+
+describe('planDataVolumeSplit', () => {
+  it('sizes a leaf scan by rows times row size', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+    ]))
+
+    expect(split.total).toBe(120_000)
+    expect(bytesOf(split, 'Customer')).toBe(120_000)
+    expect(split.operatorsMeasured).toBe(1)
+    expect(split.operatorsMissingRowSize).toBe(0)
+  })
+
+  it('does not count the same rows again at every operator above the scan', () => {
+    // This is the rule that separates the volume split from the cost split. The sort and the filter
+    // re-emit rows the scan already produced; counting them would report three times the data.
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, 1, { estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(3, 2, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+    ]))
+
+    expect(split.total).toBe(120_000)
+    expect(split.operatorsMeasured).toBe(1)
+  })
+
+  it('does not count an operator naming no object as a missing row size', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, 1, { objectReference: reference('Customer'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+    ]))
+
+    expect(split.operatorsMissingRowSize).toBe(0)
+  })
+
+  it('sizes each table in a join by its own rows', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { estimatedRows: 5000, estimatedRowSizeBytes: 200 }),
+      node(2, 1, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(3, 1, { objectReference: reference('OrderHeader'), estimatedRows: 50, estimatedRowSizeBytes: 40 }),
+    ]))
+
+    expect(bytesOf(split, 'Customer')).toBe(120_000)
+    expect(bytesOf(split, 'OrderHeader')).toBe(2_000)
+    expect(split.total).toBe(122_000)
+  })
+
+  it('accumulates repeated reads of one table onto that table', () => {
+    // A self-join really does read the table twice, and the bytes really do move twice.
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, {}),
+      node(2, 1, { objectReference: reference('Customer'), estimatedRows: 400, estimatedRowSizeBytes: 100 }),
+      node(3, 1, { objectReference: reference('Customer'), estimatedRows: 600, estimatedRowSizeBytes: 100 }),
+    ]))
+
+    expect(split.objects).toHaveLength(1)
+    expect(bytesOf(split, 'Customer')).toBe(100_000)
+  })
+
+  it('discloses a missing row size instead of counting it as zero bytes', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, null, { objectReference: reference('Ledger'), estimatedRows: 5_000_000 }),
+    ]))
+
+    expect(split.operatorsMissingRowSize).toBe(1)
+    expect(split.total).toBe(120_000)
+    expect(bytesOf(split, 'Ledger')).toBe(0)
+  })
+
+  it('discloses a missing row count the same way', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, null, { objectReference: reference('Ledger'), estimatedRowSizeBytes: 400 }),
+    ]))
+
+    expect(split.operatorsMissingRowSize).toBe(1)
+    expect(split.total).toBe(120_000)
+  })
+
+  it('treats zero estimated rows as a real estimate rather than a gap', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, null, { objectReference: reference('OrderHeader'), estimatedRows: 0, estimatedRowSizeBytes: 40 }),
+    ]))
+
+    expect(split.operatorsMissingRowSize).toBe(0)
+    expect(split.operatorsMeasured).toBe(2)
+    expect(bytesOf(split, 'OrderHeader')).toBe(0)
+  })
+
+  it('reports no volume rather than zero when no operator stated a row size', () => {
+    // Zero would put the smallest vehicle on the map for a query that may move gigabytes.
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000 }),
+      node(2, null, { objectReference: reference('OrderHeader'), estimatedRows: 50 }),
+    ]))
+
+    expect(split.operatorsMeasured).toBe(0)
+    expect(split.objects).toEqual([])
+    expect(split.total).toBe(0)
+    expect(split.operatorsMissingRowSize).toBe(2)
+  })
+
+  it('is empty with nothing missing for a plan that names no object', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { estimatedRows: 1, estimatedRowSizeBytes: 8 }),
+    ]))
+
+    expect(split).toEqual(EMPTY_PLAN_DATA_VOLUME)
+  })
+
+  it('is empty for an empty plan', () => {
+    expect(planDataVolumeSplit(showplan([]))).toEqual(EMPTY_PLAN_DATA_VOLUME)
+  })
+
+  it('treats negative estimates as missing rather than subtracting them', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, null, { objectReference: reference('Ledger'), estimatedRows: -500, estimatedRowSizeBytes: 100 }),
+      node(3, null, { objectReference: reference('Audit'), estimatedRows: 500, estimatedRowSizeBytes: -100 }),
+    ]))
+
+    expect(split.total).toBe(120_000)
+    expect(split.operatorsMissingRowSize).toBe(2)
+  })
+
+  it('publishes a fixed object order rather than one taken from plan shape', () => {
+    const forwards = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Zulu'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+      node(2, null, { objectReference: reference('Alpha'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+      node(3, null, { objectReference: reference('Mike'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+    ]))
+    const backwards = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Mike'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+      node(2, null, { objectReference: reference('Alpha'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+      node(3, null, { objectReference: reference('Zulu'), estimatedRows: 10, estimatedRowSizeBytes: 10 }),
+    ]))
+
+    expect(forwards.objects.map(entry => entry.reference.table)).toEqual(['[Alpha]', '[Mike]', '[Zulu]'])
+    expect(backwards.objects.map(entry => entry.reference.table)).toEqual(
+      forwards.objects.map(entry => entry.reference.table),
+    )
+  })
+
+  it('keeps the total equal to the sum of the published objects', () => {
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 1000, estimatedRowSizeBytes: 120 }),
+      node(2, null, { objectReference: reference('OrderHeader'), estimatedRows: 50, estimatedRowSizeBytes: 40 }),
+      node(3, null, { objectReference: reference('Audit'), estimatedRows: 7, estimatedRowSizeBytes: 3 }),
+    ]))
+
+    expect(split.objects.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(split.total)
+  })
+
+  it('agrees with the collector on an index being its own object', () => {
+    // The city draws indexes as their own structures, so an index seek's bytes must not be folded
+    // into the base table's.
+    const split = planDataVolumeSplit(showplan([
+      node(1, null, { objectReference: reference('Customer'), estimatedRows: 10, estimatedRowSizeBytes: 100 }),
+      node(2, null, {
+        objectReference: reference('Customer', '[IX_Customer_Name]'),
+        estimatedRows: 10,
+        estimatedRowSizeBytes: 20,
+      }),
+    ]))
+
+    expect(split.objects).toHaveLength(2)
+    expect(split.total).toBe(1_200)
   })
 })

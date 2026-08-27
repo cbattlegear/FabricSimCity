@@ -24,6 +24,12 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
     private const string DisplayName = "Fixture SQL Server";
 
     private readonly FixtureDocument _document;
+
+    /// <summary>
+    /// The same parser connected mode uses, so the fixture path cannot drift from it.
+    /// Stateless, hence shared.
+    /// </summary>
+    private static readonly SecureDeadlockGraphParser DeadlockParser = new();
     private readonly TimeProvider _timeProvider;
     private readonly CounterEpochTracker<(int DatabaseId, int FileId, string Metric)> _fileIoTracker = new();
     private readonly CounterEpochTracker<int> _cpuUsageTracker = new();
@@ -142,6 +148,20 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
 
         _previousSampleAt = now;
 
+        var deadlockRows = _document.DeadlockGraphs ?? [];
+        var deadlockGraphs = deadlockRows
+            .Select(row => DeadlockParser.Parse(row.DeadlockId, row.OccurredAt, row.DeadlockXml, row.IncludesSqlText))
+            .ToList();
+        var deadlocks = new DeadlockSampleV1(
+            deadlockGraphs,
+            deadlockGraphs.Count,
+            now,
+            DataStatus.Available,
+            deadlockGraphs.Count == 0
+                ? "No deadlock is present in the fixture's system_health window. The window is an observation " +
+                  "period, not a guarantee that none occurred."
+                : $"{deadlockGraphs.Count} deadlock graph(s) read from the fixture's system_health window.");
+
         var diagnostics = new CollectionDiagnosticsV1(
             sequence,
             now,
@@ -168,6 +188,7 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
             new SchedulerPressureV1(schedulerSamples, DataStatus.Available, "Scheduler pressure sampled from the fixture."),
             new LogSpaceUsageV1(_document.LogSpace.TotalLogSizeMb, _document.LogSpace.UsedLogSpaceMb, _document.LogSpace.UsedLogSpacePercent,
                 DataStatus.Available, "Log space sampled from the fixture."),
+            deadlocks,
             diagnostics);
 
         return Task.FromResult(snapshot);
@@ -442,10 +463,20 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
                 GetString(e, "indexName"))).ToList()
             : [];
 
+        var deadlockGraphs = root.TryGetProperty("deadlockGraphs", out var deadlockElement)
+            && deadlockElement.ValueKind == JsonValueKind.Array
+            ? deadlockElement.EnumerateArray().Select(e => new FixtureDeadlockRow(
+                e.GetProperty("deadlockId").GetString()!,
+                DateTimeOffset.Parse(e.GetProperty("occurredAt").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal),
+                e.GetProperty("deadlockXml").GetString()!,
+                e.TryGetProperty("includesSqlText", out var includes) && includes.ValueKind == JsonValueKind.True)).ToList()
+            : [];
+
         return new FixtureDocument(observedAt, requests, waitingTasks, memoryGrants,
             new FixtureTempdbUsage(tempdbFiles, tempdbSessions, tempdbTasks), fileIo, schedulerPressure, logSpace, serverIdentity)
         {
             LockResourceResolutions = lockResolutions,
+            DeadlockGraphs = deadlockGraphs,
         };
     }
 
@@ -484,7 +515,23 @@ public sealed class FixtureLiveIncidentCollector : ILiveIncidentCollector
         /// <see cref="LockResourceParser.Resolve"/> path connected mode uses.
         /// </summary>
         public IReadOnlyList<FixtureLockResolutionRow>? LockResourceResolutions { get; init; }
+
+        /// <summary>
+        /// Deadlock graphs the fixture presents as already recorded by <c>system_health</c>, in the
+        /// engine's own XML. They are stored as XML rather than as a pre-shredded object graph so
+        /// the fixture path runs through the same <see cref="SecureDeadlockGraphParser"/> connected
+        /// mode uses -- a fixture that bypassed the parser would keep passing while the parser
+        /// itself was broken.
+        /// </summary>
+        public IReadOnlyList<FixtureDeadlockRow>? DeadlockGraphs { get; init; }
     }
+
+    /// <summary>One recorded deadlock in the fixture, held in the form the probe returns it.</summary>
+    private sealed record FixtureDeadlockRow(
+        string DeadlockId,
+        DateTimeOffset OccurredAt,
+        string DeadlockXml,
+        bool IncludesSqlText);
 
     private sealed record FixtureLockResolutionRow(
         long HobtId,

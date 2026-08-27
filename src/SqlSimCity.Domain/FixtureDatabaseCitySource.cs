@@ -272,6 +272,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 {
                     WaitMillisecondsByCategory = waitCategories,
                     WaitAttribution = Apportion(index, "287"),
+                    PlanDataVolume = Volume(index),
                 });
                 continue;
             }
@@ -291,6 +292,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
                 {
                     WaitMillisecondsByCategory = waitCategories,
                     WaitAttribution = Apportion(index, (16 - index).ToString(CultureInfo.InvariantCulture)),
+                    PlanDataVolume = Volume(index),
                 });
                 continue;
             }
@@ -309,6 +311,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
             {
                 WaitMillisecondsByCategory = waitCategories,
                 WaitAttribution = Apportion(index, totalWait),
+                PlanDataVolume = Volume(index),
             });
         }
         return rows;
@@ -358,6 +361,74 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
     }
 
     /// <summary>
+    /// Estimated per-execution data volume per fixture family, in the shape a compiled plan's
+    /// <c>EstimateRows</c> and <c>AvgRowSize</c> would produce. Invented like every other number
+    /// here, and the field's own rationale says so on every family that carries one.
+    ///
+    /// <para>
+    /// The set spans four orders of magnitude on purpose. A reader with no server to point at should
+    /// still see the whole range the city can draw -- a family moving a few hundred bytes and one
+    /// moving hundreds of megabytes -- rather than a single middling value repeated. Concretely, at
+    /// least one family lands in each band the vehicle ladder divides this measurement into
+    /// (64 KiB and 8 MiB and 512 MiB are its cut points), because a band with no fixture family in it
+    /// is a vehicle class nobody can see without a live server.
+    /// <c>FixtureSourcePlanDataVolumesSpanEveryVehicleBandSoNoClassIsInvisibleOffline</c> pins that,
+    /// and it is the reason these
+    /// values are spread rather than clustered. Family 7 reads mostly in another database, so its
+    /// total exceeds the sum of its per-object entries and the "bytes read from objects this page
+    /// does not draw" disclosure stays demonstrable offline.
+    /// </para>
+    ///
+    /// <para>
+    /// Families 9 and above carry none, matching the gap their wait categories and cost shares
+    /// already leave, so the absent case -- "no retained plan stated a row size", which must never
+    /// be drawn as the smallest vehicle -- is visible without a live server.
+    /// </para>
+    /// </summary>
+    private static DatabaseCityPlanDataVolumeV1? Volume(int index)
+    {
+        (string ObjectId, long Bytes)[] byObject = index switch
+        {
+            1 => [("object:dbo:100", 41_984)],
+            2 => [("object:dbo:110", 3_072)],
+            3 => [("object:reporting:300", 780_140_544)],
+            4 => [("object:dbo:100", 512)],
+            5 => [("object:dbo:110", 1_572_864)],
+            6 =>
+            [
+                ("object:dbo:100", 1_048_576),
+                ("object:dbo:110", 6_291_456),
+                ("object:dbo:120", 2_097_152),
+            ],
+            7 => [("object:dbo:110", 65_536)],
+            8 => [("object:dbo:120", 134_217_728)],
+            _ => [],
+        };
+        if (byObject.Length == 0)
+        {
+            return null;
+        }
+
+        var onPage = byObject.Sum(entry => entry.Bytes);
+
+        // Family 7's plan reads a table in another database. Those bytes are real work the query
+        // does, so they stay in the total; they are simply not this page's to place on a building.
+        var total = index == 7 ? onPage + 402_653_184 : onPage;
+
+        var rationale = index == 7
+            ? $"Estimated from row counts and row sizes in 1 compiled plan retained for this family. {onPage.ToString(CultureInfo.InvariantCulture)} of {total.ToString(CultureInfo.InvariantCulture)} byte(s) per execution are read from 1 object this page draws; the remainder is read from another database and is counted in the total but not placed on a building. These are the optimizer's compile-time estimates against the statistics that existed then, not a measurement of any execution."
+            : $"Estimated from row counts and row sizes in 1 compiled plan retained for this family. All {total.ToString(CultureInfo.InvariantCulture)} byte(s) per execution are read from {byObject.Length.ToString(CultureInfo.InvariantCulture)} object(s) this page draws. These are the optimizer's compile-time estimates against the statistics that existed then, not a measurement of any execution.";
+
+        return new DatabaseCityPlanDataVolumeV1(
+            total.ToString(CultureInfo.InvariantCulture),
+            [.. byObject.Select(entry => new DatabaseCityObjectDataVolumeV1(
+                entry.ObjectId,
+                entry.Bytes.ToString(CultureInfo.InvariantCulture)))],
+            1,
+            rationale);
+    }
+
+    /// <summary>
     /// Captured Query Store wait categories per fixture family, using verbatim
     /// <c>wait_category_desc</c> text. Each family's category totals sum exactly to its
     /// <c>TotalWaitMilliseconds</c>. Families 9 and above deliberately carry none, so the "no
@@ -401,6 +472,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
         AttributedEvidence)
     {
         WaitAttribution = family.WaitAttribution,
+        PlanDataVolume = family.PlanDataVolume,
     };
 
     private static DatabaseCityIndexV1 Index(

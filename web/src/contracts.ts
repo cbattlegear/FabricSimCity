@@ -206,6 +206,12 @@ export interface ShowplanNode {
   objectReference: ShowplanObjectReference | null
   predicate: string | null
   warnings: ShowplanWarning[]
+
+  /**
+   * The optimizer's `AvgRowSize` for the rows this operator emits, in bytes. Null means the plan
+   * did not state a row size for this operator, never that its rows are free.
+   */
+  estimatedRowSizeBytes?: number | null
 }
 
 export interface NormalizedShowplan {

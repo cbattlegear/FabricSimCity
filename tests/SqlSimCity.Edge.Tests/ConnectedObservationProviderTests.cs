@@ -218,6 +218,14 @@ public sealed class ConnectedObservationProviderTests
             Task.FromResult<IReadOnlyList<SchedulerRow>>([]);
         public Task<LogSpaceRow?> GetLogSpaceUsageAsync(CancellationToken cancellationToken) =>
             Task.FromResult<LogSpaceRow?>(null);
+
+        public Task<IReadOnlyList<DeadlockGraphRow>> GetDeadlockGraphsAsync(
+            bool azureScoped,
+            DateTimeOffset? sinceUtc,
+            int? maxGraphs,
+            bool includeSqlText,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<DeadlockGraphRow>>([]);
     }
 
     private sealed class FakeAtlasProbe(DateTimeOffset now) : IAtlasProbeExecutor

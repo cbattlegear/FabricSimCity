@@ -411,7 +411,7 @@ public sealed class QueryStoreCityAttributionTests
         string? table = null,
         string? index = null) => FakeQueryStore.Reference(database, schema, table, index);
 
-    private static (string PlanId, ShowplanObjectV1[] References) Plan(
+    private static (string PlanId, FakeQueryStore.PlanNode[] Nodes) Plan(
         string planId,
         params ShowplanObjectV1[] references) => FakeQueryStore.Plan(planId, references);
 }

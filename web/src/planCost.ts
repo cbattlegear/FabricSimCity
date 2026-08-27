@@ -210,3 +210,96 @@ export function planCostSplit(showplan: NormalizedShowplan): PlanCostSplit {
 
   return { objects, unattributed: total.unattributed, total: totalCost }
 }
+
+export interface PlanObjectDataVolume {
+  readonly reference: ShowplanObjectReference
+  /** Estimated bytes one execution reads from this object. */
+  readonly bytes: number
+}
+
+export interface PlanDataVolumeSplit {
+  /** Per object reference, keyed by {@link referenceKey}, in a stable order. */
+  readonly objects: readonly PlanObjectDataVolume[]
+  readonly total: number
+  /** Operators that named an object and stated both a row count and a row size. */
+  readonly operatorsMeasured: number
+  /** Operators that named an object but stated no usable row count or row size. */
+  readonly operatorsMissingRowSize: number
+}
+
+export const EMPTY_PLAN_DATA_VOLUME: PlanDataVolumeSplit = {
+  objects: [],
+  total: 0,
+  operatorsMeasured: 0,
+  operatorsMissingRowSize: 0,
+}
+
+/**
+ * Estimates how many bytes one execution of a compiled plan moves, from the optimizer's own
+ * per-operator `EstimateRows` and `AvgRowSize`.
+ *
+ * This mirrors `PlanDataVolume` in the collector for the same reason {@link planCostSplit} mirrors
+ * `PlanCostAttribution`: the collector runs it over every ranked family so the page can size traffic
+ * without shipping plan XML, and this copy runs over the single plan an operator asked to see. If
+ * the two disagreed, opening a plan would contradict the map it was opened from.
+ *
+ * The rules are deliberately *not* the cost split's rules:
+ *
+ * 1. Only operators naming an object contribute. Rows are counted where they enter the plan. Every
+ *    operator above a scan re-emits rows that scan already produced, so summing all operators would
+ *    count the same bytes once per level and make a deep plan look like it moves several times the
+ *    data it does.
+ * 2. Nothing is pushed down and there is no unattributed pool. A filter, sort or join moves no data
+ *    *into* the query and so has no bytes of its own to place.
+ * 3. An operator naming an object but stating no row size is counted in `operatorsMissingRowSize`,
+ *    never treated as zero bytes -- a wide table read through such an operator would otherwise look
+ *    like a small query.
+ *
+ * Like the cost split this is the optimizer's arithmetic against the statistics that existed at
+ * compile time, not a measurement, and anything drawn from it has to say so.
+ */
+export function planDataVolumeSplit(showplan: NormalizedShowplan): PlanDataVolumeSplit {
+  const byKey = new Map<string, { reference: ShowplanObjectReference; bytes: number }>()
+  let operatorsMeasured = 0
+  let operatorsMissingRowSize = 0
+
+  for (const node of showplan.nodes) {
+    const reference = node.objectReference
+    if (reference === null) continue
+
+    const rows = node.estimatedRows
+    // Zero is a legitimate estimate -- the optimizer expecting no rows from a branch -- and
+    // contributes zero bytes without counting as a gap in what the plan disclosed.
+    if (rows === null || rows === undefined || !Number.isFinite(rows) || rows < 0) {
+      operatorsMissingRowSize += 1
+      continue
+    }
+
+    const rowSize = node.estimatedRowSizeBytes
+    if (rowSize === null || rowSize === undefined || !Number.isFinite(rowSize) || rowSize <= 0) {
+      operatorsMissingRowSize += 1
+      continue
+    }
+
+    operatorsMeasured += 1
+    const key = referenceKey(reference)
+    const existing = byKey.get(key)
+    if (existing) existing.bytes += rows * rowSize
+    else byKey.set(key, { reference, bytes: rows * rowSize })
+  }
+
+  if (operatorsMeasured === 0) {
+    // The missing-operator count still ships: "six operators named an object and none stated a row
+    // size" is a different fact from "this plan reads nothing".
+    return { ...EMPTY_PLAN_DATA_VOLUME, operatorsMissingRowSize }
+  }
+
+  const objects = [...byKey.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([, entry]) => ({ reference: entry.reference, bytes: entry.bytes }))
+
+  let total = 0
+  for (const entry of objects) total += entry.bytes
+
+  return { objects, total, operatorsMeasured, operatorsMissingRowSize }
+}
