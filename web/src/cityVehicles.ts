@@ -70,8 +70,19 @@ export const VEHICLE_CAP = 120
  *
  * Invented, and shared with the scene so the roster and the renderer agree on where a car is. It is
  * a drawing speed chosen to read well at map scale — nothing measures how fast a query "travels".
+ *
+ * 34 rather than the 13 this started at. A whole-city framing is hundreds of world units across, so
+ * at 13 a car crossed a road over the better part of a minute: slow enough that a glance at the map
+ * could not tell a moving vehicle from a stopped one, which is the single distinction the roster
+ * exists to draw. Faster also shortens the window in which the cap matters, because a car that
+ * reaches the end of its road retires and gives its slot back.
+ *
+ * The ceiling on this number is the sampling interval, not taste. A car must still be *somewhere* on
+ * its road when the next live sample arrives, or the map would show an empty city between ticks and
+ * a burst of departures on each one. Shorter roads already lap rather than vanish — see
+ * {@link travelledFraction} — so the constraint binds only on the longest ones.
  */
-export const VEHICLE_SPEED = 13
+export const VEHICLE_SPEED = 34
 
 /**
  * The largest invented delay between an execution arriving and its car pulling away, in seconds.

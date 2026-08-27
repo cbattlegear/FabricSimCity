@@ -1409,6 +1409,65 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 }
 
 
+/* --- The city directory -------------------------------------------------------------------- */
+/*
+ * The address book, behind a disclosure, and closed by default.
+ *
+ * It holds the retained view -- every query family, table and facility the collector has
+ * accumulated -- while `.sidebar-feed` above it holds what is executing right now. Only one of the
+ * two changes while you watch it, so the rail defaults to that one and this waits behind a click.
+ *
+ * Every trap the drawers taught applies here, and one more that does not:
+ *
+ * - **No `min-height: 0` on the `<details>` itself.** That is the 10px-drawer defect: the automatic
+ *   minimum is what keeps the summary you click on inside the box. The shrink is taken one level in,
+ *   on `::details-content`, exactly as `.sidebar-drawer` does it.
+ * - **A cap is not optional here.** A flex item's automatic minimum is its content clamped by its
+ *   own definite `max-height`, and this content is the whole 341,650px address list. Without the cap
+ *   the open directory would floor at a height no rail can hold. It is deliberately generous --
+ *   larger than the drawers' whole budget -- because when it is open it is what you are reading.
+ * - **It is `flex: 1 1 auto`, not `0 1 auto`.** Open, it takes the room the feed's `max-height`
+ *   leaves; closed, `::details-content` is not generated at all and the summary is the only box, so
+ *   the whole element collapses to 35px and the feed takes the column instead.
+ */
+.sidebar-directory {
+  flex: 1 1 auto;
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #1c2733;
+}
+.sidebar-directory > summary {
+  flex: none;
+  padding: 11px 16px;
+  color: #9bb0c2;
+  font: .72rem/1 ui-monospace, Consolas, monospace;
+  letter-spacing: .05em;
+  cursor: pointer;
+}
+.sidebar-directory > summary:hover { color: #dbe5ed; }
+.sidebar-directory[open] > summary { border-bottom: 1px solid #1c2733; }
+.sidebar-directory::details-content {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * With the directory closed the feed is the only region left that can grow, so its ceiling is lifted
+ * and it takes the column.
+ *
+ * `:has()` takes its specificity from its argument, which is the trap that made an earlier version of
+ * the drawer budget a no-op: written the obvious way round -- a wider rule later in the file -- the
+ * narrower selector kept winning. Here the override is the *more* specific of the two by
+ * construction, so source order is not carrying the result.
+ *
+ * `:not()` rather than `:where()` inside `:has()`, and for the same reason as the drawer budget: an
+ * engine without `:has()` drops this rule entirely and lands on the 22vh cap, which always fits.
+ */
+.map-sidebar:has(> .sidebar-directory:not([open])) .sidebar-feed { max-height: none; }
+
+
 /* --- Live query feed ----------------------------------------------------------------------- */
 /*
  * The rail's second scrolling region, and a peer of the address list rather than a drawer.
@@ -1771,6 +1830,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
    */
   .sidebar-place-card,
   .sidebar-feed,
+  .sidebar-directory,
   .sidebar-drawer { max-height: none; }
 
   /*

@@ -38,6 +38,7 @@ import {
   EMPTY_QUERY_FEED,
   liveQuerySummaryLabel,
   type LiveQueryFeed,
+  type LiveQueryFeedScope,
 } from './liveQueryFeed'
 import { IncidentSummary } from './IncidentPopup'
 
@@ -240,14 +241,32 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
    * sample, a few seconds away, which is soon enough for a row that will be on screen for a minute.
    */
   const familiesRef = useRef<readonly DatabaseCityQueryFamily[]>([])
+  /*
+   * The scope the fold filters on, held in a ref for the same reason `families` is.
+   *
+   * The live sampler is instance-wide, so this is what keeps a neighbouring database's executions
+   * out of a city that could never draw them. It is read rather than depended on so that arriving at
+   * a city does not re-fold a sample already counted -- and the reset below, not a re-fold, is what
+   * clears the previous city's rows.
+   */
+  const scopeRef = useRef<LiveQueryFeedScope>({ databaseName: null })
+  scopeRef.current = { databaseName: databaseName }
   useEffect(() => {
     const live = snapshot?.snapshot
     if (!live) return
-    setQueryFeed(previous => advanceQueryFeed(previous, live, familiesRef.current, Date.now()))
+    setQueryFeed(previous =>
+      advanceQueryFeed(previous, live, familiesRef.current, Date.now(), scopeRef.current))
   }, [snapshot])
 
-  // A different database is a different city; carrying the previous one's arrivals into it would put
-  // cars on roads that were never drawn for them.
+  /*
+   * A different database is a different city; carrying the previous one's arrivals into it would put
+   * cars on roads that were never drawn for them.
+   *
+   * This clears the list. It is not on its own what keeps another database's queries out of it --
+   * the sample the very next tick brings is still instance-wide, so an unscoped fold would refill
+   * the list from the same source and make this reset look as though it had never run. The scope
+   * above is what makes the reset stick.
+   */
   useEffect(() => setQueryFeed(EMPTY_QUERY_FEED), [databaseId])
 
   useEffect(() => {

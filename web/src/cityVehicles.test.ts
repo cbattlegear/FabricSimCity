@@ -751,22 +751,32 @@ describe('the launch stagger is stable, invented, and encodes nothing', () => {
 })
 
 describe('how far along the road a vehicle is', () => {
-  const straight = [{ x: 0, z: 0 }, { x: 130, z: 0 }]
+  /*
+   * A road exactly ten seconds long at whatever `VEHICLE_SPEED` happens to be.
+   *
+   * Derived rather than hard-coded, because none of the assertions below are about how fast a car
+   * travels -- they are about lapping, and about a departed car finishing the lap it was on. A
+   * literal length made every one of them a second copy of the constant, so raising the speed failed
+   * four assertions that had not changed their meaning at all.
+   */
+  const LAP_SECONDS = 10
+  const straight = [{ x: 0, z: 0 }, { x: VEHICLE_SPEED * LAP_SECONDS, z: 0 }]
 
   it('is elapsed distance over route length while the execution is still sampled', () => {
-    // 130 units at 13 u/s is ten seconds a lap.
     expect(travelledFraction(straight, 0, null)).toBeCloseTo(0)
-    expect(travelledFraction(straight, 5, null)).toBeCloseTo(0.5)
-    expect(travelledFraction(straight, 10, null)).toBeCloseTo(0)
-    expect(travelledFraction(straight, 12.5, null)).toBeCloseTo(0.25)
+    expect(travelledFraction(straight, LAP_SECONDS / 2, null)).toBeCloseTo(0.5)
+    // A car still executing laps rather than stopping, so a whole lap is back at the start.
+    expect(travelledFraction(straight, LAP_SECONDS, null)).toBeCloseTo(0)
+    expect(travelledFraction(straight, LAP_SECONDS * 1.25, null)).toBeCloseTo(0.25)
   })
 
   it('completes at most one more lap once the execution has gone', () => {
-    // Departed at 25s — two full laps and a half — so it runs on to the end of that third lap.
-    expect(travelledFraction(straight, 25, 25)).toBeCloseTo(0.5)
-    expect(travelledFraction(straight, 27.5, 25)).toBeCloseTo(0.75)
-    expect(travelledFraction(straight, 30, 25)).toBeCloseTo(1)
-    expect(travelledFraction(straight, 300, 25)).toBe(1)
+    // Departed two and a half laps in, so it runs on to the end of that third lap and stops.
+    const gone = LAP_SECONDS * 2.5
+    expect(travelledFraction(straight, gone, gone)).toBeCloseTo(0.5)
+    expect(travelledFraction(straight, gone + LAP_SECONDS * 0.25, gone)).toBeCloseTo(0.75)
+    expect(travelledFraction(straight, gone + LAP_SECONDS * 0.5, gone)).toBeCloseTo(1)
+    expect(travelledFraction(straight, gone * 12, gone)).toBe(1)
   })
 
   it('survives a degenerate road and a negative clock without producing NaN', () => {

@@ -44,14 +44,60 @@ public sealed record CityAttributionResult(
 /// </summary>
 public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStore)
 {
-    /// <summary>Families requested per page, matching the fixture city's top-N.</summary>
-    public const int DefaultTopFamilyCount = 12;
+    /// <summary>
+    /// Families requested per page.
+    /// <para>
+    /// Twelve was the fixture city's top-N, and carrying it into connected mode made the live map
+    /// far thinner than the instance it was watching. The families are the only thing a live
+    /// execution can be matched to -- the join is <c>query_hash</c> against this list -- so a
+    /// twelve-row list left almost every sampled request unmatched: measured against a seeded
+    /// database holding 237 captured families, all eight live executions in a sample matched none
+    /// of the published twelve, so the feed listed eight rows that could not be clicked and the map
+    /// drew no traffic at all.
+    /// </para>
+    /// <para>
+    /// The cost of raising it is plan hydration, which is bounded separately by
+    /// <see cref="MaxPlansPerPage"/> and is what actually makes a page slow. That bound is what
+    /// makes this number safe to raise: a family whose plans do not fit is still published, with its
+    /// plans disclosed as skipped, rather than making the page arbitrarily expensive.
+    /// </para>
+    /// </summary>
+    public const int DefaultTopFamilyCount = 48;
 
     /// <summary>Compiled plans hydrated for one family before the rest are disclosed as skipped.</summary>
     public const int MaxPlansPerFamily = 8;
 
-    /// <summary>Compiled plans hydrated for one page across every family.</summary>
-    public const int MaxPlansPerPage = 96;
+    /// <summary>
+    /// Compiled plans hydrated for one page across every family.
+    /// <para>
+    /// Deliberately not <see cref="DefaultTopFamilyCount"/> times <see cref="MaxPlansPerFamily"/>.
+    /// A query family overwhelmingly has one plan -- a seeded database with 245 families reported
+    /// exactly one plan for every one of them -- so this budget is not the common cost, it is the
+    /// ceiling on a pathological workload that has recompiled the same query dozens of times. It is
+    /// raised alongside the family count so that the ordinary one-plan-per-family case fits with
+    /// room to spare, and it goes on bounding the bad case at a fixed number of hydrations however
+    /// many families are asked for.
+    /// </para>
+    /// </summary>
+    public const int MaxPlansPerPage = 192;
+
+    /// <summary>
+    /// The largest family count a caller may ask for.
+    /// <para>
+    /// A ceiling exists because attribution runs on every city page request and its cost is linear
+    /// in this number: measured against a seeded database, one page took 153ms at twelve families
+    /// and 382ms at forty-eight, or roughly 8ms per family per request. "Every family Query Store
+    /// retained" is therefore not an option -- that database held 237, and a busy production
+    /// instance retains tens of thousands, which would put a single page into the minutes.
+    /// </para>
+    /// <para>
+    /// It is nonetheless far above <see cref="DefaultTopFamilyCount"/>, because the number that
+    /// suits an instance is a property of that instance. An operator watching a small database can
+    /// raise it and pay a second per page knowingly; the ceiling only stops a configuration
+    /// mistake from making the page effectively unavailable.
+    /// </para>
+    /// </summary>
+    public const int MaxTopFamilyCount = 250;
 
     private static readonly EvidenceV1 UnavailableEvidence = new(
         EvidenceSource.NotProbed, DataStatus.Unknown, null, null,
@@ -75,7 +121,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         ArgumentNullException.ThrowIfNull(pageObjects);
         ArgumentNullException.ThrowIfNull(databaseIdsByName);
-        if (topFamilyCount is < 1 or > 100)
+        if (topFamilyCount is < 1 or > MaxTopFamilyCount)
             throw new ArgumentOutOfRangeException(nameof(topFamilyCount));
 
         PageV1<QueryFamilySummaryV1> page;

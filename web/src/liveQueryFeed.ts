@@ -32,6 +32,14 @@ import type { LiveIncidentSnapshot, LiveRequest } from './liveContracts'
  *   session ids and per-session request ids as connections come and go, so either alone would
  *   silently fold two unrelated executions into one row — and would then keep the *first* one's
  *   arrival time, which is the failure that makes a feed look calm while the instance is churning.
+ * - **The feed is scoped to one database: the city you are looking at.** The live sampler is
+ *   instance-wide — `sys.dm_exec_requests` has no idea which city is on screen — so an unscoped fold
+ *   lists every execution on the server. That is not a cosmetic surplus. Every other claim on this
+ *   page is about *this* database, the roads a car can drive on were drawn from *this* database's
+ *   query families, and a row from a neighbouring database is an execution whose objects are not on
+ *   the map and never will be. It also made switching cities look like the feed had failed to reset:
+ *   the list did clear, and then refilled from the same instance-wide sample. See {@link
+ *   LiveQueryFeedScope}.
  */
 
 /** How many observations the feed keeps. Older arrivals fall off the bottom; nothing else evicts. */
@@ -106,8 +114,34 @@ export interface LiveQueryFeed {
   readonly nextOrdinal: number
   /** How many samples have been folded in. Zero means nothing has been observed yet. */
   readonly samples: number
+  /**
+   * Executions in the latest sample that were running against some *other* database on the instance.
+   *
+   * Reported rather than silently discarded, and reported as "this sample" rather than accumulated,
+   * because it is the one number that separates "the instance is quiet" from "the instance is busy
+   * and none of it is here". A city with an empty feed beside a busy neighbour is a real and
+   * interesting state; a feed that just showed nothing would misreport it as an idle server.
+   */
+  readonly elsewhere: number
   /** Why the feed looks the way it does, in plain language. Never omitted. */
   readonly reason: string
+}
+
+/**
+ * Which database's executions belong in the feed.
+ *
+ * `databaseName` is matched against `sys.dm_exec_requests`' database, case-insensitively: a database
+ * name is an identifier under the server's collation, and the two spellings reaching this comparison
+ * come from different places — one from the atlas route, one from the live collector — so treating
+ * `SimCityLoad` and `simcityload` as different cities would empty the feed for reasons the reader
+ * could never see.
+ *
+ * A null scope means "do not filter". That is not a convenience default: it is what a caller that
+ * genuinely has no database to scope to must pass, and it is deliberately explicit so that adding a
+ * second caller cannot re-acquire the instance-wide feed by simply forgetting an argument.
+ */
+export interface LiveQueryFeedScope {
+  readonly databaseName: string | null
 }
 
 export const EMPTY_QUERY_FEED: LiveQueryFeed = {
@@ -119,6 +153,7 @@ export const EMPTY_QUERY_FEED: LiveQueryFeed = {
   blocked: 0,
   nextOrdinal: 1,
   samples: 0,
+  elsewhere: 0,
   reason: 'No live sample has been received, so nothing is claimed about what is running now.',
 }
 
@@ -140,6 +175,7 @@ export function advanceQueryFeed(
   snapshot: LiveIncidentSnapshot | null,
   families: readonly DatabaseCityQueryFamily[],
   now: number,
+  scope: LiveQueryFeedScope,
 ): LiveQueryFeed {
   if (!snapshot) return previous
 
@@ -149,15 +185,32 @@ export function advanceQueryFeed(
     if (key && !familyByHash.has(key)) familyByHash.set(key, family)
   }
 
+  const wanted = scope.databaseName?.trim().toLowerCase() ?? null
+
   const carried = new Map(previous.events.map(event => [event.id, event]))
   const present = new Set<string>()
   let ordinal = previous.nextOrdinal
   let observed = previous.observed
+  let elsewhere = 0
   const arrived: LiveQueryEvent[] = []
 
   for (const request of snapshot.requests) {
     // Idle sessions are sampled on purpose and hold no request. They are not executions.
     if (request.requestStatus === null || request.requestStatus === undefined) continue
+
+    /*
+     * Executions on another database are counted and dropped.
+     *
+     * A request whose database the sample did not name is dropped too, and counted the same way. It
+     * cannot be shown to belong to this city, and the whole point of the scope is that a row in this
+     * list is an execution against the database on screen -- admitting the unnamed ones would make
+     * that true of most rows rather than all of them, which is the sort of "mostly" this codebase
+     * does not ship.
+     */
+    if (wanted !== null && request.databaseName?.trim().toLowerCase() !== wanted) {
+      elsewhere += 1
+      continue
+    }
 
     const id = queryEventId(request)
     if (present.has(id)) continue
@@ -241,12 +294,15 @@ export function advanceQueryFeed(
     blocked,
     nextOrdinal: ordinal,
     samples,
+    elsewhere,
     reason: feedReason({
       shown: events.length,
       observed,
       dropped,
       running,
       samples,
+      elsewhere,
+      scoped: wanted !== null,
       hashReported: events.some(event => event.hashReported),
       unmatched: events.filter(event => event.familyId === null).length,
     }),
@@ -298,6 +354,8 @@ function feedReason(counts: {
   dropped: number
   running: number
   samples: number
+  elsewhere: number
+  scoped: boolean
   hashReported: boolean
   unmatched: number
 }): string {
@@ -312,6 +370,13 @@ function feedReason(counts: {
   } else {
     parts.push(
       `${counts.shown} of ${counts.observed} observed ${plural(counts.observed, 'execution')} listed, ${counts.running} still in the latest sample.`,
+    )
+  }
+  if (counts.scoped) {
+    parts.push(
+      counts.elsewhere > 0
+        ? `Only this database's executions are listed; ${counts.elsewhere} ${plural(counts.elsewhere, 'request')} in the latest sample ${plural(counts.elsewhere, 'was', 'were')} running against another database on the instance, or named none, and ${plural(counts.elsewhere, 'is', 'are')} not shown.`
+        : 'Only this database\'s executions are listed. The live sampler is instance-wide, so a busy neighbour database would not appear here.',
     )
   }
   if (counts.dropped > 0) {

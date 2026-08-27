@@ -1789,11 +1789,12 @@ export function createDatabaseCityScene(
    * covered, brightest at the bumper and fading to nothing behind it, plus a brief flare over the
    * first few seconds after it pulls away so a new arrival reads as *new* and then settles.
    *
-   * What it is, precisely: **the road surface that vehicle covered in roughly the last two seconds**.
-   * That is a statement about the drawing, not about the query. It is not exhaust, not throughput,
-   * not progress; a longer trail means the car has been on screen long enough to have one, and
-   * nothing else. The length is fixed for every class for the same reason the speed is — see
-   * `VEHICLE_SPEED` — so the ribbon never becomes a second, contradictory size channel.
+   * What it is, precisely: **the last stretch of road that vehicle covered**, drawn at the same
+   * magnification as the shell in front of it and so about six car-lengths long at any zoom. That is
+   * a statement about the drawing, not about the query. It is not exhaust, not throughput, not
+   * progress; a longer trail means the car has been on screen long enough to have one, and nothing
+   * else. The length is fixed for every class for the same reason the speed is — see `VEHICLE_SPEED`
+   * — so the ribbon never becomes a second, contradictory size channel.
    *
    * Three constraints shape the implementation, and all three are load-bearing:
    *
@@ -1813,12 +1814,34 @@ export function createDatabaseCityScene(
    * two seconds of motion, and where there is no motion there is nothing for it to be about.
    */
   const TRAIL_SEGMENTS = 12
-  /** How far back along the road the ribbon reaches, in world units — about two seconds of travel. */
+  /**
+   * How far back along the road the ribbon reaches, in **unmagnified** world units.
+   *
+   * Multiplied by the same `magnify` the shells are drawn at, and that is the whole fix for a trail
+   * nobody could see. The width was already magnified and the span was not, so the two came apart at
+   * exactly the framing this map is usually read at: with the shells scaled 9x to clear
+   * `VEHICLE_MIN_PX`, a 26-unit span projects to about 11 CSS px behind a bumper drawn 7 px wide --
+   * a smudge wider than it is long, at a third of full alpha, over a road of similar colour.
+   *
+   * Magnified, the ribbon stays roughly six car-lengths long at every zoom, which is what makes it
+   * read as a wake rather than as a blob. It costs nothing extra: the vertex count is fixed by
+   * {@link TRAIL_SEGMENTS}, not by how much road each segment spans.
+   *
+   * It is still bounded by the road actually covered -- `tail` floors at zero -- so a car that has
+   * just pulled away has a short trail and grows one, rather than starting with a full-length ribbon
+   * over road it was never on.
+   */
   const TRAIL_SPAN = 26
   /** Ribbon width at the bumper, in world units. Close to a car's width, so it reads as its wake. */
   const TRAIL_WIDTH = 1.9
-  /** Opacity at the bumper once a vehicle has settled. Deliberately low: this is a garnish. */
-  const TRAIL_ALPHA = 0.32
+  /**
+   * Opacity at the bumper once a vehicle has settled.
+   *
+   * Still a garnish, but 0.62 rather than the 0.32 this started at. Alpha is only half of why the
+   * first number was invisible -- the span was the other half -- but 0.32 against a lit road at a
+   * whole-city framing is below what survives the tone map and the ground texture under it.
+   */
+  const TRAIL_ALPHA = 0.62
   /** How long a newly released vehicle's trail stays brightened, in seconds. */
   const TRAIL_FLARE_SECONDS = 2.6
   /** How much brighter, at the instant of release. */
@@ -1904,6 +1927,9 @@ export function createDatabaseCityScene(
     const flat = viewMode === 'map'
     const base = flat ? TRAIL_MAP_COLOR : TRAIL_CITY_COLOR
     const halfWidth = (TRAIL_WIDTH * magnify) / 2
+    // Magnified with the shells, so the ribbon keeps its proportion to the car at every zoom. See
+    // TRAIL_SPAN: magnifying one and not the other is what made this invisible.
+    const span = TRAIL_SPAN * magnify
 
     for (const batch of vehicleBatches) {
       for (let index = 0; index < batch.moving; index += 1) {
@@ -1916,7 +1942,7 @@ export function createDatabaseCityScene(
         // A vehicle still waiting out its launch stagger has covered no road, so it has no wake.
         if (elapsed <= 0) continue
         const head = travelledFraction(vehicle.points, elapsed, vehicle.finishedAfterSeconds) * length
-        const tail = Math.max(0, head - TRAIL_SPAN)
+        const tail = Math.max(0, head - span)
         if (head - tail < 0.01) continue
 
         for (let step = 0; step <= TRAIL_SEGMENTS; step += 1) {
