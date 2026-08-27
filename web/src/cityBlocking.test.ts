@@ -52,12 +52,19 @@ function lock(overrides: Partial<LockResource>): LockResource {
 }
 
 function snapshotOf(
-  requests: { lockResource?: LockResource | null; blockingSessionId: number | null }[],
+  requests: {
+    lockResource?: LockResource | null
+    blockingSessionId: number | null
+    /** Null models a sample that named no database, which switches the numeric object join off. */
+    databaseName?: string | null
+  }[],
 ): LiveIncidentSnapshot {
   return {
     requests: requests.map((entry, index) => ({
       requestId: `r${index}`,
       sessionId: 50 + index,
+      databaseId: '7',
+      databaseName: entry.databaseName === undefined ? 'CityDb' : entry.databaseName,
       waitResource: entry.lockResource?.rawResource ?? null,
       lockResource: entry.lockResource,
       blocking: { blockingSessionId: entry.blockingSessionId, sentinel: 'None' },
@@ -66,9 +73,15 @@ function snapshotOf(
   } as unknown as LiveIncidentSnapshot
 }
 
+/*
+ * Object ids in the shape the API actually serves. An earlier fixture used `7/object/200`, which
+ * was the key `lockKeys` happened to build rather than anything a running instance returns —
+ * measured, `/api/v1/database-city/primary/database/SimCitySmall` serves
+ * `primary/database/SimCitySmall/object/901578250`.
+ */
 const objects = [
-  objectOf('object:dbo:100', 'dbo', 'Customer'),
-  objectOf('7/object/200', 'sales', 'Orders'),
+  objectOf('primary/database/CityDb/object/100', 'dbo', 'Customer'),
+  objectOf('primary/database/CityDb/object/200', 'sales', 'Orders'),
 ]
 
 describe('liveBlockingEdges', () => {
@@ -89,10 +102,12 @@ describe('liveBlockingEdges', () => {
     const snapshot = snapshotOf([{ lockResource: lock({}), blockingSessionId: 60 }])
     const summary = liveBlockingEdges(snapshot, objects)
     expect(summary.probeReported).toBe(true)
-    expect(summary.edges).toEqual([{ objectKey: 'object:dbo:100', blockedSessionCount: 1 }])
+    expect(summary.edges).toEqual([{ objectKey: 'primary/database/CityDb/object/100', blockedSessionCount: 1 }])
   })
 
-  it('resolves connected-mode ids by databaseId/object/objectId', () => {
+  it('pins a table-level lock that names an object id and no names at all', () => {
+    // `OBJECT:`/`TAB:` waits are parsed straight out of the wait-resource text with no catalog
+    // lookup, so they carry no schema/object names and the numeric join is the only one available.
     const snapshot = snapshotOf([
       {
         lockResource: lock({ objectId: 200, schemaName: null, objectName: null }),
@@ -100,7 +115,47 @@ describe('liveBlockingEdges', () => {
       },
     ])
     const summary = liveBlockingEdges(snapshot, objects)
-    expect(summary.edges).toEqual([{ objectKey: '7/object/200', blockedSessionCount: 1 }])
+    expect(summary.edges).toEqual([
+      { objectKey: 'primary/database/CityDb/object/200', blockedSessionCount: 1 },
+    ])
+  })
+
+  it('refuses a numeric object id from a different database rather than pinning it here', () => {
+    // An object_id is unique only within its own database, so the same number routinely names a
+    // different table elsewhere on the instance. Off-map is the honest answer.
+    const snapshot = snapshotOf([
+      {
+        lockResource: lock({ objectId: 200, schemaName: null, objectName: null }),
+        blockingSessionId: 60,
+        databaseName: 'SomewhereElse',
+      },
+    ])
+    const summary = liveBlockingEdges(snapshot, objects)
+    expect(summary.edges).toEqual([])
+    expect(summary.offPageCount).toBe(1)
+  })
+
+  it('refuses a numeric object id when the sample named no database at all', () => {
+    const snapshot = snapshotOf([
+      {
+        lockResource: lock({ objectId: 200, schemaName: null, objectName: null }),
+        blockingSessionId: 60,
+        databaseName: null,
+      },
+    ])
+    const summary = liveBlockingEdges(snapshot, objects)
+    expect(summary.edges).toEqual([])
+    expect(summary.offPageCount).toBe(1)
+  })
+
+  it('does not read blocking_session_id 0 as a blocked waiter', () => {
+    // Zero is SQL Server's "nothing is blocking this" and is reported for every ordinary running
+    // request, so treating it as a blocker badged the whole sample and the chip could never agree
+    // with the map.
+    const snapshot = snapshotOf([{ lockResource: lock({}), blockingSessionId: 0 }])
+    const summary = liveBlockingEdges(snapshot, objects)
+    expect(summary.edges).toEqual([])
+    expect(summary.offPageCount).toBe(0)
   })
 
   it('ignores a lock held by a session that nothing is waiting behind', () => {
@@ -124,7 +179,7 @@ describe('liveBlockingEdges', () => {
       waitingTasks: [],
     } as unknown as LiveIncidentSnapshot
     expect(liveBlockingEdges(snapshot, objects).edges).toEqual([
-      { objectKey: 'object:dbo:100', blockedSessionCount: 1 },
+      { objectKey: 'primary/database/CityDb/object/100', blockedSessionCount: 1 },
     ])
   })
 
@@ -168,8 +223,8 @@ describe('liveBlockingEdges', () => {
       },
     ])
     expect(liveBlockingEdges(snapshot, objects).edges).toEqual([
-      { objectKey: 'object:dbo:100', blockedSessionCount: 2 },
-      { objectKey: '7/object/200', blockedSessionCount: 1 },
+      { objectKey: 'primary/database/CityDb/object/100', blockedSessionCount: 2 },
+      { objectKey: 'primary/database/CityDb/object/200', blockedSessionCount: 1 },
     ])
   })
 
@@ -178,7 +233,7 @@ describe('liveBlockingEdges', () => {
       { lockResource: lock({ schemaName: 'DBO', objectName: 'CUSTOMER' }), blockingSessionId: 60 },
     ])
     expect(liveBlockingEdges(snapshot, objects).edges).toEqual([
-      { objectKey: 'object:dbo:100', blockedSessionCount: 1 },
+      { objectKey: 'primary/database/CityDb/object/100', blockedSessionCount: 1 },
     ])
   })
 
@@ -197,6 +252,6 @@ describe('liveBlockingEdges', () => {
     } as unknown as LiveIncidentSnapshot
     const summary = liveBlockingEdges(snapshot, objects)
     expect(summary.probeReported).toBe(true)
-    expect(summary.edges).toEqual([{ objectKey: 'object:dbo:100', blockedSessionCount: 1 }])
+    expect(summary.edges).toEqual([{ objectKey: 'primary/database/CityDb/object/100', blockedSessionCount: 1 }])
   })
 })

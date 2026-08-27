@@ -6,6 +6,7 @@ import {
   EMPTY_QUERY_FEED,
   LIVE_QUERY_FEED_CAP,
 } from './liveQueryFeed'
+import type { LiveQueryFeedScope } from './liveQueryFeed'
 import type { DatabaseCityQueryFamily } from './databaseCityContracts'
 import type { LiveIncidentSnapshot, LiveRequest } from './liveContracts'
 
@@ -77,11 +78,22 @@ function family(over: Partial<DatabaseCityQueryFamily> = {}): DatabaseCityQueryF
 
 const families = [family()]
 
+/*
+ * Every fake request above is on 'Shop', so this scope admits them all and the existing
+ * assertions go on describing what they always described.
+ *
+ * It is deliberately a real database name rather than `null`. The live sampler is instance-wide,
+ * so a null scope is the unfiltered instance-wide feed -- exactly the bug this parameter exists to
+ * fix -- and defaulting the whole test file to it would mean none of these tests ever exercised
+ * the filter at all.
+ */
+const SCOPE: LiveQueryFeedScope = { databaseName: 'Shop' }
+
 /** Fold a run of samples, one second apart, starting at T0. */
 function fold(samples: (LiveIncidentSnapshot | null)[], step = 1_000) {
   let feed = EMPTY_QUERY_FEED
   samples.forEach((sample, index) => {
-    feed = advanceQueryFeed(feed, sample, families, T0 + index * step)
+    feed = advanceQueryFeed(feed, sample, families, T0 + index * step, SCOPE)
   })
   return feed
 }
@@ -96,7 +108,7 @@ describe('an arrival is an observation, and the row says whose clock it is on', 
    */
   it('times an arrival by when this browser sampled it, not by when the query started', () => {
     const old = request({ requestStartTime: '2020-06-01T00:00:00Z' })
-    const feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([old]), families, T0)
+    const feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([old]), families, T0, SCOPE)
     expect(feed.events[0].firstSeenAt).toBe(T0)
     // The engine's own value survives beside it, because the row shows both.
     expect(feed.events[0].startedAt).toBe('2020-06-01T00:00:00Z')
@@ -241,7 +253,7 @@ describe('a quiet channel is not evidence that anything stopped', () => {
    */
   it('leaves the feed untouched when no snapshot arrived', () => {
     const withRows = fold([snapshot([request()])])
-    const after = advanceQueryFeed(withRows, null, families, T0 + 60_000)
+    const after = advanceQueryFeed(withRows, null, families, T0 + 60_000, SCOPE)
     expect(after).toBe(withRows)
     expect(after.events[0].endedAt).toBeNull()
     expect(after.samples).toBe(1)
@@ -344,6 +356,7 @@ describe('the family is resolved once, in the feed, so the list and the map agre
       snapshot([request({ queryHash: '0000000000000000' })]),
       [family({ queryHash: '0000000000000000' })],
       T0,
+      SCOPE,
     )
     expect(feed.events[0].queryHash).toBeNull()
     expect(feed.events[0].familyId).toBeNull()
@@ -357,15 +370,15 @@ describe('the family is resolved once, in the feed, so the list and the map agre
    * when it happened to turn up relative to a page load, which is not a fact about the workload.
    */
   it('resolves a family that only became available after the row arrived', () => {
-    let feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), [], T0)
+    let feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), [], T0, SCOPE)
     expect(feed.events[0].familyId).toBeNull()
-    feed = advanceQueryFeed(feed, snapshot([request()]), families, T0 + 1_000)
+    feed = advanceQueryFeed(feed, snapshot([request()]), families, T0 + 1_000, SCOPE)
     expect(feed.events[0].familyId).toBe('fam-1')
   })
 
   it('does not un-resolve a family when a later page no longer lists it', () => {
-    let feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), families, T0)
-    feed = advanceQueryFeed(feed, snapshot([request()]), [], T0 + 1_000)
+    let feed = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), families, T0, SCOPE)
+    feed = advanceQueryFeed(feed, snapshot([request()]), [], T0 + 1_000, SCOPE)
     expect(feed.events[0].familyId).toBe('fam-1')
   })
 
@@ -415,6 +428,19 @@ describe('a block is reported on the row, and only on evidence', () => {
     expect(feed.events[0].blocked).toBe(false)
   })
 
+  it('does not read blocking_session_id 0 as a blocker', () => {
+    /*
+     * Zero means "nothing is blocking this" -- sys.dm_exec_requests reports it for every ordinary
+     * running request, so a predicate that only checks for null badges the whole sample as blocked.
+     * The map could never agree: an unblocked request holds no lock resource, so there was no pin
+     * to draw beside the row, and the feed and the city contradicted each other on every sample.
+     */
+    const feed = fold([snapshot([request({ blocking: { blockingSessionId: 0, sentinel: 'None' } })])])
+    expect(feed.events[0].blocked).toBe(false)
+    expect(feed.blocked).toBe(0)
+    expect(liveQuerySummaryLabel(feed)).toBe('1 running')
+  })
+
   it('does not count a departed row as still blocked', () => {
     const feed = fold([
       snapshot([request({ blocking: { blockingSessionId: 52, sentinel: 'None' } })]),
@@ -434,6 +460,7 @@ describe('the feed is capped, and says what scrolled past', () => {
         snapshot([request({ sessionId: 100 + index, requestId: `req:${100 + index}:0` })]),
         families,
         T0 + index * 1_000,
+        SCOPE,
       )
     }
     return feed
@@ -461,7 +488,115 @@ describe('the feed is capped, and says what scrolled past', () => {
 
   it('does not double-count the same overflow on every later sample', () => {
     const feed = manySamples(LIVE_QUERY_FEED_CAP + 3)
-    const settled = advanceQueryFeed(feed, snapshot([]), families, T0 + 1_000_000)
+    const settled = advanceQueryFeed(feed, snapshot([]), families, T0 + 1_000_000, SCOPE)
     expect(settled.dropped).toBe(3)
+  })
+})
+
+/*
+ * The live sampler is instance-wide. It has to be: it reads the request DMVs once for the whole
+ * server, and there is no per-database subscription to make instead.
+ *
+ * That made the feed show another database's traffic while claiming to describe this city, which is
+ * worse than showing nothing -- the rows are real, so nothing about them looks wrong. It also could
+ * not be fixed by clearing the list when the user navigates, which was the obvious first attempt:
+ * clearing works for exactly one sample, and then the very next instance-wide sample refills the
+ * list with the same foreign rows. The filter has to live in the fold, which is what these pin.
+ */
+describe('the feed describes one database, not the instance it was sampled from', () => {
+  const OTHER = request({ sessionId: 200, requestId: 'req:200:0', databaseName: 'Warehouse' })
+
+  it('keeps only the requests belonging to the scoped database', () => {
+    const feed = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request(), OTHER]),
+      families,
+      T0,
+      SCOPE,
+    )
+    expect(feed.events).toHaveLength(1)
+    expect(feed.events[0].databaseName).toBe('Shop')
+  })
+
+  /*
+   * Mutation checked: dropping the foreign rows silently passes the assertion above and fails this
+   * one. A feed that quietly discards half its input while presenting itself as a log of events is
+   * the same class of defect as the one being fixed.
+   */
+  it('discloses how many executions it set aside rather than dropping them silently', () => {
+    const feed = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request(), OTHER]),
+      families,
+      T0,
+      SCOPE,
+    )
+    expect(feed.elsewhere).toBe(1)
+    expect(feed.reason).toMatch(/elsewhere|other databases?|another database/i)
+  })
+
+  it('matches the database name without regard to case, as SQL Server does', () => {
+    const feed = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request({ databaseName: 'sHoP' })]),
+      families,
+      T0,
+      SCOPE,
+    )
+    expect(feed.events).toHaveLength(1)
+    expect(feed.elsewhere).toBe(0)
+  })
+
+  /*
+   * A request whose database the DMV did not report cannot be claimed for this city. Admitting it
+   * would put an unattributable row in a list whose whole purpose is to say "this happened here".
+   */
+  it('sets aside a request whose database is unnamed instead of assuming it is local', () => {
+    const feed = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request({ databaseName: null })]),
+      families,
+      T0,
+      SCOPE,
+    )
+    expect(feed.events).toHaveLength(0)
+    expect(feed.elsewhere).toBe(1)
+  })
+
+  /*
+   * The reason a null scope is spelled out as its own case rather than left to a default: it is the
+   * unfiltered instance-wide feed, i.e. the original bug. Keeping it reachable but explicit means a
+   * caller has to ask for it, and cannot re-acquire it by forgetting an argument.
+   */
+  it('admits every database when the scope names none', () => {
+    const feed = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request(), OTHER]),
+      families,
+      T0,
+      { databaseName: null },
+    )
+    expect(feed.events).toHaveLength(2)
+    expect(feed.elsewhere).toBe(0)
+  })
+
+  /*
+   * The navigation case, end to end: rows collected under one city must not survive into the next
+   * one. This is the user-visible bug -- "the live query window doesn't reset when I go to a new
+   * database city so it is showing queries from the wrong database".
+   */
+  it('does not carry rows from the previous city into the next one', () => {
+    const shop = advanceQueryFeed(EMPTY_QUERY_FEED, snapshot([request()]), families, T0, SCOPE)
+    expect(shop.events).toHaveLength(1)
+
+    const moved = advanceQueryFeed(
+      EMPTY_QUERY_FEED,
+      snapshot([request()]),
+      families,
+      T0 + 1_000,
+      { databaseName: 'Warehouse' },
+    )
+    expect(moved.events).toHaveLength(0)
+    expect(moved.elsewhere).toBe(1)
   })
 })

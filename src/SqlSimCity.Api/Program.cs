@@ -131,7 +131,8 @@ if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
     builder.Services.AddSingleton<IDatabaseCitySource>(services => new ConnectedDatabaseCitySource(
         services.GetRequiredService<IAtlasSnapshotSource>(),
         services.GetRequiredService<IDatabaseCityProbeExecutor>(),
-        services.GetService<QueryStoreCityAttribution>()));
+        services.GetService<QueryStoreCityAttribution>(),
+        builder.Configuration.GetValue<int?>("DatabaseCity:TopQueryFamilyCount")));
     builder.Services.AddHostedService<AtlasRefreshBackgroundService>();
     if (queryStoreConnected)
     {

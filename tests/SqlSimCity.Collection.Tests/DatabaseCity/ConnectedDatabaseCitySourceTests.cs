@@ -158,6 +158,96 @@ public sealed class ConnectedDatabaseCitySourceTests
                 .AttributedExposure.TotalCpuMicroseconds);
     }
 
+    /// <summary>
+    /// The published family count is the join key a live execution is matched against, so a page
+    /// that publishes too few of them leaves the live feed inert and the map empty however much
+    /// traffic the instance is serving. Measured against a seeded database holding 237 captured
+    /// families, publishing twelve matched none of the eight executions sampled. The default is
+    /// therefore well above twelve, and this pins that it is the source's own default that reaches
+    /// Query Store rather than some incidental page size.
+    /// </summary>
+    [Fact]
+    public async Task PublishesTheDefaultFamilyCountRatherThanThePageSize()
+    {
+        var queryStore = new FakeQueryStore();
+        var source = new ConnectedDatabaseCitySource(
+            new FakeAtlasSource(),
+            new FakeCityProbeExecutor(expectedTopN: 3),
+            new QueryStoreCityAttribution(queryStore));
+
+        await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 2, null, CancellationToken.None);
+
+        Assert.Equal(QueryStoreCityAttribution.DefaultTopFamilyCount, queryStore.RequestedPageSize);
+        Assert.True(
+            QueryStoreCityAttribution.DefaultTopFamilyCount >= 24,
+            "A dozen families is too few to match live traffic against.");
+    }
+
+    /// <summary>
+    /// An operator watching a small database may reasonably want every family it has. Attribution
+    /// treats a count above its supported ceiling as a programming error and throws, which reaches
+    /// the endpoint as a bare 500 that names neither the setting nor the limit -- so configuration
+    /// is clamped to the ceiling instead of being passed through.
+    /// </summary>
+    [Fact]
+    public async Task ClampsAConfiguredFamilyCountAboveTheCeilingInsteadOfFailingThePage()
+    {
+        var queryStore = new FakeQueryStore();
+        var source = new ConnectedDatabaseCitySource(
+            new FakeAtlasSource(),
+            new FakeCityProbeExecutor(expectedTopN: 3),
+            new QueryStoreCityAttribution(queryStore),
+            topQueryFamilyCount: QueryStoreCityAttribution.MaxTopFamilyCount + 5_000);
+
+        var page = await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 2, null, CancellationToken.None);
+
+        Assert.NotNull(page);
+        Assert.Equal(QueryStoreCityAttribution.MaxTopFamilyCount, queryStore.RequestedPageSize);
+    }
+
+    /// <summary>
+    /// Zero is never "publish no families": a page with no families is indistinguishable from a
+    /// database whose Query Store never captured anything, so a nonsense setting falls back to the
+    /// default rather than quietly emptying the city.
+    /// </summary>
+    [Fact]
+    public async Task FallsBackToTheDefaultWhenTheConfiguredFamilyCountIsNotPositive()
+    {
+        var queryStore = new FakeQueryStore();
+        var source = new ConnectedDatabaseCitySource(
+            new FakeAtlasSource(),
+            new FakeCityProbeExecutor(expectedTopN: 3),
+            new QueryStoreCityAttribution(queryStore),
+            topQueryFamilyCount: 0);
+
+        await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 2, null, CancellationToken.None);
+
+        Assert.Equal(QueryStoreCityAttribution.DefaultTopFamilyCount, queryStore.RequestedPageSize);
+    }
+
+    /// <summary>
+    /// A count the operator actually chose, and which the ceiling permits, must reach Query Store
+    /// unchanged -- otherwise the setting silently does nothing.
+    /// </summary>
+    [Fact]
+    public async Task PassesAConfiguredFamilyCountWithinTheCeilingThrough()
+    {
+        var queryStore = new FakeQueryStore();
+        var source = new ConnectedDatabaseCitySource(
+            new FakeAtlasSource(),
+            new FakeCityProbeExecutor(expectedTopN: 3),
+            new QueryStoreCityAttribution(queryStore),
+            topQueryFamilyCount: 96);
+
+        await source.GetDatabaseAsync(
+            "target/database/sales", DatabaseCityMetric.Cpu, 2, null, CancellationToken.None);
+
+        Assert.Equal(96, queryStore.RequestedPageSize);
+    }
+
     private sealed class FakeCityProbeExecutor(int expectedTopN = 2) : IDatabaseCityProbeExecutor
     {
         public Task<DatabaseCityProbePage> CollectPageAsync(

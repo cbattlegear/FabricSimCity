@@ -34,6 +34,28 @@ export function blockingReferenceLabel(blocking: BlockingReference): string {
   return `blocked by session ${blocking.blockingSessionId}`
 }
 
+/**
+ * Whether this reference describes a session that is actually stopped.
+ *
+ * Zero is SQL Server's "nothing is blocking this". It is not a session number and it is what
+ * `sys.dm_exec_requests` reports for every request that is merely running, so a predicate that only
+ * tests the field against null calls the entire sample blocked. That is a real defect this codebase
+ * shipped twice, once in the live feed's badge and once in the map's pin: a running query was
+ * labelled "blocked" in the scrolling feed while the map showed no pin beside it, because an
+ * unblocked request has no lock resource and there was nothing to place. The two disagreed because
+ * they were both wrong in the same way, and only one of them had a way to show it.
+ *
+ * {@link blockingReferenceLabel} has always read zero correctly. This is that same rule, exported so
+ * the places that *decide* something is blocked cannot drift from the place that describes it.
+ *
+ * A negative sentinel still counts. `-5` is commonly benign and the label says so, but the session
+ * is genuinely waiting on an owner the engine cannot name, which is not the same as running.
+ */
+export function isBlockedReference(blocking: BlockingReference): boolean {
+  if (blocking.sentinel !== 'None') return true
+  return blocking.blockingSessionId !== null && blocking.blockingSessionId !== 0
+}
+
 export function formatKb(value: string | null): string {
   if (value === null) return 'Unavailable'
   if (!/^\d+$/.test(value)) return 'Invalid value'

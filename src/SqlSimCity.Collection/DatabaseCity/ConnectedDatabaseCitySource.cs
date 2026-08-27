@@ -10,8 +10,31 @@ namespace SqlSimCity.Collection.DatabaseCity;
 public sealed class ConnectedDatabaseCitySource(
     IAtlasSnapshotSource atlasSource,
     IDatabaseCityProbeExecutor probeExecutor,
-    QueryStoreCityAttribution? attribution = null) : IDatabaseCitySource
+    QueryStoreCityAttribution? attribution = null,
+    int? topQueryFamilyCount = null) : IDatabaseCitySource
 {
+    /// <summary>
+    /// How many query families this source asks for per page.
+    /// <para>
+    /// Configurable because the right number is a property of the instance being watched, not of
+    /// this code: a database with forty retained families wants all of them, and one with forty
+    /// thousand wants a bound. The default is <see
+    /// cref="QueryStoreCityAttribution.DefaultTopFamilyCount"/>.
+    /// </para>
+    /// <para>
+    /// Out-of-range configuration is clamped rather than rejected. Attribution treats a count
+    /// outside its supported range as a programming error and throws, which reaches the endpoint as
+    /// a 500 -- so passing a configured value straight through would let one mistyped setting take
+    /// the city page down with an error that names neither the setting nor the limit. A non-positive
+    /// value is ignored rather than treated as "no families", because a page with no families is
+    /// indistinguishable from a database Query Store never captured and is never what an operator
+    /// meant.
+    /// </para>
+    /// </summary>
+    private readonly int topFamilyCount = topQueryFamilyCount is > 0
+        ? Math.Min(topQueryFamilyCount.Value, QueryStoreCityAttribution.MaxTopFamilyCount)
+        : QueryStoreCityAttribution.DefaultTopFamilyCount;
+
     public ValueTask<DatabaseCitySummarySnapshotV1> GetSummariesAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -102,7 +125,7 @@ public sealed class ConnectedDatabaseCitySource(
                 metric,
                 attributionObjects,
                 DatabaseIdsByName(atlas),
-                QueryStoreCityAttribution.DefaultTopFamilyCount,
+                topFamilyCount,
                 cancellationToken).ConfigureAwait(false);
         var familyIdsByObject = (joined?.Families ?? [])
             .SelectMany(family => family.ObjectIds.Select(objectId => (objectId, family.FamilyId)))

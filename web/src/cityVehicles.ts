@@ -66,12 +66,111 @@ export const SEMI_FLOOR_BYTES = 536_870_912n
 export const VEHICLE_CAP = 120
 
 /**
- * World units a vehicle covers per second.
+ * World units the *typical* vehicle covers per second, before its family's own scaling.
  *
- * Invented, and shared with the scene so the roster and the renderer agree on where a car is. It is
- * a drawing speed chosen to read well at map scale — nothing measures how fast a query "travels".
+ * Invented, and shared with the scene so the roster and the renderer agree on where a car is. The
+ * number itself measures nothing: it is a drawing speed chosen to read well at map scale.
+ *
+ * 82, by way of 68 and 34, from the 13 this started at. A whole-city framing is hundreds of world
+ * units across, so at 13 a car crossed a road over the better part of a minute: slow enough that a
+ * glance at the map could not tell a moving vehicle from a stopped one, which is the single
+ * distinction the roster exists to draw. Faster also shortens the window in which the cap matters,
+ * because a car that reaches the end of its road retires and gives its slot back.
+ *
+ * The ceiling on this number is *not* the sampling interval, which is what an earlier version of
+ * this comment claimed. A car whose execution is still in the sample laps its road rather than
+ * stopping at the end of it — see {@link travelledFraction} — so no speed empties the city between
+ * ticks. What actually bounds it is the eye: past roughly a road-length per second a car stops
+ * reading as a vehicle travelling a route and starts reading as a flicker, and the trail behind it
+ * degenerates into a static streak because the ribbon spans a fixed distance no matter how quickly
+ * the head crosses it.
  */
-export const VEHICLE_SPEED = 13
+export const VEHICLE_SPEED = 82
+
+/**
+ * How far a family's own speed may depart from {@link VEHICLE_SPEED}, as a fraction.
+ *
+ * ±15%, so the fastest car on a map is about 35% quicker than the slowest. Wide enough to notice two
+ * cars on neighbouring streets keeping different paces, narrow enough that speed never competes with
+ * *length* — the class ladder — as the thing a reader measures a vehicle by.
+ */
+export const VEHICLE_SPEED_VARIATION = 0.15
+
+/**
+ * The mean-duration anchors the scale is drawn between, as log10 of milliseconds.
+ *
+ * -1.5 is 0.032 ms and 1.5 is 32 ms, so the ramp spans three decades centred on a millisecond.
+ * Anything at or below the fast anchor drives at the full `1 + variation`, anything at or above the
+ * slow one at `1 - variation`, and everything between is linear **in the logarithm** because query
+ * durations are distributed across orders of magnitude rather than evenly.
+ *
+ * These are absolute, and that is the whole design decision. Scaling against the page's own fastest
+ * and slowest family would use the full range on every database, which is tempting and wrong twice
+ * over: the same query would drive at a different speed depending on which other families happened
+ * to be ranked beside it, and a car would change pace when an unrelated family appeared. Absolute
+ * anchors mean a speed means the same thing on every map — and a uniformly slow database correctly
+ * shows a city where *everything* crawls, rather than manufacturing a spread that is not there. It is
+ * the same choice the class ladder already makes with `CAR_FLOOR_BYTES` and friends.
+ *
+ * Measured on the 60-object sample database: mean duration per execution runs 0.024 ms to 3.2 ms,
+ * which lands inside this ramp and yields scales from 1.15 down to about 0.95.
+ */
+export const SPEED_FAST_LOG10_MS = -1.5
+export const SPEED_SLOW_LOG10_MS = 1.5
+
+/**
+ * A decimal string from the payload, as a number.
+ *
+ * Separate from {@link parseBytes} because these are not integers: Query Store hands back totals like
+ * `"5098381354.9999988117331"`, and `parseBytes`'s `^\d+$` rejects every one of them. Using it here
+ * would have made {@link familyMeanDurationMs} return null for every family on a real payload, so
+ * every car would have driven at exactly the base speed and the feature would have looked
+ * implemented while doing nothing.
+ */
+function parseDecimal(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return null
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * How long one execution of this family takes on average, in milliseconds, or null if unmeasured.
+ *
+ * A Query Store aggregate over every execution the family has ever had — deliberately *not* the
+ * elapsed time of the live request the car represents. The live figure grows between samples, and a
+ * vehicle's position is `elapsedSeconds * speed`, so a speed that changed under it would teleport the
+ * car on every tick. The aggregate is fixed for as long as the page holds the family, so a car keeps
+ * one pace for its whole life.
+ */
+export function familyMeanDurationMs(family: DatabaseCityQueryFamily): number | null {
+  const micros = parseDecimal(family.totalDurationMicroseconds)
+  const executions = parseDecimal(family.executionCount)
+  if (micros === null || executions === null || executions <= 0) return null
+  return micros / executions / 1000
+}
+
+/**
+ * The multiplier a family's measured speed puts on {@link VEHICLE_SPEED}, in `[0.85, 1.15]`.
+ *
+ * Faster query, faster car. This makes speed a real channel on this map, which reverses what this
+ * file used to say — the old comment claimed "speed is *not* a channel" on the grounds that SQL
+ * Server reports nothing about how far through a statement is. That is still true, and it is why
+ * this reads a *duration aggregate* rather than any notion of progress: the claim being drawn is
+ * "executions of this query have historically taken about this long", which Query Store does
+ * measure, and not "this execution is running at this speed", which nothing measures.
+ *
+ * An unmeasured family drives at exactly 1. Absent is not slow and not fast — the same reading the
+ * `unknown` class gives a family whose plans never stated a size.
+ */
+export function vehicleSpeedScale(meanDurationMs: number | null): number {
+  if (meanDurationMs === null || !Number.isFinite(meanDurationMs) || meanDurationMs <= 0) return 1
+  const log = Math.log10(meanDurationMs)
+  const span = SPEED_SLOW_LOG10_MS - SPEED_FAST_LOG10_MS
+  const t = Math.min(1, Math.max(0, (log - SPEED_FAST_LOG10_MS) / span))
+  return 1 + VEHICLE_SPEED_VARIATION - t * 2 * VEHICLE_SPEED_VARIATION
+}
 
 /**
  * The largest invented delay between an execution arriving and its car pulling away, in seconds.
@@ -167,6 +266,16 @@ export interface Vehicle {
    * end of the road would teleport it.
    */
   readonly finishedAfterSeconds: number | null
+  /**
+   * This vehicle's own multiplier on {@link VEHICLE_SPEED}, from its family's mean duration.
+   *
+   * Fixed for the life of the car. Carried on the vehicle rather than recomputed by the renderer so
+   * the roster and the scene cannot disagree about where it is: the roster uses it to decide when a
+   * finished car has reached the end of its road and may retire, and the scene uses it to draw the
+   * car and its trail. The two reading different speeds would show up as vehicles vanishing early or
+   * lingering, which does not look like a bug in a multiplier.
+   */
+  readonly speedScale: number
   /** Non-null exactly when the request is blocked. A blocked vehicle does not move. */
   readonly blockedAt: VehicleStop | null
 }
@@ -303,7 +412,8 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
     const finishedAfterSeconds =
       event.endedAt === null ? null : Math.max(0, (event.endedAt - event.firstSeenAt) / 1000 - stagger)
 
-    const fraction = travelledFraction(road.polyline, elapsedSeconds, finishedAfterSeconds)
+    const speedScale = vehicleSpeedScale(familyMeanDurationMs(family))
+    const fraction = travelledFraction(road.polyline, elapsedSeconds, finishedAfterSeconds, speedScale)
     if (finishedAfterSeconds !== null) {
       // Reaching the end of the road is how a car says its query is gone. The deadline is only for
       // the case where no further sample will ever arrive to retire it.
@@ -325,6 +435,7 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
       points: road.polyline,
       elapsedSeconds,
       finishedAfterSeconds,
+      speedScale,
       blockedAt: stopFor(event, road, blocked, fraction),
     })
   }
@@ -368,17 +479,24 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
  * statement is left and a car that stopped at the end would be claiming the query had finished. Once
  * the execution leaves the sample the car completes the lap it is on and stops — the laps it had
  * already done are subtracted so the change of rule is continuous rather than a jump.
+ *
+ * `speedScale` defaults to 1 so the lapping tests below can be written about lapping alone. Every
+ * *production* call passes {@link Vehicle.speedScale}, and `vehicleSpeedWiring.test.ts` pins that,
+ * because a call site that quietly took the default would draw a car at a different speed from the
+ * one the roster retires it by.
  */
 export function travelledFraction(
   points: readonly VehiclePoint[],
   elapsedSeconds: number,
   finishedAfterSeconds: number | null,
+  speedScale = 1,
 ): number {
   const length = polylineLength(points)
   if (length <= 0) return 0
-  const travelled = (Math.max(0, elapsedSeconds) * VEHICLE_SPEED) / length
+  const speed = VEHICLE_SPEED * (Number.isFinite(speedScale) && speedScale > 0 ? speedScale : 1)
+  const travelled = (Math.max(0, elapsedSeconds) * speed) / length
   if (finishedAfterSeconds === null) return travelled % 1
-  const lapsWhenFinished = Math.floor((Math.max(0, finishedAfterSeconds) * VEHICLE_SPEED) / length)
+  const lapsWhenFinished = Math.floor((Math.max(0, finishedAfterSeconds) * speed) / length)
   return Math.min(1, Math.max(0, travelled - lapsWhenFinished))
 }
 
@@ -396,6 +514,35 @@ export function vehicleClass(family: DatabaseCityQueryFamily): VehicleClass {
   if (bytes < VAN_FLOOR_BYTES) return 'car'
   if (bytes < SEMI_FLOOR_BYTES) return 'van'
   return 'semiTruck'
+}
+
+/**
+ * The hue, in `[0, 1)`, that a vehicle's body is painted — derived from its id and nothing else.
+ *
+ * Hashed rather than drawn from `Math.random()` because the roster is rebuilt from scratch on every
+ * live sample, which is every two to five seconds. A random hue would repaint the whole city on that
+ * cadence, and a vehicle that changes colour while you are watching it reads as a *different*
+ * vehicle. Hashing the id makes the colour a property of the request, so a car keeps its paint from
+ * the moment it appears until it leaves the map, across every rebuild in between.
+ *
+ * Hue only. The caller pairs this with one fixed saturation and one fixed lightness, so no vehicle
+ * can be brighter, deeper or more washed-out than another. That is deliberate: this map already has
+ * exactly one measured visual channel — length, which says how much data the query moves — and a
+ * second channel that varied with *anything* would invite a reading nobody measured. Colour here is
+ * identity, not magnitude.
+ *
+ * FNV-1a over the UTF-16 code units. It avalanches well enough that ids differing in one character
+ * land far apart on the wheel, which is the only property that matters: two vehicles on the same
+ * street have to be told apart at a glance.
+ */
+export function vehiclePaintHue(id: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < id.length; index += 1) {
+    hash ^= id.charCodeAt(index)
+    // The FNV prime, by shift-and-add: `hash * 16777619` overflows a double's exact integer range.
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0
+  }
+  return (hash >>> 0) / 4294967296
 }
 
 /**

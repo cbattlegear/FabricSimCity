@@ -23,6 +23,7 @@ import {
   sidebarGeometry,
   openSidebarWorstCase,
   openPlaceCard,
+  openDirectory,
 } from './lib/address.js'
 
 function parseArgs(argv) {
@@ -246,6 +247,19 @@ async function measureViewport(context, viewport, args) {
      * state is what this pass is supposed to measure anyway.
      */
     await page.reload({ waitUntil: 'domcontentloaded' })
+    /*
+     * The reload also re-collapses the "City directory" disclosure, so this has to be reopened
+     * here and not only in `openSidebarWorstCase`. Everything below reads `.address-entry` and
+     * the searchbox, both of which live inside it.
+     *
+     * Waiting for the summary first is not belt-and-braces. `domcontentloaded` fires before React
+     * has mounted the rail, so `openDirectory` ran against an empty document, found no
+     * `.sidebar-directory`, and returned its "no directory disclosure in this view" success --
+     * after which the pass sat on hidden `.address-entry` nodes for the full 120s budget. A step
+     * that reports ok on a page it never touched is worse than one that fails.
+     */
+    await page.locator('.sidebar-directory > summary').waitFor({ state: 'visible', timeout: 120000 })
+    sidebarSteps.push(await openDirectory(page))
     await page.locator('.address-entry').first().waitFor({ state: 'visible', timeout: 120000 })
     search = await typeSearch(page, args.term)
     cleared = await clearSearch(page, { term: args.term })
@@ -414,6 +428,11 @@ function report(result) {
       out.push(line(name, `${box.clientHeight}px visible, ${box.scrollHeight}px content, `
         + `overflow ${box.overflowY}, ${box.unreachablePx}px unreachable`
         + (box.scrollExtentPx ? `, ${box.scrollExtentPx}px scrollable` : '')
+        /*
+         * Printed for `directory` so a 0px `.sidebar-scroll` on the next line is attributable:
+         * a closed disclosure and a column squeezed to nothing read the same otherwise.
+         */
+        + (box.open !== undefined ? `, ${box.open ? 'open' : 'CLOSED'}` : '')
         /*
          * The number that says whether the feed is a feed. Zero unreachable pixels is necessary and
          * not sufficient: as a drawer this read 0.4 rows with every overflow number clean.

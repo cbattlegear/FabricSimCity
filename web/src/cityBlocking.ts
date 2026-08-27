@@ -1,6 +1,7 @@
 import type { LiveIncidentSnapshot, LockResource } from './liveContracts'
 import type { DatabaseCityObject } from './databaseCityContracts'
 import type { LiveBlockingEdge } from './cityTraffic'
+import { isBlockedReference } from './liveIncidents'
 
 /**
  * Turns live lock waits into per-object blocking evidence.
@@ -31,31 +32,42 @@ export interface LiveBlockingSummary {
 
 const EMPTY: LiveBlockingSummary = { edges: [], unresolved: [], offPageCount: 0, probeReported: false }
 
+/** Shared with the pin projection so the chip and the pins cannot disagree about what "blocked" is. */
 function isBlocked(blocking: { blockingSessionId: number | null; sentinel: string }): boolean {
-  return blocking.blockingSessionId !== null || blocking.sentinel !== 'None'
+  return isBlockedReference(blocking as Parameters<typeof isBlockedReference>[0])
 }
 
 /**
- * Builds the lookup keys a resolved lock can match a loaded object by. Connected mode emits
- * `{databaseId}/object/{int}` object ids while the fixture emits `object:dbo:100`, so the
- * `schema.object` name is always carried as a fallback — which is why the probe returns names too.
+ * Builds the lookup keys a resolved lock can match a loaded object by.
+ *
+ * Connected mode emits `<endpoint>/database/<name>/object/<object_id>` — measured against a live
+ * instance, `primary/database/SimCitySmall/object/901578250`. An earlier comment here claimed the
+ * format was `{databaseId}/object/{int}`, which is the key `lockKeys` used to build rather than
+ * anything the API returns, so the numeric join could never match and every table-level block was
+ * counted off-map. The `schema.object` name remains the primary join; the numeric id is the
+ * fallback for `OBJECT:`/`TAB:` waits, which the parser resolves without a catalog lookup and which
+ * therefore carry no names at all.
  */
 function objectKeys(object: DatabaseCityObject): string[] {
-  return [
+  const keys = [
     object.objectId.toLocaleLowerCase(),
     `${object.schemaName}.${object.name}`.toLocaleLowerCase(),
   ]
-}
-
-function lockKeys(lock: LockResource): string[] {
-  const keys: string[] = []
-  if (lock.schemaName && lock.objectName) {
-    keys.push(`${lock.schemaName}.${lock.objectName}`.toLocaleLowerCase())
-  }
-  if (lock.databaseId !== null && lock.objectId !== null) {
-    keys.push(`${lock.databaseId}/object/${lock.objectId}`.toLocaleLowerCase())
+  const marker = object.objectId.lastIndexOf('/object/')
+  if (marker >= 0) {
+    const tail = object.objectId.slice(marker + '/object/'.length)
+    if (/^\d+$/.test(tail)) keys.push(`object/${tail}`)
   }
   return keys
+}
+
+/** The database segment every object id on this page shares, lowercased. */
+function pageDatabaseName(objects: readonly DatabaseCityObject[]): string | null {
+  for (const object of objects) {
+    const match = /\/database\/([^/]+)\/object\//.exec(object.objectId)
+    if (match) return match[1].toLocaleLowerCase()
+  }
+  return null
 }
 
 export function liveBlockingEdges(
@@ -69,29 +81,56 @@ export function liveBlockingEdges(
     for (const key of objectKeys(object)) byKey.set(key, object.objectId)
   }
 
-  const waits: LockResource[] = []
+  /*
+   * Which database each sampled session ran in, so a bare `object_id` can be trusted. An object id
+   * is unique only inside its own database; instance-wide it is just a number. Waiting tasks report
+   * no database of their own and borrow their session's request, which is in the same sample.
+   */
+  const databaseBySession = new Map<number, string>()
+  for (const request of snapshot.requests ?? []) {
+    if (request.databaseName) {
+      databaseBySession.set(request.sessionId, request.databaseName.toLocaleLowerCase())
+    }
+  }
+  const pageDatabase = pageDatabaseName(objects)
+
+  const resolveLockObject = (lock: LockResource, sessionId: number): string | undefined => {
+    if (lock.schemaName && lock.objectName) {
+      const named = byKey.get(`${lock.schemaName}.${lock.objectName}`.toLocaleLowerCase())
+      if (named !== undefined) return named
+    }
+    if (lock.objectId === null) return undefined
+    if (pageDatabase === null || databaseBySession.get(sessionId) !== pageDatabase) return undefined
+    return byKey.get(`object/${lock.objectId}`.toLocaleLowerCase())
+  }
+
+  const waits: { lock: LockResource; sessionId: number }[] = []
   let probeReported = false
   for (const request of snapshot.requests ?? []) {
     if (request.lockResource === undefined) continue
     probeReported = true
-    if (request.lockResource && isBlocked(request.blocking)) waits.push(request.lockResource)
+    if (request.lockResource && isBlocked(request.blocking)) {
+      waits.push({ lock: request.lockResource, sessionId: request.sessionId })
+    }
   }
   for (const task of snapshot.waitingTasks ?? []) {
     if (task.lockResource === undefined) continue
     probeReported = true
-    if (task.lockResource && isBlocked(task.blocking)) waits.push(task.lockResource)
+    if (task.lockResource && isBlocked(task.blocking)) {
+      waits.push({ lock: task.lockResource, sessionId: task.sessionId })
+    }
   }
 
   const counts = new Map<string, number>()
   const unresolved: { rawResource: string; reason: string }[] = []
   let offPageCount = 0
 
-  for (const lock of waits) {
+  for (const { lock, sessionId } of waits) {
     if (lock.status !== 'Resolved') {
       unresolved.push({ rawResource: lock.rawResource, reason: lock.reason })
       continue
     }
-    const objectId = lockKeys(lock).map(key => byKey.get(key)).find(value => value !== undefined)
+    const objectId = resolveLockObject(lock, sessionId)
     if (objectId === undefined) {
       offPageCount += 1
       continue

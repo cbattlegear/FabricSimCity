@@ -455,6 +455,134 @@ describe('the sidebar column scrolls its own overflow', () => {
    * the fieldset, because a fieldset's box is measured from its rendered legend's top. The geometry
    * looked correct while the pixels did not, and only a screenshot settled it.
    */
+  /**
+   * The address book is now a disclosure, because the live feed took the rail's default subject.
+   *
+   * That makes it the fourth `<details>` in this layout and it inherits every trap the drawers
+   * already documented: the floor lives on `::details-content`, never on the `<details>` itself,
+   * and a rule written into the wrong `@media` block loses on source order without failing.
+   */
+  it('collapses the address book behind a disclosure rather than dropping it', () => {
+    const address = readFileSync(new URL('./AddressPanel.tsx', import.meta.url), 'utf8')
+    expect(address, 'the address book is no longer a <details>')
+      .toMatch(/<details\s[\s\S]{0,120}?className="sidebar-directory"/)
+    expect(address, 'the disclosure has no summary to click').toMatch(/<summary/)
+    expect(desktopRule('.sidebar-directory'), '.sidebar-directory has no rule at all').not.toBeNull()
+  })
+
+  /*
+   * The 10px-drawer defect, transplanted. `min-height: 0` on the <details> shrinks the box that
+   * holds the summary, so the control you click to open the directory gets clipped away and the
+   * address book becomes unreachable rather than merely closed.
+   */
+  it('never shrinks the directory past its own summary', () => {
+    const own = rules().filter((one) => one.selector.split(',')
+      .some((part) => part.trim() === '.sidebar-directory'))
+    expect(own.length, 'no .sidebar-directory rule to check').toBeGreaterThan(0)
+    for (const rule of own) {
+      expect(rule.body, 'a .sidebar-directory rule sets min-height: 0').not.toMatch(/min-height:\s*0/)
+    }
+    // The floor belongs on the box that is actually the flex item.
+    expect(css).toMatch(/\.sidebar-directory::details-content \{[^}]*min-height:\s*0/)
+    expect(css).toMatch(/\.sidebar-directory > summary \{[^}]*flex:\s*none/)
+  })
+
+  /*
+   * `::details-content` is `display: block` with `min-height: auto`, so it floors on its own content
+   * however hard the column pushes. Making it a flex column is what lets the shrink reach the
+   * scroller inside, which is the only reason the directory can give way at all.
+   */
+  it('lets the shrink reach the scroller inside the directory', () => {
+    const content = ownRule('.sidebar-directory::details-content')
+    expect(content, '.sidebar-directory::details-content has no rule').not.toBeNull()
+    expect(content).toMatch(/display:\s*flex/)
+    expect(content).toMatch(/flex-direction:\s*column/)
+  })
+
+  /*
+   * A definite max-height is what gives the directory a bounded automatic minimum, so it cannot
+   * floor at the full height of a 60-object address list and push the feed out of the rail.
+   */
+  it('caps the open directory so a long address list cannot evict the feed', () => {
+    expect(desktopRule('.sidebar-directory')).toMatch(/max-height:\s*\d+(?:\.\d+)?vh/)
+  })
+
+  /*
+   * The cap above is not enough on its own, and pairing it with an explicit floor is what fixes the
+   * defect this guards.
+   *
+   * A flex item's *automatic* minimum is its content size clamped by its own definite `max-height`.
+   * So with `min-height: auto` the cap acted as a floor as well as a ceiling: a directory holding a
+   * 60-entry address list floored at the whole 62vh and could not give way at all, and the rail
+   * overflowed behind `overflow: hidden`. Measured with the directory open, 249px of the column was
+   * unreachable at 1440x900 and 271px at 1115x800 -- the AGENTS.md clipping signature. Naming a
+   * floor replaces the automatic minimum, and the same six states then measure 0 unreachable.
+   *
+   * `.sidebar-feed` never had this problem because it already names an explicit `min-height`, which
+   * is what made the asymmetry easy to miss.
+   *
+   * The floor has to be small enough to be a floor rather than a second cap, and large enough that
+   * the summary can never be clipped -- the 10px-drawer invariant, guarded separately above.
+   */
+  it('gives the directory an explicit floor so its cap cannot become one', () => {
+    const own = desktopRule('.sidebar-directory')
+    expect(own, '.sidebar-directory has no rule at all').not.toBeNull()
+    const floor = own!.match(/min-height:\s*([\d.]+)rem/)
+    expect(floor, '.sidebar-directory names no explicit min-height, so it floors at its max-height')
+      .not.toBeNull()
+    const rem = Number(floor![1])
+    expect(rem, 'the directory floor is a second cap, not a floor').toBeLessThan(6)
+    expect(rem, 'the directory floor is too low to keep the summary clickable')
+      .toBeGreaterThanOrEqual(2.5)
+  })
+
+  /*
+   * The point of collapsing it: with the directory shut there is nothing competing for the rail, so
+   * the feed should take the space rather than sitting at its own cap with dead air beneath it.
+   *
+   * `:has()` and not `:where()` inside it -- `:has()` takes a relative selector list, `:where()` a
+   * complex one, so a leading combinator inside `:where()` is dropped by forgiving parsing and the
+   * rule silently matches everything.
+   */
+  it('gives the feed the rail back when the directory is closed', () => {
+    const lifted = css.match(/\.map-sidebar:has\(> \.sidebar-directory:not\(\[open\]\)\)[^{]*\{[^}]*\}/)
+    expect(lifted, 'no rule lifts the feed cap when the directory is closed').not.toBeNull()
+    expect(lifted![0]).toMatch(/max-height:\s*none/)
+    expect(lifted![0], 'a :where() inside :has() is dropped by forgiving parsing')
+      .not.toMatch(/:where\(/)
+  })
+
+  /*
+   * Source order, the trap AGENTS.md calls out: base sidebar rules sit after the FIRST
+   * max-width:860px block, so a narrow override written into that block loses to them silently.
+   *
+   * `lastNarrowRuleFor` is no use here because it only matches a selector that owns its own brace,
+   * and this override rides in a comma group with the other capped sections. Comparing raw offsets
+   * is the same check without that assumption.
+   */
+  it('declares the directory narrow override after the base rule it overrides', () => {
+    const base = css.indexOf('\n.sidebar-directory {')
+    expect(base, 'no base .sidebar-directory rule').toBeGreaterThan(-1)
+
+    const override = css.lastIndexOf('.sidebar-directory,')
+    expect(override, 'no grouped narrow override for .sidebar-directory').toBeGreaterThan(-1)
+    expect(override, 'the narrow override is declared before the rule it overrides')
+      .toBeGreaterThan(base)
+
+    // And specifically inside the last narrow block, not merely later in the file.
+    const lastSheetBlock = css.lastIndexOf(`@media (max-width: ${SHEET}px)`)
+    expect(override, 'the override is not in the last narrow block').toBeGreaterThan(lastSheetBlock)
+  })
+
+  /*
+   * In the sheet the rail's caps are lifted wholesale, because the sheet scrolls as one column
+   * instead of dividing a fixed height. A directory left capped at a fraction of the viewport there
+   * would scroll inside a page that is already scrolling.
+   */
+  it('lifts the directory cap in the bottom sheet', () => {
+    expect(narrowRule('.sidebar-directory')).toMatch(/max-height:\s*none/)
+  })
+
   it('gives the layers panel a heading rather than a legend in its border', () => {
     expect(city, 'the layers panel is back to a fieldset/legend').not.toMatch(/<legend>/)
     expect(city, 'the layers panel is no longer a labelled group')
@@ -954,5 +1082,84 @@ describe('three drawers in one rail share one height budget', () => {
     expect(css.slice(block)).toMatch(/\.sidebar-drawers\s*\{[^}]*display:\s*contents/)
     expect(block, 'the wrapper is dissolved before it is defined')
       .toBeGreaterThan(css.indexOf('\n.sidebar-drawers {'))
+  })
+})
+
+/*
+ * The count that rides beside a drawer title.
+ *
+ * Measured in Chromium before the fix, at 1440x900, 1115x800 and 820x900 alike: the gap between the
+ * title's last glyph box and the badge's first was **0.00px** at every one of them, which is what
+ * "City directory114 places" and "Live activityNo blocks" are. `.drawer-badge` simply had no rule.
+ * After: 188.31px / 120.31px / 601.31px, each badge inset 16px from the trailing edge, still one
+ * 34px line.
+ *
+ * These live in this file so they read the desktop/sheet split above rather than growing a fourth
+ * private stylesheet parser -- and because the trap that split exists for applies here directly: a
+ * narrow override for `.drawer-badge` would silently retarget the desktop assertion at itself.
+ */
+describe('the count beside a drawer title', () => {
+  it('is separated from the title by CSS, because the markup cannot carry a space', () => {
+    const rule = desktopRule('.drawer-badge')
+    expect(rule, '.drawer-badge has no rule at all -- the title and the count run together').not.toBeNull()
+    expect(rule, 'nothing holds the count off the title').toMatch(/padding-inline-start:\s*[^;]+/)
+  })
+
+  /*
+   * The failure this pins is a *silent* one, which is why it is asserted rather than left to review.
+   * `margin-inline-start: auto` is the idiomatic way to push a child to the trailing edge and it does
+   * nothing at all here: it only resolves against free space inside a flex or grid container, and
+   * `<summary>` is `display: list-item`. It parses, it survives every linter, and the badge stays
+   * exactly where it was.
+   */
+  it('reaches the trailing edge by a means that works outside flex and grid', () => {
+    const rule = desktopRule('.drawer-badge') ?? ''
+    expect(rule, 'the count no longer reaches the trailing edge').toMatch(/float:\s*inline-end/)
+    expect(rule, 'margin auto is inert on a list-item summary and will not move the badge')
+      .not.toMatch(/margin-inline-start:\s*auto/)
+  })
+
+  /*
+   * The other way to right-align this is `display: flex` on the summary, which works and takes the
+   * disclosure triangle with it -- the triangle is `display: list-item`'s marker, and it is the only
+   * thing on the row saying the row opens. So the badge must not be paid for out of the summary's
+   * display type.
+   */
+  /*
+   * Deliberately not `desktopRule`. `ownRule` returns the *last* rule matching the selector and its
+   * optional pseudo-class, and the rule after each of these summaries is its own `:hover` -- so
+   * `desktopRule('.sidebar-drawer > summary')` hands back `color: #dbe5ed` and an assertion about
+   * `display` passes against a stylesheet that does set `display: flex`. That was caught by mutating
+   * the stylesheet and watching this very test keep passing, which is the whole reason to run the
+   * mutation rather than trust the green tick. Every rule targeting the summary has to be checked,
+   * because any one of them can carry the declaration.
+   */
+  it('does not cost the summary its disclosure marker', () => {
+    for (const selector of ['.sidebar-drawer > summary', '.sidebar-directory > summary']) {
+      const matching = rules(desktopCss).filter((rule) => rule.selector
+        .split(',')
+        .some((one) => one.trim() === selector || one.trim().startsWith(`${selector}:`)))
+      expect(matching.length, `no rule targets ${selector} any more`).toBeGreaterThan(0)
+      for (const rule of matching) {
+        expect(rule.body, `${selector} became a flex container, which drops the disclosure triangle`)
+          .not.toMatch(/display:\s*(flex|grid|inline-flex|inline-grid)/)
+      }
+    }
+  })
+
+  it('reads as secondary to the title rather than competing with it', () => {
+    const rule = desktopRule('.drawer-badge') ?? ''
+    expect(rule, 'the count is not dimmed against the title').toMatch(/color:\s*#[0-9a-f]{6}/i)
+    // Counts change in place while you watch them; proportional digits make the row twitch.
+    expect(rule).toMatch(/font-variant-numeric:\s*tabular-nums/)
+  })
+
+  it('covers every summary that carries one, not just the one that was reported', () => {
+    const panels = [
+      readFileSync(new URL('./AddressPanel.tsx', import.meta.url), 'utf8'),
+      readFileSync(new URL('./DatabaseCityView.tsx', import.meta.url), 'utf8'),
+    ].join('\n')
+    const uses = panels.match(/className="drawer-badge"/g) ?? []
+    expect(uses.length, 'the badge class is no longer what the summaries use').toBeGreaterThanOrEqual(3)
   })
 })

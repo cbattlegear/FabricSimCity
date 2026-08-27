@@ -102,6 +102,20 @@ function objectEntry(object: DatabaseCityObject, plan: CityPlan): AddressEntry {
   }
 }
 
+/**
+ * The address-book id for a query family.
+ *
+ * Shared rather than inlined because two call sites have to agree on it exactly and neither can
+ * see the other: `queryEntry` below mints the id for the list, and `showFamilyOnMap` in
+ * `DatabaseCityView` selects by it when a route is drawn from somewhere *other* than the list --
+ * the live feed, or the ranked families table. A drift in the template would not fail anything
+ * loudly; the row would simply never highlight, which is the same silent divergence that made the
+ * feed and the list behave differently in the first place.
+ */
+export function queryAddressId(familyId: string): string {
+  return `query:${familyId}`
+}
+
 function queryEntry(family: DatabaseCityQueryFamily, objectNames: ReadonlyMap<string, string>): AddressEntry {
   const stops = family.objectIds
     .map(id => objectNames.get(id))
@@ -125,7 +139,7 @@ function queryEntry(family: DatabaseCityQueryFamily, objectNames: ReadonlyMap<st
     address = 'Plans named no object in this database'
   }
   return {
-    id: `query:${family.familyId}`,
+    id: queryAddressId(family.familyId),
     kind: 'query',
     targetId: family.familyId,
     name: `Query ${family.queryHash}`,

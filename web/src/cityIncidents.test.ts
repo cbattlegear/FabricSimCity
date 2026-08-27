@@ -43,9 +43,10 @@ function graph(overrides: Partial<DeadlockGraph> = {}): DeadlockGraph {
   return {
     id: 'dl:1',
     occurredAt: '2024-05-01T11:40:00Z',
+    // A graph names its database on the processes, which is what gates the numeric object join.
     processes: [
-      { id: 'p1', sessionId: 51, isVictim: false },
-      { id: 'p2', sessionId: 52, isVictim: true },
+      { id: 'p1', sessionId: 51, isVictim: false, databaseName: 'CityDb' },
+      { id: 'p2', sessionId: 52, isVictim: true, databaseName: 'CityDb' },
     ],
     resources: [resource()],
     victimProcessIds: ['p2'],
@@ -93,6 +94,8 @@ interface RequestSpec {
   sentinel?: string
   waitTimeMs?: number | null
   waitType?: string | null
+  /** Null models a sample that named no database, which switches the numeric object join off. */
+  databaseName?: string | null
 }
 
 interface SnapshotSpec {
@@ -114,6 +117,8 @@ function snapshotOf(spec: SnapshotSpec = {}): LiveIncidentSnapshot {
     requests: (spec.requests ?? []).map((entry, index) => ({
       requestId: `r${index}`,
       sessionId: entry.sessionId,
+      databaseId: '7',
+      databaseName: entry.databaseName === undefined ? 'CityDb' : entry.databaseName,
       waitType: entry.waitType === undefined ? 'LCK_M_X' : entry.waitType,
       waitTimeMs: entry.waitTimeMs === undefined ? 2500 : entry.waitTimeMs,
       waitResource: entry.lockResource?.rawResource ?? null,
@@ -158,9 +163,18 @@ function snapshotOf(spec: SnapshotSpec = {}): LiveIncidentSnapshot {
   } as unknown as LiveIncidentSnapshot
 }
 
+/*
+ * Object ids in the shape the API actually serves: `<endpoint>/database/<name>/object/<object_id>`.
+ *
+ * An earlier fixture used `7/object/200` here, which was the key format `lockKeys` happened to
+ * build rather than anything a running instance ever returns. Measured against a live SQL Server,
+ * `/api/v1/database-city/primary/database/SimCitySmall` serves
+ * `primary/database/SimCitySmall/object/901578250`, so a test written to the old shape asserted the
+ * implementation agreed with itself and could not see that the join was dead on real data.
+ */
 const objects = [
-  objectOf('object:dbo:100', 'dbo', 'Customer'),
-  objectOf('7/object/200', 'sales', 'Orders'),
+  objectOf('primary/database/CityDb/object/100', 'dbo', 'Customer'),
+  objectOf('primary/database/CityDb/object/200', 'sales', 'Orders'),
 ]
 
 describe('projectIncidents · never implies an all-clear', () => {
@@ -215,7 +229,7 @@ describe('projectIncidents · what earns a pin', () => {
       snapshotOf({ requests: [{ sessionId: 51, lockResource: lock(), blockingSessionId: 60 }] }),
       objects)
     expect(projection.markers).toHaveLength(1)
-    expect(projection.markers[0].objectId).toBe('object:dbo:100')
+    expect(projection.markers[0].objectId).toBe('primary/database/CityDb/object/100')
     expect(projection.markers[0].severity).toBe('blocked')
     expect(projection.markers[0].headline).toContain('51')
   })
@@ -238,17 +252,97 @@ describe('projectIncidents · what earns a pin', () => {
     expect(projection.markers[0].details.join(' ')).toContain('Orphan')
   })
 
-  it('resolves a connected-mode id by databaseId/object/objectId', () => {
+  /*
+   * The regression this file previously could not see.
+   *
+   * An `OBJECT:`/`TAB:` lock is parsed straight out of the wait-resource text with no catalog
+   * lookup, so it carries `objectId` and nothing else — `schemaName` and `objectName` are null by
+   * design. Measured against a live instance, a table-level block produced exactly this and was
+   * counted off-map every time, so the live feed showed rows badged "blocked" with no pin beside
+   * them on the city.
+   */
+  it('pins a table-level lock that names an object id and no names at all', () => {
     const projection = projectIncidents(
       snapshotOf({
         requests: [{
           sessionId: 51,
+          lockResource: lock({
+            rawResource: 'OBJECT: 7:200:15',
+            kind: 'Object',
+            objectId: 200,
+            schemaName: null,
+            objectName: null,
+          }),
+          blockingSessionId: 60,
+        }],
+      }),
+      objects)
+    expect(projection.markers.map(marker => marker.objectId))
+      .toEqual(['primary/database/CityDb/object/200'])
+    expect(projection.offPageCount).toBe(0)
+  })
+
+  /*
+   * An object_id is unique only inside its own database. Two databases on one instance reuse the
+   * same numbers routinely, so a numeric join without a database check would pin another
+   * database's block onto this city's buildings — a worse failure than not pinning it.
+   */
+  it('refuses a numeric object id from a different database rather than pinning it here', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        requests: [{
+          sessionId: 51,
+          databaseName: 'SomewhereElse',
           lockResource: lock({ objectId: 200, schemaName: null, objectName: null }),
           blockingSessionId: 60,
         }],
       }),
       objects)
-    expect(projection.markers.map(marker => marker.objectId)).toEqual(['7/object/200'])
+    expect(projection.markers).toEqual([])
+    expect(projection.offPageCount).toBe(1)
+  })
+
+  it('refuses a numeric object id when the sample named no database at all', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        requests: [{
+          sessionId: 51,
+          databaseName: null,
+          lockResource: lock({ objectId: 200, schemaName: null, objectName: null }),
+          blockingSessionId: 60,
+        }],
+      }),
+      objects)
+    expect(projection.markers).toEqual([])
+    expect(projection.offPageCount).toBe(1)
+  })
+
+  /*
+   * Zero is SQL Server's "nothing is blocking this", reported for every ordinary running request.
+   * Reading it as a session number marked the whole sample blocked, and because an unblocked
+   * request carries no lock resource there was never a pin to go with the badge -- which is exactly
+   * how this surfaced: "blocked" rows in the live feed with nothing on the map beside them.
+   */
+  it('does not treat blocking_session_id 0 as a blocker', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        requests: [{
+          sessionId: 51,
+          lockResource: lock(),
+          blockingSessionId: 0,
+        }],
+      }),
+      objects)
+    expect(projection.markers).toEqual([])
+    expect(projection.offPageCount).toBe(0)
+    expect(projection.unresolved).toEqual([])
+  })
+
+  it('still pins a real blocker', () => {
+    const projection = projectIncidents(
+      snapshotOf({ requests: [{ sessionId: 51, lockResource: lock(), blockingSessionId: 60 }] }),
+      objects)
+    expect(projection.markers).toHaveLength(1)
   })
 
   it('pins waiting tasks as well as requests', () => {
@@ -574,7 +668,7 @@ describe('projectIncidents · recorded deadlocks', () => {
       snapshotOf({ deadlocks: { graphs: [graph()], totalRetainedCount: 1 } }),
       objects)
     const marker = projection.markers.find(entry => entry.severity === 'deadlock')
-    expect(marker?.objectId).toBe('object:dbo:100')
+    expect(marker?.objectId).toBe('primary/database/CityDb/object/100')
     expect(marker?.headline).toContain('deadlock was recorded here')
     expect(marker?.source).toContain('system_health')
   })
@@ -595,6 +689,25 @@ describe('projectIncidents · recorded deadlocks', () => {
   })
 
   /** Two loaded resources make the pin a claim about a relationship, so the road can be found. */
+  it('does not pin a graph from another database by object id alone', () => {
+    const projection = projectIncidents(
+      snapshotOf({
+        deadlocks: {
+          graphs: [graph({
+            processes: [
+              { id: 'p1', sessionId: 51, isVictim: false, databaseName: 'SomewhereElse' },
+              { id: 'p2', sessionId: 52, isVictim: true, databaseName: 'SomewhereElse' },
+            ],
+            resources: [resource({ objectName: null, associatedObjectId: 100 })],
+          } as unknown as Partial<DeadlockGraph>)],
+          totalRetainedCount: 1,
+        },
+      }),
+      objects)
+    expect(projection.markers.filter(entry => entry.severity === 'deadlock')).toEqual([])
+    expect(projection.deadlocks.retainedCount).toBe(1)
+  })
+
   it('names the other loaded objects in the graph as counterparts', () => {
     const projection = projectIncidents(
       snapshotOf({
@@ -616,8 +729,8 @@ describe('projectIncidents · recorded deadlocks', () => {
       }),
       objects)
     const marker = projection.markers.find(entry => entry.severity === 'deadlock')
-    expect(marker?.objectId).toBe('object:dbo:100')
-    expect(marker?.counterpartObjectIds).toEqual(['7/object/200'])
+    expect(marker?.objectId).toBe('primary/database/CityDb/object/100')
+    expect(marker?.counterpartObjectIds).toEqual(['primary/database/CityDb/object/200'])
   })
 
   /**
@@ -646,7 +759,7 @@ describe('projectIncidents · recorded deadlocks', () => {
       objects)
     const marker = projection.markers.find(entry => entry.severity === 'deadlock')
     // p2 is the victim and waits on the `dbo.Customer` resource, which is second in the list.
-    expect(marker?.objectId).toBe('object:dbo:100')
+    expect(marker?.objectId).toBe('primary/database/CityDb/object/100')
   })
 
   it('says when the anchor is not the victim\'s resource, rather than implying it was', () => {

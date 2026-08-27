@@ -65,6 +65,14 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
     /// <summary>The database filter the last families read asked for.</summary>
     public string? RequestedDatabaseId { get; private set; }
 
+    /// <summary>
+    /// The family count the last families read asked for. This is how many query families the city
+    /// page publishes, so it is the knob that decides whether a live execution can be matched to a
+    /// family at all -- worth asserting on directly rather than inferring from the rows returned,
+    /// because a fake with few families looks identical whatever count was requested.
+    /// </summary>
+    public int? RequestedPageSize { get; private set; }
+
     public void AddFamily(
         string familyId,
         string cpu,
@@ -118,6 +126,7 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
         }
 
         RequestedDatabaseId = databaseId;
+        RequestedPageSize = pageSize;
         Assert.Equal(DatabaseName, databaseId);
         Assert.Equal("cpu", metric);
         return Task.FromResult(new PageV1<QueryFamilySummaryV1>(

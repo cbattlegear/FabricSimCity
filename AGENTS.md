@@ -80,6 +80,18 @@ override for a selector will therefore repoint existing desktop assertions at th
 they may keep passing while asserting the wrong rule. The helper splits the stylesheet into
 desktop and sheet sources for this reason — use that split rather than adding a new mechanism.
 
+The media split does not save you from the **second** face of this, because the retarget can happen
+*within* one source. `ownRule()` matches its selector followed by an **optional pseudo-class group**,
+and still returns the last match — so `ownRule('.sidebar-drawer > summary')` resolves to the body of
+`.sidebar-drawer > summary:hover`, which is declared after it. An assertion about `display` on that
+selector therefore reads the hover rule, and passes happily against a stylesheet where the base rule
+sets `display: flex`. That is a guard advertising protection it does not provide, and only a mutation
+found it.
+
+When asserting that a declaration is **absent** — the negative form, which is where this bites —
+iterate `rules(css)` and check *every* rule whose selector is the target or starts with `target:`.
+Reserve `ownRule()` for reading a value you expect to be present.
+
 ## `App.css` source order is load-bearing
 
 A media query adds no specificity, so same-specificity rules resolve by source order. Base rules
@@ -181,6 +193,17 @@ And each slice is bounded by a named anchor further down the file, so **adding a
 two anchors silently extends the slice above it** and the guard starts asserting about code it was
 never written for. Check the anchors when you add anything near a loop.
 
+Anchors are used the same way outside that file — `cityVehicleAssets.test.ts` and
+`cityVehicleLegibility.test.ts` both slice `VEHICLE_SIZE` out of `DatabaseCityScene.ts` — and there
+the failure is sharper. **Promoting a declaration to module scope moves an anchor, and if it ends up
+*above* the start anchor the window inverts.** `String.slice(from, to)` with `to < from` returns the
+empty string, so every lookup inside the slice finds nothing. Hoisting `VEHICLE_Y` to the top of the
+file to derive the trail height did exactly this to both files at once.
+
+So assert `to > from`, not merely that each `indexOf` cleared `-1`. An inverted window and a renamed
+anchor are different bugs and only the stricter check catches both. Prefer an end anchor that is
+declared close to the start one and is unlikely to be hoisted.
+
 ## NuGet lock files move together
 
 The repo uses Central Package Management (`Directory.Packages.props`) with `packages.lock.json`
@@ -203,9 +226,9 @@ Do not weaken `--locked-mode` in CI to get around this. It is a supply-chain con
 
 ```powershell
 dotnet build SqlSimCity.slnx -c Release        # 0 warnings expected
-dotnet test SqlSimCity.slnx -c Release         # 1,363 tests
+dotnet test SqlSimCity.slnx -c Release         # 1,367 tests
 npm test                                       # 626 probe-catalog tests
-cd web; npm ci; npm run build; npm test -- --run   # 922 tests / 48 files
+cd web; npm ci; npm run build; npm test -- --run   # 1,069 tests / 54 files
 npm run typecheck
 ```
 
