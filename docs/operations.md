@@ -53,6 +53,33 @@ configured separately. Pass the real `Host` from the proxy instead. Note that on
 this is enabled, recorded client addresses are asserted by the proxy rather than
 observed by this process.
 
+## Link previews
+
+Every page is served with a document head describing what that link opens: the
+title is `SQL Sim City` at the root and `SQL Sim City - <database>` for a city
+link, and the preview image is a skyline drawn from the same measurements the map
+uses — one tower per database on the atlas card, one per object on a city card.
+Databases nothing has measured get a fenced empty plot rather than a short tower,
+so the count in the corner always matches the number of plots in the picture.
+
+The card is served from `/social-card.png`, optionally with `?database=<name>`. It
+is a `GET`-only route like everything else here, it reads only the snapshot the API
+already holds, and it is rendered at most once per database per UTC day and then
+cached in memory. There is no new outbound traffic and nothing is written to disk.
+
+**Behind a reverse proxy, set `ReverseProxy__Enabled` and name the peer.** The
+absolute URLs in `og:image` and `og:url` are built from the request scheme and
+host. `X-Forwarded-Proto` is ignored unless the proxy is trusted, so a site
+terminating TLS at the proxy will otherwise advertise `http://` image URLs, and
+the clients that fetch preview images generally will not follow that from an
+`https://` page — the preview arrives with no picture. The section above is the
+same setting; this is a second reason to configure it.
+
+Preview clients cache aggressively and by URL. After an upgrade that changes the
+card, expect existing links to keep showing the old image until the client's own
+cache expires; posting the link with a changed query string is the usual way to
+force a re-fetch while testing.
+
 ## Health and readiness
 
 `GET /healthz` reports that the process is running. `GET /readyz` reports that
