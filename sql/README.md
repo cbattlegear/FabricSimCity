@@ -1,7 +1,7 @@
 # SQL probe catalog
 
-This directory is a self-contained, strictly read-only catalog of T-SQL probes intended
-for future collection via `Microsoft.Data.SqlClient`. It has no dependency on any
+This directory is a self-contained, strictly read-only catalog of T-SQL probes used by
+connected collection through `Microsoft.Data.SqlClient`. It has no dependency on any
 application code in this repository -- it is pure `.sql` text plus a JSON manifest
 describing how to run each file safely.
 
@@ -11,9 +11,9 @@ describing how to run each file safely.
 - `probes/` -- the T-SQL files themselves, one probe (one logical unit of collection)
   per file, grouped by capability.
 
-Nothing under `sql/` executes automatically. A future collector is expected to load
-`manifest.json`, read the referenced file, bind the declared `SqlParameter`s by name,
-and execute it with `Microsoft.Data.SqlClient`.
+Nothing under `sql/` executes by itself. `SqlSimCity.Collection` loads `manifest.json`,
+reads the referenced file, binds the declared `SqlParameter`s by name, and executes it
+with `Microsoft.Data.SqlClient`.
 
 ## Design rules every probe file follows
 
@@ -38,7 +38,7 @@ and execute it with `Microsoft.Data.SqlClient`.
    `plan_handle`/`sql_handle` to text via `sys.dm_exec_sql_text`, but never
    `CROSS/OUTER APPLY sys.dm_exec_query_plan`. A single query plan can be tens of KB of
    XML; fetching it for every row of a live-session sweep turns a cheap poll into an
-   expensive one. If a future collector needs a plan, it should be a separate,
+   expensive one. When a collector needs a plan, it uses a separate,
    explicitly-requested, single-plan lookup.
 4. **Root-blocker inputs, not root-blocker answers.** `sessions/blocking_inputs.sql`
    returns raw blocked-request and idle-open-transaction facts, preserving
@@ -136,19 +136,26 @@ requirement; this table is a summary, not a substitute for either.
   service objectives (`VIEW DATABASE STATE` or `##MS_ServerStateReader##`). Prefer
   `scheduler.pressure_2019` on Azure SQL Database, since it always runs a current engine
   and additionally reports `ideal_workers_limit`.
-- **`tempdb.usage`** still applies: every Azure SQL Database has its own private
-  `tempdb`. Microsoft documents that a T-SQL `USE` statement cannot change database
-  context on Azure SQL Database -- the client must "create a new connection to that
-  database" instead -- which is exactly the fresh-connection-from-the-pool pattern this
-  probe already requires; see the T-SQL differences page cited below.
+- **`sessions.deadlock_graphs`** is **NOT SUPPORTED on Azure SQL Database.**
+  The probe reads the server-scoped `system_health` Extended Events file target; Azure
+  SQL Database exposes database-scoped Extended Events views instead and has no built-in
+  `xml_deadlock_report` session for this catalog to read. Treat that as unsupported
+  evidence, not as an empty deadlock list.
+- **`tempdb.usage`** is **NOT SUPPORTED on Azure SQL Database through this
+  probe**. Every Azure SQL Database has its own private `tempdb`, but a connection
+  string cannot target `tempdb` as its initial catalog on the logical server, and the
+  session/task allocation views are documented as applicable only to `tempdb`. Querying
+  them from an ordinary user-database connection is therefore not a substitute; the live
+  collector reports this evidence as unsupported on Azure SQL Database.
 
 See `manifest.json`'s per-probe `azureSqlDatabase` field for the authoritative,
-per-probe statement. `io.file_io_stats` and `server.host_info` are the two probes in
-this catalog flagged `unsupported` on Azure SQL Database, each because it calls a DMV or
-catalog view (`sys.master_files`, `sys.dm_os_host_info`) that Microsoft's own
-documentation does not list as available there; each has an Azure-safe alternative
-(`io.file_io_stats_current_db`) or an explicit precondition (`server.host_info` requires
-first checking `server.identity.engine_edition`). Every other probe is supported, though
+per-probe statement. Four probes in this catalog are flagged `unsupported` on Azure SQL
+Database: `server.host_info`, `sessions.deadlock_graphs`, `tempdb.usage`, and
+`io.file_io_stats`. Each is unsupported because it calls a server-scoped DMV/catalog view
+or requires a connection context Azure SQL Database does not expose; only
+`io.file_io_stats` has an Azure-safe alternative (`io.file_io_stats_current_db`), while
+`server.host_info` has an explicit precondition (`server.identity.engine_edition` must
+first identify SQL Server or Managed Instance). Every other probe is supported, though
 several document narrower visibility or a different required permission.
 
 ## Units
@@ -325,9 +332,9 @@ silently truncated to an integer by T-SQL's `bigint`/`bigint` division rule.
 
 `manifest.json` assigns every probe a `cadenceClass`; the intent behind each class:
 
-- **`realtime`** (sessions/waiting-tasks/blocking facts) -- safe to poll sub-minute; all
-  three read from small, in-memory, fixed-cost structures with no page or plan-cache
-  scan.
+- **`realtime`** (active requests, waiting tasks, blocking inputs, completed query stats,
+  and lock-resource lookup) -- safe to poll sub-minute; all five read from small,
+  in-memory, fixed-cost structures with no page or plan-cache scan.
 - **`frequent`** (log space, memory grants, tempdb usage, file I/O counters, scheduler
   pressure) -- intended for 1-5 minute polling; still cheap, but less urgent than live
   session state.
@@ -337,10 +344,12 @@ silently truncated to an integer by T-SQL's `bigint`/`bigint` division rule.
   own window advances.
 - **`low_frequency`** (server identity, database discovery, Query Store options) --
   configuration-shaped facts that rarely change; hourly or on-connect is sufficient.
-- **`on_demand`** (`index.operational_stats`) -- never put on a fixed timer; only run
-  once a specific object has already been identified as interesting by a cheaper probe
-  (e.g. `index.usage_summary`), because `@ObjectId` is a required parameter specifically
-  to prevent a whole-database enumeration.
+- **`on_demand`** (capability self-checks, single Query Store context/text/plan lookups,
+  and `index.operational_stats`) -- never put on a blind fixed timer. The capability
+  probes are targeted preflight checks, the Query Store lookups hydrate one known id, and
+  `index.operational_stats` only runs after a specific object has already been identified
+  as interesting by a cheaper probe (e.g. `index.usage_summary`), because `@ObjectId` is a
+  required parameter specifically to prevent a whole-database enumeration.
 
 No probe in this catalog samples every executing query (Query Store's own capture
 policy -- `ALL`/`AUTO`/`NONE`/`CUSTOM` -- decides what gets captured before any probe

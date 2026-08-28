@@ -11,7 +11,7 @@ drawn as a wireframe rather than a guess.
 **[Try the live demo →](https://sqlsimcity.battagler.me/)** · Heavily inspired by
 [PGSimCity](https://github.com/NikolayS/PGSimCity).
 
-![The database city: a full-screen 3D map with tables drawn as buildings, query traffic as roads, and waits as lanes into scattered infrastructure facilities, beside the Query Store address book sidebar](docs/images/city.png)
+![The database city: a full-screen 3D map with tables drawn as buildings, query traffic as roads, and waits as lanes into scattered infrastructure facilities, beside a sidebar showing the live query feed and the selected table's measured pages](docs/images/city.png)
 
 ## What it does
 
@@ -21,8 +21,13 @@ drawn as a wireframe rather than a guess.
   lanes into tempdb, log, lock, memory-grant, CPU, and I/O facilities.
 - **Two views of the same city** — a flat top-down map for reading structure and traffic, and a 3D
   city for reading massing. One toggle, one object graph, the same evidence.
-- **The Query Store address book** — one searchable sidebar listing query families, tables, and
-  infrastructure together, each with its measured metric and its block address on the map.
+- **Live query feed** — queries scroll past as they run, and each one sends a vehicle down the route
+  its plan actually takes, leaving a light trail that fades. Clicking a query pins its route and its
+  evidence, the same as clicking a query family.
+- **The city directory** — one searchable sidebar region listing query families, tables, and
+  infrastructure together, each with its measured metric and its block address on the map. It is a
+  live document: entries arrive, move, and drop out as the retention window advances, and traffic
+  colour is graded from the last few minutes rather than the whole history.
 - **Incident pins** — live blocking and wait-graph cycles pinned to the building they were measured
   on, with the source DMV and observation time in the popup.
 - **Offline archives** and an optional **outward-only edge connector** for servers you can't reach directly.
@@ -42,32 +47,54 @@ their confidence. A subsystem that could not be sampled is drawn as unavailable,
 
 ## Quick start
 
-Fixture mode needs no SQL Server and is the fastest way to look around.
+Point it at a SQL Server and it draws that server. One connection string is the whole
+configuration — setting it turns connected mode on by itself.
+
+```powershell
+docker run --rm --name sqlsimcity `
+  --publish 127.0.0.1:8080:8080 `
+  --volume sqlsimcity-data:/data `
+  --env ConnectionStrings__SqlSimCity="Server=sql01.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=<password>;TrustServerCertificate=true" `
+  ghcr.io/cbattlegear/sqlsimcity:latest
+```
+
+Open <http://127.0.0.1:8080>. The atlas appears immediately and each database fills in as it is
+measured; Query Store history keeps building for a few minutes after that.
+
+A few notes on that command:
+
+- **A password containing `;` or `=` must be quoted.** Write `Password='p;a=ss'`, single quotes and
+  all, or the value splits into fragments and the string will not parse. A connection string that
+  fails to parse stops startup with a deliberately value-free error, so it never quotes your
+  password back into a log.
+- **`TrustServerCertificate=true` is for self-signed development certificates.** Drop it against a
+  server whose certificate you trust. TLS itself is never optional: `Encrypt=false` is rejected.
+- **`--volume sqlsimcity-data:/data` is what makes history survive a restart.** Connected Query
+  Store history is written there, and without a volume every restart starts the city from an empty
+  window. Captured query text and plan XML are stored **in the clear** — see
+  [SECURITY.md](SECURITY.md).
+- **`master` is only the connection's initial catalog.** SQLSimCity enumerates the server from
+  there; it does not restrict collection to that database. On Azure SQL Database, which cannot
+  enumerate its siblings, name the database you want instead.
+- **`:latest` is for trying it out.** A real deployment should pin the manifest digest, which is
+  what makes a rollback and a signature check possible — see [operations](docs/operations.md).
+
+The password is read into a `SqlCredential` and never lands in a log or a diagnostic, but an
+environment variable is still readable by anything that can read the process environment, and it
+cannot be rotated without a restart. For production, set the connection fields individually and
+mount the password as a read-only file secret — see [connected mode](docs/connected-mode.md) for
+the hardened setup, least-privilege permissions, Azure SQL, Query Store, and live sampling.
+
+### No SQL Server handy?
+
+Fixture mode draws a synthetic city from the sanitized evidence in `fixtures/`, with no server and
+no connection string.
 
 ```powershell
 docker compose up --build
 ```
 
 Open <http://127.0.0.1:8080>.
-
-### Point it at a real server
-
-One connection string is enough to turn connected mode on:
-
-```powershell
-docker build -t sqlsimcity:local .
-
-docker run --rm --name sqlsimcity `
-  --publish 127.0.0.1:8080:8080 `
-  --env ConnectionStrings__SqlSimCity="Server=sql01.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=<password>;TrustServerCertificate=true" `
-  sqlsimcity:local
-```
-
-The password is parsed into a `SqlCredential` and never lands in a log or diagnostic, but an
-environment variable is still readable by anything that can read the process environment. For
-production, set the connection fields individually and mount the password as a read-only file
-secret — see [connected mode](docs/connected-mode.md) for the hardened setup, least-privilege
-permissions, Azure SQL, Query Store, and live sampling.
 
 ## Screenshots
 
@@ -117,7 +144,8 @@ Set-Location web
 npm test; npm run typecheck; npm run build
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for shipped changes and known validation gaps.
+Per-release notes are on the [Releases page](https://github.com/cbattlegear/SQLSimCity/releases);
+[CHANGELOG.md](CHANGELOG.md) carries the breaking changes and the long-form development record.
 
 ## Affiliation
 

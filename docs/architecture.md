@@ -46,20 +46,40 @@ only for exact formatting and converts to bounded numeric scales solely for visu
 The UI is one surface: a full-bleed map with a sidebar over it. The map is the product — there is no
 tab bar, and no page that is not the map.
 
-The sidebar is an **address book** (`web/src/addressBook.ts`): one flat, searchable list holding
-query families, tables, and infrastructure facilities together, each with a measured one-line summary
-and an address derived from the city plan (`dbo · Block C4`). One search box matches all three kinds,
-so you look up a place rather than first having to know which category it lives in — searching a
+The sidebar is a column holding the live query feed and four **accordion regions** — the city
+directory, live activity, the captured-plan router, and legend & evidence.
+`web/src/sidebarAccordion.ts` allows at most one of the four to be open, so the open one gets the
+column and the other three cost only their summary; a live search term pins the directory open,
+since its search box is inside it. That rule is the fix for a measured defect rather than a
+preference: with all four open at 1440×900, three of them held eighteen pixels of body against tens
+of thousands of pixels of content, and the rail still reported zero unreachable pixels, because an
+18px `overflow: auto` scroller clips nothing and simply cannot be read.
+
+The live query feed is deliberately *not* one of the four. Sharing the drawers' budget, it was
+measured at 1115×800 holding 26px at rest and 5px with everything open — a third of one row — so it
+sits beside the directory as the column's other scrolling region, with a floor of its own.
+
+The **city directory** (`web/src/addressBook.ts`) is the address book: one flat, searchable listholding query families, tables, and infrastructure facilities together, each with a measured one-line
+summary and an address derived from the city plan (`dbo · Block C4`). One search box matches all three
+kinds, so you look up a place rather than first having to know which category it lives in — searching a
 table name also surfaces the query families that drive traffic to it. Selecting an entry selects it
 on the map and replaces the list with a place card carrying the existing evidence panels verbatim.
 An entry whose object is not on the loaded bounded page has no lot, and says so rather than inventing
 a location.
 
+The **live query feed** (`web/src/liveQueryFeed.ts`) lists individual executions as they are observed,
+folded out of the difference between successive live samples rather than read from any one of them.
+Each arrival also sends a vehicle down the road its family graded, so the feed doubles as the map's
+caption: a row appearing is the same event as a car pulling away. Selecting a row draws that family's
+plan as a route, by the same path a directory click takes. The live sampler is instance-wide, so the
+feed is scoped by database name *and* emptied when `databaseId` changes — the reset alone would not
+hold, because the very next instance-wide sample would refill it.
+
 Everything else floats over the canvas: the view-mode toggle, camera controls, the layer switches,
 a status chip, and the incident summary. The evidence tables and the visual-semantics prose live
-behind a "Legend & evidence" disclosure in the sidebar footer — kept in full for accessibility and
-honesty, but no longer the page. The deployment-security notice and the archive and edge banners are
-floating cards that default to visible and are dismissed only by the reader.
+behind a "Legend & evidence" disclosure at the foot of that column — kept in full for accessibility
+and honesty, but no longer the page. The deployment-security notice and the archive and edge banners
+are floating cards that default to visible and are dismissed only by the reader.
 
 ### Server atlas
 
@@ -662,7 +682,8 @@ into a continuous trace.
 
 - Atlas summaries load before database-city or query detail.
 - Query Store uses keyset pagination, chunked index pages, individually addressable/chunked detail,
-  a final publication pointer, and 7-day detail plus 90-day hourly retention.
+  a final publication pointer, and a configurable retention horizon defaulting to 24 hours of both
+  detail and hourly rollups.
 - Database-city layout is deterministic and independent of source row order.
 - Live samplers, channels, publishers, edge spools, idempotency maps, and replay journals are bounded.
 - three.js frame loops reuse objects and pools rather than allocating per frame.

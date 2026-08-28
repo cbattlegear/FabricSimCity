@@ -167,3 +167,26 @@ look at are not there to see. Two things to know: the probe is installed *after*
 purpose (`page.clock` replaces `requestAnimationFrame`, and a probe registered first ends up
 underneath it and silently records no frames), and the clock quantises `performance.now()` to
 1 ms — fine against 100 ms frames, misleading if you ever measure something small with it.
+
+## Retaking the README screenshots
+
+`capture-readme-shots.js` produces the three images in `docs/images/` against a running
+instance, so a documentation refresh does not depend on whoever took the last one:
+
+```powershell
+node tools\measure-browser\capture-readme-shots.js --origin https://sqlsimcity.battagler.me --out docs\images
+```
+
+It reuses this probe's `lib/city.js`, so the settle rule is the same one the measurements use.
+Four things it does that a hand-taken capture reliably gets wrong:
+
+- **It picks the largest database from `/api/v1/atlas`**, not the first one on screen. The first
+  entry is usually `master`, and a 4.6 MB city photographs as an empty lot.
+- **It takes the atlas shot first, and asks for `mode=city` explicitly.** View mode persists
+  across navigations, so an atlas captured after a `mode=map` city comes back as flat paper —
+  a perfectly good screenshot of the wrong thing.
+- **It waits for the atlas freshness line to read `Available live`.** The live DMV sample goes
+  stale in about twenty seconds, so an otherwise healthy server hands you `Stale live` on
+  roughly every other run. The wait is bounded and does not fail the shot if it expires.
+- **It pins the clock to 18:10 and shoots at 3200x1800**, matching the committed images, so the
+  README's layout does not move when the pictures are replaced.

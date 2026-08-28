@@ -1,7 +1,7 @@
 # Telemetry fixture pack v1
 
-This is a self-contained, dependency-free fixture pack for future SQLSimCity
-.NET and TypeScript tests. Every identifier, database name, query shape, source
+This is a self-contained, dependency-free fixture pack for SQLSimCity .NET
+tests and Node validation. Every identifier, database name, query shape, source
 label, timestamp, and numeric value is synthetic and sanitized. It contains no
 production connection strings, credentials, hosts, or customer data.
 

@@ -235,8 +235,9 @@ storage, which a connection string enables automatically (see the quick start ab
 collector uses keyset pages, overlap watermarks, reset epochs, active-interval replacement, bounded
 generations, and a final publication pointer.
 
-Raw SQL and Showplan XML are fetched only on demand and stored as 7-day detail. Normalized
-facts and hourly history are retained for 90 days by default.
+Raw SQL and Showplan XML are fetched only on demand and stored as detail records. Normalized facts,
+per-interval detail and hourly history all follow the same retention horizon, 24 hours by default
+and configurable — see below.
 
 Those on-demand payloads are a cache, and `QueryStoreHistory__PlanCacheQuotaBytes` bounds it —
 2 GiB by default, which is roughly 45,000 distinct plans at the ~45 KB one hydrated plan cost when
@@ -255,43 +256,70 @@ the previous generation stays on disk until its slot is reused, so retained snap
 about twice one publish.
 
 The first cycle for a database has no watermark to resume from, so it looks back
-`QueryStoreHistory__InitialLookbackDays` (the retention horizon by default) rather than to the
+`QueryStoreHistory__InitialLookbackMinutes` (one backfill increment by default, never narrower than
+the re-read overlap) rather than to the
 server's oldest retained interval. A source retaining more than that would otherwise be read in full
 on first connection, for evidence the first prune discards. When the source holds less than the
 lookback, its own boundary wins. The lookback cannot exceed the retention horizon, and the published
 `oldestAvailableAt` reports what was actually collected and retained, never the server's older
 boundary.
 
-How much history is kept is itself configurable. `QueryStoreHistory__RetentionDays` (90 by default,
-365 at most) sets the horizon normalized facts and hourly rollups survive, and
-`QueryStoreHistory__DetailRetentionDays` (7 by default) sets how much of that keeps per-interval
-runtime detail before it is rolled up hourly; the detail horizon cannot exceed the retention one.
-Both the sink's prune and the collector's caps read the same figure, so lowering retention lowers
-what is read and what is stored in one step rather than leaving the collector gathering evidence the
-prune then discards.
+How much history is kept is itself configurable. `QueryStoreHistory__RetentionHours` (**24** by
+default, one hour at least and 365 days at most) sets the horizon normalized facts and hourly
+rollups survive, and `QueryStoreHistory__DetailRetentionHours` sets how much of that keeps
+per-interval runtime detail before it is rolled up hourly; unset it is one day, or the retention
+horizon when that is shorter, and it can never exceed it. Both the sink's prune and the collector's
+caps read the same figure, so lowering retention lowers what is read and what is stored in one step
+rather than leaving the collector gathering evidence the prune then discards.
 
-Lowering it is worth considering after the data volume is recreated. Watermarks live in protected
-storage, so losing that volume also loses the resume point, and the next cycle falls back to the
-full initial lookback across every database at once. Because a publish is atomic, nothing appears in
-the query views until that first cycle completes — a deployment with a large Query Store can look
-stalled while it is in fact still reading. A shallower `RetentionDays`, or a shallow
-`InitialLookbackDays` with `BackfillIncrementHours` set, gets the views populated quickly and lets
-depth arrive over later cycles. Every publish rewrites the whole slot, so retention also sets the
-steady-state write churn per cycle, not just the disk footprint.
+A day rather than a quarter-year because this is a picture of a city's *current* traffic. Ninety
+days of accumulated executions grade every street by a quarter-year average, which is the one thing
+a traffic map must not do: a road that was slow in May reads slow today, and a road that went bad an
+hour ago is diluted to nothing by the calm behind it. Raise it if you want the query history to
+reach further back — `RetentionHours: 2160` is the ninety days that shipped before v1.0.0 — knowing
+that every publish rewrites the whole slot, so retention sets the steady-state write churn per
+cycle as well as the disk footprint.
 
-That cap means history older than the lookback is not collected at all. To reach it, set
-`QueryStoreHistory__BackfillIncrementHours`. Each cycle then reads its ordinary forward window and
-one further step backwards of that size, so a shallow `InitialLookbackDays` makes the first cycle
-cheap and the depth arrives over the following cycles instead of all at once. Unset — the default —
-there is no backward window at all and collection behaves exactly as it does without this setting.
+Street colour is graded from a separate, shorter window: `DatabaseCity__TrafficWindowMinutes`,
+15 by default. Retention decides which streets exist at all; this decides what colour they are.
+Widen it to see anything on a quiet instance, narrow it so a spike on a busy one stops colouring the
+map long after it ended.
 
-The walk stops at `QueryStoreHistory__BackfillHorizonDays`, which defaults to and cannot exceed the
+History older than the lookback still arrives, an increment at a time. Each cycle reads its ordinary
+forward window and one further step backwards of `QueryStoreHistory__BackfillIncrementMinutes`
+(**60** by default), so the first cycle stays cheap and depth arrives over the cycles that follow.
+This matters most after the data volume is recreated: watermarks live in protected storage, so
+losing that volume loses the resume point too, and a publish is atomic — nothing appears in the
+query views until the first cycle completes, which is how a deployment with a large Query Store can
+look stalled while it is in fact still reading. Progressive backfill is what keeps that first cycle
+from becoming one unbounded read. Set the increment to zero to switch the walk off entirely.
+
+The walk stops at `QueryStoreHistory__BackfillHorizonHours`, **3** by default and capped at the
 retention horizon: reading past what the store keeps would re-create the waste the lookback
 cap removed. It also stops at the server's own oldest retained interval, whichever is later. How far
 it has actually reached is persisted per database as a second, low watermark, so a run interrupted
 part-way resumes from there rather than starting the walk again; a reset restarts it along with the
 epoch. Pick an increment larger than the ground the horizon covers between cycles, or the floor
 slides forward as fast as the walk moves back and the backfill never finishes.
+
+### Settings retired in v1.0.0
+
+The retention and backfill settings changed unit when the collector stopped archiving and started
+following current traffic, so the old names are **refused at startup** rather than ignored —
+`BackfillHorizonDays: 3` and `BackfillHorizonHours: 3` differ by a factor of 24, and a setting that
+silently stopped being read would leave a deployment running against a horizon nobody chose. Each
+retired key names its replacement in the error.
+
+| retired | replacement |
+|---|---|
+| `QueryStoreHistory__RetentionDays` | `QueryStoreHistory__RetentionHours` |
+| `QueryStoreHistory__DetailRetentionDays` | `QueryStoreHistory__DetailRetentionHours` |
+| `QueryStoreHistory__InitialLookbackDays` | `QueryStoreHistory__InitialLookbackMinutes` |
+| `QueryStoreHistory__BackfillIncrementHours` | `QueryStoreHistory__BackfillIncrementMinutes` |
+| `QueryStoreHistory__BackfillHorizonDays` | `QueryStoreHistory__BackfillHorizonHours` |
+
+A deployment that set none of them needs no configuration change to upgrade. It will keep one day of
+history instead of ninety, and the first prune after the upgrade discards what falls outside that.
 
 `oldestAvailableAt` is unaffected by any of this. It is derived from the runtime buckets actually
 being published, so it follows collected and retained history as the low watermark moves, and stays
