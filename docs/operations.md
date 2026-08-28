@@ -130,6 +130,15 @@ cannot open it, and says so at startup rather than serving nothing.
 4. Wait for `/readyz`; then check atlas, Query Store, and findings status.
 5. Keep the previous image digest and pre-upgrade backup until acceptance.
 
+Step 3 is not only a formality. A configuration key that is *removed* rather than
+renamed-with-a-fallback stops startup by design, so an upgrade can fail on a
+setting the old image accepted happily. Upgrading to **1.0.0** from any `0.x` is
+the case in force today: the five `QueryStoreHistory` day/hour keys were replaced
+by hour/minute equivalents and the old names are now rejected by name. Check the
+deployment's environment against the table in
+[connected mode](connected-mode.md) before deploying, since a container that
+carries one will not reach `/readyz` at step 4.
+
 Protected-storage schema migrations run fail-closed at startup. No backward
 migration is promised. Rolling back may require restoring a data backup that is
 compatible with the older image; do not point an older image at data already

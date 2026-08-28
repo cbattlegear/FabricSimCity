@@ -11,7 +11,34 @@ SimCity assets are included.
 
 ## [Unreleased]
 
-First MVP release candidate. There is no tagged release yet.
+_Nothing since v1.0.0._
+
+## [1.0.0] - 2026-08-28
+
+First stable release. Retention and backfill are now described in hours and minutes rather than
+days and hours, and the retired key names are **rejected at startup** instead of ignored, so a
+container still carrying one stops with a message naming its replacement rather than silently
+collecting on a different horizon.
+
+| Retired | Replacement | New default |
+| --- | --- | --- |
+| `QueryStoreHistory:RetentionDays` | `QueryStoreHistory:RetentionHours` | 24 |
+| `QueryStoreHistory:DetailRetentionDays` | `QueryStoreHistory:DetailRetentionHours` | 24, or retention when shorter |
+| `QueryStoreHistory:InitialLookbackDays` | `QueryStoreHistory:InitialLookbackMinutes` | one increment |
+| `QueryStoreHistory:BackfillIncrementHours` | `QueryStoreHistory:BackfillIncrementMinutes` | 60 |
+| `QueryStoreHistory:BackfillHorizonDays` | `QueryStoreHistory:BackfillHorizonHours` | 3 |
+
+Progressive backfill is on by default as a result, and the new
+`DatabaseCity:TrafficWindowMinutes` (default 15) grades traffic colour from a short recent
+window rather than the whole retention horizon -- a city shows current traffic, not a quarter of a
+year of it. [Connected mode](docs/connected-mode.md) documents every key and its bounds.
+
+## Development record through v1.0.0
+
+Each tagged release carries generated notes on the
+[Releases page](https://github.com/cbattlegear/SQLSimCity/releases), written from the pull requests
+merged into it. The record below predates that automation and is kept as one narrative rather than
+split per version.
 
 ### Added
 

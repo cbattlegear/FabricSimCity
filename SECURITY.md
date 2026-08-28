@@ -103,7 +103,7 @@ Protected storage runs SQLite in WAL (write-ahead log) journal mode, which relie
 
 ### Connected SQL Server collection
 
-Connected mode uses `SqlSimCity.SqlServer` through an injected connection factory and `SqlSimCity.Collection` through injected probe executors. It collects database identity, exact space usage, bounded Query Store aggregates, and cumulative file I/O. It does not collect query text, plan XML, or live request traffic. Deployment must:
+Connected Atlas collection uses `SqlSimCity.SqlServer` through an injected connection factory and `SqlSimCity.Collection` through injected probe executors. It collects database identity, exact space usage, bounded Query Store aggregates, and cumulative file I/O. It does not collect live request traffic; connected Query Store history separately retains on-demand query text and plan XML as described above. Deployment must:
 
 - use a least-privilege, read-only SQL Server principal and document every required permission;
 - keep target secrets out of images, source, logs, URLs, and atlas responses;
@@ -166,7 +166,7 @@ Every profile sets an explicit `EncryptionPolicy` — `Mandatory` (TLS required;
 
 - `Microsoft.Data.SqlClient` 7.0.2
 - `Azure.Identity` 1.21.0
-- `Azure.Core` 1.61.0
+- `Azure.Core` 1.62.0
 
 SqlClient 7 removed Entra ID authentication providers from its core package into `Microsoft.Data.SqlClient.Extensions.Azure`; this library does not take that dependency because it authenticates through `SqlConnection.AccessTokenCallback` plus directly constructed `Azure.Identity` credentials, a core-SqlClient mechanism unrelated to the extracted `Authentication=Active Directory ...` connection-string modes.
 
