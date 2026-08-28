@@ -201,6 +201,10 @@ public sealed class ConnectedObservationProviderTests
                     1, 1, "RAW SQL BATCH".Length, "RAW SQL STATEMENT".Length),
             ]);
 
+        public Task<IReadOnlyList<CompletedQueryRow>> GetCompletedQueriesAsync(
+            DateTimeOffset? sinceEngineLocal, int? maxRows, bool includeSqlText, int? maxTextLength, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CompletedQueryRow>>([]);
+
         public Task<IReadOnlyList<WaitingTaskFact>> GetWaitingTasksAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<WaitingTaskFact>>([]);
         public Task<IReadOnlyList<BlockingInputFact>> GetBlockingInputsAsync(CancellationToken cancellationToken) =>

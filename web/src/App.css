@@ -1766,6 +1766,13 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .query-ticker-flag.is-blocked { color: #f7c98f; background: #33240f; }
 .query-ticker-flag.is-gone { color: #93a8ba; background: #16202a; }
 /*
+ * The execution multiplier. Reads as information rather than as a warning -- a query running four
+ * times is the instance working, not a problem -- so it is deliberately cooler and quieter than
+ * `.is-blocked` beside it. `margin-left: auto` on the base rule pushes only the first flag, so when
+ * this appears alongside another they sit together at the end of the line rather than splitting it.
+ */
+.query-ticker-flag.is-repeat { color: #9fd3c7; background: #14282a; text-transform: none; }
+/*
  * Two lines of statement text, then an ellipsis. A feed row is a glance, and the plan finder and
  * the place card are where a whole statement is read -- but the first line of a batch is almost
  * never the distinguishing part of it, so one line would be a worse trade than it looks.

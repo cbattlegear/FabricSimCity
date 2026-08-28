@@ -389,6 +389,17 @@ internal static class ConnectorObservationSanitizer
         {
             BatchText = null,
         }).ToArray(),
+        // Completed queries carry statement text for the same reason active requests do, and it is
+        // stripped here for the same reason: the connector's contract is that no query text leaves
+        // the customer's network. The executions, timings and hashes survive, so the map still moves
+        // -- what is removed is only the text a viewer could read.
+        CompletedQueries = snapshot.CompletedQueries with
+        {
+            Queries = snapshot.CompletedQueries.Queries.Select(query => query with
+            {
+                StatementText = null,
+            }).ToArray(),
+        },
     };
 
     public static QueryFamilyDetailV1 QueryFamily(

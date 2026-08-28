@@ -60,6 +60,9 @@ const NOW = 1_700_000_000_000
 function event(over: Partial<LiveQueryEvent> = {}): LiveQueryEvent {
   return {
     id: '51|req:51:0|2024-01-01T00:00:00Z',
+    source: 'sampled-request',
+    executions: 1,
+    executionsEstimated: false,
     ordinal: 1,
     sessionId: 51,
     requestId: 'req:51:0',
@@ -440,6 +443,101 @@ describe('a vehicle whose execution has gone finishes its road and leaves', () =
     })
     expect(roster.vehicles).toHaveLength(0)
     expect(roster.retired).toBe(1)
+  })
+})
+
+describe('a completed execution drives one trip, not laps forever', () => {
+  const LONG_ROAD_SECONDS = 30
+  const longRoad = road({ polyline: [{ x: 0, z: 0 }, { x: VEHICLE_SPEED * LONG_ROAD_SECONDS, z: 0 }] })
+
+  function planCacheRoster(firstSeenAgoMs: number) {
+    return buildVehicleRoster({
+      // `endedAt` stays null on purpose: nothing was observed leaving, so the *list* has no departure
+      // to show. The car still has a finite trip, which is what these guards are about.
+      events: [event({ source: 'plan-cache', sessionId: null, requestId: null, firstSeenAt: NOW - firstSeenAgoMs, endedAt: null })],
+      families: [family()],
+      roads: [longRoad],
+      blocked: noBlocks,
+      now: NOW,
+    })
+  }
+
+  /*
+   * Mutation checked: reading `endedAt === null` literally for a plan-cache row gives
+   * `finishedAfterSeconds === null`, which is the "still running" case -- so this reports null and
+   * the car laps its road forever.
+   */
+  it('treats a row that was already finished on arrival as finished at zero', () => {
+    const vehicle = planCacheRoster(5_000).vehicles[0]
+    expect(vehicle.finishedAfterSeconds).toBe(0)
+  })
+
+  /*
+   * The visible symptom of the same mutation. `travelledFraction` wraps an unfinished car with
+   * `travelled % 1`, so a completed execution would re-cross its road indefinitely and read as a
+   * query that is still going long after it finished.
+   */
+  it('does not lap the road once it has crossed it', () => {
+    const vehicle = planCacheRoster((LONG_ROAD_SECONDS + 5) * 1_000).vehicles[0]
+    expect(vehicle).toBeUndefined()
+  })
+
+  /*
+   * Mutation checked: without a finite trip these never retire, because the feed deliberately never
+   * marks a plan-cache row as departed. A page left open then accumulates every execution it has
+   * ever heard about, up to the roster cap, all of them driving.
+   */
+  it('retires once it reaches the end of its road', () => {
+    const roster = planCacheRoster((LONG_ROAD_SECONDS + 5) * 1_000)
+    expect(roster.vehicles).toHaveLength(0)
+    expect(roster.retired).toBe(1)
+  })
+
+  /** Still driving part way along, so the retirement above is a finite trip and not a car that never launched. */
+  it('is on the road before it gets there', () => {
+    const roster = planCacheRoster((LONG_ROAD_SECONDS / 2) * 1_000)
+    expect(roster.vehicles).toHaveLength(1)
+    const vehicle = roster.vehicles[0]
+    const fraction = travelledFraction(vehicle.points, vehicle.elapsedSeconds, vehicle.finishedAfterSeconds)
+    expect(fraction).toBeGreaterThan(0)
+    expect(fraction).toBeLessThan(1)
+  })
+
+  /*
+   * The backstop must not key off `endedAt`, which is null here forever.
+   *
+   * Mutation checked: `event.endedAt !== null && ...` makes `overdue` unreachable for a plan-cache
+   * row, so a car on a road too long to finish sits there after the live channel has dropped.
+   */
+  it('retires a long-overdue car on a road it could never finish', () => {
+    const endless = road({ polyline: [{ x: 0, z: 0 }, { x: 1_000_000_000, z: 0 }] })
+    const roster = buildVehicleRoster({
+      events: [event({
+        source: 'plan-cache',
+        sessionId: null,
+        requestId: null,
+        firstSeenAt: NOW - (VEHICLE_RETIRE_SECONDS + 5) * 1_000,
+        endedAt: null,
+      })],
+      families: [family()],
+      roads: [endless],
+      blocked: noBlocks,
+      now: NOW,
+    })
+    expect(roster.vehicles).toHaveLength(0)
+    expect(roster.retired).toBe(1)
+  })
+
+  /** A sampled request that is genuinely still running keeps lapping; the change above is not global. */
+  it('leaves a still-running sampled request lapping', () => {
+    const vehicle = buildVehicleRoster({
+      events: [event({ source: 'sampled-request', firstSeenAt: NOW - 5_000, endedAt: null })],
+      families: [family()],
+      roads: [longRoad],
+      blocked: noBlocks,
+      now: NOW,
+    }).vehicles[0]
+    expect(vehicle.finishedAfterSeconds).toBeNull()
   })
 })
 

@@ -402,8 +402,78 @@ export interface UnavailableField {
   reason: string
 }
 
-export interface CollectionDiagnostics {
-  sequence: number
+/**
+ * One statement in the plan cache whose execution counter moved since the previous sample.
+ *
+ * This is the *other* way a query reaches the feed, and the one that sees most of them. A
+ * `LiveRequest` is a query caught mid-flight, which requires the sample to land inside its
+ * execution; measured against a churning AdventureWorks instance, twelve samples 250ms apart over
+ * three seconds caught 8 request rows while the plan cache recorded 364 executions over the same
+ * three seconds. Short OLTP queries — nearly all of them — are structurally invisible to request
+ * sampling and arrive only here.
+ *
+ * The collector has already differenced the engine's cumulative counters, so `executions` is what
+ * happened in one interval and is never a running total.
+ */
+export interface CompletedQuery {
+  /** Stable identity of one statement within one cached plan, so the same query is recognisable across samples. */
+  planKey: string
+  /**
+   * Executions observed since the previous sample. Always at least 1 — a plan whose counter did not
+   * move is not reported at all rather than reported as zero.
+   */
+  executions: number
+  /**
+   * True when there was no previous sample to difference against, so `executions` is the evidenced
+   * floor of 1 rather than a measured count. A cumulative counter cannot say how many of its
+   * executions fell inside this interval, so the first sight of a plan is deliberately understated.
+   */
+  firstObservation: boolean
+  /** When the engine last ran this plan, on the engine's own clock. */
+  lastExecutionAt: string | null
+  /** The most recent execution's elapsed microseconds. Not a lifetime average. */
+  lastElapsedTimeUs: number
+  /** The most recent execution's CPU microseconds. Not a lifetime average. */
+  lastWorkerTimeUs: number
+  /** The most recent execution's logical reads, in 8-KiB pages. */
+  lastLogicalReads: number
+  /** Rows returned or affected by the most recent execution. */
+  lastRows: number
+  databaseId: number | null
+  databaseName: string | null
+  /** The statement text, or null when text collection is off or the edge connector stripped it. */
+  statementText: string | null
+  /**
+   * `query_hash` in the same uppercase-hex rendering `LiveRequest.queryHash` uses, so both sources
+   * join to a Query Store family on equal terms. Null when the engine reported none.
+   */
+  queryHash: string | null
+  queryPlanHash: string | null
+}
+
+/**
+ * The executions the plan cache retained since the previous sample.
+ *
+ * An empty `queries` with status `Available` means no cached plan advanced its counter. That is a
+ * stronger statement than an empty request list but still not "nothing ran": `OPTION (RECOMPILE)`
+ * leaves no plan-cache row, ad-hoc text can be stubbed rather than cached, natively compiled
+ * procedures report elsewhere, and a plan evicted between two reads takes its executions with it.
+ */
+export interface CompletedQuerySample {
+  queries: CompletedQuery[]
+  /** How many distinct plans advanced. Never larger than `queries.length`. */
+  plansAdvanced: number
+  /** Executions summed across every plan in this sample. */
+  totalExecutions: number
+  /** The engine's own clock as of this read. Not this browser's clock and not the collector's. */
+  watermarkEngineLocal: string | null
+  /** Length of the interval the counts cover, null on the first cycle when there is no previous sample. */
+  intervalMs: number | null
+  status: DataStatus
+  reason: string
+}
+
+export interface CollectionDiagnostics {  sequence: number
   collectedAt: string
   sourceTimestamp: string | null
   durationMs: number
@@ -429,6 +499,12 @@ export interface LiveIncidentSnapshot {
   status: DataStatus
   reason: string
   requests: LiveRequest[]
+  /**
+   * Optional because a collector older than this field, or an archived snapshot captured before it
+   * existed, simply will not carry it. Consumers must treat its absence as "this source cannot see
+   * completed queries", which is different from an empty sample meaning "none ran".
+   */
+  completedQueries?: CompletedQuerySample
   waitingTasks: WaitingTask[]
   blockingGraph: BlockingGraph
   memoryGrants: MemoryGrant[]

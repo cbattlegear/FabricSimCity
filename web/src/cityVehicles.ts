@@ -7,25 +7,31 @@ import type { LiveQueryEvent } from './liveQueryFeed'
  *
  * Everything else this map draws about the workload is an *aggregate*: road colour is Query Store's
  * captured history, and it is true of the last hour rather than of this instant. A vehicle is the
- * other thing — one row of `sys.dm_exec_requests` that was running when the sampler last looked. The
- * two are never blended. A road can be dark red with no vehicle on it (the waiting happened earlier)
+ * other thing — one execution the engine reported, either as a row of `sys.dm_exec_requests` that was
+ * running when the sampler last looked, or as an advance in a `sys.dm_exec_query_stats` execution
+ * counter since the previous sample. The two are never blended with the aggregate. A road can be dark
+ * red with no vehicle on it (the waiting happened earlier)
  * and a vehicle can drive a green road (this one execution is not what graded it).
  *
  * Three rules govern everything here, and each exists because the alternative would make the map
  * claim something nobody measured.
  *
- * - **A vehicle is only ever a sampled running request.** `requestStatus === null` is an idle session
+ * - **A vehicle is only ever a reported execution.** `requestStatus === null` is an idle session
  *   holding no request (issue #79) and produces nothing. Nothing is invented from the aggregate
- *   workload to fill an empty street, because an empty street is a finding: it means nothing was
- *   sampled here, which is not the same as nothing having run here. The live sampler runs on a 2–5 s
- *   cadence, so a query that starts and finishes between two samples never appears at all.
+ *   workload to fill an empty street, because an empty street is a finding: it means neither source
+ *   reported an execution here, which is not the same as nothing having run here. What is left
+ *   unseen is narrower than it was — the plan cache catches the short queries that start and finish
+ *   between two request samples — but it is not nothing: a statement the engine kept no plan for is
+ *   invisible to both.
  * - **A vehicle leaves the kerb when its execution *arrives*, not when the query started.** The
  *   roster is built from {@link LiveQueryEvent}s, so a car's position is a function of how long that
  *   execution has been *in the feed* — which is what the scrolling list beside the map is showing.
  *   The two are the same event seen twice, which is the entire point: a row appears, a car sets off.
  *   It is not a claim about progress. `sys.dm_exec_requests` reports no percentage complete for an
  *   arbitrary statement, so the distance a car has covered says how long it has been watched and
- *   nothing whatever about how much of the query is left.
+ *   nothing whatever about how much of the query is left. A plan-cache execution was already over
+ *   when it arrived, so its car makes exactly one trip and retires at the end of the road rather
+ *   than lapping it the way a still-running request does.
  * - **The join is `query_hash`, and only `query_hash`.** `sys.dm_exec_requests.query_hash` and
  *   `sys.query_store_query.query_hash` are the same `binary(8)`, rendered to the same string by both
  *   collectors. A request whose hash matches no family on this page gets no vehicle and is *counted*
@@ -236,7 +242,7 @@ export interface VehicleStop {
 
 export interface Vehicle {
   readonly id: string
-  readonly sessionId: number
+  readonly sessionId: number | null
   readonly familyId: string
   /** The feed row this vehicle is. Same identity the scrolling list uses, so hovering can pair them. */
   readonly eventId: string
@@ -409,15 +415,33 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
 
     const stagger = phaseOf(event.sessionId, event.id) * VEHICLE_LAUNCH_STAGGER_SECONDS
     const elapsedSeconds = Math.max(0, (now - event.firstSeenAt) / 1000 - stagger)
+    /*
+     * A plan-cache row was already finished when it arrived, so its car makes exactly one trip.
+     *
+     * The event keeps `endedAt === null` because the *list* has no departure to show -- nothing was
+     * observed leaving. That is a statement about the feed, not about the car: read literally here it
+     * would mean "still running", and `travelledFraction` laps an unfinished car forever. Every
+     * completed execution would then circle its road until it fell out of the feed window, which says
+     * the query is still going long after it finished.
+     *
+     * Finishing at zero is the honest reading: the execution was over before this browser heard about
+     * it, so the car has no running phase to serve and retires when it reaches the end of the road.
+     */
     const finishedAfterSeconds =
-      event.endedAt === null ? null : Math.max(0, (event.endedAt - event.firstSeenAt) / 1000 - stagger)
+      event.source === 'plan-cache'
+        ? 0
+        : event.endedAt === null
+          ? null
+          : Math.max(0, (event.endedAt - event.firstSeenAt) / 1000 - stagger)
 
     const speedScale = vehicleSpeedScale(familyMeanDurationMs(family))
     const fraction = travelledFraction(road.polyline, elapsedSeconds, finishedAfterSeconds, speedScale)
     if (finishedAfterSeconds !== null) {
       // Reaching the end of the road is how a car says its query is gone. The deadline is only for
-      // the case where no further sample will ever arrive to retire it.
-      const overdue = event.endedAt !== null && now - event.endedAt >= VEHICLE_RETIRE_SECONDS * 1000
+      // the case where no further sample will ever arrive to retire it. A plan-cache car needs no
+      // such backstop: its travelled fraction grows with wall time and always reaches the end.
+      const retireAt = event.endedAt ?? event.firstSeenAt
+      const overdue = now - retireAt >= VEHICLE_RETIRE_SECONDS * 1000
       if (fraction >= 1 || overdue) {
         retired += 1
         continue
@@ -446,7 +470,7 @@ export function buildVehicleRoster(input: VehicleInput): VehicleRoster {
     (left, right) =>
       Number(right.blockedAt !== null) - Number(left.blockedAt !== null)
       || right.ordinal - left.ordinal
-      || left.sessionId - right.sessionId
+      || (left.sessionId ?? -1) - (right.sessionId ?? -1)
       || left.familyId.localeCompare(right.familyId),
   )
 
@@ -608,7 +632,11 @@ function stopFor(
 ): VehicleStop | null {
   // A car whose execution has already left the sample is not blocked now, whatever it was doing when
   // it was last seen. It finishes its road rather than being frozen by a block that is over.
-  if (!event.blocked || event.endedAt !== null) return null
+  //
+  // A row with no session is a plan-cache observation: the executions it reports had already
+  // finished when they were read, so there is nothing left to block. It never reaches the blocking
+  // map, which is keyed by session and could not be joined to it in any case.
+  if (!event.blocked || event.endedAt !== null || event.sessionId === null) return null
 
   // Where it would have been standing had nothing stopped it. Used whenever the pin cannot honestly
   // move it, so a halt never teleports a vehicle to a place no measurement put it.
@@ -638,8 +666,12 @@ function stopFor(
  * FNV-1a over the two, so it is deterministic across reloads and across machines, and spreads
  * neighbouring session ids rather than clustering them at one end of the road. Used only to stagger
  * departures — see {@link VEHICLE_LAUNCH_STAGGER_SECONDS}. It encodes nothing about the query.
+ *
+ * A null session is a plan-cache observation, which has no session to attribute. It hashes as the
+ * literal `null` alongside its key, so those rows still stagger against each other — the key is
+ * per-plan and per-sample, which is exactly the variation the stagger needs.
  */
-export function phaseOf(sessionId: number, key: string): number {
+export function phaseOf(sessionId: number | null, key: string): number {
   let hash = 0x811c9dc5
   const text = `${sessionId}:${key}`
   for (let index = 0; index < text.length; index += 1) {

@@ -549,6 +549,95 @@ public sealed record DeadlockSampleV1(
     string Reason);
 
 /// <summary>
+/// One query family that executed during the interval between two samples, learned from the plan
+/// cache's cumulative counters rather than from a live request.
+/// <para>
+/// This is the other half of what the live feed knows, and it exists because
+/// <see cref="LiveRequestV1"/> structurally cannot see a short query:
+/// <c>sys.dm_exec_requests</c> holds a row only while a request is executing, so an OLTP statement
+/// taking a millisecond is invisible unless a sample lands inside it. Measured against the
+/// AdventureWorks churn workload, twelve samples 250 ms apart over one 3-second window caught 8
+/// request rows in total while the plan cache recorded 364 executions over the same 3 seconds.
+/// </para>
+/// <para>
+/// <see cref="Executions"/> is a count for an <em>interval</em>, obtained by differencing the plan's
+/// cumulative counter against the previous sample. It is not a cumulative total and must never be
+/// rendered as one: "ran 4 times" here means four times since the last sample, roughly the last few
+/// seconds, not four times ever.
+/// </para>
+/// <para>
+/// The per-execution figures are the engine's <c>last_*</c> columns, which describe the single most
+/// recent execution. They are deliberately not averages over <see cref="Executions"/>: a plan's
+/// lifetime average is not a description of the execution that just happened, and dividing a
+/// cumulative total by an interval count would mix two different windows into one number that
+/// describes neither.
+/// </para>
+/// <para>
+/// <see cref="FirstObservation"/> is true when this plan had no previous sample to difference
+/// against, in which case <see cref="Executions"/> is 1 -- the floor the evidence supports, since the
+/// plan's last execution fell inside the interval, and never the plan's whole cumulative count, which
+/// on a hot plan is six figures of history that did not happen just now.
+/// </para>
+/// </summary>
+public sealed record CompletedQueryV1(
+    /// <summary>Identity of one statement within one cached plan; stable across samples so a consumer can recognise the same query returning.</summary>
+    string PlanKey,
+    /// <summary>Executions observed in the interval between the previous sample and this one. Never a cumulative total.</summary>
+    long Executions,
+    /// <summary>True when no previous observation existed to difference against, so <see cref="Executions"/> is the evidenced floor of 1 rather than a measured count.</summary>
+    bool FirstObservation,
+    /// <summary>When the engine last ran this plan, on its own local clock.</summary>
+    DateTimeOffset? LastExecutionAt,
+    /// <summary>The most recent execution's elapsed time in microseconds. Not an average.</summary>
+    long LastElapsedTimeUs,
+    /// <summary>The most recent execution's CPU time in microseconds. Not an average.</summary>
+    long LastWorkerTimeUs,
+    /// <summary>The most recent execution's logical reads, in 8-KiB pages.</summary>
+    long LastLogicalReads,
+    /// <summary>Rows returned or affected by the most recent execution.</summary>
+    long LastRows,
+    int? DatabaseId,
+    string? DatabaseName,
+    /// <summary>The statement these counters belong to, or the batch when no statement was isolated. Null when text was not collected.</summary>
+    string? StatementText,
+    /// <summary><c>query_hash</c> rendered by the one shared converter, so it joins to a Query Store family without a formatting disagreement. Null when the engine reported none.</summary>
+    string? QueryHash,
+    /// <summary><c>query_plan_hash</c>, on the same terms as <see cref="QueryHash"/>.</summary>
+    string? QueryPlanHash);
+
+/// <summary>
+/// The executions the plan cache retained since the previous sample.
+/// <para>
+/// An empty <see cref="Queries"/> with <see cref="DataStatus.Available"/> means no cached plan
+/// advanced its counter during the interval. That is a much stronger statement than the live request
+/// list's silence, but it is still not "the instance ran nothing": a statement compiled with
+/// <c>OPTION (RECOMPILE)</c> leaves no plan-cache row at all, unparameterized ad-hoc text under
+/// 'optimize for ad hoc workloads' is stubbed on first execution, natively compiled procedures report
+/// elsewhere, and anything evicted between two reads takes its executions with it.
+/// </para>
+/// <para>
+/// <see cref="WatermarkEngineLocal"/> is the engine's own clock as of this read, carried so the next
+/// cycle can bound its query without substituting the collector's clock, and so a consumer can see
+/// which interval <see cref="CompletedQueryV1.Executions"/> counts over.
+/// <see cref="IntervalMs"/> is that interval's length, null on the first cycle when there is no
+/// previous sample and therefore no interval.
+/// </para>
+/// <para>
+/// <see cref="PlansAdvanced"/> is how many distinct plans advanced before any cap, so a capped list
+/// is never read as a quieter instance, and <see cref="TotalExecutions"/> is the executions those
+/// plans account for -- including the ones whose plans the cap dropped.
+/// </para>
+/// </summary>
+public sealed record CompletedQuerySampleV1(
+    IReadOnlyList<CompletedQueryV1> Queries,
+    int PlansAdvanced,
+    long TotalExecutions,
+    DateTimeOffset? WatermarkEngineLocal,
+    decimal? IntervalMs,
+    DataStatus Status,
+    string Reason);
+
+/// <summary>
 /// Per-scheduler CPU/runnable-queue pressure. <c>current_tasks_count</c>/<c>runnable_tasks_count</c>
 /// etc. are instant gauges and are reported as-is; <c>total_cpu_usage_ms</c>/
 /// <c>total_scheduler_delay_ms</c> are cumulative since engine start and are delta'd the same way as
@@ -643,7 +732,26 @@ public sealed record LiveIncidentSnapshotV1(
     SchedulerPressureV1 Scheduler,
     LogSpaceUsageV1 LogSpace,
     DeadlockSampleV1 Deadlocks,
-    CollectionDiagnosticsV1 Diagnostics);
+    CollectionDiagnosticsV1 Diagnostics)
+{
+    /// <summary>
+    /// Executions the plan cache retained since the previous sample -- the queries that finished
+    /// between two looks and that <see cref="Requests"/> therefore never saw.
+    /// <para>
+    /// An init-only member with a default rather than a positional parameter, so every existing
+    /// construction site and deserializer keeps compiling and an older payload decodes to an explicit
+    /// "not collected" rather than to an empty list that would read as a quiet instance.
+    /// </para>
+    /// </summary>
+    public CompletedQuerySampleV1 CompletedQueries { get; init; } = new(
+        [],
+        0,
+        0,
+        null,
+        null,
+        DataStatus.Unknown,
+        "Completed-query collection did not run for this snapshot, so nothing is claimed about queries that finished between samples.");
+}
 
 /// <summary>
 /// The <c>LiveIncidentSampler</c>'s own operational status, independent of whether a snapshot has
