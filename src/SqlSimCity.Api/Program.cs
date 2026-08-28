@@ -137,6 +137,7 @@ if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
     if (queryStoreConnected)
     {
         builder.Services.AddSingleton(QueryStoreHistoryConfiguration.BuildCollectionOptions(builder.Configuration));
+        builder.Services.AddSingleton(QueryStoreHistoryConfiguration.BuildRetentionOptions(builder.Configuration));
         builder.Services.AddSingleton(QueryStoreHistoryConfiguration.BuildHostOptions(builder.Configuration));
         builder.Services.AddSingleton<IQueryStoreIncrementalSource, SqlQueryStoreIncrementalSource>();
         builder.Services.AddSingleton<ProtectedQueryStoreRepository>();

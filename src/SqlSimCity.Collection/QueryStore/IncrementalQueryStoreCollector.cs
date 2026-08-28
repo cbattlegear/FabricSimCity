@@ -150,9 +150,14 @@ public interface IQueryStoreHistorySink
 /// keeps exactly the behaviour that shipped without it.
 /// </param>
 /// <param name="BackfillHorizon">
-/// How far back the backfill is allowed to walk. Defaults to, and is capped at,
-/// <see cref="QueryStoreRetention.History"/>: reading past what the sink retains would re-create the
-/// waste the initial lookback cap removed, so the two horizons are held to the same figure.
+/// How far back the backfill is allowed to walk. Defaults to, and is capped at, the configured
+/// retention horizon: reading past what the sink retains would re-create the waste the initial
+/// lookback cap removed, so the two horizons are held to the same figure.
+/// </param>
+/// <param name="Retention">
+/// How much history the sink keeps. <c>null</c> uses <see cref="QueryStoreRetentionOptions.Default"/>.
+/// Every cap below is expressed against this rather than against a constant, so lowering retention
+/// lowers what the collector reads in the same step and the two cannot drift apart.
 /// </param>
 public sealed record QueryStoreCollectionOptions(
     int PageSize = 1_000,
@@ -160,46 +165,51 @@ public sealed record QueryStoreCollectionOptions(
     TimeSpan? Overlap = null,
     TimeSpan? InitialLookback = null,
     TimeSpan? BackfillIncrement = null,
-    TimeSpan? BackfillHorizon = null)
+    TimeSpan? BackfillHorizon = null,
+    QueryStoreRetentionOptions? Retention = null)
 {
     public TimeSpan EffectiveOverlap => Overlap ?? TimeSpan.FromMinutes(65);
+
+    public QueryStoreRetentionOptions EffectiveRetention => Retention ?? QueryStoreRetentionOptions.Default;
 
     /// <summary>
     /// How far back the first cycle for a database reads when there is no watermark to resume from.
     /// Defaults to the horizon retained history covers: anything older is read off a production
     /// instance only to be discarded by the first prune.
     /// </summary>
-    public TimeSpan EffectiveInitialLookback => InitialLookback ?? QueryStoreRetention.History;
+    public TimeSpan EffectiveInitialLookback => InitialLookback ?? EffectiveRetention.EffectiveHistory;
 
     /// <summary>Whether cycles reach backwards past what the first cycle collected.</summary>
     public bool BackfillEnabled => BackfillIncrement is not null;
 
-    public TimeSpan EffectiveBackfillHorizon => BackfillHorizon ?? QueryStoreRetention.History;
+    public TimeSpan EffectiveBackfillHorizon => BackfillHorizon ?? EffectiveRetention.EffectiveHistory;
 
     public void Validate()
     {
+        EffectiveRetention.Validate();
+        var history = EffectiveRetention.EffectiveHistory;
         if (PageSize is < 1 or > 10_000) throw new ArgumentOutOfRangeException(nameof(PageSize));
         if (DatabaseConcurrency is < 1 or > 16) throw new ArgumentOutOfRangeException(nameof(DatabaseConcurrency));
         if (EffectiveOverlap < TimeSpan.Zero || EffectiveOverlap > TimeSpan.FromHours(24))
             throw new ArgumentOutOfRangeException(nameof(Overlap));
         if (EffectiveInitialLookback < EffectiveOverlap ||
-            EffectiveInitialLookback > QueryStoreRetention.History)
+            EffectiveInitialLookback > history)
             throw new ArgumentOutOfRangeException(
                 nameof(InitialLookback),
                 "The initial Query Store lookback must be at least the overlap window and at most " +
-                $"the {QueryStoreRetention.History.TotalDays:0}-day horizon retained history covers.");
+                $"the {history.TotalDays:0}-day horizon retained history covers.");
         if (BackfillIncrement is { } increment &&
-            (increment <= TimeSpan.Zero || increment > QueryStoreRetention.History))
+            (increment <= TimeSpan.Zero || increment > history))
             throw new ArgumentOutOfRangeException(
                 nameof(BackfillIncrement),
                 "The Query Store backfill increment must be positive and no larger than the " +
-                $"{QueryStoreRetention.History.TotalDays:0}-day horizon retained history covers.");
-        if (EffectiveBackfillHorizon > QueryStoreRetention.History ||
+                $"{history.TotalDays:0}-day horizon retained history covers.");
+        if (EffectiveBackfillHorizon > history ||
             EffectiveBackfillHorizon < EffectiveInitialLookback)
             throw new ArgumentOutOfRangeException(
                 nameof(BackfillHorizon),
                 "The Query Store backfill horizon must be at least the initial lookback and at most " +
-                $"the {QueryStoreRetention.History.TotalDays:0}-day horizon retained history covers; " +
+                $"the {history.TotalDays:0}-day horizon retained history covers; " +
                 "reaching past what the sink retains collects evidence the first prune discards.");
     }
 }

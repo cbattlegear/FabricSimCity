@@ -255,12 +255,29 @@ the previous generation stays on disk until its slot is reused, so retained snap
 about twice one publish.
 
 The first cycle for a database has no watermark to resume from, so it looks back
-`QueryStoreHistory__InitialLookbackDays` (90 by default) rather than to the server's oldest
-retained interval. A source retaining more than that would otherwise be read in full on first
-connection, for evidence the first prune discards. When the source holds less than the lookback,
-its own boundary wins. The lookback cannot exceed the 90-day retention horizon, and the published
+`QueryStoreHistory__InitialLookbackDays` (the retention horizon by default) rather than to the
+server's oldest retained interval. A source retaining more than that would otherwise be read in full
+on first connection, for evidence the first prune discards. When the source holds less than the
+lookback, its own boundary wins. The lookback cannot exceed the retention horizon, and the published
 `oldestAvailableAt` reports what was actually collected and retained, never the server's older
 boundary.
+
+How much history is kept is itself configurable. `QueryStoreHistory__RetentionDays` (90 by default,
+365 at most) sets the horizon normalized facts and hourly rollups survive, and
+`QueryStoreHistory__DetailRetentionDays` (7 by default) sets how much of that keeps per-interval
+runtime detail before it is rolled up hourly; the detail horizon cannot exceed the retention one.
+Both the sink's prune and the collector's caps read the same figure, so lowering retention lowers
+what is read and what is stored in one step rather than leaving the collector gathering evidence the
+prune then discards.
+
+Lowering it is worth considering after the data volume is recreated. Watermarks live in protected
+storage, so losing that volume also loses the resume point, and the next cycle falls back to the
+full initial lookback across every database at once. Because a publish is atomic, nothing appears in
+the query views until that first cycle completes — a deployment with a large Query Store can look
+stalled while it is in fact still reading. A shallower `RetentionDays`, or a shallow
+`InitialLookbackDays` with `BackfillIncrementHours` set, gets the views populated quickly and lets
+depth arrive over later cycles. Every publish rewrites the whole slot, so retention also sets the
+steady-state write churn per cycle, not just the disk footprint.
 
 That cap means history older than the lookback is not collected at all. To reach it, set
 `QueryStoreHistory__BackfillIncrementHours`. Each cycle then reads its ordinary forward window and
@@ -269,7 +286,7 @@ cheap and the depth arrives over the following cycles instead of all at once. Un
 there is no backward window at all and collection behaves exactly as it does without this setting.
 
 The walk stops at `QueryStoreHistory__BackfillHorizonDays`, which defaults to and cannot exceed the
-90-day retention horizon: reading past what the store keeps would re-create the waste the lookback
+retention horizon: reading past what the store keeps would re-create the waste the lookback
 cap removed. It also stops at the server's own oldest retained interval, whichever is later. How far
 it has actually reached is persisted per database as a second, low watermark, so a run interrupted
 part-way resumes from there rather than starting the walk again; a reset restarts it along with the

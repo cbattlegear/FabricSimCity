@@ -38,25 +38,47 @@ public static class QueryStoreHistoryConfiguration
         configuration.GetValue<string>("QueryStoreHistory:Mode")
             ?.Equals("Disabled", StringComparison.OrdinalIgnoreCase) == true;
 
+    /// <summary>
+    /// How much history this deployment keeps. Both the sink's prune and the collector's lookback
+    /// caps read this one value, so lowering it lowers what is read and what is stored together.
+    /// </summary>
+    public static QueryStoreRetentionOptions BuildRetentionOptions(IConfiguration configuration)
+    {
+        var section = configuration.GetSection("QueryStoreHistory");
+        var options = new QueryStoreRetentionOptions(
+            section.GetValue<int?>("RetentionDays") is { } days
+                ? TimeSpan.FromDays(days)
+                : null,
+            section.GetValue<int?>("DetailRetentionDays") is { } detailDays
+                ? TimeSpan.FromDays(detailDays)
+                : null);
+        options.Validate();
+        return options;
+    }
+
     public static QueryStoreCollectionOptions BuildCollectionOptions(IConfiguration configuration)
     {
         var section = configuration.GetSection("QueryStoreHistory");
+        var retention = BuildRetentionOptions(configuration);
         var options = new QueryStoreCollectionOptions(
             section.GetValue<int?>("PageSize") ?? 1_000,
             section.GetValue<int?>("DatabaseConcurrency") ?? 4,
             TimeSpan.FromMinutes(section.GetValue<int?>("OverlapMinutes") ?? 65),
-            TimeSpan.FromDays(
-                section.GetValue<int?>("InitialLookbackDays") ??
-                QueryStoreRetention.History.TotalDays),
+            // Absent means "follow retention". Pinning a number here instead would make lowering
+            // RetentionDays fail validation against a default the operator never set.
+            section.GetValue<int?>("InitialLookbackDays") is { } lookbackDays
+                ? TimeSpan.FromDays(lookbackDays)
+                : null,
             // Absent means off: a progressive backfill is something an operator asks for, so
             // configuring nothing keeps the first cycle bounded by the initial lookback and every
             // later cycle reading forward only.
             section.GetValue<int?>("BackfillIncrementHours") is { } hours
                 ? TimeSpan.FromHours(hours)
                 : null,
-            TimeSpan.FromDays(
-                section.GetValue<int?>("BackfillHorizonDays") ??
-                QueryStoreRetention.History.TotalDays));
+            section.GetValue<int?>("BackfillHorizonDays") is { } horizonDays
+                ? TimeSpan.FromDays(horizonDays)
+                : null,
+            retention);
         options.Validate();
         return options;
     }

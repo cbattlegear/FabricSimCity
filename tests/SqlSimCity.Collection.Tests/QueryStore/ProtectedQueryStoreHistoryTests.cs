@@ -135,6 +135,46 @@ public sealed class ProtectedQueryStoreHistoryTests
             detail.Family.FamilyId.Contains(":epoch:", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// Day 8 sits inside the 90-day default and outside a 7-day configured horizon, so the two
+    /// disagree exactly here. This can only pass if the prune reads the configured value rather
+    /// than the constant it used to read.
+    /// </summary>
+    [Fact]
+    public async Task AConfiguredRetentionHorizonPrunesArchivedEpochsTheDefaultWouldKeep()
+    {
+        var repository = new ProtectedQueryStoreRepository(new MemoryProtectedStore());
+        var sink = new ProtectedQueryStoreHistorySink(
+            repository,
+            new QueryStoreCollectionStatusTracker(),
+            retention: new QueryStoreRetentionOptions(History: TimeSpan.FromDays(7)));
+        await PublishCycleAsync(sink, 40, "epoch-1", observedAt: Now);
+        await PublishCycleAsync(sink, 5, "epoch-2", reset: true, observedAt: Now.AddDays(1));
+        await PublishCycleAsync(sink, 7, "epoch-2", observedAt: Now.AddDays(8));
+
+        var snapshot = await repository.ReadPublishedSnapshotAsync();
+        Assert.DoesNotContain(snapshot!.Families, detail =>
+            detail.Family.FamilyId.Contains(":epoch:", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The control for the test above, on the same timeline. Without it a sink that pruned
+    /// archived epochs unconditionally would satisfy that assertion and look correct.
+    /// </summary>
+    [Fact]
+    public async Task TheDefaultRetentionHorizonStillKeepsAnArchivedEpochAtEightDays()
+    {
+        var repository = new ProtectedQueryStoreRepository(new MemoryProtectedStore());
+        var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker());
+        await PublishCycleAsync(sink, 40, "epoch-1", observedAt: Now);
+        await PublishCycleAsync(sink, 5, "epoch-2", reset: true, observedAt: Now.AddDays(1));
+        await PublishCycleAsync(sink, 7, "epoch-2", observedAt: Now.AddDays(8));
+
+        var snapshot = await repository.ReadPublishedSnapshotAsync();
+        Assert.Contains(snapshot!.Families, detail =>
+            detail.Family.FamilyId.Contains(":epoch:", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task RepeatedResetsDoNotRetainExpiredArchivedEpochs()
     {
