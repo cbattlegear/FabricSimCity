@@ -662,7 +662,8 @@ into a continuous trace.
 
 - Atlas summaries load before database-city or query detail.
 - Query Store uses keyset pagination, chunked index pages, individually addressable/chunked detail,
-  a final publication pointer, and 7-day detail plus 90-day hourly retention.
+  a final publication pointer, and a configurable retention horizon defaulting to 24 hours of both
+  detail and hourly rollups.
 - Database-city layout is deterministic and independent of source row order.
 - Live samplers, channels, publishers, edge spools, idempotency maps, and replay journals are bounded.
 - three.js frame loops reuse objects and pools rather than allocating per frame.

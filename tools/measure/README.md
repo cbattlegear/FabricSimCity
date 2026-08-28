@@ -23,7 +23,7 @@ docker compose -f compose.measure.yaml up -d
 # ~4 minutes: 4,200 tables across 8 schemas, then rows.
 ./Initialize-MeasureDatabase.ps1
 
-# Or, if you need history older than the 90-day horizon (see below), ~20 seconds more:
+# Or, if you need history older than the retention horizon (see below), ~20 seconds more:
 ./Initialize-MeasureDatabase.ps1 -DeepHistoryDays 120
 ```
 
@@ -72,14 +72,19 @@ clean-looking measurement of the wrong thing:
   `sys.query_store_runtime_stats` is exercised by interval count multiplied by plan count,
   and one interval cannot exercise it at all.
 
-## Seeding more than 90 days of history
+## Seeding history older than the retention horizon
 
 The history above is minutes old. That is right for every probe measurement, and it means
 the rig cannot reach anything that only engages on *old* history: the initial backfill cap
-added by #87 starts no earlier than `QueryStoreHistory:InitialLookbackDays` (90 days), so
-against a store whose oldest interval is four minutes old the cap has nothing to refuse and
+added by #87 starts no earlier than `QueryStoreHistory:InitialLookbackMinutes`, so against a
+store whose oldest interval is four minutes old the cap has nothing to refuse and
 never fires. The same is true of a progressive backfill and of a retention prune at the
 boundary. #87 was verified by unit tests only, and said so.
+
+Since v1.0.0 the retention horizon defaults to **24 hours** rather than 90 days, so the ground
+these caps refuse starts a day back rather than a quarter-year back. `-DeepHistoryDays 120` still
+reaches past any horizon an operator can configure; a single day of stretch is enough to exercise
+the default one.
 
 Opt in with `-DeepHistoryDays`:
 
@@ -211,7 +216,7 @@ A run at the defaults produces:
 | --- | ---: |
 | intervals | 241 |
 | span | 120 days |
-| intervals older than the 90-day horizon | 61 |
+| intervals older than the 90-day horizon then in force | 61 |
 | `id_time_order_violations` | 0 |
 | queries / plans | 5,901 / 5,901 |
 | runtime buckets | 372,847 |
@@ -222,7 +227,7 @@ Interval *density* is the honest limitation. `-IntervalCount` slots the store ev
 the span, so 240 intervals over 120 days is one every twelve hours. A real 120-day store at
 `INTERVAL_LENGTH_MINUTES = 1` would hold 172,800 of them. Raising `-IntervalCount` costs
 storage and seed time in proportion, and the script refuses a count high enough to make the
-slots overlap. What this rig gives you is *span* — enough to make the 90-day horizon a real
+slots overlap. What this rig gives you is *span* — enough to make a retention horizon a real
 boundary with data on both sides of it — not a faithful reproduction of a production store's
 shape.
 
