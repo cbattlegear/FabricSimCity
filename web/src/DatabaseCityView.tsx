@@ -14,11 +14,17 @@ import type { NormalizedShowplan, QueryFamilySummary } from './contracts'
 import { DatabaseCityViewport } from './DatabaseCityViewport'
 import { liveBlockingEdges, type LiveBlockingSummary } from './cityBlocking'
 import { mergeCityPage } from './cityPaging'
+import {
+  CITY_REFRESH_INTERVAL_MS,
+  cityLayoutSignature,
+  citySchemaSignature,
+  useContentStable,
+} from './cityRefresh'
 import { neighborhoodSwatch, planCity, type CityPlanOptions } from './cityPlan'
 import { buildCityRoute, type CityRoute } from './cityRoute'
 import { assignWorkloadTraffic } from './cityWorkloadTraffic'
 import { attributedWaits, type WaitAttributionTotals } from './cityWaitAttribution'
-import { CONGESTION_LABELS, gradeRoads, type RoadTraffic } from './cityTraffic'
+import { CONGESTION_LABELS, describeTrafficWindow, gradeRoads, type RoadTraffic } from './cityTraffic'
 import { FACILITY_LABELS, projectFacilities, type Facility, type FacilityKind } from './cityInfrastructure'
 import {
   facilityMixLabel,
@@ -132,6 +138,8 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
   /** Objects fetched so far, tracked separately so progress can move while the layout is held. */
   const [loadedCount, setLoadedCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  /** When the city last re-read itself, so the legend can date the traffic it is showing. */
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<LiveIncidentResponse | null>(null)
   /**
    * The scrolling log of individual executions, folded out of successive samples.
@@ -158,6 +166,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     setPage(value)
     setObjects(value.objects)
   }, [])
+  const hasPage = page !== null
 
   useEffect(() => {
     for (const request of requests.current) request.abort()
@@ -171,6 +180,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     setError(null)
     setPage(null)
     setObjects([])
+    setRefreshedAt(null)
     /*
      * Walk the cursor to the end rather than stopping at the first page.
      *
@@ -249,6 +259,67 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
     for (const request of requests.current) request.abort()
     requests.current.clear()
   }, [])
+
+  /*
+   * The city re-reads itself while it is open.
+   *
+   * Traffic is graded from the last quarter of an hour and the directory is meant to be a live
+   * document -- objects appear, disappear and change size as the database does. Neither is true of a
+   * page fetched once when the view mounted; on a long-lived tab that page is a photograph of the
+   * moment someone clicked, presented as a traffic map.
+   *
+   * Three things make this safe to run on a timer:
+   *
+   *  - Each refresh is a **fresh walk**, merged only onto its own pages and then published whole. It
+   *    is deliberately not merged onto the page already on screen: `mergeCityPage` accumulates by id
+   *    and never drops, so refreshing through it would make removal impossible and the directory
+   *    would only ever grow.
+   *  - The layout inputs are held content-stable (see `planObjects` below), so a refresh that only
+   *    moved the traffic repaints without re-planning the city.
+   *  - A failed refresh is swallowed. The city already on screen is real evidence, dated and
+   *    disclosed; replacing it with an error because one poll timed out would throw away something
+   *    true in favour of nothing.
+   */
+  useEffect(() => {
+    if (loading || backfilling || !hasPage) return
+    let cancelled = false
+    let walking: AbortController | null = null
+    const refresh = async () => {
+      // A hidden tab re-probing SQL Server every thirty seconds forever is invisible in a screenshot
+      // and shows up only as an instance that never goes idle.
+      if (document.hidden || walking) return
+      const controller = new AbortController()
+      walking = controller
+      requests.current.add(controller)
+      try {
+        let token: string | null = null
+        let pages = 0
+        let merged: DatabaseCityPage | null = null
+        do {
+          const value = await fetchDatabaseCity(databaseId, metric, token, controller.signal)
+          if (cancelled || controller.signal.aborted) return
+          pages += 1
+          merged = merged ? mergeCityPage(merged, value) : value
+          token = value.nextPageToken ?? null
+        } while (token && pages < AUTO_PAGE_LIMIT)
+        if (merged && !cancelled && !controller.signal.aborted) {
+          publish(merged)
+          setRefreshedAt(new Date().toISOString())
+        }
+      } catch {
+        // Deliberately silent: see above.
+      } finally {
+        requests.current.delete(controller)
+        if (walking === controller) walking = null
+      }
+    }
+    const handle = window.setInterval(() => void refresh(), CITY_REFRESH_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(handle)
+      walking?.abort()
+    }
+  }, [databaseId, metric, loading, backfilling, hasPage, publish])
 
   useEffect(() => subscribeToLiveIncidents(setSnapshot, setFeedState), [])
 
@@ -492,15 +563,24 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
    * Everything `planCity` needs to lay the city out the same way every time: the database id as the
    * scatter seed, and the full totals so the grid is sized for the whole database rather than for
    * whichever pages happen to have arrived.
+   *
+   * Both inputs are held content-stable across refreshes. The city now re-reads itself every thirty
+   * seconds so its traffic is current, and every one of those refreshes hands back fresh arrays with
+   * fresh activity on them. Keyed on identity, that would re-run a 16-second layout on every poll and
+   * reshuffle the buildings under the cursor each time. Keyed on the fields the layout is actually
+   * derived from, a refresh that only moved the traffic costs nothing, and one that genuinely added,
+   * removed or resized a table still re-plans -- which is the live directory the map is meant to be.
    */
+  const planObjects = useContentStable(visibleObjects, cityLayoutSignature)
+  const planSchemas = useContentStable(page?.schemas, citySchemaSignature)
   const planOptions: CityPlanOptions = useMemo(
-    () => ({ seed: databaseId, totalObjects: page?.totalObjects ?? null, schemas: page?.schemas }),
-    [databaseId, page?.totalObjects, page?.schemas],
+    () => ({ seed: databaseId, totalObjects: page?.totalObjects ?? null, schemas: planSchemas }),
+    [databaseId, page?.totalObjects, planSchemas],
   )
 
   const cityPlan = useMemo(
-    () => planCity(visibleObjects, planOptions),
-    [visibleObjects, planOptions],
+    () => planCity(planObjects, planOptions),
+    [planObjects, planOptions],
   )
 
   const route: CityRoute | null = useMemo(() => {
@@ -986,6 +1066,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
                   onShowFamily={showFamilyOnMap}
                   selectedObject={selected}
                   vehicles={vehicleRoster}
+                  refreshedAt={refreshedAt}
                   open={openRegion === 'legend'}
                   onOpenChange={regionToggle('legend')}
                 />}
@@ -1222,6 +1303,7 @@ function LegendDrawer({
   onShowFamily,
   selectedObject,
   vehicles,
+  refreshedAt,
   open,
   onOpenChange,
 }: {
@@ -1244,6 +1326,7 @@ function LegendDrawer({
   onShowFamily: (family: DatabaseCityQueryFamily) => void | Promise<void>
   selectedObject: DatabaseCityObject | null
   vehicles: VehicleRoster
+  refreshedAt: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
@@ -1255,6 +1338,10 @@ function LegendDrawer({
    * already carries ("Plans named no object in this database").
    */
   const [showUnmappedFamilies, setShowUnmappedFamilies] = useState(false)
+  const trafficWindow = useMemo(
+    () => describeTrafficWindow(page.topQueryFamilies, refreshedAt, CITY_REFRESH_INTERVAL_MS),
+    [page.topQueryFamilies, refreshedAt],
+  )
   const placedIds = useMemo(() => placedObjectIds(objects), [objects])
   const familySplit = useMemo(
     () => splitQueryFamiliesByMap(page.topQueryFamilies, placedIds, showUnmappedFamilies),
@@ -1268,6 +1355,10 @@ function LegendDrawer({
     >
       <summary>Legend &amp; evidence</summary>
       <div className="sidebar-drawer-body">
+        <p className="mapping-note">
+          <strong>{trafficWindow.headline}</strong> {trafficWindow.detail}
+        </p>
+
         <div className="city-legend" aria-label="Database city legend">
           <span><i className="legend-direct" /> direct cumulative DMV activity</span>
           <span><i className="legend-attributed" /> attributed Query Store aggregate</span>

@@ -160,12 +160,19 @@ public sealed class ProtectedQueryStoreHistoryTests
     /// <summary>
     /// The control for the test above, on the same timeline. Without it a sink that pruned
     /// archived epochs unconditionally would satisfy that assertion and look correct.
+    ///
+    /// This pins a wide retention explicitly rather than riding the default, which is now a single
+    /// day and would prune an eight-day-old epoch itself -- leaving the pair agreeing for opposite
+    /// reasons and distinguishing nothing.
     /// </summary>
     [Fact]
-    public async Task TheDefaultRetentionHorizonStillKeepsAnArchivedEpochAtEightDays()
+    public async Task AWiderRetentionHorizonStillKeepsAnArchivedEpochAtEightDays()
     {
         var repository = new ProtectedQueryStoreRepository(new MemoryProtectedStore());
-        var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker());
+        var sink = new ProtectedQueryStoreHistorySink(
+            repository,
+            new QueryStoreCollectionStatusTracker(),
+            retention: new QueryStoreRetentionOptions(History: TimeSpan.FromDays(90)));
         await PublishCycleAsync(sink, 40, "epoch-1", observedAt: Now);
         await PublishCycleAsync(sink, 5, "epoch-2", reset: true, observedAt: Now.AddDays(1));
         await PublishCycleAsync(sink, 7, "epoch-2", observedAt: Now.AddDays(8));
@@ -486,7 +493,10 @@ public sealed class ProtectedQueryStoreHistoryTests
     {
         var repository = new ProtectedQueryStoreRepository(new MemoryProtectedStore());
         var tracker = new QueryStoreCollectionStatusTracker();
-        var sink = new ProtectedQueryStoreHistorySink(repository, tracker);
+        // A thirty-day walk needs a retention that keeps thirty days; on the one-day default the
+        // bucket below is pruned as it lands and the horizon reads null for the wrong reason.
+        var sink = new ProtectedQueryStoreHistorySink(
+            repository, tracker, retention: new QueryStoreRetentionOptions(History: TimeSpan.FromDays(90)));
         // The server still holds well over a year; the collector only ever walked back 30 days.
         var state = new QueryStoreDatabaseState(
             "db", QueryStoreCollectionState.ReadWrite, "epoch", Now.AddDays(-400), Now,

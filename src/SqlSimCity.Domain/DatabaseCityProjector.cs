@@ -53,6 +53,12 @@ public sealed record DatabaseCityQueryEvidence(
     /// counts and row sizes. Null when no retained plan stated both. Modelled, not measured.
     /// </summary>
     public DatabaseCityPlanDataVolumeV1? PlanDataVolume { get; init; }
+
+    /// <summary>
+    /// What this family did inside the recent traffic window, which is what the map grades street
+    /// colour from. Null when no window was configured for this page.
+    /// </summary>
+    public DatabaseCityRecentActivityV1? RecentActivity { get; init; }
 }
 
 public sealed record DatabaseCityWorkloadProjection(

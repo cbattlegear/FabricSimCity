@@ -161,9 +161,18 @@ export async function openDirectory(page) {
  * Puts the sidebar into the state that has produced every layout defect this column has had.
  *
  * An empty plan finder is a short form, and a closed drawer costs its summary and nothing else,
- * so a column measured in its resting state hides the case that matters. The worst case is every
- * drawer open over real rows with a place card holding its own share of the same rail -- which is
- * exactly the arrangement #65 was measured in.
+ * so a column measured in its resting state hides the case that matters. The worst case is the
+ * tallest drawer open over real rows with a place card holding its own share of the same rail --
+ * which is the arrangement #65 was measured in.
+ *
+ * **The drawers are an accordion, so "every drawer open at once" is no longer reachable.** Opening
+ * one closes the rest by design. This walks them in order anyway, because each summary still has to
+ * survive a trusted click, and records which one is left open at the end -- but it can no longer
+ * populate the plan finder *after* the walk, because by then the finder's drawer is closed and its
+ * "Route it" button is not clickable. That is not a layout defect and reporting it as a failed step
+ * is worse than not measuring: it buries the real signal under a step that cannot pass. So the
+ * finder is populated while its own drawer is the open one, which is also the only moment its
+ * height can be measured over real rows.
  *
  * Every interaction here is a trusted `locator.click()`. A summary that cannot be clicked because
  * its drawer was squeezed under it is the defect, so reaching this state has to fail loudly rather
@@ -171,6 +180,7 @@ export async function openDirectory(page) {
  */
 export async function openSidebarWorstCase(page, { populatePlanFinder = true } = {}) {
   const steps = []
+  let planFinderGeometry = null
   /*
    * The directory first, because the address book is part of the worst case rather than a
    * separate concern: an open book is what competes with the drawers and the place card for the
@@ -194,27 +204,45 @@ export async function openSidebarWorstCase(page, { populatePlanFinder = true } =
       steps.push({ step: `open "${label}"`, ok: true, ms: Date.now() - startedAt })
     } catch (reason) {
       steps.push({ step: `open "${label}"`, ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
+      continue
+    }
+
+    /*
+     * Fill the finder now, while this drawer is the open one.
+     *
+     * An empty search term lists everything, which is the reliable way to fill it: Query Store's
+     * capture mode decides whether any particular term matches anything, and a finder that came
+     * back empty is a short form that hides every height defect in that drawer.
+     */
+    if (populatePlanFinder) {
+      const submit = drawer.getByRole('button', { name: 'Route it' })
+      if ((await submit.count()) > 0) {
+        const submittedAt = Date.now()
+        try {
+          await submit.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+          await page.locator('.hud-results li').first().waitFor({ state: 'visible', timeout: 30000 })
+          steps.push({ step: 'populate plan finder', ok: true, ms: Date.now() - submittedAt })
+        } catch (reason) {
+          steps.push({ step: 'populate plan finder', ok: false, ms: Date.now() - submittedAt, error: String(reason).split('\n')[0] })
+        }
+        planFinderGeometry = await sidebarGeometry(page)
+      }
     }
   }
 
   /*
-   * An empty search term lists everything, which is the reliable way to fill the finder: Query
-   * Store's capture mode decides whether any particular term matches anything, and a finder that
-   * came back empty is a short form that hides every height defect in that drawer.
+   * Which drawer survived the walk, recorded rather than assumed.
+   *
+   * With an accordion this is one drawer, and every geometry read after this point describes that
+   * drawer and not the others. Without recording it, a later `drawersOpen` snapshot showing two
+   * closed drawers reads as three squeezed drawers instead of the accordion working.
    */
-  if (populatePlanFinder) {
-    const submit = page.getByRole('button', { name: 'Route it' })
-    const startedAt = Date.now()
-    try {
-      await submit.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
-      await page.locator('.hud-results li').first().waitFor({ state: 'visible', timeout: 30000 })
-      steps.push({ step: 'populate plan finder', ok: true, ms: Date.now() - startedAt })
-    } catch (reason) {
-      steps.push({ step: 'populate plan finder', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
-    }
-  }
+  const open = await page.locator('.sidebar-drawer').evaluateAll(
+    list => list.filter(drawer => drawer.open).map(drawer => drawer.querySelector(':scope > summary')?.textContent?.trim() ?? '?'),
+  )
+  steps.push({ step: 'drawers left open', ok: true, ms: 0, note: open.length ? open.join(', ') : 'none' })
 
-  return steps
+  return { steps, planFinderGeometry }
 }
 
 /** Opens a place card by selecting an address, so the card competes for the rail like the rest. */

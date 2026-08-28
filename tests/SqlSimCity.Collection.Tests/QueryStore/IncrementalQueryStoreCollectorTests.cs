@@ -215,24 +215,32 @@ public sealed class IncrementalQueryStoreCollectorTests
         Assert.True(sink.Published);
     }
 
+    /// <summary>
+    /// The first cycle takes one backfill increment, not the whole retained horizon. Reading the
+    /// horizon in one go is what left a wiped volume publishing nothing until an unbounded cold
+    /// start finished; the rest of the horizon now arrives an increment per cycle behind it.
+    /// </summary>
     [Fact]
-    public async Task FirstCycleStartsAtTheRetainedHorizonRatherThanTheSourcesOldestInterval()
+    public async Task FirstCycleStartsAtTheInitialLookbackRatherThanTheSourcesOldestInterval()
     {
+        var options = new QueryStoreCollectionOptions(DatabaseConcurrency: 1);
         var source = new FakeSource { State = State(Through.AddDays(-400)) };
         var sink = new FakeSink();
-        using var collector = new IncrementalQueryStoreCollector(
-            source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+        using var collector = new IncrementalQueryStoreCollector(source, sink, options);
 
         await collector.CollectAsync(["db"], Through);
 
         Assert.NotEmpty(source.Starts);
-        Assert.All(source.Starts, start => Assert.Equal(Through - QueryStoreRetention.History, start));
+        Assert.All(source.Starts, start => Assert.Equal(Through - options.EffectiveInitialLookback, start));
     }
 
     [Fact]
     public async Task FirstCycleDoesNotReachPastWhatTheSourceStillRetains()
     {
-        var oldest = Through.AddDays(-3);
+        // Inside the initial lookback, so the source's own boundary is the binding constraint and
+        // not the lookback. With a wider fixture the lookback would bound it and this would pass
+        // without ever exercising the clamp it is named for.
+        var oldest = Through.AddMinutes(-30);
         var source = new FakeSource { State = State(oldest) };
         var sink = new FakeSink();
         using var collector = new IncrementalQueryStoreCollector(
@@ -246,6 +254,7 @@ public sealed class IncrementalQueryStoreCollectorTests
     [Fact]
     public async Task ResetCycleIsBoundedByTheSameHorizonAsTheFirstCycle()
     {
+        var options = new QueryStoreCollectionOptions(DatabaseConcurrency: 1);
         var source = new FakeSource { State = State(Through.AddDays(-400)) };
         var sink = new FakeSink
         {
@@ -253,13 +262,12 @@ public sealed class IncrementalQueryStoreCollectorTests
                 "db", "other-signature", "epoch", Through.AddHours(-2),
                 new Dictionary<QueryStoreFactKind, string?>()),
         };
-        using var collector = new IncrementalQueryStoreCollector(
-            source, sink, new QueryStoreCollectionOptions(DatabaseConcurrency: 1));
+        using var collector = new IncrementalQueryStoreCollector(source, sink, options);
 
         var result = await collector.CollectAsync(["db"], Through);
 
         Assert.True(result.Databases[0].ResetDetected);
-        Assert.All(source.Starts, start => Assert.Equal(Through - QueryStoreRetention.History, start));
+        Assert.All(source.Starts, start => Assert.Equal(Through - options.EffectiveInitialLookback, start));
     }
 
     [Fact]
@@ -270,15 +278,15 @@ public sealed class IncrementalQueryStoreCollectorTests
         using var collector = new IncrementalQueryStoreCollector(
             source, sink,
             new QueryStoreCollectionOptions(
-                DatabaseConcurrency: 1, InitialLookback: TimeSpan.FromDays(2)));
+                DatabaseConcurrency: 1, InitialLookback: TimeSpan.FromHours(12)));
 
         await collector.CollectAsync(["db"], Through);
 
-        Assert.All(source.Starts, start => Assert.Equal(Through.AddDays(-2), start));
+        Assert.All(source.Starts, start => Assert.Equal(Through.AddHours(-12), start));
     }
 
     [Theory]
-    [InlineData(91)]
+    [InlineData(2)]
     [InlineData(0)]
     public void InitialLookbackBeyondTheRetainedHorizonOrInsideTheOverlapIsRejected(int days)
     {

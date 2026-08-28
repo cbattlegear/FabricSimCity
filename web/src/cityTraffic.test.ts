@@ -11,6 +11,7 @@ import {
   SEVERE_DELAY_MS_PER_EXECUTION,
   confidencePattern,
   congestionFromDelay,
+  describeTrafficWindow,
   gradeRoads,
   roadDelay,
   roadVolume,
@@ -330,5 +331,172 @@ describe('gradeRoads', () => {
     for (const road of graded) {
       expect(road.rationale.length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('the recent traffic window', () => {
+  function recent(
+    overrides: Partial<NonNullable<DatabaseCityQueryFamily['recentActivity']>> = {},
+  ): NonNullable<DatabaseCityQueryFamily['recentActivity']> {
+    return {
+      windowMinutes: 15,
+      windowStart: '2024-05-01T00:45:00Z',
+      windowEnd: '2024-05-01T01:00:00Z',
+      covered: true,
+      executionCount: '0',
+      totalDurationMicroseconds: '0',
+      totalWaitMilliseconds: '0',
+      rationale: 'test',
+      ...overrides,
+    }
+  }
+
+  const hot = route({ routeId: 'r:hot', fromObjectId: 'a', toId: 'b' })
+
+  it('grades from the window rather than from the retained totals', () => {
+    // Enormous history, quiet now: the street is not congested at this moment, and a map read as a
+    // traffic map has to say so.
+    const families = [
+      family({
+        familyId: 'qf:batch',
+        objectIds: ['a', 'b'],
+        executionCount: '500000',
+        totalWaitMilliseconds: '50000000',
+        recentActivity: recent({ executionCount: '10', totalWaitMilliseconds: '1' }),
+      }),
+    ]
+
+    const [road] = gradeRoads([hot], families)
+
+    expect(roadDelay(families)).toBeGreaterThanOrEqual(SEVERE_DELAY_MS_PER_EXECUTION)
+    expect(road.grade).toBe('free')
+    expect(road.delayPerExecution).toBeCloseTo(0.1)
+    expect(road.recentExecutions).toBe(10)
+    expect(road.recentWindowMinutes).toBe(15)
+  })
+
+  it('reports a quiet window as unknown rather than as a clear road', () => {
+    // The distinction the whole contract exists for: nothing captured is grey, not green.
+    const families = [
+      family({
+        familyId: 'qf:idle',
+        objectIds: ['a', 'b'],
+        executionCount: '100',
+        totalWaitMilliseconds: '10',
+        recentActivity: recent({ covered: false }),
+      }),
+    ]
+
+    const [road] = gradeRoads([hot], families)
+
+    expect(road.grade).toBe('unknown')
+    expect(road.delayPerExecution).toBeNull()
+    expect(road.rationale).toContain('missing capture')
+  })
+
+  it('still grades a busy window severe', () => {
+    const families = [
+      family({
+        familyId: 'qf:hot',
+        objectIds: ['a', 'b'],
+        executionCount: '10',
+        totalWaitMilliseconds: '0',
+        recentActivity: recent({
+          executionCount: '4',
+          totalWaitMilliseconds: String(SEVERE_DELAY_MS_PER_EXECUTION * 4),
+        }),
+      }),
+    ]
+
+    expect(gradeRoads([hot], families)[0].grade).toBe('severe')
+  })
+
+  it('falls back to retained totals when no family published a window', () => {
+    // An archive or a fixture page. Greying those out would discard evidence that is perfectly
+    // good, just of a different kind.
+    const families = [
+      family({
+        familyId: 'qf:archive',
+        objectIds: ['a', 'b'],
+        executionCount: '10',
+        totalWaitMilliseconds: String(SEVERE_DELAY_MS_PER_EXECUTION * 10),
+      }),
+    ]
+
+    const [road] = gradeRoads([hot], families)
+
+    expect(road.grade).toBe('severe')
+    expect(road.recentWindowMinutes).toBeNull()
+  })
+
+  it('lets a live lock wait still outrank a quiet window', () => {
+    const families = [
+      family({
+        familyId: 'qf:idle',
+        objectIds: ['a', 'b'],
+        recentActivity: recent({ covered: false }),
+      }),
+    ]
+
+    const [road] = gradeRoads([hot], families, [{ objectKey: 'a', blockedSessionCount: 2 }])
+
+    expect(road.grade).toBe('severe')
+  })
+})
+
+describe('describeTrafficWindow', () => {
+  const covered = {
+    windowMinutes: 15,
+    windowStart: '2024-05-01T00:45:00Z',
+    windowEnd: '2024-05-01T01:00:00Z',
+    covered: true,
+    executionCount: '4',
+    totalDurationMicroseconds: '0',
+    totalWaitMilliseconds: '0',
+    rationale: 'test',
+  }
+
+  it('says the colours are the window, and names the window', () => {
+    const disclosure = describeTrafficWindow(
+      [family({ familyId: 'qf:1', recentActivity: covered })],
+      '2024-05-01T01:00:00Z',
+      30_000,
+    )
+
+    expect(disclosure.headline).toContain('last 15 minutes')
+    expect(disclosure.windowMinutes).toBe(15)
+    expect(disclosure.covered).toBe(true)
+    // The legend has to admit the buckets are counted whole, or the totals read as 15 minutes of work.
+    expect(disclosure.detail).toContain('pro-rated')
+  })
+
+  it('says so when the colours are the retained history instead', () => {
+    const disclosure = describeTrafficWindow([family({ familyId: 'qf:1' })], null, 30_000)
+
+    expect(disclosure.headline).toContain('retained history')
+    expect(disclosure.windowMinutes).toBeNull()
+  })
+
+  it('explains an empty window rather than letting it read as a fault', () => {
+    const disclosure = describeTrafficWindow(
+      [family({ familyId: 'qf:1', recentActivity: { ...covered, covered: false } })],
+      '2024-05-01T01:00:00Z',
+      30_000,
+    )
+
+    expect(disclosure.covered).toBe(false)
+    expect(disclosure.headline).toContain('captured nothing')
+    expect(disclosure.detail).toContain('unmeasured, not clear')
+  })
+
+  it('does not date the traffic before the city has re-read itself', () => {
+    const disclosure = describeTrafficWindow(
+      [family({ familyId: 'qf:1', recentActivity: covered })],
+      null,
+      30_000,
+    )
+
+    expect(disclosure.detail).toContain('every 30 seconds')
+    expect(disclosure.detail).not.toContain('last read at')
   })
 })

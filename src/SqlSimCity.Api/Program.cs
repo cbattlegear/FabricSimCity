@@ -155,7 +155,11 @@ if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
             services.GetRequiredService<ConnectedQueryStoreHistorySource>());
         // Joins Query Store families to catalog objects so the live map shows attributed
         // exposure, co-reference roads, and wait lanes instead of an unattributed city.
-        builder.Services.AddSingleton<QueryStoreCityAttribution>();
+        // Registered by factory rather than by type so the traffic window is read from
+        // configuration and validated at startup rather than on the first city page.
+        builder.Services.AddSingleton(services => new QueryStoreCityAttribution(
+            services.GetRequiredService<IQueryStoreHistorySource>(),
+            DatabaseCityConfiguration.BuildTrafficWindow(builder.Configuration)));
         builder.Services.AddHostedService<QueryStoreHistoryBackgroundService>();
     }
     else

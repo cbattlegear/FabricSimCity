@@ -473,6 +473,7 @@ public sealed class FixtureDatabaseCitySource : IDatabaseCitySource
     {
         WaitAttribution = family.WaitAttribution,
         PlanDataVolume = family.PlanDataVolume,
+        RecentActivity = family.RecentActivity,
     };
 
     private static DatabaseCityIndexV1 Index(

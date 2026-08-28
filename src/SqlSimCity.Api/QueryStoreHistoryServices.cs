@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.SignalR;
+using SqlSimCity.Collection.DatabaseCity;
 using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
@@ -10,6 +11,37 @@ public sealed record QueryStoreHistoryHostOptions(
     IReadOnlyList<string> KnownDatabases,
     TimeSpan RefreshInterval,
     TimeSpan MaximumBackoff);
+
+/// <summary>
+/// Settings for the city view itself, as distinct from how much history is collected behind it.
+/// </summary>
+public static class DatabaseCityConfiguration
+{
+    /// <summary>
+    /// How far back street colour is graded from. Deliberately separate from retention: retention
+    /// decides which streets exist at all, and this decides what colour they are. An operator
+    /// watching a quiet instance widens this to see anything; one watching a busy instance narrows
+    /// it so a spike stops colouring the map long after it ended.
+    /// </summary>
+    public static TimeSpan BuildTrafficWindow(IConfiguration configuration)
+    {
+        var minutes = configuration.GetSection("DatabaseCity").GetValue<int?>("TrafficWindowMinutes");
+        if (minutes is null) return QueryStoreCityAttribution.DefaultTrafficWindow;
+        var window = TimeSpan.FromMinutes(minutes.Value);
+        if (window < QueryStoreCityAttribution.MinimumTrafficWindow ||
+            window > QueryStoreCityAttribution.MaximumTrafficWindow)
+        {
+            // Named for the setting rather than a parameter, because the setting is what an
+            // operator has to go and change.
+            throw new InvalidOperationException(
+                $"DatabaseCity:TrafficWindowMinutes is {minutes.Value}; it must be between " +
+                $"{QueryStoreCityAttribution.MinimumTrafficWindow.TotalMinutes:0} and " +
+                $"{QueryStoreCityAttribution.MaximumTrafficWindow.TotalMinutes:0} minutes.");
+        }
+
+        return window;
+    }
+}
 
 public static class QueryStoreHistoryConfiguration
 {
@@ -39,18 +71,52 @@ public static class QueryStoreHistoryConfiguration
             ?.Equals("Disabled", StringComparison.OrdinalIgnoreCase) == true;
 
     /// <summary>
+    /// Settings whose unit changed when the collector stopped archiving and started following
+    /// current traffic. Honouring them would be wrong -- <c>BackfillHorizonDays: 3</c> and
+    /// <c>BackfillHorizonHours: 3</c> differ by a factor of 24 -- and ignoring them would drop a
+    /// setting the operator is still relying on, silently. So each one is refused by name.
+    /// </summary>
+    private static readonly (string Retired, string Replacement)[] RetiredSettings =
+    [
+        ("RetentionDays", "RetentionHours"),
+        ("DetailRetentionDays", "DetailRetentionHours"),
+        ("InitialLookbackDays", "InitialLookbackMinutes"),
+        ("BackfillIncrementHours", "BackfillIncrementMinutes"),
+        ("BackfillHorizonDays", "BackfillHorizonHours"),
+    ];
+
+    /// <summary>
+    /// Refuses a configuration that still carries a retired key. A unit change is the one kind of
+    /// rename that cannot fail loudly on its own: the old name simply stops being read, and the
+    /// deployment keeps running against a horizon nobody chose.
+    /// </summary>
+    private static void RequireRetiredSettingsAbsent(IConfigurationSection section)
+    {
+        foreach (var (retired, replacement) in RetiredSettings)
+        {
+            if (section.GetSection(retired).Value is null) continue;
+            throw new InvalidOperationException(
+                $"QueryStoreHistory:{retired} is no longer read; use QueryStoreHistory:{replacement} " +
+                "instead. The unit changed, so the old value cannot be carried across: retention and " +
+                "backfill now describe a live traffic picture in hours and minutes rather than an " +
+                "archive in days.");
+        }
+    }
+
+    /// <summary>
     /// How much history this deployment keeps. Both the sink's prune and the collector's lookback
     /// caps read this one value, so lowering it lowers what is read and what is stored together.
     /// </summary>
     public static QueryStoreRetentionOptions BuildRetentionOptions(IConfiguration configuration)
     {
         var section = configuration.GetSection("QueryStoreHistory");
+        RequireRetiredSettingsAbsent(section);
         var options = new QueryStoreRetentionOptions(
-            section.GetValue<int?>("RetentionDays") is { } days
-                ? TimeSpan.FromDays(days)
+            section.GetValue<int?>("RetentionHours") is { } hours
+                ? TimeSpan.FromHours(hours)
                 : null,
-            section.GetValue<int?>("DetailRetentionDays") is { } detailDays
-                ? TimeSpan.FromDays(detailDays)
+            section.GetValue<int?>("DetailRetentionHours") is { } detailHours
+                ? TimeSpan.FromHours(detailHours)
                 : null);
         options.Validate();
         return options;
@@ -59,24 +125,26 @@ public static class QueryStoreHistoryConfiguration
     public static QueryStoreCollectionOptions BuildCollectionOptions(IConfiguration configuration)
     {
         var section = configuration.GetSection("QueryStoreHistory");
+        RequireRetiredSettingsAbsent(section);
         var retention = BuildRetentionOptions(configuration);
         var options = new QueryStoreCollectionOptions(
             section.GetValue<int?>("PageSize") ?? 1_000,
             section.GetValue<int?>("DatabaseConcurrency") ?? 4,
             TimeSpan.FromMinutes(section.GetValue<int?>("OverlapMinutes") ?? 65),
-            // Absent means "follow retention". Pinning a number here instead would make lowering
-            // RetentionDays fail validation against a default the operator never set.
-            section.GetValue<int?>("InitialLookbackDays") is { } lookbackDays
-                ? TimeSpan.FromDays(lookbackDays)
+            // Absent means "one backfill increment, floored at the overlap". Pinning a number here
+            // instead would make lowering RetentionHours fail validation against a default the
+            // operator never set.
+            section.GetValue<int?>("InitialLookbackMinutes") is { } lookbackMinutes
+                ? TimeSpan.FromMinutes(lookbackMinutes)
                 : null,
-            // Absent means off: a progressive backfill is something an operator asks for, so
-            // configuring nothing keeps the first cycle bounded by the initial lookback and every
-            // later cycle reading forward only.
-            section.GetValue<int?>("BackfillIncrementHours") is { } hours
-                ? TimeSpan.FromHours(hours)
+            // Absent means the default increment: the progressive backfill is on unless an operator
+            // widens or narrows the step, because reaching a whole horizon in one cold-start cycle
+            // is what leaves a fresh deployment with nothing published.
+            section.GetValue<int?>("BackfillIncrementMinutes") is { } incrementMinutes
+                ? TimeSpan.FromMinutes(incrementMinutes)
                 : null,
-            section.GetValue<int?>("BackfillHorizonDays") is { } horizonDays
-                ? TimeSpan.FromDays(horizonDays)
+            section.GetValue<int?>("BackfillHorizonHours") is { } horizonHours
+                ? TimeSpan.FromHours(horizonHours)
                 : null,
             retention);
         options.Validate();

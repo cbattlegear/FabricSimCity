@@ -48,6 +48,19 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
         decimal? EstimatedRows = null,
         decimal? EstimatedRowSizeBytes = null);
 
+    /// <summary>
+    /// One retained runtime bucket at an explicit interval, for tests about the recent traffic
+    /// window. Separate from <see cref="AddFamily"/>'s <c>runtimeWaits</c>, which pins every bucket
+    /// at the same instant and is what the wait-category tests already rely on -- the window tests
+    /// need buckets that differ in <em>when</em>, which that shape cannot express.
+    /// </summary>
+    public sealed record RuntimeInterval(
+        DateTimeOffset Start,
+        DateTimeOffset End,
+        string Executions = "1",
+        string DurationMicroseconds = "1",
+        string WaitMilliseconds = "0");
+
     private static readonly DateTimeOffset Observed = new(2026, 8, 17, 17, 0, 0, TimeSpan.Zero);
 
     private static readonly QueryStoreEvidenceV1 Evidence = new(
@@ -79,7 +92,8 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
         string executions,
         (string PlanId, PlanNode[] Nodes)[] plans,
         string waitMilliseconds = "0",
-        IReadOnlyList<IReadOnlyDictionary<string, string>>? runtimeWaits = null)
+        IReadOnlyList<IReadOnlyDictionary<string, string>>? runtimeWaits = null,
+        IReadOnlyList<RuntimeInterval>? runtimeIntervals = null)
     {
         var text = new QueryTextDescriptorV1(QueryTextAvailability.Available, "SELECT 1", "fp", "Captured.");
         var summary = new QueryFamilySummaryV1(
@@ -99,6 +113,13 @@ internal sealed class FakeQueryStore : IQueryStoreHistorySource
                 plans[0].PlanId, $"interval-{i}", "epoch:1", Observed, Observed,
                 QueryStoreExecutionType.Regular, "primary", "1", 1m, 1m, 1m, "1", "1", "1",
                 new ReadOnlyDictionary<string, string>(waits.ToDictionary()), Evidence))
+            .Concat((runtimeIntervals ?? []).Select((interval, i) => new RuntimeBucketV1(
+                plans[0].PlanId, $"window-{i}", "epoch:1", interval.Start, interval.End,
+                QueryStoreExecutionType.Regular, "primary", interval.Executions, 1m, 1m, 1m,
+                interval.DurationMicroseconds, "1", "1",
+                new ReadOnlyDictionary<string, string>(
+                    new Dictionary<string, string> { ["CPU"] = interval.WaitMilliseconds }),
+                Evidence)))
             .ToArray();
 
         _details[familyId] = new QueryFamilyDetailV1("1.0", summary, planSummaries, runtime);

@@ -178,6 +178,38 @@ public sealed record DatabaseCityPlanDataVolumeV1(
     int PlansRead,
     string Rationale);
 
+/// <summary>
+/// What a query family did in the last few minutes, as opposed to across the whole retained
+/// horizon. This is what the map grades traffic colour from: an aggregate over a day of history
+/// describes a database's past, and a city street should show what is happening on it now.
+/// <para>
+/// The window is matched by <em>overlap</em>, not by interval end. Query Store's current interval
+/// is still open -- its <c>IntervalEnd</c> is in the future -- so selecting intervals that ended
+/// inside the window would exclude live traffic and report a busy database as idle.
+/// </para>
+/// <para>
+/// Because intervals are typically an hour wide, an overlapping interval's totals cover more than
+/// the window asked for, and they are published as measured rather than pro-rated: dividing a
+/// measured total by the fraction of an interval that happens to fall inside the window would
+/// invent numbers Query Store never reported. The ratio the colour is graded from -- wait per
+/// execution -- is unaffected by that, and is genuinely current.
+/// </para>
+/// </summary>
+/// <param name="Covered">
+/// Whether any retained interval overlapped the window at all. False means Query Store captured
+/// nothing here, which is not the same as a street being quiet, and the map must grade it unknown
+/// rather than free. Every count below is zero when this is false.
+/// </param>
+public sealed record DatabaseCityRecentActivityV1(
+    int WindowMinutes,
+    DateTimeOffset WindowStart,
+    DateTimeOffset WindowEnd,
+    bool Covered,
+    string ExecutionCount,
+    string TotalDurationMicroseconds,
+    string TotalWaitMilliseconds,
+    string Rationale);
+
 public sealed record DatabaseCityQueryFamilyV1(
     string FamilyId,
     string QueryHash,
@@ -204,6 +236,12 @@ public sealed record DatabaseCityQueryFamilyV1(
     /// Modelled, not measured; see <see cref="DatabaseCityPlanDataVolumeV1"/>.
     /// </summary>
     public DatabaseCityPlanDataVolumeV1? PlanDataVolume { get; init; }
+
+    /// <summary>
+    /// What this family did inside the recent traffic window. Null when the page was built without
+    /// one; see <see cref="DatabaseCityRecentActivityV1"/> for why absence is not idleness.
+    /// </summary>
+    public DatabaseCityRecentActivityV1? RecentActivity { get; init; }
 }
 
 public sealed record DatabaseCityWorkloadAggregateV1(

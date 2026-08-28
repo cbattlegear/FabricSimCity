@@ -174,6 +174,37 @@ export interface DatabaseCityQueryFamily {
    * absent case as unknown rather than as the smallest bucket.
    */
   planDataVolume?: DatabaseCityPlanDataVolume | null
+
+  /**
+   * What this family did inside the recent traffic window, which is what street colour is graded
+   * from. Absent on a page built before the window existed — an archive, or a fixture — and there
+   * the retained totals are all there is, so grading falls back to them rather than to grey.
+   */
+  recentActivity?: DatabaseCityRecentActivity | null
+}
+
+/**
+ * A query family's activity inside the recent traffic window.
+ *
+ * `covered` is the field that matters. It is false when no retained Query Store interval overlapped
+ * the window at all, and every count below is then zero — which is "nothing was captured here", not
+ * "this street is quiet". Rendering the two the same is the easiest way to make the map claim a road
+ * is clear when it was never measured.
+ *
+ * Counts are summed from intervals that *overlap* the window, not ones contained by it, because
+ * Query Store's current interval is still open and holds the live traffic. They are therefore not
+ * pro-rated to the window, and a wider interval contributes everything it measured. The ratio the
+ * colour is graded from — wait per execution — is unaffected by that.
+ */
+export interface DatabaseCityRecentActivity {
+  windowMinutes: number
+  windowStart: string
+  windowEnd: string
+  covered: boolean
+  executionCount: string
+  totalDurationMicroseconds: string
+  totalWaitMilliseconds: string
+  rationale: string
 }
 
 export interface DatabaseCityWorkloadAggregate {

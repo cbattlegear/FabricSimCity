@@ -161,15 +161,19 @@ async function measureViewport(context, viewport, args) {
   const census = args.vehicles ? await vehicleCensus(page) : null
 
   /*
-   * Three states, measured in the order a reader reaches them.
+   * Four states, measured in the order a reader reaches them.
    *
    * `resting` is the column as it loads, with every drawer closed. That is the state a casual
-   * check sees and the one that has never had a defect in it. `drawersOpen` opens every drawer
-   * over real rows, and `worstCase` adds a place card so all three claims on the rail are live at
-   * once -- which is the arrangement #63 and #65 were both found in. Quoting only the first is how
-   * a squeezed column gets signed off.
+   * check sees and the one that has never had a defect in it. `planFinder` is caught mid-walk,
+   * with the finder open over real rows -- the only moment it can be measured populated, since
+   * the accordion closes it as soon as the next drawer opens. `drawersOpen` is the column after
+   * the walk, which under an accordion means the last drawer open rather than all of them, and
+   * `worstCase` adds a place card so the other claims on the rail are live alongside it -- the
+   * arrangement #63 and #65 were both found in. Quoting only the first is how a squeezed column
+   * gets signed off.
    */
-  const sidebarSteps = await openSidebarWorstCase(page)
+  const { steps: sidebarSteps, planFinderGeometry } = await openSidebarWorstCase(page)
+  if (planFinderGeometry) geometry.planFinder = planFinderGeometry
   geometry.drawersOpen = await sidebarGeometry(page)
   const placeCardStep = await openPlaceCard(page)
   sidebarSteps.push(placeCardStep)

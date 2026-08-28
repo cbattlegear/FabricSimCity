@@ -73,6 +73,8 @@ function road(routeId: string, fromObjectId: string, toId: string, executions: n
     executions,
     waitShare: null,
     delayPerExecution: null,
+    recentExecutions: null,
+    recentWindowMinutes: null,
     familyIds: [],
     rationale: 'test',
   }

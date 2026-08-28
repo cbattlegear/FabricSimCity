@@ -145,14 +145,15 @@ public interface IQueryStoreHistorySink
 }
 
 /// <param name="BackfillIncrement">
-/// How much further back each cycle reaches once the forward window is collected. <c>null</c>, the
-/// default, switches the progressive backfill off entirely, so an operator who configures nothing
-/// keeps exactly the behaviour that shipped without it.
+/// How much further back each cycle reaches once the forward window is collected. <c>null</c> uses
+/// <see cref="DefaultBackfillIncrement"/>. Progressive backfill is on by default: a collector that
+/// reaches its whole horizon in one cold-start cycle is the thing that stalls a fresh deployment,
+/// and walking back an increment per cycle publishes a usable city after the first one.
 /// </param>
 /// <param name="BackfillHorizon">
-/// How far back the backfill is allowed to walk. Defaults to, and is capped at, the configured
-/// retention horizon: reading past what the sink retains would re-create the waste the initial
-/// lookback cap removed, so the two horizons are held to the same figure.
+/// How far back the backfill is allowed to walk. <c>null</c> uses <see cref="DefaultBackfillHorizon"/>,
+/// and it is capped at the configured retention horizon: reading past what the sink retains would
+/// re-create the waste the initial lookback cap removed.
 /// </param>
 /// <param name="Retention">
 /// How much history the sink keeps. <c>null</c> uses <see cref="QueryStoreRetentionOptions.Default"/>.
@@ -168,21 +169,64 @@ public sealed record QueryStoreCollectionOptions(
     TimeSpan? BackfillHorizon = null,
     QueryStoreRetentionOptions? Retention = null)
 {
+    /// <summary>One hour: the step each cycle reaches further back by.</summary>
+    public static readonly TimeSpan DefaultBackfillIncrement = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Three hours: how far back the backfill walks in total.
+    ///
+    /// Deliberately far short of retention. What the collector <em>reads</em> and what the sink
+    /// <em>keeps</em> answer different questions — the city needs enough past to grade current
+    /// traffic against, not the whole retained horizon re-read on every deployment.
+    /// </summary>
+    public static readonly TimeSpan DefaultBackfillHorizon = TimeSpan.FromHours(3);
+
     public TimeSpan EffectiveOverlap => Overlap ?? TimeSpan.FromMinutes(65);
 
     public QueryStoreRetentionOptions EffectiveRetention => Retention ?? QueryStoreRetentionOptions.Default;
 
     /// <summary>
     /// How far back the first cycle for a database reads when there is no watermark to resume from.
-    /// Defaults to the horizon retained history covers: anything older is read off a production
-    /// instance only to be discarded by the first prune.
+    ///
+    /// One backfill increment, floored at the overlap so the first cycle cannot ask for a window
+    /// narrower than the re-read it is obliged to perform. The rest of the horizon arrives an
+    /// increment per cycle, which is what keeps a wiped volume from turning into one unbounded
+    /// cold-start read that publishes nothing until it finishes.
     /// </summary>
-    public TimeSpan EffectiveInitialLookback => InitialLookback ?? EffectiveRetention.EffectiveHistory;
+    public TimeSpan EffectiveInitialLookback =>
+        InitialLookback ?? (EffectiveBackfillIncrement > EffectiveOverlap
+            ? EffectiveBackfillIncrement
+            : EffectiveOverlap);
+
+    /// <summary>How much further back each cycle reaches. Never null: backfill is always on.</summary>
+    public TimeSpan EffectiveBackfillIncrement => BackfillIncrement ?? DefaultBackfillIncrement;
 
     /// <summary>Whether cycles reach backwards past what the first cycle collected.</summary>
-    public bool BackfillEnabled => BackfillIncrement is not null;
+    public bool BackfillEnabled => EffectiveBackfillIncrement > TimeSpan.Zero;
 
-    public TimeSpan EffectiveBackfillHorizon => BackfillHorizon ?? EffectiveRetention.EffectiveHistory;
+    /// <summary>
+    /// How far back the backfill walks, never past what the sink retains. The cap is applied here
+    /// rather than rejected in <see cref="Validate"/> only for the default, so lowering retention
+    /// below three hours narrows the backfill with it instead of failing to start.
+    ///
+    /// The derived value is also floored at the initial lookback, because the first cycle reads
+    /// that far back whether the horizon agrees or not: a deployment that widens the lookback past
+    /// the three-hour default would otherwise refuse to boot on a contradiction it never wrote. An
+    /// explicitly configured horizon is left alone and still validated, since a horizon set
+    /// shallower than a lookback set beside it is a genuine contradiction worth reporting.
+    /// </summary>
+    public TimeSpan EffectiveBackfillHorizon
+    {
+        get
+        {
+            var history = EffectiveRetention.EffectiveHistory;
+            if (BackfillHorizon is { } configured) return configured;
+            var derived = DefaultBackfillHorizon < history ? DefaultBackfillHorizon : history;
+            var lookback = EffectiveInitialLookback;
+            if (derived < lookback) derived = lookback;
+            return derived < history ? derived : history;
+        }
+    }
 
     public void Validate()
     {
@@ -197,21 +241,30 @@ public sealed record QueryStoreCollectionOptions(
             throw new ArgumentOutOfRangeException(
                 nameof(InitialLookback),
                 "The initial Query Store lookback must be at least the overlap window and at most " +
-                $"the {history.TotalDays:0}-day horizon retained history covers.");
-        if (BackfillIncrement is { } increment &&
-            (increment <= TimeSpan.Zero || increment > history))
+                $"the {Describe(history)} horizon retained history covers.");
+        if (EffectiveBackfillIncrement <= TimeSpan.Zero || EffectiveBackfillIncrement > history)
             throw new ArgumentOutOfRangeException(
                 nameof(BackfillIncrement),
                 "The Query Store backfill increment must be positive and no larger than the " +
-                $"{history.TotalDays:0}-day horizon retained history covers.");
+                $"{Describe(history)} horizon retained history covers.");
         if (EffectiveBackfillHorizon > history ||
             EffectiveBackfillHorizon < EffectiveInitialLookback)
             throw new ArgumentOutOfRangeException(
                 nameof(BackfillHorizon),
                 "The Query Store backfill horizon must be at least the initial lookback and at most " +
-                $"the {history.TotalDays:0}-day horizon retained history covers; " +
+                $"the {Describe(history)} horizon retained history covers; " +
                 "reaching past what the sink retains collects evidence the first prune discards.");
     }
+
+    /// <summary>
+    /// Renders a horizon in whichever unit states it without a fraction. Retention is measured in
+    /// hours now as often as in days, and "the 0-day horizon" is what a days-only message says
+    /// about a three-hour one.
+    /// </summary>
+    internal static string Describe(TimeSpan span) =>
+        span.TotalDays >= 1 && span.TotalDays == Math.Floor(span.TotalDays)
+            ? $"{span.TotalDays:0}-day"
+            : $"{span.TotalHours:0.##}-hour";
 }
 
 public sealed record QueryStoreDatabaseCollectionResult(
@@ -427,7 +480,8 @@ public sealed class IncrementalQueryStoreCollector : IDisposable
         DateTimeOffset throughExclusive,
         DateTimeOffset reachedBack)
     {
-        if (_options.BackfillIncrement is not { } increment) return null;
+        if (!_options.BackfillEnabled) return null;
+        var increment = _options.EffectiveBackfillIncrement;
         var floor = throughExclusive - _options.EffectiveBackfillHorizon;
         if (state.OldestIntervalStart is { } oldest && oldest > floor) floor = oldest;
         if (reachedBack <= floor) return null;
