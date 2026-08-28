@@ -432,6 +432,38 @@ describe('the sidebar column scrolls its own overflow', () => {
   })
 
   /**
+   * And lifting the cap means the card has to be able to give way, which is #120.
+   *
+   * A flex item's automatic minimum is its content size clamped by its own *definite* `max-height`.
+   * The base card is capped at `16vh`, so it can never overflow the rail; `.is-full` removes the cap
+   * and removes that clamp with it, and without `min-height: 0` the card floors at its content and
+   * `flex-shrink` has nothing to act on. Measured at 1440x900 before the fix: the card held 1028px
+   * inside a 900px `overflow: hidden` rail and 229px of the routed plan was unreachable by any means.
+   *
+   * `.hud-slideover` needs the same floor removed. It is the card's own flex item, so it floors on
+   * its content in exactly the same way, and shrinking the card alone would move the overflow one
+   * box inwards rather than resolve it. It already carries `overflow: auto`, so once it can shrink
+   * it scrolls.
+   *
+   * This does not contradict `never squeezes the place card past its own evidence` below, which bans
+   * the same declaration on the *base* card. That ban exists because the base card shares the rail
+   * with the address list and the drawers, and a card that can shrink is the one that loses. In the
+   * takeover state none of them are rendered, so this card is the column's only flex item: `flex: 1
+   * 1 auto` makes it take all the space rather than less, and there is nothing to squeeze it.
+   */
+  it('lets a full-takeover route card give way to the rail instead of overflowing it', () => {
+    expect(desktopRule('.sidebar-place-card.is-full'),
+      '.is-full floors on its content and will overflow the rail').toMatch(/min-height:\s*0/)
+
+    const slideover = rules().filter((one) => one.selector.split(',')
+      .some((part) => part.trim() === '.sidebar-place-card > .hud-slideover'))
+    expect(slideover.length, "no rule lets the route card's slideover shrink").toBeGreaterThan(0)
+    expect(slideover.some((one) => /min-height:\s*0/.test(one.body)),
+      'the slideover floors on its content, so the card shrinking only moves the overflow inwards')
+      .toBe(true)
+  })
+
+  /**
    * `min-height: 0` here is the difference between "the legend collapses to its summary" and "the
    * legend collapses to ten pixels and you can no longer click it", which is what a full column
    * actually did when this was first written. Leaving the drawer's minimum at `auto` floors it on its

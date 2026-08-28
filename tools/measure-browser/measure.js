@@ -21,8 +21,10 @@ import {
   clearSearch,
   clickFirstEntry,
   sidebarGeometry,
-  openSidebarWorstCase,
+  walkSidebarRegions,
   openPlaceCard,
+  openRoutedPlan,
+  dismissRoutedPlan,
   openDirectory,
 } from './lib/address.js'
 
@@ -161,20 +163,26 @@ async function measureViewport(context, viewport, args) {
   const census = args.vehicles ? await vehicleCensus(page) : null
 
   /*
-   * Four states, measured in the order a reader reaches them.
+   * The states a reader can actually reach, measured in the order they reach them.
    *
-   * `resting` is the column as it loads, with every drawer closed. That is the state a casual
-   * check sees and the one that has never had a defect in it. `planFinder` is caught mid-walk,
-   * with the finder open over real rows -- the only moment it can be measured populated, since
-   * the accordion closes it as soon as the next drawer opens. `drawersOpen` is the column after
-   * the walk, which under an accordion means the last drawer open rather than all of them, and
-   * `worstCase` adds a place card so the other claims on the rail are live alongside it -- the
-   * arrangement #63 and #65 were both found in. Quoting only the first is how a squeezed column
-   * gets signed off.
+   * `resting` is the column as it loads. The accordion then makes every other state a *single* open
+   * region -- opening one closes the last, and the city directory shares the same `openRegion` -- so
+   * each is measured while it is the open one rather than pretending to a combined state that
+   * stopped existing in #116. `routedPlan` opens a captured plan, which takes the whole rail over and
+   * is the state #120 was found in, and `worstCase` adds a place card on top.
+   *
+   * `routedPlan` runs *before* `openPlaceCard` and is dismissed afterwards, and that ordering is the
+   * whole point of the pass. A place card leaves `showsAddressBook` false, so the plan finder stops
+   * being rendered; run second, `openRoutedPlan` finds no finder, reports "no plan finder in this
+   * view" and re-measures the place card under the routed plan's name. That is what the first run
+   * after this pass was written did -- it reported a clean `routedPlan` for a state it never entered.
    */
-  const { steps: sidebarSteps, planFinderGeometry } = await openSidebarWorstCase(page)
-  if (planFinderGeometry) geometry.planFinder = planFinderGeometry
-  geometry.drawersOpen = await sidebarGeometry(page)
+  const { steps: sidebarSteps, regions } = await walkSidebarRegions(page)
+  Object.assign(geometry, regions)
+  const routeStep = await openRoutedPlan(page)
+  sidebarSteps.push(routeStep)
+  if (routeStep.ok) geometry.routedPlan = await sidebarGeometry(page)
+  sidebarSteps.push(await dismissRoutedPlan(page))
   const placeCardStep = await openPlaceCard(page)
   sidebarSteps.push(placeCardStep)
   geometry.worstCase = await sidebarGeometry(page)

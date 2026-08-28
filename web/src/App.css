@@ -390,7 +390,8 @@
 }
 
 .sidebar-place-card .detail,
-.sidebar-place-card .place-card {
+.sidebar-place-card .place-card,
+.sidebar-place-card > .hud-slideover {
   position: static;
   margin: 0;
   min-height: 0;
@@ -401,13 +402,31 @@
  * A query route takes the whole rail over.
  *
  * When a route is open the address book — search, list, metric footer, every drawer — is not
- * rendered, so the card is the only thing under the header. The shared-with-a-list `46vh` cap would
+ * rendered, so the card is the only thing under the header. The shared-with-a-list `16vh` cap would
  * strand the rest of the rail empty, so a full-takeover card grows to fill the column instead and
- * scrolls its own content (`.hud-slideover` inside is already a `min-height: 0` `overflow: auto`
- * flex item). Measured before/after at 1115x800 and in the bottom sheet; see the pull request body.
+ * scrolls its own content. Measured before/after at 1115x800 and in the bottom sheet; see the pull
+ * request body.
+ *
+ * `min-height: 0` is what makes the "and scrolls its own content" half true, and its absence was
+ * #120. A flex item's automatic minimum is its content size clamped by its *own definite*
+ * `max-height`; the base card is capped at `16vh` and therefore can never overflow, but removing the
+ * cap here removes the clamp with it and the card floors at content instead. Measured at 1440x900
+ * before this line: the card held 1028px inside a 900px `overflow: hidden` rail with `flex-shrink`
+ * unable to act, and 229px of the routed plan was unreachable by any means.
+ *
+ * This is not the 10px-drawer mistake `AGENTS.md` warns about, and the difference is that nothing
+ * competes here: in the full-takeover state the address book, the feed and the drawers are not
+ * rendered, so this card is the column's only flex item and `flex: 1 1 auto` makes it take *all* the
+ * space rather than less. A drawer given the same treatment is squeezed by its siblings; this cannot
+ * be, because it has none.
+ *
+ * The floor has to come off `.hud-slideover` as well, above. It is the card's own flex item, so its
+ * automatic minimum floors it at content in exactly the same way, and shrinking the card alone would
+ * simply move the overflow one box inwards.
  */
 .sidebar-place-card.is-full {
   flex: 1 1 auto;
+  min-height: 0;
   max-height: none;
 }
 
@@ -2036,5 +2055,6 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   .sidebar-feed-body,
   .sidebar-drawer-body,
   .sidebar-place-card .detail,
-  .sidebar-place-card .place-card { overflow: visible; }
+  .sidebar-place-card .place-card,
+  .sidebar-place-card > .hud-slideover { overflow: visible; }
 }
