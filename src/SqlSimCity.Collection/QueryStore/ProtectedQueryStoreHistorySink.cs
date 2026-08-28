@@ -12,7 +12,8 @@ namespace SqlSimCity.Collection.QueryStore;
 public sealed class ProtectedQueryStoreHistorySink(
     ProtectedQueryStoreRepository repository,
     QueryStoreCollectionStatusTracker statusTracker,
-    ILogger<ProtectedQueryStoreHistorySink>? logger = null) : IQueryStoreHistorySink
+    ILogger<ProtectedQueryStoreHistorySink>? logger = null,
+    QueryStoreRetentionOptions? retention = null) : IQueryStoreHistorySink
 {
     /// <summary>
     /// Information, not Debug: every publish rewrites the whole slot, so this is the one number
@@ -31,6 +32,7 @@ public sealed class ProtectedQueryStoreHistorySink(
             "so this is the write churn per collection cycle, not the change since the last one.");
 
     private readonly ILogger _logger = logger ?? NullLogger<ProtectedQueryStoreHistorySink>.Instance;
+    private readonly QueryStoreRetentionOptions _retention = retention ?? QueryStoreRetentionOptions.Default;
     private readonly ConcurrentDictionary<string, DatabaseFacts> _committed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DatabaseFacts> _staged = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, QueryStoreWatermark> _pendingWatermarks = new(StringComparer.Ordinal);
@@ -59,7 +61,7 @@ public sealed class ProtectedQueryStoreHistorySink(
         {
             var archivedIds = current.ArchivedFamilies.Select(detail => detail.Family.FamilyId)
                 .ToHashSet(StringComparer.Ordinal);
-            foreach (var archived in BuildCurrentFamilies(current, state.ObservedAt, out _)
+            foreach (var archived in BuildCurrentFamilies(current, state.ObservedAt, _retention, out _)
                          .Select(detail => Archive(detail, current.CurrentEpoch)))
                 if (archivedIds.Add(archived.Family.FamilyId))
                     current.ArchivedFamilies.Add(archived);
@@ -72,7 +74,7 @@ public sealed class ProtectedQueryStoreHistorySink(
             current.Text.Clear();
         }
 
-        PruneCommitted(current, state.ObservedAt);
+        PruneCommitted(current, state.ObservedAt, _retention);
         var activeBuckets = current.Runtime.Where(pair => pair.Value.ActiveInterval).ToArray();
         var activeWaitKeys = activeBuckets.Select(pair => WaitBucketKey(pair.Value)).ToHashSet();
         foreach (var key in activeBuckets.Select(pair => pair.Key))
@@ -199,7 +201,7 @@ public sealed class ProtectedQueryStoreHistorySink(
         var inspections = new List<QueryStoreBuildInspection>();
         var details = _committed.Values
             .Where(state => requested is null || requested.Contains(state.DatabaseId))
-            .SelectMany(state => BuildFamilies(state, publishedAt, inspections))
+            .SelectMany(state => BuildFamilies(state, publishedAt, _retention, inspections))
             .OrderBy(detail => detail.Family.FamilyId, StringComparer.Ordinal)
             .ToArray();
         LastBuildInspection = inspections.Aggregate(
@@ -287,16 +289,20 @@ public sealed class ProtectedQueryStoreHistorySink(
     private static QueryFamilyDetailV1[] BuildFamilies(
         DatabaseFacts state,
         DateTimeOffset observedAt,
+        QueryStoreRetentionOptions retention,
         List<QueryStoreBuildInspection> inspections)
     {
-        var current = BuildCurrentFamilies(state, observedAt, out var inspection);
+        var current = BuildCurrentFamilies(state, observedAt, retention, out var inspection);
         inspections.Add(inspection);
         return state.ArchivedFamilies.Concat(current).ToArray();
     }
 
-    private static void PruneCommitted(DatabaseFacts state, DateTimeOffset observedAt)
+    private static void PruneCommitted(
+        DatabaseFacts state,
+        DateTimeOffset observedAt,
+        QueryStoreRetentionOptions retention)
     {
-        var cutoff = observedAt - QueryStoreRetention.History;
+        var cutoff = observedAt - retention.EffectiveHistory;
         for (var index = state.ArchivedFamilies.Count - 1; index >= 0; index--)
         {
             var archived = state.ArchivedFamilies[index];
@@ -306,7 +312,7 @@ public sealed class ProtectedQueryStoreHistorySink(
                 continue;
             }
             state.ArchivedFamilies[index] = WithRuntimeSummary(
-                archived, RetainArchivedRuntime(archived.Runtime, observedAt), cutoff);
+                archived, RetainArchivedRuntime(archived.Runtime, observedAt, retention), cutoff);
         }
         foreach (var key in state.Runtime.Where(pair => pair.Value.Bucket.Key.IntervalEnd < cutoff)
                      .Select(pair => pair.Key).ToArray())
@@ -339,10 +345,11 @@ public sealed class ProtectedQueryStoreHistorySink(
 
     private static RuntimeBucketV1[] RetainArchivedRuntime(
         IReadOnlyList<RuntimeBucketV1> runtime,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        QueryStoreRetentionOptions retention)
     {
-        var detailCutoff = observedAt - QueryStoreRetention.Detail;
-        var retentionCutoff = observedAt - QueryStoreRetention.History;
+        var detailCutoff = observedAt - retention.EffectiveDetail;
+        var retentionCutoff = observedAt - retention.EffectiveHistory;
         var retained = runtime.Where(bucket => bucket.IntervalEnd >= detailCutoff).ToList();
         foreach (var group in runtime.Where(bucket =>
                      bucket.IntervalEnd >= retentionCutoff && bucket.IntervalEnd < detailCutoff)
@@ -418,6 +425,7 @@ public sealed class ProtectedQueryStoreHistorySink(
     private static List<QueryFamilyDetailV1> BuildCurrentFamilies(
         DatabaseFacts state,
         DateTimeOffset observedAt,
+        QueryStoreRetentionOptions retention,
         out QueryStoreBuildInspection inspection)
     {
         var queryToParent = state.Variants.Values.ToDictionary(
@@ -426,7 +434,7 @@ public sealed class ProtectedQueryStoreHistorySink(
         var variantsByParent = state.Variants.Values.ToLookup(
             variant => variant.ParentQueryId, StringComparer.Ordinal);
         var plansByQuery = state.Plans.Values.ToLookup(plan => plan.QueryId, StringComparer.Ordinal);
-        var retainedRuntime = RetainedRuntime(state, observedAt)
+        var retainedRuntime = RetainedRuntime(state, observedAt, retention)
             .Where(bucket => bucket.Epoch == state.CurrentEpoch).ToArray();
         var runtimeByPlan = retainedRuntime.ToLookup(
             bucket => bucket.Bucket.Key.PlanId, StringComparer.Ordinal);
@@ -623,10 +631,11 @@ public sealed class ProtectedQueryStoreHistorySink(
 
     private static IEnumerable<EpochRuntimeBucket> RetainedRuntime(
         DatabaseFacts state,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        QueryStoreRetentionOptions retention)
     {
-        var detailCutoff = observedAt - QueryStoreRetention.Detail;
-        var retentionCutoff = observedAt - QueryStoreRetention.History;
+        var detailCutoff = observedAt - retention.EffectiveDetail;
+        var retentionCutoff = observedAt - retention.EffectiveHistory;
         foreach (var value in state.Runtime.Values.Where(value =>
                      value.Bucket.Key.IntervalEnd >= detailCutoff))
             yield return value;

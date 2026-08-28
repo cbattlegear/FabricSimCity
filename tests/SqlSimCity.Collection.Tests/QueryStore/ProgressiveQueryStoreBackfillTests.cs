@@ -17,8 +17,14 @@ public sealed class ProgressiveQueryStoreBackfillTests
 {
     private static readonly DateTimeOffset Through = new(2026, 8, 17, 18, 0, 0, TimeSpan.Zero);
 
+    /// <summary>
+    /// The backfill is on without being asked for, so "configured nothing" still walks backwards --
+    /// by the default increment. It used to read forward only, which meant a deployment that wanted
+    /// any past at all had to know to request it, and one that did not got a city with nothing to
+    /// grade current traffic against.
+    /// </summary>
     [Fact]
-    public async Task ConfiguringNothingReadsForwardOnlyAndStillRecordsHowFarBackItReached()
+    public async Task ConfiguringNothingStillWalksBackwardsByTheDefaultIncrement()
     {
         var source = new WindowedSource();
         var sink = new RecordingSink();
@@ -29,11 +35,12 @@ public sealed class ProgressiveQueryStoreBackfillTests
         source.Windows.Clear();
         await collector.CollectAsync(["db"], Through.AddHours(1));
 
-        Assert.All(source.Windows, window => Assert.Equal(
-            Through - TimeSpan.FromMinutes(65), window.Start));
-        // Recorded even with the backfill off, so switching it on later resumes from a real figure
-        // instead of adopting whatever the forward window happened to be that cycle.
-        Assert.Equal(Through.AddDays(-2), sink.Watermark?.BackfilledFrom);
+        var reach = Through.AddDays(-2) - QueryStoreCollectionOptions.DefaultBackfillIncrement;
+        var backward = source.Windows
+            .Where(window => window.End < Through.AddHours(1)).Distinct().ToArray();
+        var step = Assert.Single(backward);
+        Assert.Equal((reach, Through.AddDays(-2)), (step.Start, step.End));
+        Assert.Equal(reach, sink.Watermark?.BackfilledFrom);
     }
 
     [Fact]
@@ -96,17 +103,21 @@ public sealed class ProgressiveQueryStoreBackfillTests
     {
         // 120 days on the server, 90 days of retention here: the last 30 are evidence the first
         // prune would discard, which is exactly the reading #87 removed.
+        var retention = TimeSpan.FromDays(90);
         var source = new WindowedSource { Oldest = Through.AddDays(-120) };
         var sink = new RecordingSink();
         using var collector = new IncrementalQueryStoreCollector(
             source, sink,
-            Options(initialLookback: TimeSpan.FromDays(2), increment: TimeSpan.FromDays(30)));
+            Options(
+                initialLookback: TimeSpan.FromDays(2),
+                increment: TimeSpan.FromDays(30),
+                retention: retention));
 
         for (var cycle = 0; cycle < 8; cycle++) await collector.CollectAsync(["db"], Through);
         source.Windows.Clear();
         await collector.CollectAsync(["db"], Through);
 
-        Assert.Equal(Through - QueryStoreRetention.History, sink.Watermark?.BackfilledFrom);
+        Assert.Equal(Through - retention, sink.Watermark?.BackfilledFrom);
         Assert.All(source.Windows, window => Assert.Equal(Through, window.End));
     }
 
@@ -219,10 +230,25 @@ public sealed class ProgressiveQueryStoreBackfillTests
         Assert.Equal(forwardStart - TimeSpan.FromDays(10), sink.Watermark?.BackfilledFrom);
     }
 
+    /// <summary>
+    /// A lookback wider than the three-hour default horizon boots rather than being rejected as a
+    /// contradiction the deployment never wrote: the first cycle reads that far back regardless, so
+    /// the derived horizon follows it up rather than sitting underneath it.
+    /// </summary>
+    [Fact]
+    public void ADerivedHorizonIsFlooredAtTheInitialLookbackRatherThanRefusingToStart()
+    {
+        var options = new QueryStoreCollectionOptions(InitialLookback: TimeSpan.FromHours(12));
+
+        options.Validate();
+
+        Assert.Equal(TimeSpan.FromHours(12), options.EffectiveBackfillHorizon);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    [InlineData(91 * 24)]
+    [InlineData(25)]
     public void AnIncrementThatIsNotPositiveOrReachesPastRetentionIsRejected(int hours)
     {
         var options = new QueryStoreCollectionOptions(BackfillIncrement: TimeSpan.FromHours(hours));
@@ -234,19 +260,24 @@ public sealed class ProgressiveQueryStoreBackfillTests
     public void ABackfillHorizonBeyondWhatTheSinkRetainsIsRejected()
     {
         var options = new QueryStoreCollectionOptions(
-            BackfillIncrement: TimeSpan.FromDays(1),
-            BackfillHorizon: QueryStoreRetention.History + TimeSpan.FromDays(1));
+            BackfillIncrement: TimeSpan.FromHours(1),
+            BackfillHorizon: QueryStoreRetention.History + TimeSpan.FromHours(1));
 
         Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
     }
 
+    /// <summary>
+    /// Every figure here sits inside the retained horizon so the horizon-versus-lookback check is
+    /// the one that fires. Written at day scale it would throw on the lookback exceeding retention
+    /// instead and pass without ever reaching the rule it is named for.
+    /// </summary>
     [Fact]
     public void ABackfillHorizonShallowerThanTheInitialLookbackIsRejected()
     {
         var options = new QueryStoreCollectionOptions(
-            InitialLookback: TimeSpan.FromDays(30),
-            BackfillIncrement: TimeSpan.FromDays(1),
-            BackfillHorizon: TimeSpan.FromDays(10));
+            InitialLookback: TimeSpan.FromHours(12),
+            BackfillIncrement: TimeSpan.FromHours(1),
+            BackfillHorizon: TimeSpan.FromHours(6));
 
         Assert.Throws<ArgumentOutOfRangeException>(options.Validate);
     }
@@ -256,7 +287,11 @@ public sealed class ProgressiveQueryStoreBackfillTests
     {
         var tracker = new QueryStoreCollectionStatusTracker();
         var repository = new ProtectedQueryStoreRepository(new MemoryStore());
-        var sink = new ProtectedQueryStoreHistorySink(repository, tracker);
+        // The sink prunes on its own retention, which now defaults to a day. This walk is measured
+        // in weeks, so without saying so the runtime below would be pruned as it arrived and the
+        // assertion would read null rather than the boundary it is about.
+        var sink = new ProtectedQueryStoreHistorySink(
+            repository, tracker, retention: new QueryStoreRetentionOptions(History: TimeSpan.FromDays(90)));
         // The backfill will walk to 32 days back; the source only ever produced runtime at 5 days.
         var source = new WindowedSource
         {
@@ -294,12 +329,27 @@ public sealed class ProgressiveQueryStoreBackfillTests
         Assert.Null(status.OldestAvailableAt);
     }
 
+    /// <summary>
+    /// Day-scale walk mechanics need a day-scale horizon to walk across, so these pin their own
+    /// retention rather than riding the shipped default. The default is now a single day, which is
+    /// the right horizon for a live traffic picture and the wrong one for exercising a thirty-day
+    /// walk: left implicit, every test below would stop at the three-hour default horizon and pass
+    /// while measuring nothing.
+    /// </summary>
     private static QueryStoreCollectionOptions Options(
         TimeSpan? initialLookback = null,
         TimeSpan? increment = null,
-        TimeSpan? horizon = null) =>
-        new(DatabaseConcurrency: 1, InitialLookback: initialLookback,
-            BackfillIncrement: increment, BackfillHorizon: horizon);
+        TimeSpan? horizon = null,
+        TimeSpan? retention = null)
+    {
+        var history = retention ?? TimeSpan.FromDays(90);
+        return new QueryStoreCollectionOptions(
+            DatabaseConcurrency: 1,
+            InitialLookback: initialLookback,
+            BackfillIncrement: increment,
+            BackfillHorizon: horizon ?? history,
+            Retention: new QueryStoreRetentionOptions(History: history));
+    }
 
     /// <summary>
     /// Enough of <see cref="IProtectedRecordStore"/> for a publish and a watermark round trip.

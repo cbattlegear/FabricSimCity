@@ -111,6 +111,14 @@ Two lines in the report are easy to misread:
   scroller working; the same numbers under `overflow: hidden` are content nobody can get to.
   Reporting them as one figure is how a scroll extent gets filed as a bug and a real clipping
   bug gets waved away as "it's just a long list".
+- **One sidebar state per open region, and the routed plan separately.** The accordion in #116
+  made "open everything" impossible, so a run that still tried it measured the *emptiest*
+  column and called it the worst case (#118). Each region is now opened in turn and reported
+  under its own name, and the routed plan — the one state where the card takes the whole rail
+  over and the drawers stop being rendered — gets a pass of its own. It runs *before* the place
+  card and is cleared afterwards: run second there is no plan finder left to click, and the pass
+  would quietly re-measure the place card under the routed plan's name. That state is where #120
+  lived, 1,028px of card in a 900px `overflow: hidden` rail.
 
 ## What a 4,200-object city measured
 

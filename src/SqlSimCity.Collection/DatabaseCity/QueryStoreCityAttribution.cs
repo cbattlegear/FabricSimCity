@@ -42,8 +42,39 @@ public sealed record CityAttributionResult(
 /// instead of local exposure.
 /// </para>
 /// </summary>
-public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStore)
+public sealed class QueryStoreCityAttribution(
+    IQueryStoreHistorySource queryStore,
+    TimeSpan? trafficWindow = null,
+    TimeProvider? timeProvider = null)
 {
+    /// <summary>
+    /// How far back a street's colour is graded from.
+    /// <para>
+    /// Fifteen minutes, not the retained horizon. A city map is read the way a traffic map is read
+    /// -- "what is congested now" -- and an average taken over a day of history answers a different
+    /// question, one where a morning batch job goes on colouring a street red all afternoon. The
+    /// retained horizon still decides which streets exist; this decides what colour they are.
+    /// </para>
+    /// </summary>
+    public static readonly TimeSpan DefaultTrafficWindow = TimeSpan.FromMinutes(15);
+
+    /// <summary>The narrowest and widest traffic window an operator may configure.</summary>
+    public static readonly TimeSpan MinimumTrafficWindow = TimeSpan.FromMinutes(1);
+
+    public static readonly TimeSpan MaximumTrafficWindow = TimeSpan.FromDays(1);
+
+    private readonly TimeSpan _trafficWindow = Validated(trafficWindow ?? DefaultTrafficWindow);
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
+    private static TimeSpan Validated(TimeSpan window) =>
+        window < MinimumTrafficWindow || window > MaximumTrafficWindow
+            ? throw new ArgumentOutOfRangeException(
+                nameof(window),
+                window,
+                $"The city traffic window must be between {MinimumTrafficWindow.TotalMinutes:0} and " +
+                $"{MaximumTrafficWindow.TotalMinutes:0} minutes.")
+            : window;
+
     /// <summary>
     /// Families requested per page.
     /// <para>
@@ -285,11 +316,93 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
                 WaitMillisecondsByCategory = waits,
                 WaitAttribution = costs.Build(counters.TotalWaitMilliseconds),
                 PlanDataVolume = volumes.Build(),
+                RecentActivity = RecentActivity(detail),
             },
             hydrated,
             // Totals belong to one building only when the plans named that building and nothing
             // else at all: not another page, not another database, not something unresolvable.
             ExposureEligible: local.Count == 1 && namedElsewhere == 0);
+    }
+
+    /// <summary>
+    /// What the family did inside the recent traffic window, summed from the retained runtime
+    /// buckets that <em>overlap</em> it.
+    /// <para>
+    /// Overlap rather than containment, because Query Store's current interval is still open: its
+    /// <c>IntervalEnd</c> is in the future, so a containment test would drop the one bucket that
+    /// holds live traffic and report the busiest family on the instance as idle. The cost of that
+    /// choice is that an overlapping hour-wide interval contributes more than fifteen minutes of
+    /// work, and the totals are published as measured rather than scaled down to the window --
+    /// pro-rating a measured total across an interval assumes work was spread evenly through it,
+    /// which Query Store never said.
+    /// </para>
+    /// <para>
+    /// A family with no overlapping bucket reports <c>Covered: false</c> with zero counts, which
+    /// the map must render as unknown rather than free. "Query Store captured nothing here" and
+    /// "this street is quiet" are different statements and colouring them the same is how a map
+    /// starts to lie.
+    /// </para>
+    /// </summary>
+    private DatabaseCityRecentActivityV1 RecentActivity(QueryFamilyDetailV1 detail)
+    {
+        var end = _clock.GetUtcNow();
+        var start = end - _trafficWindow;
+        var minutes = (int)Math.Round(_trafficWindow.TotalMinutes, MidpointRounding.AwayFromZero);
+
+        var executions = BigInteger.Zero;
+        var duration = BigInteger.Zero;
+        var waits = BigInteger.Zero;
+        var covered = 0;
+        foreach (var bucket in detail.Runtime)
+        {
+            if (bucket.IntervalEnd < start || bucket.IntervalStart > end) continue;
+            covered++;
+            executions += Parse(bucket.ExecutionCount);
+            duration += Parse(bucket.TotalDurationMicroseconds);
+            foreach (var milliseconds in bucket.WaitMilliseconds.Values)
+                waits += Parse(milliseconds);
+        }
+
+        var rationale = covered == 0
+            ? $"No retained Query Store interval overlaps the last {minutes} minutes, so recent " +
+              "activity is not known for this family. That is missing capture, not an idle query."
+            : $"Summed from {covered} retained Query Store interval(s) overlapping the last " +
+              $"{minutes} minutes. Intervals are not divided at the window edge, so a wider " +
+              "interval contributes everything it measured rather than a pro-rated share.";
+
+        return new DatabaseCityRecentActivityV1(
+            minutes,
+            start,
+            end,
+            covered > 0,
+            executions.ToString(CultureInfo.InvariantCulture),
+            duration.ToString(CultureInfo.InvariantCulture),
+            waits.ToString(CultureInfo.InvariantCulture),
+            rationale);
+    }
+
+    /// <summary>
+    /// Unparseable counters contribute zero rather than failing the page. A single malformed bucket
+    /// should cost that bucket's contribution, not the whole city's traffic colour.
+    /// <para>
+    /// Totals are <c>average × execution count</c>, and Query Store's averages are decimals, so a
+    /// real total arrives as <c>"8039297979.000000331"</c> — an integer with a float tail. Parsing
+    /// those as integers-only returned <see cref="BigInteger.Zero"/>, which published a number the
+    /// instance never reported: measured against a live AdventureWorks, every family's duration came
+    /// back as <c>0</c> while the same family's retained total read 8.0e9. The integer part is taken
+    /// and the tail dropped, which loses less than one microsecond per bucket.
+    /// </para>
+    /// </summary>
+    private static BigInteger Parse(string value)
+    {
+        if (BigInteger.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var whole))
+            return whole;
+        var point = value.IndexOf('.', StringComparison.Ordinal);
+        return point > 0
+            && BigInteger.TryParse(
+                value.AsSpan(0, point), NumberStyles.None, CultureInfo.InvariantCulture, out var truncated)
+            ? truncated
+            : BigInteger.Zero;
     }
 
     /// <summary>
@@ -820,10 +933,7 @@ public sealed class QueryStoreCityAttribution(IQueryStoreHistorySource queryStor
             _reads.ToString(CultureInfo.InvariantCulture),
             $"{_families.ToString(CultureInfo.InvariantCulture)} ranked Query Store family or families name {name} alongside other objects, so Query Store measured one total per query and never a per-object share. These totals are those queries' own figures, reported whole and undivided, and the same figures also appear on every other object those queries named: they must not be summed across buildings.");
 
-        private static BigInteger Parse(string value) =>
-            BigInteger.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
-                ? parsed
-                : BigInteger.Zero;
+        private static BigInteger Parse(string value) => QueryStoreCityAttribution.Parse(value);
     }
 
     /// <summary>

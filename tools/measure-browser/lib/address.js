@@ -158,63 +158,151 @@ export async function openDirectory(page) {
 }
 
 /**
- * Puts the sidebar into the state that has produced every layout defect this column has had.
+ * Walks the sidebar's accordion and measures each region while it is the open one.
  *
- * An empty plan finder is a short form, and a closed drawer costs its summary and nothing else,
- * so a column measured in its resting state hides the case that matters. The worst case is every
- * drawer open over real rows with a place card holding its own share of the same rail -- which is
- * exactly the arrangement #65 was measured in.
+ * There is no longer a single "worst case" state to reach. `DatabaseCityView.tsx` holds one
+ * `openRegion`, and the city directory is part of it, so opening any region closes the last --
+ * "every drawer open over real rows with an open address book competing for the same rail" is
+ * unreachable by construction. This used to click every summary in turn and then measure, which
+ * measured the *emptiest* column rather than the fullest (#118): three closed drawers, a closed
+ * book, and a reassuring 0px unreachable from a column carrying almost nothing.
  *
- * Every interaction here is a trusted `locator.click()`. A summary that cannot be clicked because
- * its drawer was squeezed under it is the defect, so reaching this state has to fail loudly rather
- * than be forced through with `element.click()`.
+ * So the accordion's worst case is a *set* of single-region states, and each one is measured while
+ * its region is open. The plan finder is populated at the only moment it can be -- while its own
+ * drawer is the open one. Clicking "Route it" after the walk, as this did, hits a button the
+ * accordion has already closed, and `AGENTS.md` is specific that an empty finder is a short form
+ * that hides every height defect in that drawer.
+ *
+ * Every interaction is a trusted `locator.click()`. A summary that cannot be clicked because its
+ * region was squeezed under it is the defect this pass exists to catch, so reaching each state has
+ * to fail loudly rather than be forced through with `element.click()`.
  */
-export async function openSidebarWorstCase(page, { populatePlanFinder = true } = {}) {
+export async function walkSidebarRegions(page, { populatePlanFinder = true } = {}) {
   const steps = []
-  /*
-   * The directory first, because the address book is part of the worst case rather than a
-   * separate concern: an open book is what competes with the drawers and the place card for the
-   * rail's slack, and a collapsed one hands the column back all of that space. Measuring
-   * "every drawer open" over a *closed* book measures a column carrying less than it does in use.
-   */
-  steps.push(await openDirectory(page))
+  const regions = {}
+
+  const directoryStep = await openDirectory(page)
+  steps.push(directoryStep)
+  if (directoryStep.ok) regions['City directory'] = await sidebarGeometry(page)
+
   const drawers = page.locator('.sidebar-drawer')
   const count = await drawers.count()
   for (let index = 0; index < count; index += 1) {
     const drawer = drawers.nth(index)
     const summary = drawer.locator('> summary')
     const label = (await summary.textContent())?.trim() ?? `drawer ${index}`
-    if (await drawer.evaluate(element => element.open)) {
+    if (!(await drawer.evaluate(element => element.open))) {
+      const startedAt = Date.now()
+      try {
+        await summary.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+        steps.push({ step: `open "${label}"`, ok: true, ms: Date.now() - startedAt })
+      } catch (reason) {
+        steps.push({ step: `open "${label}"`, ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
+        continue
+      }
+    } else {
       steps.push({ step: `open "${label}"`, ok: true, ms: 0, note: 'already open' })
-      continue
     }
-    const startedAt = Date.now()
-    try {
-      await summary.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
-      steps.push({ step: `open "${label}"`, ok: true, ms: Date.now() - startedAt })
-    } catch (reason) {
-      steps.push({ step: `open "${label}"`, ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
+
+    /*
+     * Fill the finder now, while this drawer is the open one. An empty search term lists
+     * everything, which is the reliable way to fill it: Query Store's capture mode decides whether
+     * any particular term matches anything.
+     */
+    if (populatePlanFinder) {
+      const submit = drawer.getByRole('button', { name: 'Route it' })
+      if ((await submit.count()) > 0) {
+        const submittedAt = Date.now()
+        try {
+          await submit.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+          await page.locator('.hud-results li').first().waitFor({ state: 'visible', timeout: 30000 })
+          steps.push({ step: 'populate plan finder', ok: true, ms: Date.now() - submittedAt })
+        } catch (reason) {
+          steps.push({ step: 'populate plan finder', ok: false, ms: Date.now() - submittedAt, error: String(reason).split('\n')[0] })
+        }
+      }
     }
+
+    regions[label] = await sidebarGeometry(page)
   }
 
   /*
-   * An empty search term lists everything, which is the reliable way to fill the finder: Query
-   * Store's capture mode decides whether any particular term matches anything, and a finder that
-   * came back empty is a short form that hides every height defect in that drawer.
+   * What the accordion left open, recorded rather than assumed.
+   *
+   * Under an accordion this is one region, and every geometry read after this point describes that
+   * region and not the others. Without recording it, a snapshot showing three closed drawers reads
+   * as three squeezed drawers instead of the accordion working -- which is the misreading #118 was
+   * filed for.
    */
-  if (populatePlanFinder) {
-    const submit = page.getByRole('button', { name: 'Route it' })
-    const startedAt = Date.now()
-    try {
-      await submit.click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
-      await page.locator('.hud-results li').first().waitFor({ state: 'visible', timeout: 30000 })
-      steps.push({ step: 'populate plan finder', ok: true, ms: Date.now() - startedAt })
-    } catch (reason) {
-      steps.push({ step: 'populate plan finder', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] })
-    }
-  }
+  const open = await page.locator('.sidebar-drawer, .sidebar-directory').evaluateAll(
+    list => list.filter(element => element.open).map(element => element.querySelector(':scope > summary')?.textContent?.trim() ?? '?'),
+  )
+  steps.push({ step: 'regions left open', ok: true, ms: 0, note: open.length ? open.join(', ') : 'none' })
 
-  return steps
+  return { steps, regions }
+}
+
+/**
+ * Routes a captured plan, which is the one state where the card takes the whole rail over.
+ *
+ * Worth its own pass because it is not a bigger version of the place card -- the address book, the
+ * feed and every drawer stop being rendered, so the card is the column's only flex item and the
+ * rules that hold it are different ones. #120 lived exactly here: 1028px of card in a 900px
+ * `overflow: hidden` rail, 229px of a routed plan unreachable, while every other state on this run
+ * reported a clean column.
+ *
+ * Must run while the plan finder is still rendered -- see the ordering note at the call site. A
+ * missing finder is reported as a *failure* rather than a pass with a note, because the state this
+ * pass exists to measure was not measured, and any geometry recorded next to it would belong to
+ * whatever the column happened to be showing instead.
+ */
+export async function openRoutedPlan(page) {
+  const startedAt = Date.now()
+  const drawer = page.locator('.sidebar-drawer').filter({ hasText: 'Route a captured query plan' }).first()
+  try {
+    if ((await drawer.count()) === 0) {
+      return {
+        step: 'route a captured plan',
+        ok: false,
+        ms: 0,
+        error: 'plan finder not rendered, so the routed-plan state was never entered',
+      }
+    }
+    if (!(await drawer.evaluate(element => element.open))) {
+      await drawer.locator('> summary').click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    }
+    const results = page.locator('.hud-results li')
+    if ((await results.count()) === 0) {
+      await drawer.getByRole('button', { name: 'Route it' }).click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+      await results.first().waitFor({ state: 'visible', timeout: 30000 })
+    }
+    await results.first().click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    await page.locator('.sidebar-place-card.is-full').waitFor({ state: 'visible', timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    return { step: 'route a captured plan', ok: true, ms: Date.now() - startedAt }
+  } catch (reason) {
+    return { step: 'route a captured plan', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] }
+  }
+}
+
+/**
+ * Clears an open route, putting the address book back so later passes have a column to work with.
+ *
+ * The route's back button *is* the clear control -- `sidebarMode` swaps it from "back to the atlas"
+ * to "back to <database>" whenever a route is open -- so this is the reader's own way out, not a
+ * probe-only reset.
+ */
+export async function dismissRoutedPlan(page) {
+  const startedAt = Date.now()
+  try {
+    if ((await page.locator('.sidebar-place-card.is-full').count()) === 0) {
+      return { step: 'clear the routed plan', ok: true, ms: 0, note: 'no route open' }
+    }
+    await page.locator('.sidebar-back').first().click({ timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    await page.locator('.sidebar-place-card.is-full').waitFor({ state: 'detached', timeout: TRUSTED_CLICK_TIMEOUT_MS })
+    return { step: 'clear the routed plan', ok: true, ms: Date.now() - startedAt }
+  } catch (reason) {
+    return { step: 'clear the routed plan', ok: false, ms: Date.now() - startedAt, error: String(reason).split('\n')[0] }
+  }
 }
 
 /** Opens a place card by selecting an address, so the card competes for the rail like the rest. */
@@ -299,6 +387,16 @@ export async function sidebarGeometry(page) {
       /** The address list's scroller: the section that gave way to 0px in #65. */
       scroll: read('.sidebar-scroll'),
       placeCard: read('.sidebar-place-card'),
+      /*
+       * The routed plan's own scroller, one box inside the card.
+       *
+       * The card is the only flex item in the takeover state, so making it shrink moves the
+       * overflow inwards rather than removing it: `.hud-slideover` is the card's flex item and
+       * floors on its own content the same way. #120 needed both, and a run that reports only the
+       * card cannot tell "the slideover scrolls" from "the slideover is clipping and the card
+       * happens to hide it". Null in every state but the routed plan.
+       */
+      routeSlideover: read('.sidebar-place-card > .hud-slideover'),
       /*
        * The live query feed, which is a rail region and not a drawer.
        *

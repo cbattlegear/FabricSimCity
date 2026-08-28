@@ -415,3 +415,206 @@ public sealed class QueryStoreCityAttributionTests
         string planId,
         params ShowplanObjectV1[] references) => FakeQueryStore.Plan(planId, references);
 }
+
+/// <summary>
+/// The recent traffic window: what a family did in the last few minutes, which is what the map
+/// grades street colour from. An average over the whole retained horizon answers a different
+/// question, one where a finished batch job goes on colouring a street red for the rest of the day.
+/// </summary>
+public sealed class QueryStoreCityRecentActivityTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 8, 17, 18, 0, 0, TimeSpan.Zero);
+    private const string CustomerId = "target/database/sales/object/10";
+
+    private static readonly IReadOnlyList<CityAttributionObject> PageObjects =
+    [
+        new(CustomerId, "dbo", "Customer", DatabaseObjectKind.Table),
+    ];
+
+    private static Task<CityAttributionResult> AttributeAsync(
+        FakeQueryStore store, TimeSpan? window = null) =>
+        new QueryStoreCityAttribution(
+                store, window, new FixedClock(Now))
+            .AttributeAsync(
+                FakeQueryStore.DatabaseName,
+                DatabaseCityMetric.Cpu,
+                PageObjects,
+                new Dictionary<string, string> { ["sales"] = FakeQueryStore.DatabaseId },
+                topFamilyCount: 12,
+                CancellationToken.None);
+
+    private static void AddFamily(
+        FakeQueryStore store,
+        string familyId,
+        params FakeQueryStore.RuntimeInterval[] intervals) =>
+        store.AddFamily(
+            familyId, cpu: "900", executions: "30",
+            plans: [FakeQueryStore.Plan($"plan-{familyId}", FakeQueryStore.Reference(table: "Customer"))],
+            runtimeIntervals: intervals);
+
+    /// <summary>
+    /// Query Store's current interval is still open: its end is in the future because it is still
+    /// being written to. Selecting intervals that <em>ended</em> inside the window therefore drops
+    /// the one bucket holding live traffic, and the busiest family on the instance reports as idle.
+    /// </summary>
+    [Fact]
+    public async Task TheStillOpenCurrentIntervalCountsAsRecentActivity()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-live", new FakeQueryStore.RuntimeInterval(
+            Now.AddMinutes(-30), Now.AddMinutes(30), Executions: "42", WaitMilliseconds: "500"));
+
+        var result = await AttributeAsync(store);
+
+        var recent = Assert.Single(result.Families).RecentActivity;
+        Assert.NotNull(recent);
+        Assert.True(recent.Covered);
+        Assert.Equal("42", recent.ExecutionCount);
+        Assert.Equal("500", recent.TotalWaitMilliseconds);
+    }
+
+    [Fact]
+    public async Task AnIntervalEntirelyBeforeTheWindowIsNotRecentActivity()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-old", new FakeQueryStore.RuntimeInterval(
+            Now.AddHours(-5), Now.AddHours(-4), Executions: "9999", WaitMilliseconds: "9999"));
+
+        var result = await AttributeAsync(store);
+
+        var recent = Assert.Single(result.Families).RecentActivity;
+        Assert.NotNull(recent);
+        Assert.False(recent.Covered);
+        Assert.Equal("0", recent.ExecutionCount);
+        Assert.Equal("0", recent.TotalWaitMilliseconds);
+    }
+
+    /// <summary>
+    /// A family Query Store captured nothing recent for reports no coverage rather than zero
+    /// traffic. The map colours the first grey and the second green, and folding them together is
+    /// the easiest way to make the map claim a street is clear when nothing was ever measured on it.
+    /// </summary>
+    [Fact]
+    public async Task NoOverlappingIntervalReportsMissingCoverageRatherThanAnIdleFamily()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-uncaptured");
+
+        var result = await AttributeAsync(store);
+
+        var recent = Assert.Single(result.Families).RecentActivity;
+        Assert.NotNull(recent);
+        Assert.False(recent.Covered);
+        Assert.Contains("not known", recent.Rationale, StringComparison.Ordinal);
+        Assert.Contains("not an idle query", recent.Rationale, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The whole point of the change: a family whose retained totals are enormous but whose recent
+    /// window is empty must not go on being graded from the totals. Both figures are published, and
+    /// they disagree here on purpose.
+    /// </summary>
+    [Fact]
+    public async Task RetainedTotalsAndTheRecentWindowAreReportedSeparately()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-batch", new FakeQueryStore.RuntimeInterval(
+            Now.AddHours(-8), Now.AddHours(-7), Executions: "500000", WaitMilliseconds: "800000"));
+
+        var family = Assert.Single((await AttributeAsync(store)).Families);
+
+        Assert.Equal("30", family.ExecutionCount);
+        Assert.Equal("0", family.RecentActivity!.ExecutionCount);
+        Assert.False(family.RecentActivity.Covered);
+    }
+
+    [Fact]
+    public async Task TheWindowDefaultsToFifteenMinutesAndIsReportedWithTheCounts()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-1", new FakeQueryStore.RuntimeInterval(
+            Now.AddMinutes(-5), Now.AddMinutes(5)));
+
+        var recent = Assert.Single((await AttributeAsync(store)).Families).RecentActivity;
+
+        Assert.Equal(15, recent!.WindowMinutes);
+        Assert.Equal(Now.AddMinutes(-15), recent.WindowStart);
+        Assert.Equal(Now, recent.WindowEnd);
+    }
+
+    /// <summary>
+    /// A wider window reaches an interval the default excludes, which is what an operator watching
+    /// a quiet instance is configuring it for.
+    /// </summary>
+    [Fact]
+    public async Task AWiderConfiguredWindowReachesAnIntervalTheDefaultExcludes()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-1", new FakeQueryStore.RuntimeInterval(
+            Now.AddMinutes(-50), Now.AddMinutes(-40), Executions: "7"));
+
+        Assert.False(Assert.Single((await AttributeAsync(store)).Families).RecentActivity!.Covered);
+
+        var wide = await AttributeAsync(store, TimeSpan.FromHours(1));
+
+        var recent = Assert.Single(wide.Families).RecentActivity;
+        Assert.True(recent!.Covered);
+        Assert.Equal("7", recent.ExecutionCount);
+        Assert.Equal(60, recent.WindowMinutes);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2 * 24 * 60)]
+    public void AWindowOutsideTheSupportedRangeIsRejected(int minutes)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new QueryStoreCityAttribution(new FakeQueryStore(), TimeSpan.FromMinutes(minutes)));
+    }
+
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+    /// <summary>
+    /// Query Store totals are <c>average × execution count</c>, and its averages are decimals, so a
+    /// real total arrives as an integer with a float tail: <c>"8039297979.000000331"</c>. Parsing
+    /// those integers-only published a flat zero -- measured against a live AdventureWorks, every
+    /// family's window duration read <c>0</c> while the same family's retained total read 8.0e9.
+    /// A fabricated zero is worse than an omission, because nothing about it says it is missing.
+    /// </summary>
+    [Fact]
+    public async Task ADecimalDurationTotalIsCountedRatherThanReadAsZero()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-decimal", new FakeQueryStore.RuntimeInterval(
+            Now.AddMinutes(-5), Now.AddMinutes(55),
+            Executions: "2", DurationMicroseconds: "8039297979.000000331"));
+
+        var result = await AttributeAsync(store);
+
+        var recent = result.Families.Single().RecentActivity;
+        Assert.NotNull(recent);
+        Assert.True(recent!.Covered);
+        // Truncated, not rounded up, and certainly not zero: the tail is float noise below a microsecond.
+        Assert.Equal("8039297979", recent.TotalDurationMicroseconds);
+    }
+
+    /// <summary>
+    /// A counter that is not a number at all still contributes nothing rather than taking the page
+    /// down, which is the behaviour the truncating parse must not have traded away.
+    /// </summary>
+    [Fact]
+    public async Task AMalformedCounterContributesNothingRatherThanFailingThePage()
+    {
+        var store = new FakeQueryStore();
+        AddFamily(store, "family-malformed", new FakeQueryStore.RuntimeInterval(
+            Now.AddMinutes(-5), Now.AddMinutes(55), Executions: "2", DurationMicroseconds: "not-a-number"));
+
+        var result = await AttributeAsync(store);
+
+        var recent = result.Families.Single().RecentActivity;
+        Assert.Equal("0", recent!.TotalDurationMicroseconds);
+        Assert.Equal("2", recent.ExecutionCount);
+    }
+}

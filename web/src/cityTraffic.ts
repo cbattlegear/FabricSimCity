@@ -107,6 +107,13 @@ export interface RoadTraffic {
   readonly waitShare: number | null
   /** Mean captured wait milliseconds per captured execution — what the colour is graded from. */
   readonly delayPerExecution: number | null
+  /**
+   * Executions inside the recent traffic window, or null when nothing was captured in it. Distinct
+   * from {@link executions}, which is the retained total across the whole horizon.
+   */
+  readonly recentExecutions: number | null
+  /** Width of the recent traffic window in minutes, or null when the page published none. */
+  readonly recentWindowMinutes: number | null
   /** Ids of the query families that produced this road's numbers, for drill-down. */
   readonly familyIds: readonly string[]
   /** Plain-language justification shown in the HUD, never omitted. */
@@ -187,6 +194,46 @@ export function roadDelay(families: readonly DatabaseCityQueryFamily[]): number 
   return waitMs / executions
 }
 
+/**
+ * Mean wait milliseconds per execution inside the recent traffic window.
+ *
+ * Returns `null` for the delay whenever the window was published but nothing overlapped it, which
+ * grades `unknown`. That is deliberately not `free`: a road nobody captured and a road nobody drove
+ * are different claims, and only the second one is green.
+ *
+ * `published` is false when no matched family carries a window at all — an archive or a fixture page
+ * built before it existed. Callers fall back to the retained totals there rather than greying out a
+ * city that has perfectly good evidence of a different kind.
+ */
+export function recentRoadDelay(families: readonly DatabaseCityQueryFamily[]): {
+  delay: number | null
+  published: boolean
+  covered: boolean
+  executions: number | null
+  windowMinutes: number | null
+} {
+  let published = false
+  let covered = false
+  let waitMs = 0
+  let executions = 0
+  let windowMinutes: number | null = null
+  for (const family of families) {
+    const recent = family.recentActivity
+    if (!recent) continue
+    published = true
+    if (windowMinutes === null) windowMinutes = recent.windowMinutes
+    if (!recent.covered) continue
+    covered = true
+    waitMs += toNumber(recent.totalWaitMilliseconds) ?? 0
+    executions += toNumber(recent.executionCount) ?? 0
+  }
+  if (!published) return { delay: null, published: false, covered: false, executions: null, windowMinutes: null }
+  if (!covered) return { delay: null, published: true, covered: false, executions: null, windowMinutes }
+  // Covered with no executions is a measured quiet street, not an unmeasured one, so it grades free
+  // rather than unknown. Query Store only writes a bucket when something ran, so this is rare.
+  return { delay: executions > 0 ? waitMs / executions : 0, published: true, covered: true, executions, windowMinutes }
+}
+
 /** The ladder itself. Shared by the co-reference roads and by the aggregate street load. */
 export function congestionFromDelay(delay: number | null): CongestionGrade {
   if (delay === null || !Number.isFinite(delay)) return 'unknown'
@@ -221,7 +268,12 @@ export function gradeRoads(
     const { executions, familyIds } = roadVolume(route, families)
     const matched = families.filter(family => familyIds.includes(family.familyId))
     const share = waitShare(matched)
-    const delay = roadDelay(matched)
+    const retainedDelay = roadDelay(matched)
+    const recent = recentRoadDelay(matched)
+    // The window wins wherever it exists, including when it is empty: a street that carried nothing
+    // in the last quarter of an hour is not congested now, whatever the day's totals say. Only a
+    // page that never published a window falls back to those totals.
+    const delay = recent.published ? recent.delay : retainedDelay
     const capturedGrade = congestionFromDelay(delay)
     const blocked = blockedKeys.has(route.fromObjectId) || blockedKeys.has(route.toId)
     const grade = blocked ? LIVE_BLOCKING_GRADE : capturedGrade
@@ -238,8 +290,10 @@ export function gradeRoads(
       executions,
       waitShare: share,
       delayPerExecution: delay,
+      recentExecutions: recent.executions,
+      recentWindowMinutes: recent.windowMinutes,
       familyIds,
-      rationale: describe(executions, familyIds.length, share, delay, grade, blocked),
+      rationale: describe(executions, familyIds.length, share, delay, grade, blocked, recent),
     }
   })
 }
@@ -251,6 +305,7 @@ function describe(
   delay: number | null,
   grade: CongestionGrade,
   blocked: boolean,
+  recent: ReturnType<typeof recentRoadDelay>,
 ): string {
   const volume =
     executions === null
@@ -259,10 +314,16 @@ function describe(
   if (blocked) {
     return `${volume} Graded ${CONGESTION_LABELS[grade].toLowerCase()} because a live lock wait resolves to an endpoint of this road.`
   }
+  if (recent.published && !recent.covered) {
+    return `${volume} Nothing was captured in the last ${recent.windowMinutes} minutes, so no current congestion grade is claimed — that is missing capture, not a clear road.`
+  }
   if (delay === null) {
     return `${volume} Captured waiting per execution is unavailable, so no congestion grade is claimed.`
   }
   const shareText = share === null ? '' : `, ${(share * 100).toFixed(1)}% of captured duration`
+  if (recent.published) {
+    return `${(recent.executions ?? 0).toLocaleString()} execution(s) in the last ${recent.windowMinutes} minutes, ${delay.toFixed(2)} ms of waiting each — ${CONGESTION_LABELS[grade].toLowerCase()}. ${volume}`
+  }
   return `${volume} ${delay.toFixed(2)} ms of captured waiting per execution${shareText} — ${CONGESTION_LABELS[grade].toLowerCase()}.`
 }
 
@@ -270,4 +331,70 @@ function toNumber(value: string | null | undefined): number | null {
   if (value === null || value === undefined || value.trim() === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+export interface TrafficWindowDisclosure {
+  headline: string
+  detail: string
+  windowMinutes: number | null
+  covered: boolean
+}
+
+/**
+ * What the road colours on this page were actually graded from, in words.
+ *
+ * The colours changed meaning: they used to be the whole retained history and are now the last few
+ * minutes of it. A map that quietly swapped one for the other would be reporting a different claim
+ * under an unchanged legend, so the legend has to say which one it is -- including the awkward case
+ * where the window is published and empty, which is grey rather than green and looks like a fault
+ * unless it is explained.
+ */
+export function describeTrafficWindow(
+  families: readonly DatabaseCityQueryFamily[],
+  refreshedAt: string | null,
+  refreshIntervalMs: number,
+): TrafficWindowDisclosure {
+  let published = false
+  let covered = false
+  let windowMinutes: number | null = null
+  for (const family of families) {
+    const recent = family.recentActivity
+    if (!recent) continue
+    published = true
+    if (windowMinutes === null) windowMinutes = recent.windowMinutes
+    if (recent.covered) covered = true
+  }
+
+  const seconds = Math.max(1, Math.round(refreshIntervalMs / 1000))
+  const cadence = refreshedAt === null
+    ? `The city re-reads itself every ${seconds} seconds.`
+    : `The city re-reads itself every ${seconds} seconds; last read at ${new Date(refreshedAt).toLocaleTimeString()}.`
+
+  if (!published) {
+    return {
+      headline: 'Road colour is the whole retained history.',
+      detail: 'This page published no recent-activity window, so the colours are cumulative totals '
+        + 'over everything Query Store still retains rather than a reading of current traffic.',
+      windowMinutes: null,
+      covered: false,
+    }
+  }
+
+  if (!covered) {
+    return {
+      headline: `Query Store captured nothing in the last ${windowMinutes} minutes.`,
+      detail: `Every road is drawn grey: unmeasured, not clear. ${cadence}`,
+      windowMinutes,
+      covered: false,
+    }
+  }
+
+  return {
+    headline: `Road colour is wait per execution over the last ${windowMinutes} minutes.`,
+    detail: 'Query Store buckets its runtime statistics into intervals, so a bucket overlapping the '
+      + 'window is counted whole rather than pro-rated -- it never said how the work was spread '
+      + `inside it. Roads no interval covered are grey, not green. ${cadence}`,
+    windowMinutes,
+    covered: true,
+  }
 }

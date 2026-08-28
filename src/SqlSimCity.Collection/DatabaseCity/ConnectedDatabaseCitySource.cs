@@ -263,6 +263,7 @@ public sealed class ConnectedDatabaseCitySource(
     {
         WaitAttribution = family.WaitAttribution,
         PlanDataVolume = family.PlanDataVolume,
+        RecentActivity = family.RecentActivity,
     };
 
     /// <summary>
