@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using System.Xml;
 using Microsoft.AspNetCore.SignalR;
 using SqlSimCity.Api;
+using SqlSimCity.Api.Social;
 using SqlSimCity.Collection.Atlas;
 using SqlSimCity.Collection.LiveIncidents;
 using SqlSimCity.Collection.DatabaseCity;
@@ -27,7 +28,15 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddSignalR().AddJsonProtocol(options =>
     options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton(probeCatalog);
-
+builder.Services.AddSingleton<SocialDocumentTemplate>();
+// Resolved rather than injected: an atlas source is always registered but a city source is not in
+// every acquisition mode, and a share card is expected to draw whatever is there rather than to
+// require it.
+builder.Services.AddSingleton(services => new SocialCardCache(
+    services.GetService<IAtlasSnapshotSource>(),
+    services.GetService<IDatabaseCitySource>(),
+    services.GetRequiredService<TimeProvider>(),
+    services.GetRequiredService<ILogger<SocialCardCache>>()));
 // Connected Query Store history retains query text and plan XML, so it needs a
 // storage directory. An operator whose whole configuration is a connection string
 // would otherwise get empty query views with no explanation. Enable it for them --
@@ -225,6 +234,10 @@ app.UseSqlSimCityHttpSecurity();
 app.UseResponseCompression();
 app.UseSqlSimCityImmutableAssets();
 
+// Ahead of the static handlers, because the document it produces replaces the one they would
+// serve. Every other asset falls straight through to them.
+app.UseSqlSimCitySocialDocument();
+
 // Rewrites "/" to "/index.html" so the request matches the static asset endpoint (and its
 // pre-compressed, ETagged representation) instead of falling through to the SPA fallback.
 app.UseDefaultFiles();
@@ -415,6 +428,7 @@ else
 {
     app.MapGet("/api/v1/edge/source", () => Results.NotFound());
 }
+app.MapSocialCard();
 app.MapFallbackToFile("index.html");
 
 app.Run();

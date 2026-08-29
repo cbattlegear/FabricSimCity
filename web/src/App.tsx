@@ -95,6 +95,13 @@ export default function App() {
   const hoverDatabase = useCallback((databaseId: string | null) => setHoveredId(databaseId), [])
   const cityDatabase = snapshot?.databases.find(database => database.databaseId === cityDatabaseId) ?? null
 
+  // The server already writes this title into the document for whoever fetched the HTML, which is
+  // the copy a link preview reads. This is the other half: once the SPA takes over, navigating
+  // between the atlas and a city never reloads the page, so nothing else would ever update the tab.
+  useEffect(() => {
+    document.title = cityDatabase ? `SQL Sim City - ${cityDatabase.name}` : 'SQL Sim City'
+  }, [cityDatabase])
+
   const changeViewMode = useCallback((mode: MapViewMode) => {
     setViewMode(mode)
     const url = new URL(window.location.href)
