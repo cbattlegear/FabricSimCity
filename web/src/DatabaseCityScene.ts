@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { directActivityWidth } from './databaseCity'
 import type { DatabaseCityObject, DatabaseCityQueryFamily } from './databaseCityContracts'
 import { ARTERIAL_WIDTH, streetPitch, streetRoute, type CityLot, type CityPlan, type StreetClass } from './cityPlan'
-import { buildBuildingGeometry, buildingColor, mapBuildingColor, neighborhoodTint } from './cityBuildings'
+import { buildBuildingGeometry, buildingColor, mapBuildingColor, mixColor, neighborhoodTint } from './cityBuildings'
 import { assignQueryRoutes } from './cityQueryTraffic'
 import { ROAD_WIDTH, type RoadTraffic } from './cityTraffic'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
@@ -245,6 +245,11 @@ export type DatabaseCitySceneController = {
   setSelected(objectId: string | null): void
   /** Highlights one road and pins both of its endpoints. */
   setSelectedRoad(routeId: string | null): void
+  /**
+   * Weathers the buildings whose statistics are stale. Per object rather than a whole-city flag,
+   * because a city-wide wash would weather buildings whose statistics are fresh.
+   */
+  setStaleStatsObjects(objectIds: readonly string[]): void
   setLayers(layers: Partial<CityLayerToggles>): void
   /** Live incident pins, placed on the road between the parties rather than on a roof. */
   setIncidents(markers: readonly IncidentMarker[]): void
@@ -870,7 +875,7 @@ export function createDatabaseCityScene(
     blocked: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
     waiting: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
     cycle: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
-    deadlock: { glyph: '✖', color: '#e4483c', ink: '#f7e9e7' },
+    deadlock: { glyph: '💥', color: '#e4483c', ink: '#f7e9e7' },
   }
 
   const INCIDENT_PIN_PX = 96
@@ -1244,6 +1249,7 @@ export function createDatabaseCityScene(
   let plan: CityPlan | null = null
   let facilitySites: ReadonlyMap<FacilityKind, FacilitySite> = new Map<FacilityKind, FacilitySite>()
   let currentRoads: readonly RoadTraffic[] = []
+  let currentObjects: readonly DatabaseCityObject[] = []
   let currentTraffic: WorkloadTraffic | null = null
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
@@ -1284,6 +1290,7 @@ export function createDatabaseCityScene(
   let vehicleBatches: VehicleBatch[] = []
   /** Vehicles that are not stopped. Zero means there is nothing to animate and the loop must end. */
   let movingVehicles = 0
+  let staleStatsObjectIds = new Set<string>()
   /** Placements keyed by the session they were pinned for, so a blocked vehicle stops at its pin. */
   const blockedPlacements = new Map<number, IncidentPlacement>()
   const layers: CityLayerToggles = {
@@ -2814,6 +2821,15 @@ export function createDatabaseCityScene(
       cityPlan.districts.map(district => [district.districtId, neighborhoodTint(district.neighborhoodOrdinal)]),
     )
     /*
+     * Weathering is per object, not a city-wide wash.
+     *
+     * Staleness is measured per object, so a single flag would weather buildings whose statistics
+     * were rebuilt an hour ago just because some other table's were not — which reads as a claim
+     * about those buildings that the evidence does not make.
+     */
+    const weatheredBuildingColor = (color: number, objectId: string): number =>
+      staleStatsObjectIds.has(objectId) ? mixColor(color, 0x4f4a45, 0.35) : color
+    /*
      * Shadow casting is capped rather than universal.
      *
      * Every caster is another draw of the whole building into the depth map, so a ten-thousand-table
@@ -2839,12 +2855,14 @@ export function createDatabaseCityScene(
       const character = cityPlan.terrain.characters.get(lot.districtId)
       const geometry = buildBuildingGeometry(lot, character)
       const tint = tints.get(lot.districtId)
+      const bodyColor = weatheredBuildingColor(buildingColor(lot.archetype, character, tint), object.objectId)
+      const mapColor = weatheredBuildingColor(mapBuildingColor(lot.archetype, MAP_PALETTE.building, tint), object.objectId)
       const body = new THREE.Mesh(
         track(geometry.body),
         known
           ? bodyMaterial(
-              buildingColor(lot.archetype, character, tint),
-              mapBuildingColor(lot.archetype, MAP_PALETTE.building, tint),
+              bodyColor,
+              mapColor,
             )
           : materials.unknown,
       )
@@ -3457,6 +3475,7 @@ export function createDatabaseCityScene(
 
   return {
     setObjects(objects, cityPlan) {
+      currentObjects = objects
       plan = cityPlan
       facilitySites = plan.facilities
       buildGround(plan)
@@ -3511,6 +3530,18 @@ export function createDatabaseCityScene(
     setSelectedRoad(routeId) {
       selectedRoadId = routeId
       applyRoadHighlight()
+      requestRender()
+    },
+    setStaleStatsObjects(objectIds) {
+      // Rebuilding every building is the expensive part, so an unchanged set returns before it.
+      // Compared by content rather than identity: the projection allocates a fresh array each
+      // render, so an identity check would rebuild the whole city on every unrelated state change.
+      if (staleStatsObjectIds.size === objectIds.length &&
+          objectIds.every(objectId => staleStatsObjectIds.has(objectId))) {
+        return
+      }
+      staleStatsObjectIds = new Set(objectIds)
+      if (plan) buildBuildings(currentObjects, plan)
       requestRender()
     },
     setLayers(next) {

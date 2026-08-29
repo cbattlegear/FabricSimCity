@@ -54,6 +54,7 @@ import {
   type LiveQueryFeedScope,
 } from './liveQueryFeed'
 import { IncidentSummary } from './IncidentPopup'
+import { projectCityDisasters } from './cityDisasters'
 
 const metrics = ['cpu', 'duration', 'reads', 'executions'] as const
 type Metric = (typeof metrics)[number]
@@ -591,6 +592,15 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
       databaseName,
     })
   }, [activePlan, cityPlan, visibleObjects, databaseName])
+  const disasters = useMemo(
+    () => projectCityDisasters({
+      incidents,
+      route,
+      objects: visibleObjects,
+      search: window.location.search,
+    }),
+    [incidents, route, visibleObjects],
+  )
 
   /**
    * The traffic map: every ranked family driven through the tables its plans read, once per captured
@@ -860,6 +870,20 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           openId={openIncidentId}
           onOpen={openIncidentFromList}
         />
+        {disasters.items.length > 0 && (
+          <div className="source-note">
+            <strong>Disasters</strong>
+            <ul>
+              {disasters.items.map(item => (
+                <li key={item.key}>
+                  <strong>{item.headline}</strong>
+                  <small>{item.detail}</small>
+                </li>
+              ))}
+            </ul>
+            <small>Stats decay threshold: {disasters.staleStatsDays} day(s) (set with <code>statsStaleDays</code>).</small>
+          </div>
+        )}
       </div>
     </details>
   )
@@ -1121,6 +1145,7 @@ export function DatabaseCityView({ databaseId, databaseName, onBack, viewMode, o
           liveStatus={liveStatus}
           feedState={feedState}
           incidents={incidents}
+          staleStatsObjectIds={disasters.staleStatsObjectIds}
           liveQueries={queryFeed.events}
           families={families}
           onVehicleRoster={setVehicleRoster}
