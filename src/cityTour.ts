@@ -23,11 +23,11 @@
  *   not support.
  */
 
-import type { CapacityCityItem } from '../capacityCityContracts'
+import type { CapacityCityItem } from './capacityCityContracts'
 import type { RoadTraffic } from './cityTraffic'
 import { CONGESTION_LABELS } from './cityTraffic'
 import type { IncidentMarker } from './cityIncidents'
-import { stableHash } from '../atlasLayout'
+import { stableHash } from './atlasLayout'
 
 /** A point on the ground plane. The tour never needs a third axis for anything it targets. */
 export interface TourPoint {
@@ -412,18 +412,24 @@ function formatCount(value: number): string {
   return Math.round(value).toLocaleString()
 }
 
-/** Microseconds as the seconds a reader can hold in their head, without inventing precision. */
-function formatMicroseconds(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} s`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} ms`
-  return `${formatCount(value)} µs`
+/** A decimal string as a number, tolerating the fractional CU-second totals the metrics app emits. */
+function decimal(value: string | null | undefined): number | null {
+  if (value === null || value === undefined || value.trim() === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
-function formatPages(pages: number): string {
-  const kib = pages * 8
-  if (kib >= 1024 * 1024) return `${(kib / (1024 * 1024)).toFixed(1)} GiB`
-  if (kib >= 1024) return `${(kib / 1024).toFixed(1)} MiB`
-  return `${formatCount(kib)} KiB`
+function formatCuSeconds(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M CU-s`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k CU-s`
+  return `${value.toFixed(1)} CU-s`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${formatCount(bytes)} B`
 }
 
 const DEFAULT_POLAR = 0.848
@@ -486,15 +492,15 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
    * screen rather than in this comment.
    */
   const withLot = facts.objects.filter(object => facts.lots.has(object.itemId))
-  const byCpu = withLot
-    .map(object => ({ object, cpu: numeric(object.attributedExposure.totalCpuMicroseconds) }))
-    .filter((entry): entry is { object: CapacityCityItem; cpu: number } => entry.cpu !== null && entry.cpu > 0)
-    .sort((left, right) => right.cpu - left.cpu || left.object.itemId.localeCompare(right.object.itemId))
+  const byCu = withLot
+    .map(object => ({ object, cu: decimal(object.cuConsumed.cuSeconds) }))
+    .filter((entry): entry is { object: CapacityCityItem; cu: number } => entry.cu !== null && entry.cu > 0)
+    .sort((left, right) => right.cu - left.cu || left.object.itemId.localeCompare(right.object.itemId))
     .slice(0, 4)
   const bySize = withLot
-    .map(object => ({ object, pages: numeric(object.storageBytes) }))
-    .filter((entry): entry is { object: CapacityCityItem; pages: number } => entry.pages !== null && entry.pages > 0)
-    .sort((left, right) => right.pages - left.pages || left.object.itemId.localeCompare(right.object.itemId))
+    .map(object => ({ object, bytes: numeric(object.storage.bytes) }))
+    .filter((entry): entry is { object: CapacityCityItem; bytes: number } => entry.bytes !== null && entry.bytes > 0)
+    .sort((left, right) => right.bytes - left.bytes || left.object.itemId.localeCompare(right.object.itemId))
     .slice(0, 4)
 
   const claimed = new Set<string>()
@@ -530,23 +536,23 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
     })
   }
 
-  for (const { object, cpu } of byCpu) {
+  for (const { object, cu } of byCu) {
     addLandmark(
       object,
-      `Most attributed Query Store CPU on this page · ${formatMicroseconds(cpu)} attributed to this object alone`,
-      cpu,
+      `Most CU consumed on this page · ${formatCuSeconds(cu)} over the window`,
+      cu,
     )
   }
-  for (const { object, pages } of bySize) {
-    addLandmark(object, `Largest by reserved pages on this page · ${formatPages(pages)} reserved`, pages)
+  for (const { object, bytes } of bySize) {
+    addLandmark(object, `Largest by OneLake storage on this page · ${formatBytes(bytes)}`, bytes)
   }
 
   /*
    * Busy streets, ranked by the same grading the map is already coloured with.
    *
-   * `delayPerExecution` is what the colour is graded from, so ranking on it means the tour visits
+   * `delayPerOperation` is what the colour is graded from, so ranking on it means the tour visits
    * the streets a viewer can already see are red — rather than arriving somewhere green and leaving
-   * them to wonder what the shot was for. A road with no captured wait evidence is ranked last and
+   * them to wonder what the shot was for. A road with no measured operations is ranked last and
    * captioned as unmeasured, never as quiet.
    */
   const streets = facts.roads
@@ -555,7 +561,7 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
       entry.path !== undefined && entry.path.length >= 2)
     .map(entry => ({
       ...entry,
-      rank: (entry.road.delayPerExecution ?? 0) * 1000 + (entry.road.recentExecutions ?? entry.road.executions ?? 0),
+      rank: (entry.road.delayPerOperation ?? 0) * 1000 + (entry.road.recentOperations ?? entry.road.operations ?? 0),
     }))
     .filter(entry => entry.rank > 0)
     .sort((left, right) => right.rank - left.rank || left.road.routeId.localeCompare(right.road.routeId))
@@ -566,12 +572,12 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
     const from = byId.get(road.fromItemId)
     const to = byId.get(road.toId)
     const endpoints = `${from ? objectLabel(from) : road.fromItemId} → ${to ? objectLabel(to) : road.toId}`
-    const delay = road.delayPerExecution === null
+    const delay = road.delayPerOperation === null
       ? CONGESTION_LABELS.unknown
-      : `${CONGESTION_LABELS[road.grade]} · ${road.delayPerExecution.toFixed(1)} ms mean captured wait per execution`
-    const executions = road.executions === null
-      ? 'no captured executions'
-      : `${formatCount(road.executions)} captured executions`
+      : `${CONGESTION_LABELS[road.grade]} · ${road.delayPerOperation.toFixed(1)} s mean throttling per operation`
+    const operations = road.operations === null
+      ? 'no measured operations'
+      : `${formatCount(road.operations)} measured operations`
     // Behind the direction of travel, so the camera looks *down* the street it is following. The
     // scene's azimuth is the bearing of the camera from its target, hence the half turn.
     const heading = Math.atan2(
@@ -597,7 +603,7 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
         polar: DEFAULT_POLAR,
         ...timing(3800, 8200),
         caption: endpoints,
-        detail: `${delay} · ${executions}`,
+        detail: `${delay} · ${operations}`,
         routeId: road.routeId,
       },
     })
@@ -608,10 +614,9 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
    * the order the list reads.
    */
   const severityRank: Record<IncidentMarker['severity'], number> = {
-    deadlock: 4,
-    cycle: 3,
-    blocked: 2,
-    waiting: 1,
+    backgroundRejection: 3,
+    interactiveRejection: 2,
+    delay: 1,
   }
   for (const marker of facts.incidents) {
     const lot = facts.lots.get(marker.itemId)

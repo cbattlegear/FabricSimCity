@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ROAD_Y, ROAD_LANE_STEP, ROAD_TOP_Y, TRAIL_Y, VEHICLE_Y } from './CapacityCityScene'
 import { MAX_LANE } from './cityRoads'
 
@@ -22,7 +23,7 @@ import { MAX_LANE } from './cityRoads'
  * trail with nothing saying so, and it is what would let it happen again.
  */
 
-const source = readFileSync(new URL('./CapacityCityScene.ts', import.meta.url), 'utf8')
+const source = readFileSync(resolve(process.cwd(), 'src', 'CapacityCityScene.ts'), 'utf8')
 
 /** Strips comments, so the doc comment explaining the old `0.05` cannot read as the old `0.05`. */
 function code(text: string): string {

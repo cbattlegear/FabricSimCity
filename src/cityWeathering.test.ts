@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import {
   ARCHETYPE_COLORS,
@@ -18,7 +19,7 @@ import {
   weatheredMapBuildingColor,
 } from './cityBuildings'
 import type { BuildingArchetype } from './cityPlan'
-import type { DistrictCharacter } from '../cityTerrain'
+import type { DistrictCharacter } from './cityTerrain'
 
 const ARCHETYPES = Object.keys(ARCHETYPE_COLORS) as BuildingArchetype[]
 const CHARACTERS: DistrictCharacter[] = ['residential', 'commercial', 'industrial', 'civic']
@@ -195,7 +196,7 @@ describe('weathered buildings', () => {
    * changing a single colour.
    */
   describe('the scene draws all three cues', () => {
-    const scene = readFileSync(new URL('./CapacityCityScene.ts', import.meta.url), 'utf8')
+    const scene = readFileSync(resolve(process.cwd(), 'src', 'CapacityCityScene.ts'), 'utf8')
     const buildBuildings = scene.slice(
       scene.indexOf('function buildBuildings('),
       scene.indexOf('function buildTraffic('),

@@ -1,7 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { directActivityWidth } from './capacityCity'
-import type { CapacityCityItem, OperationFamily } from '../capacityCityContracts'
+import type { CapacityCityItem } from './capacityCityContracts'
 import { ARTERIAL_WIDTH, streetPitch, streetRoute, type CityLot, type CityPlan, type StreetClass } from './cityPlan'
 import {
   BUILDING_TRIM_COLOR,
@@ -16,7 +15,7 @@ import {
   neighborhoodTint,
   weatheredBuildingColor,
   weatheredMapBuildingColor,
-} from '../cityBuildings'
+} from './cityBuildings'
 import { assignQueryRoutes } from './cityQueryTraffic'
 import { ROAD_WIDTH, type RoadTraffic } from './cityTraffic'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
@@ -27,11 +26,11 @@ import {
   laneOffset,
   MAX_LANE,
   offsetPolyline,
-} from '../cityRoads'
-import { ribbonGeometry, ribbonPositions } from '../mapRibbon'
-import { type Facility, type FacilityKind, type FacilitySite } from '../cityInfrastructure'
-import { facilityShell, facilitySlots } from '../cityFacilityShells'
-import { LANDMARK_ASSETS, loadCityAssets, loadVehicleAssets, type AssetKit, type AssetRole, type CityAssets, type SceneryAsset, type VehicleAsset } from '../cityAssets'
+} from './cityRoads'
+import { ribbonGeometry, ribbonPositions } from './mapRibbon'
+import { type Facility, type FacilityKind, type FacilitySite } from './cityInfrastructure'
+import { facilityShell, facilitySlots } from './cityFacilityShells'
+import { LANDMARK_ASSETS, loadCityAssets, loadVehicleAssets, type AssetKit, type AssetRole, type CityAssets, type SceneryAsset, type VehicleAsset } from './cityAssets'
 import {
   buildingLabelText,
   buildingLabelWorldHeight,
@@ -46,9 +45,19 @@ import {
   neighborhoodLabelText,
   LABEL_MAX_CHARS,
   LABEL_WORLD_HEIGHT,
-} from '../cityLabels'
-import type { LabelBox } from '../cityLabels'
-import type { CityRoute } from './cityRoute'
+} from './cityLabels'
+import type { LabelBox } from './cityLabels'
+/**
+ * The selected-route highlight is retired on Fabric. Its SQL builder (`cityRoute.ts`) parsed
+ * showplan XML to infer a path between objects; Capacity Metrics attributes each operation to an
+ * item directly, so there is no lineage path to reconstruct and the module was deleted. The scene
+ * keeps the drawing plumbing behind this minimal shape so a future Fabric lineage-route source can
+ * feed it, but nothing drives it today.
+ */
+type CityRoute = {
+  readonly polyline: readonly { readonly x: number; readonly z: number }[]
+  readonly stops: readonly { readonly x: number | null; readonly z: number | null }[]
+}
 import {
   LANDUSE_CITY_COLORS,
   LANDUSE_MAP_COLORS,
@@ -57,18 +66,18 @@ import {
   MAP_ROAD,
   MAP_STREET,
   type MapViewMode,
-} from '../mapStyle'
+} from './mapStyle'
 import {
   CITY_ATMOSPHERE,
   resolveTimeOfDay,
   watchTimeOfDay,
   type CityAtmosphere,
   type TimeOfDay,
-} from '../timeOfDay'
-import type { LandUse, TerrainBlock } from '../cityTerrain'
-import { stopsTraffic } from './cityIncidents'
+} from './timeOfDay'
+import type { LandUse, TerrainBlock } from './cityTerrain'
+import { stopsTraffic, isRejectionSeverity } from './cityIncidents'
 import type { IncidentMarker } from './cityIncidents'
-import { placeIncident, type IncidentPlacement } from '../cityIncidentPlacement'
+import { placeIncident, type IncidentPlacement } from './cityIncidentPlacement'
 import {
   buildVehicleRoster,
   pointAt,
@@ -80,7 +89,7 @@ import {
   type VehicleClass,
   type VehicleRoster,
 } from './cityVehicles'
-import type { LiveQueryEvent } from './liveQueryFeed'
+import type { VehicleRoad } from './cityVehicles'
 import {
   TOUR_START,
   breakingStopIndex,
@@ -298,14 +307,15 @@ export type DatabaseCitySceneController = {
   /** Live incident pins, placed on the road between the parties rather than on a roof. */
   setIncidents(markers: readonly IncidentMarker[]): void
   /**
-   * The observed live executions and the page's query families, from which the vehicle roster is
-   * built.
+   * Rebuilds the vehicle roster from the roads this scene last drew.
    *
-   * Deliberately not a roster: the roster has to be joined against the roads *as this scene drew
-   * them*, and only the scene has those polylines. The result comes back out through
-   * `onVehicleRoster` so the legend can disclose what was dropped and why.
+   * On Fabric a vehicle is a measured share of a road's operation traffic, not a live execution, so
+   * the roster is derived entirely from the graded roads the scene already holds — there is no live
+   * feed to hand in. Roads change through `setRoads`, which refreshes the roster itself; this exists
+   * for a caller that wants to force a rebuild. The result comes back out through `onVehicleRoster`
+   * so the legend can disclose what was drawn and what was withheld.
    */
-  setVehicles(events: readonly LiveQueryEvent[] | null, families: readonly OperationFamily[]): void
+  refreshVehicles(): void
   /**
    * Where one incident pin ended up and which rung of the placement ladder put it there, or null
    * when it is not drawn. The popup states the rung, because a pin on the measured road between two
@@ -941,18 +951,18 @@ export function createDatabaseCityScene(
   const incidentPlacements = new Map<string, IncidentPlacement>()
 
   /**
-   * Two pins, not four.
+   * Two pins, not three.
    *
-   * Blocking of any kind — a plain blocked waiter or a cycle in the live wait graph — is a yellow
-   * warning, because it is happening now and may clear on its own. A deadlock the engine already
-   * recorded is a red crash, because a transaction was killed and it is not going to clear. Grading
-   * live blocking into several reds would put the loudest colour on the least certain claim.
+   * A delay is a yellow warning: interactive work is queuing at the 10-minute gate but still
+   * proceeding, and it may clear as carry-forward burns down. A rejection — interactive or
+   * background — is a red crash, because work is being turned away outright. Grading the two
+   * rejection stages into separate reds would put the loudest colour on a distinction the reader
+   * does not need to act on differently.
    */
   const INCIDENT_PIN_STYLE: Record<IncidentMarker['severity'], { glyph: string; color: string; ink: string }> = {
-    blocked: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
-    waiting: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
-    cycle: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
-    deadlock: { glyph: '💥', color: '#e4483c', ink: '#f7e9e7' },
+    delay: { glyph: '⚠', color: '#e8b13a', ink: '#231704' },
+    interactiveRejection: { glyph: '💥', color: '#e4483c', ink: '#f7e9e7' },
+    backgroundRejection: { glyph: '💥', color: '#e4483c', ink: '#f7e9e7' },
   }
 
   const INCIDENT_PIN_PX = 96
@@ -1024,7 +1034,7 @@ export function createDatabaseCityScene(
       routeId: entry.road.routeId,
       fromItemId: entry.road.fromItemId,
       toId: entry.road.toId,
-      executions: entry.road.executions,
+      executions: entry.road.operations,
       polyline: entry.polyline,
     }))
 
@@ -1054,16 +1064,16 @@ export function createDatabaseCityScene(
       incidentAnchors.set(marker.id, new THREE.Vector3(placement.x, y + INCIDENT_PIN_WORLD * 0.5, placement.z))
       incidentPlacements.set(marker.id, placement)
       /*
-       * Remember where each *live* block was pinned, so a blocked request's vehicle can stop at the
-       * same point rather than computing its own answer from the same inputs and drifting from it.
+       * Remember where each traffic-stopping incident was pinned, keyed by the item it sits on, so a
+       * vehicle whose road is refused stops at the same point rather than computing its own answer
+       * from the same inputs and drifting from it.
        *
-       * Which markers qualify is `stopsTraffic`'s rule, not this loop's — see `cityIncidents.ts`
-       * for why a recorded deadlock graph is excluded and a live wait cycle is not. It lives there
-       * so all four severities can be covered by a test; a conditional here could only be pinned by
-       * asserting on source text.
+       * Which markers qualify is `stopsTraffic`'s rule, not this loop's — see `cityIncidents.ts` for
+       * why an interactive delay is excluded and a rejection is not. It lives there so every severity
+       * can be covered by a test; a conditional here could only be pinned by asserting on source text.
        */
       if (stopsTraffic(marker)) {
-        for (const sessionId of marker.sessionIds) blockedPlacements.set(sessionId, placement)
+        blockedPlacements.set(marker.itemId, placement)
       }
     }
   }
@@ -1363,8 +1373,6 @@ export function createDatabaseCityScene(
    */
   let vehicleClockAtBuild = 0
   let vehicleKit: AssetKit | null = null
-  let currentEvents: readonly LiveQueryEvent[] | null = null
-  let currentFamilies: readonly OperationFamily[] = []
   let vehicleRoster: VehicleRoster | null = null
   let vehicleBatches: VehicleBatch[] = []
   /** Vehicles that are not stopped. Zero means there is nothing to animate and the loop must end. */
@@ -1392,7 +1400,7 @@ export function createDatabaseCityScene(
   /** Animated time consumed by the disaster loop, in ms. Never the wall clock. */
   let disasterClock = 0
   /** Placements keyed by the session they were pinned for, so a blocked vehicle stops at its pin. */
-  const blockedPlacements = new Map<number, IncidentPlacement>()
+  const blockedPlacements = new Map<string, IncidentPlacement>()
   const layers: CityLayerToggles = {
     traffic: true,
     paths: false,
@@ -1961,11 +1969,12 @@ export function createDatabaseCityScene(
 
     /*
      * Wreckage sits under the crash pin the incident layer already placed, so the two are the same
-     * measurement rather than two that happen to agree. Only a *recorded* deadlock gets wreckage:
-     * live blocking may clear on its own and has not wrecked anything.
+     * measurement rather than two that happen to agree. Only a *rejection* gets wreckage: an
+     * interactive delay is work queuing and proceeding, not work turned away, so it is drawn busy
+     * rather than wrecked — the same line `stopsTraffic` and `isRejecting` hold.
      */
     for (const marker of currentIncidents) {
-      if (marker.severity !== 'deadlock') continue
+      if (!isRejectionSeverity(marker.severity)) continue
       const placement = incidentPlacements.get(marker.id)
       if (!placement) continue
       for (let i = 0; i < 2; i += 1) {
@@ -3204,18 +3213,20 @@ export function createDatabaseCityScene(
    * driving over open ground.
    */
   function refreshVehicles() {
-    const roads = [...roadPaths.values()].map(entry => ({
+    const roads: VehicleRoad[] = [...roadPaths.values()].map(entry => ({
       routeId: entry.road.routeId,
+      fromItemId: entry.road.fromItemId,
+      toItemId: entry.road.toId,
       familyIds: entry.road.familyIds,
-      executions: entry.road.executions,
+      operations: entry.road.operations,
+      carOperations: entry.road.carOperations,
+      freightOperations: entry.road.freightOperations,
+      delayPerOperation: entry.road.delayPerOperation,
       polyline: entry.polyline,
     }))
     vehicleRoster = buildVehicleRoster({
-      events: currentEvents,
-      families: currentFamilies,
       roads,
       blocked: blockedPlacements,
-      now: Date.now(),
     })
     vehicleClockAtBuild = vehicleClock
     buildVehicles()
@@ -3769,32 +3780,31 @@ export function createDatabaseCityScene(
         geometry.trim.dispose()
       }
 
-      // Index annexes: width still maps direct DMV operations, exactly as before.
       const footprint = lot.footprint ?? 11
-      object.indexes.forEach((index, ordinal) => {
-        const width = directActivityWidth(index.directActivity.totalOperations)
-        const annex = new THREE.Mesh(
-          track(new THREE.BoxGeometry(width ?? 4, 1.7, Math.max(4, footprint * 0.5))),
-          width === null ? materials.unknownIndex : materials.index,
-        )
-        annex.position.set(footprint / 2 + (width ?? 4) / 2 + 1.4, 0.85 + ordinal * 2, -footprint * 0.14)
-        annex.userData.itemId = object.itemId
-        group.add(annex)
-        pickable.push(annex)
-      })
 
-      // Amber roof cap: attributed Query Store CPU. A solid cap is a total measured for this object
-      // alone; an outlined one is a query total shared with the other tables the same query named,
-      // which is the only figure a join-heavy workload can honestly produce.
-      const attributedCpu = object.attributedExposure.totalCpuMicroseconds
-      const sharedCpu = object.attributedExposure.shared?.totalCpuMicroseconds ?? null
-      const capCpu = attributedCpu ?? sharedCpu
-      if (known && capCpu !== null) {
-        const cpu = Number(BigInt(capCpu))
-        const capHeight = 0.5 + Math.log2(1 + Math.max(0, cpu)) * 0.05
+      /*
+       * Regression cap: the item's week-over-week CU change, as the metrics app computes it.
+       *
+       * This replaces the SQL build's amber roof cap, which stood for attributed Query Store CPU —
+       * a field Fabric does not publish. Rather than invent a new magnitude scale, the cap now
+       * composes a measurement already landed on the item, `performanceDeltaPercent`: a *negative*
+       * value is a genuine regression (this item burned more CU than the same window seven days ago)
+       * and earns a red cap sized by how far it regressed. Building height already carries CU
+       * consumed, so this is deliberately a different question — "is it getting worse?" — and not a
+       * second drawing of the same number.
+       *
+       * The missing-rather-than-zero line is held exactly: a null delta means there was no comparable
+       * window (the item is younger than a week, the normal case) and draws **no cap at all**, never a
+       * flat one, because "unchanged" is a claim the evidence does not make. A zero or positive delta
+       * is measured improvement and also draws nothing — there is no regression to flag.
+       */
+      const delta = object.performanceDeltaPercent
+      if (known && delta !== null && delta < 0) {
+        const regression = Math.min(1, Math.abs(delta) / 100)
+        const capHeight = 0.6 + regression * 5
         const cap = new THREE.Mesh(
-          track(new THREE.BoxGeometry(footprint * 0.55, capHeight, footprint * 0.55)),
-          attributedCpu === null ? materials.sharedExposure : materials.exposure,
+          track(new THREE.BoxGeometry(footprint * 0.5, capHeight, footprint * 0.5)),
+          materials.exposure,
         )
         cap.position.set(0, geometry.height + capHeight / 2 + 0.4, 0)
         cap.userData.itemId = object.itemId
@@ -3820,7 +3830,7 @@ export function createDatabaseCityScene(
 
     // Busiest first so a heavy street keeps the top of the stack where two overlap at a junction.
     const ordered = [...traffic.streets.values()].sort(
-      (left, right) => right.executions - left.executions || left.edgeId - right.edgeId,
+      (left, right) => right.operations - left.operations || left.edgeId - right.edgeId,
     )
     for (const street of ordered) {
       if (street.points.length < 2) continue
@@ -3846,7 +3856,7 @@ export function createDatabaseCityScene(
     // Busiest first, so the heaviest traffic keeps the centre line and the light roads move aside.
     // Every ribbon is the same width now, so executions do the ordering they used to do by proxy.
     const ordered = [...roads].sort(
-      (left, right) => (right.executions ?? -1) - (left.executions ?? -1) || left.routeId.localeCompare(right.routeId),
+      (left, right) => (right.operations ?? -1) - (left.operations ?? -1) || left.routeId.localeCompare(right.routeId),
     )
     const corridorLanes = new Map<string, Set<number>>()
 
@@ -4485,9 +4495,7 @@ export function createDatabaseCityScene(
       refreshTour()
       requestRender()
     },
-    setVehicles(events, families) {
-      currentEvents = events
-      currentFamilies = families
+    refreshVehicles() {
       refreshVehicles()
       requestRender()
     },

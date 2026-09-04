@@ -1,8 +1,11 @@
 # Pending port
 
-14 modules and 16 test files from SQLSimCity that the Fabric port has not reached yet. They are
+The React UI mount layer (`CapacityCityView.tsx`, `CapacityCityViewport.tsx`) and one test
+(`cityTour.test.ts`) from SQLSimCity that the Fabric port has not reached yet. They are
 excluded from `tsconfig.json` and from `vitest.config.ts` — deliberately in agreement, so a module
-here is neither type-checked nor run, and nothing in the shipped app imports one.
+here is neither type-checked nor run, and nothing in the shipped app imports one. The 3D city scene
+itself (`CapacityCityScene.ts`), the vehicle system (`cityVehicles.ts`) and the camera tour
+(`cityTour.ts`) have been ported out to `src/` and tested — see the `port-city` section below.
 
 They are kept rather than deleted because each one is a solved rendering problem. The traffic
 system, the incident pins, the disaster survey and the tour camera all work; what they do not have
@@ -71,14 +74,51 @@ guard mutation-checked against the broken state):
   `cityGrowthLots/Placement/Retrace/Streets.test.ts`) — moved with their subject. The four-files-over-one-testkit
   layout is preserved intact (`cityGrowthRetrace.test.ts` is left alone on the critical path); do not merge them.
 
-**Still quarantined** (too large / too interconnected to port safely without the scene):
+**Ported out** (moved to `src/`, rewritten against the Fabric contracts, tested, and each guard
+mutation-checked against the broken state):
+
+- `CapacityCityScene.ts` — the 3D city itself. Its imports were repointed (`../` → `./`), the deleted
+  `cityRoute`/`liveQueryFeed` imports removed (the selected-route highlight is retired behind a local
+  minimal type pending a Fabric lineage-route source, and vehicles no longer read a live feed), and
+  its three surviving SQL-era reads rewritten: the index annexes (`object.indexes` / `directActivity`)
+  were removed (no Fabric analogue), and the amber CPU roof cap (`object.attributedExposure`) became a
+  **CU-regression cap** derived from `performanceDeltaPercent` — a red cap on items whose CU regressed
+  week-over-week, sized by the regression, with a **null delta drawing no cap at all** (never
+  "unchanged"). Road/street field renames (`executions` → `operations`) and the new
+  `IncidentSeverity` (`delay`/`interactiveRejection`/`backgroundRejection`, replacing the SQL
+  `blocked`/`waiting`/`cycle`/`deadlock`) were applied; wreckage now sits under a **rejection** pin and
+  blocked-vehicle placements key on `itemId`. `setVehicles(events, families)` became
+  `refreshVehicles()`, since vehicles now derive from the graded roads the scene already holds. The
+  shadow-invalidation contract is intact (three loops, three handles, all cancelled in `dispose()`;
+  vehicles `castShadow = false`; the vehicle loop stops on an empty roster and never touches
+  `needsUpdate`) and all of `shadowInvalidation.test.ts` still binds and was mutation-verified.
+- `cityVehicles.ts` — **a semantics rewrite onto the trip/road model.** The SQL live-execution roster
+  (`LiveQueryEvent` / `query_hash` / `planDataVolume`) is gone; a vehicle is now a measured share of a
+  road's operation traffic. An **unmeasured road (`operations === null`) gets no vehicles** (distinct
+  from a measured-quiet road, which is counted apart); class is the operation class (interactive → car,
+  background → freight/`semiTruck`, unclassed → `unknown` cube — the four-rung size ladder survives in
+  the scene's `VEHICLE_SIZE` and `vehicles.glb` but only `car`/`semiTruck`/`unknown` are produced,
+  because Fabric publishes no per-operation size); and **speed is graded off the same
+  throttling-per-operation ratio the road colour is** (`delayPerOperation`), so paint and motion never
+  contradict. Guarded by a rewritten `cityVehicles.test.ts` and `vehicleSpeedWiring.test.ts`, both
+  mutation-checked (unmeasured road → no vehicles; congested road slower than free; missing ratio →
+  base speed).
+- `cityTour.ts` — the camera tour. Landmark ranking rewired off `cuConsumed`/`storage` (was attributed
+  CPU / reserved pages), captions rewritten into Fabric vocabulary, road ranking onto
+  `delayPerOperation`/`operations`, and `severityRank` onto the new incident severities. The module
+  compiles and ships; **its test `cityTour.test.ts` is left quarantined** (a full rewrite of a 25 KB
+  suite that was not on the critical path for the scene).
+- `cityWeathering.test.ts`, `trailGeometry.test.ts`, `cityDepthRanks.test.ts`, `cityVehiclePaint.test.ts`,
+  `vehicleSpeedWiring.test.ts` — the source-text/geometry guards that slice the scene, moved with it.
+  `shadowInvalidation.test.ts`, `cityVehicleAssets.test.ts`, `cityVehicleLegibility.test.ts` (already in
+  `src/` via the `sourcePath()` fallback) rebind to the shipped scene; all three slice anchors still
+  hold `to > from` and were mutation-verified.
+
+**Still quarantined** (the React UI mount layer — one coherent blocked unit):
 
 | Module | What it needs |
 |---|---|
-| `CapacityCityScene.ts` | Mostly domain-agnostic (221 KB) — it consumes a `CityPlan`, which now exists. The traffic set it imports (`cityQueryTraffic`, `cityTraffic`, `cityWorkloadTraffic`) is now ported to `src/`, and the showplan modules it used to reach through (`cityRoute`, `planCost`) were deleted by `operation-traffic`, so the scene consumes `RoadTraffic`/`StreetLoad` directly. **Still blocked in practice**: it also imports the incident set (`cityIncidents`), the live feed (`liveQueryFeed`) and the tour (`cityTour`), none of which are ported to Fabric yet, and moving the scene into `src/` would make the source-text guards (`shadowInvalidation`, `cityVehicle*`) bind against uncompilable vehicle/tour/live code. Its building paint also reads `object.attributedExposure.totalCpuMicroseconds`, a query-store field with no Fabric analogue — colour has to be re-derived from `cuConsumed`/`operations`/`performanceDeltaPercent`, which is a semantics decision, not a rename. **Read `AGENTS.md` on shadow invalidation before touching its loops**, and check the `shadowInvalidation.test.ts` / `cityVehicle*` slice anchors. |
-| `CapacityCityViewport.tsx`, `cityVehicles.ts` | Blocked on the scene. `cityVehicles.ts` is only ported when the scene needs it, because the scene owns the vehicle loop and the slice anchors live there. |
-| `CapacityCityView.tsx` | Follows the contracts; passes the plan `workspaces` option (was `schemas`) and mounts `AddressPanel`. Blocked on the scene. |
-| `cityWeathering.test.ts` | A cityBuildings weathering guard that also slices `CapacityCityScene.ts`; moves to `src/` with the scene. |
+| `CapacityCityView.tsx`, `CapacityCityViewport.tsx` | The scene, `cityVehicles`, and `cityTour` are ported and tested, so the geometry these mount is ready. The **view** is the block: it carries ~146 type errors that are a genuine semantic rewrite, not a rename — its object-detail panel and evidence tables render deleted query-store fields (`attributedExposure`, `directActivity`, `indexes`, `reservedBytes`, `usedBytes`, `storageBytes`, `cuSecondsRaw`), and it calls the pre-Fabric signatures of `projectIncidents(snapshot, objects)`, `projectFacilityTraffic(families, objects)`, `runDisasterSurvey`, `projectCityDisasters`, plus deleted `../api`, `./liveFeed`, `./cityRoute`, and `NormalizedShowplan`. Rewiring these to `surveyCapacityWeather` / `projectCityDisasters({throttle,items,capabilities})` / `projectIncidents({families,items,samples,throttle,capabilities,observedAt})` / `projectFacilityTraffic(families,items,throttle,capabilities)` / `startTimepointClock`, deciding what each Fabric item/family/facility detail panel should show, wiring `AddressPanel` and the `.sidebar-drawers` budget, and then **browser-verifying** the result at both breakpoints — is a task on the scale of the scene port itself. The viewport ports cleanly (verified: it compiles with a local `CityRoute` type, dropping the `liveQueryFeed`/`liveQueries`/`families` inputs, `setVehicles` → `refreshVehicles`, and `FacilityTraffic.unmapped` → `unattributedSeconds`); it is quarantined with the view so the mount layer stays one unit for whoever ports it. |
 
 
 ### `power-grid` — the civic infrastructure
@@ -165,7 +205,7 @@ and the source-cannot-report-families capability collapsing into measured-quiet.
 
 | Module | What it needs |
 |---|---|
-| `cityVehicles.ts` | The vehicle geometry and loop, ported only when the scene needs it because the scene owns the vehicle loop and the `cityVehicleAssets.test.ts`/`cityVehicleLegibility.test.ts` slice anchors live there. `trafficModeForClass` in `cityTraffic.ts` gives it the car/freight decision from the domain side. |
+| `cityVehicles.ts` | **Ported** to `src/` with the scene (a semantics rewrite onto the trip/road model). See the `port-city` section above. |
 
 ### `throttle-incidents`
 

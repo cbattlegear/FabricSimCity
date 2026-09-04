@@ -105,7 +105,7 @@ describe('the shadow map is invalidated by whatever changed what casts', () => {
     ['setLayers', 'toggling a layer changes caster visibility'],
     ['setViewMode', 'map mode turns the shadow map off and city mode turns it back on'],
     ['setIncidents', 'incident markers are objects in the scene'],
-    ['setVehicles', 'a live sample adds, moves and removes vehicle meshes'],
+    ['refreshVehicles', 'a rebuild adds, moves and removes vehicle meshes'],
     ['setFireObjects', 'a fire adds flame and smoke meshes to the scene'],
     ['setWaterMainBreaks', 'a burst main adds jets and a puddle to the scene'],
   ])('%s invalidates, because %s', name => {

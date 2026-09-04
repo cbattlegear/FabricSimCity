@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import * as THREE from 'three'
 import { vehiclePaintHue } from './cityVehicles'
 
@@ -12,7 +13,7 @@ import { vehiclePaintHue } from './cityVehicles'
  * by producing a plausible-looking scene rather than an error.
  */
 
-const scene = readFileSync(new URL('./CapacityCityScene.ts', import.meta.url), 'utf8')
+const scene = readFileSync(resolve(process.cwd(), 'src', 'CapacityCityScene.ts'), 'utf8')
 /** Comments describe the traps; matching against them would let a description pass as a fix. */
 const code = scene.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
 
