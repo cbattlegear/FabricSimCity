@@ -1,0 +1,32 @@
+name: Release label
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - ready_for_review
+      - edited
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release-label:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out release policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require exactly one release label
+        env:
+          RELEASE_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: node .github/scripts/release-policy.mjs check-labels

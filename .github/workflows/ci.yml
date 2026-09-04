@@ -11,7 +11,10 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull request pushes may cancel stale work. Main pushes must not: release automation runs after
+  # CI completes on main, so canceling a superseded main run would also discard that PR's
+  # release label before the version job can read it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # One job. The .NET, probe-catalog and container jobs this replaces are gone along with the stack
 # they verified, and what remains -- typecheck, tests, build -- shares a single `npm ci` and runs
@@ -31,11 +34,14 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Test release policy
+        run: node .github/scripts/release-policy.test.mjs
+
       - name: Install dependencies
         run: npm ci
 
       - name: Test
-        run: npx vitest run
+        run: npm test
 
       # `tsc -b`, not `tsc --noEmit`. The latter reports TS6305 against `src/services/*` because
       # the Rayfin project references have not been built, and the build is what reads the

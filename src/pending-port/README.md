@@ -1,6 +1,6 @@
 # Pending port
 
-29 modules and 33 test files from SQLSimCity that the Fabric port has not reached yet. They are
+27 modules and 30 test files from SQLSimCity that the Fabric port has not reached yet. They are
 excluded from `tsconfig.json` and from `vitest.config.ts` — deliberately in agreement, so a module
 here is neither type-checked nor run, and nothing in the shipped app imports one.
 
@@ -25,14 +25,30 @@ Grouped by the todo that unblocks it, because they do not become portable one at
 
 ### `port-city` — items as buildings
 
+**Ported out so far** (moved to `src/`, rewritten against the Fabric contracts, tested, and each
+guard mutation-checked against the broken state):
+
+- `capacityCity.ts` — the keystone. `bytesToFootprint`/`itemFootprint` size a building from OneLake
+  bytes, `itemHeight` raises it from CU-seconds (importing `cuToHeight` from `capacityAtlas.ts`
+  verbatim so the two levels share one scale), and `itemMassing` resolves the pair into `built` vs
+  `vacant`. It holds the "missing rather than zero" line at the item level, with the one subtlety the
+  city adds: a compute-only kind with null bytes is a *measured* minimum lot, while a storage kind
+  with null bytes is missing evidence and draws wireframe — `canHoldStorage` in `itemKind.ts` is what
+  tells the two apart. The old SQL-era `capacityCity.ts` (query-store exposure, index DMV counters)
+  was deleted, not adapted; nothing in it survived the contract change.
+- `cityPaging.ts` — reduced to almost nothing, as predicted. It now folds `items`, `routes`,
+  `workspaces` (summing counts, null-preserving) and each family's `itemIds` across pages. The
+  wait-attribution and per-object confidence machinery is gone, because the new `OperationFamily`
+  carries no such fields.
+
+**Still quarantined** (too large / too interconnected to port safely without `cityPlan`):
+
 | Module | What it needs |
 |---|---|
-| `capacityCity.ts` | Item footprint from OneLake bytes, height from CU seconds. The plot/height pair is already settled in `capacityAtlas.ts`; this is the same decision one level down. |
-| `cityBuildings.ts` | Archetype per item kind. `itemKind.ts` holds the mapping; the REST `ItemType` enum and the Capacity Metrics names disagree, which is why that file exists. |
-| `cityPlan.ts` | Workspaces as neighbourhoods. Currently splits on schema. |
-| `CapacityCityScene.ts` | Mostly domain-agnostic already — it consumes a `CityPlan`. Blocked on the above rather than on itself. **Read `AGENTS.md` on shadow invalidation before touching its loops.** |
-| `CapacityCityView.tsx`, `CapacityCityViewport.tsx`, `AddressPanel.tsx`, `addressBook.ts` | Follow the contracts; no independent decision. |
-| `cityPaging.ts` | Page counts have no Fabric analogue. Storage bytes are the replacement, and the module may reduce to nothing. |
+| `cityBuildings.ts` | Visual archetype (`house`/`tower`/…) and geometry per building. Consumes a `CityLot` from `cityPlan`, so it cannot move until `cityPlan` does. (`itemKind.ts` already assigns the *semantic* `ItemArchetype`; the visual one is size-driven and lives in `cityPlan`.) |
+| `cityPlan.ts` | Workspaces as neighbourhoods (82 KB). Currently splits on schema and builds lots from reserved/used pages — a substantial rewrite onto `CapacityCityItem`/`itemMassing`. This is the blocker for everything below it. |
+| `CapacityCityScene.ts` | Mostly domain-agnostic (221 KB) — it consumes a `CityPlan`. Blocked on `cityPlan` rather than on itself. **Read `AGENTS.md` on shadow invalidation before touching its loops.** |
+| `CapacityCityView.tsx`, `CapacityCityViewport.tsx`, `AddressPanel.tsx`, `addressBook.ts` | Follow the contracts; no independent decision. Blocked on the scene/plan. |
 
 ### `power-grid` — the civic infrastructure
 

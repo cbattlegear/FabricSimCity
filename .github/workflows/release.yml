@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Highest bump earned by all changes since the previous release.
+        required: true
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+          - skip
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Select release target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            echo "mode=auto" >> "$GITHUB_OUTPUT"
+            echo "sha=$WORKFLOW_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=dispatch" >> "$GITHUB_OUTPUT"
+            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read release tags
+        id: tags
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "pointing_tags<<TAGS"
+            git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --points-at "$HEAD_SHA"
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read merged pull request labels
+        id: pr
+        if: ${{ steps.target.outputs.mode == 'auto' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.target.outputs.sha }}
+          RELEASE_HEAD_SHA: ${{ steps.target.outputs.sha }}
+          RELEASE_PRS_JSON_FILE: .github-release-prs.json
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+            -H "Accept: application/vnd.github+json" > "$RELEASE_PRS_JSON_FILE"
+          node .github/scripts/release-policy.mjs select-pr
+          rm "$RELEASE_PRS_JSON_FILE"
+
+      - name: Plan release
+        id: plan
+        env:
+          RELEASE_MODE: ${{ steps.target.outputs.mode }}
+          RELEASE_LABELS_JSON: ${{ steps.pr.outputs.labels_json || '[]' }}
+          RELEASE_DISPATCH_BUMP: ${{ inputs.bump }}
+          RELEASE_LATEST_TAG: ${{ steps.tags.outputs.latest_tag }}
+          RELEASE_POINTING_TAGS: ${{ steps.tags.outputs.pointing_tags }}
+        run: node .github/scripts/release-policy.mjs plan-release
+
+      - name: Explain skipped release
+        if: ${{ steps.plan.outputs.action == 'skip' }}
+        env:
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: echo "::notice::$REASON"
+
+      - name: Create GitHub release
+        if: ${{ steps.plan.outputs.action == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.target.outputs.sha }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --target "$HEAD_SHA" \
+            --title "$TAG" \
+            --generate-notes

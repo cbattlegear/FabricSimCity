@@ -367,13 +367,10 @@ contract value with a string literal outside its union type passes the suite —
 
 ## Every pull request needs a `release:*` label
 
-**The automation is not wired up yet.** `auto-release.yml` and `release.yml` were deleted with the
-.NET stack — they built and pushed a container image, and this app deploys through `rayfin up`
-instead. Rebuilding that path is the `ci-and-deploy` work.
-
-Keep labelling anyway. The label is the record of what a change promises, and it is far easier to
-apply while the change is fresh than to reconstruct from a diff months later when the automation
-lands and needs a history to read.
+Merging to `main` with green CI cuts a GitHub Release automatically. The release workflow reads the
+`release:*` label on the pull request merged at the CI head SHA, computes the next `vMAJOR.MINOR.PATCH`
+tag, and writes generated release notes. A separate pull request check fails unless **exactly one**
+`release:*` label is present.
 
 | label | when |
 |---|---|
@@ -386,33 +383,50 @@ lands and needs a history to read.
 change that renames a config key is `major`. A thousand-line refactor nobody can observe is `patch`.
 When a pull request spans categories, take the highest one it earns.
 
-### The rules the automation will re-impose
+Omitting the label is not neutral. The workflow now fails loudly instead of silently defaulting to
+`release:patch`; this is deliberate because #69, #70 and #71 all merged unlabelled once and forced a
+hand-cut release after feature work shipped understated.
 
-Recorded now because every one of them cost something in the previous repository, and rebuilding
-the workflow without them would buy the same lessons twice.
+### Manual and batched releases
 
-Omitting the label was not neutral — it silently meant `patch`, so feature work shipped
-understated. Three unlabelled merges once forced a hand-cut release.
+`release:skip` defers a bump; it does not cancel one. The skipped change still lands on `main`, so
+skip means "some later release carries this". When cutting a batched release with
+`workflow_dispatch`, choose the explicit bump input as the **highest bump earned by any pull request
+merged since the last release** — not the size of whichever one triggered it. **When a bump-worthy
+change is skipped, say so in the pull request body**, so whoever cuts the batched release can find it
+without re-reading every diff since the tag.
 
-`release:skip` deferred a bump, it did not cancel one. The skipped change still landed on `main`,
-so skip meant "some later release carries this". When cutting a batched release the bump was the
-**highest bump earned by any pull request merged since the last release** — not the size of
-whichever one triggered it. **When a bump-worthy change is skipped, say so in the pull request
-body**, so whoever cuts the batched release can find it without re-reading every diff since the tag.
+The release workflow tests `release:skip` first and that branch wins outright over any bump. That is
+intentional historical behaviour, and the exact-one-label PR check is what keeps mixed labels from
+reaching this point in normal use.
 
-Auto-release triggered on **CI completing on `main`**, not on the merge, and CI cancels a superseded
-in-progress run. Merging a second pull request before the first one's run finished cancelled that
-run, and the release it would have cut never happened — the commits still landed, but one commit's
-label was never read. Two pull requests merged 94 seconds apart shipped a `release:minor` and a
-`release:patch` together as a **patch**, and it could not be repaired: the workflow declines to cut
-a second release for an already-tagged commit, deliberately.
+The workflow deliberately declines to cut a second release for an already-tagged commit. Keep that
+safety check: it is why a rerun cannot move or duplicate a release after the fact.
 
-The mitigation was to **merge the release-bearing pull request last**. The version job tested
-`release:skip` first and that branch won outright over any bump, so the two collapse cases were not
-symmetric. Merge a skip before a bump and the collapse cost nothing — the skip run was cancelled and
-was never going to cut anything. The other way round, the bump run was cancelled and the skip run
-cut **nothing at all**: no tag, and the change shipped silently inside a later release. Between two
-bumps there was no safe order, only the wait.
+### Merge ordering still matters
+
+Auto-release triggers on **CI completing on `main`**, not on the merge. CI no longer cancels
+in-progress runs on `main`, because doing so once cancelled the release that should have read a
+`release:minor` label. #85 (`release:minor`) and #86 (`release:patch`) merged 94 seconds apart and
+shipped together as a **patch**; it could not be repaired because the workflow correctly declined to
+cut a second release for the already-tagged commit.
+
+Still prefer to **merge the release-bearing pull request last** when batching with `release:skip`.
+The skip-first precedence makes the two collapse cases asymmetric: merge a skip before a bump and a
+later bump release can carry it; merge the bump before a skip and, if only the skip run reaches the
+version job, it cuts **nothing at all** — no tag, and the change ships silently inside a later
+release. Between two bumps there is no safe order, only waiting for the first release to appear.
+
+### Fabric deployment
+
+`deploy-fabric.yml` runs on a published GitHub Release and can also be started manually. It checks
+out the release tag, installs dependencies, authenticates Rayfin non-interactively, runs
+`npm run rayfin:up`, then `npm run rayfin:status`.
+
+The deploy job is guarded until the repository or environment has a real Fabric target configured:
+set `RAYFIN_WORKSPACE_ID`, `RAYFIN_TENANT_ID`, and either `RAYFIN_TOKEN` or
+`RAYFIN_CLIENT_ID`/`RAYFIN_CLIENT_SECRET`. Without those values the job logs notices and skips
+`rayfin up`; do not claim a deploy is verified until it has run against a tenant.
 
 ## Scratch files
 
@@ -424,3 +438,29 @@ a deliberate, documented workbench for measuring what the city costs the browser
 rail beside it can be read, kept precisely so the next measurement is reproducible rather than
 reinvented. Add to it, and document what you added in its README, rather than growing a private
 copy beside it.
+
+## The city keystone: footprint from bytes, height from CU
+
+`src/capacityCity.ts` is the item-level echo of `capacityAtlas.ts`, and the two must stay the same
+shape. A capacity's plot comes from its provisioned CU budget and its skyline from CU consumed; one
+level down, a *building's* footprint comes from its OneLake bytes and its height from the CU-seconds
+charged to it. `capacityCity.ts` imports `cuToHeight` from `capacityAtlas.ts` verbatim rather than
+re-deriving it, so an item and its capacity raise a skyline on one scale — do not fork that formula.
+
+The city adds one subtlety to "never draw a guess", and it is the easy thing to get wrong: a null
+footprint is **not** always a missing measurement. A compute-only kind — a Notebook, a Pipeline —
+holds no OneLake storage by nature, so null bytes is a *complete* measurement of an item that stores
+nothing, and it sits on `MIN_FOOTPRINT`. A storage-bearing kind — a Lakehouse, a Warehouse — with
+null bytes is missing evidence and draws `vacant`/wireframe. `canHoldStorage(kind)` in `itemKind.ts`
+is the only thing that separates the two; collapsing them either fills the city with false wireframes
+or hides real gaps. `itemMassing` draws `vacant` when *either* footprint or height is missing, so a
+building with a known lot but unknown CU still fences rather than claiming a height of zero.
+
+`capacityCity.test.ts` pins this in `describe('measurements that are missing rather than zero')`.
+When you change any of it, mutate the fix and watch that block go red first — a footprint helper that
+returns `MIN_FOOTPRINT` for a missing Lakehouse, or a height helper that returns `0` for unknown CU,
+must fail a test, or the guard is advertising protection it does not provide.
+
+`cityPlan.ts`, `cityBuildings.ts`, `CapacityCityScene.ts` and the city view components are still in
+`src/pending-port/` — they consume a `CityPlan` that does not exist yet against the Fabric contracts,
+and `cityPlan.ts` (the schema-split neighbourhood builder) is the blocker for all of them.

@@ -51,6 +51,9 @@ export function bootstrapAuth(): IAuthService {
   const client = initRayfinClient({
     baseUrl: apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`,
     publishableKey: publishableKey ?? 'local-dev-key',
+    functionsBaseUrl: localDev
+      ? import.meta.env.VITE_RAYFIN_FUNCTIONS_URL
+      : undefined,
     localDev,
   });
 

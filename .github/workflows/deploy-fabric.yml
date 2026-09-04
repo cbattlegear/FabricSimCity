@@ -1,0 +1,88 @@
+name: Deploy Fabric app
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-fabric
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: fabric-production
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check Rayfin deployment configuration
+        id: config
+        env:
+          RAYFIN_TOKEN: ${{ secrets.RAYFIN_TOKEN }}
+          RAYFIN_CLIENT_ID: ${{ secrets.RAYFIN_CLIENT_ID }}
+          RAYFIN_CLIENT_SECRET: ${{ secrets.RAYFIN_CLIENT_SECRET }}
+          RAYFIN_TENANT_ID: ${{ vars.RAYFIN_TENANT_ID || secrets.RAYFIN_TENANT_ID }}
+          RAYFIN_WORKSPACE_ID: ${{ vars.RAYFIN_WORKSPACE_ID || secrets.RAYFIN_WORKSPACE_ID }}
+        run: |
+          configured=true
+          if [[ -z "$RAYFIN_WORKSPACE_ID" ]]; then
+            echo "::notice::Set RAYFIN_WORKSPACE_ID as a repository/environment variable or secret before Fabric deployment can run."
+            configured=false
+          fi
+          if [[ -z "$RAYFIN_TENANT_ID" ]]; then
+            echo "::notice::Set RAYFIN_TENANT_ID as a repository/environment variable or secret before Fabric deployment can run."
+            configured=false
+          fi
+          if [[ -z "$RAYFIN_TOKEN" && ( -z "$RAYFIN_CLIENT_ID" || -z "$RAYFIN_CLIENT_SECRET" ) ]]; then
+            echo "::notice::Set either RAYFIN_TOKEN or the RAYFIN_CLIENT_ID/RAYFIN_CLIENT_SECRET service-principal pair before Fabric deployment can run."
+            configured=false
+          fi
+          echo "configured=$configured" >> "$GITHUB_OUTPUT"
+          if [[ "$configured" != "true" ]]; then
+            echo "::notice::Skipping rayfin up; no Fabric tenant credentials are configured for this repository yet."
+          fi
+
+      - name: Authenticate Rayfin
+        if: ${{ steps.config.outputs.configured == 'true' }}
+        env:
+          RAYFIN_TOKEN: ${{ secrets.RAYFIN_TOKEN }}
+          RAYFIN_CLIENT_ID: ${{ secrets.RAYFIN_CLIENT_ID }}
+          RAYFIN_CLIENT_SECRET: ${{ secrets.RAYFIN_CLIENT_SECRET }}
+          RAYFIN_TENANT_ID: ${{ vars.RAYFIN_TENANT_ID || secrets.RAYFIN_TENANT_ID }}
+        run: |
+          if [[ -n "$RAYFIN_TOKEN" ]]; then
+            echo "::notice::Using RAYFIN_TOKEN for non-interactive Rayfin authentication."
+          else
+            npx rayfin login --service-principal \
+              --client-id "$RAYFIN_CLIENT_ID" \
+              --client-secret "$RAYFIN_CLIENT_SECRET" \
+              --tenant "$RAYFIN_TENANT_ID"
+          fi
+
+      - name: Deploy with Rayfin
+        if: ${{ steps.config.outputs.configured == 'true' }}
+        env:
+          RAYFIN_TOKEN: ${{ secrets.RAYFIN_TOKEN }}
+          RAYFIN_TENANT_ID: ${{ vars.RAYFIN_TENANT_ID || secrets.RAYFIN_TENANT_ID }}
+          RAYFIN_WORKSPACE_ID: ${{ vars.RAYFIN_WORKSPACE_ID || secrets.RAYFIN_WORKSPACE_ID }}
+        run: |
+          npm run rayfin:up
+          npm run rayfin:status

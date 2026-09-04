@@ -1,0 +1,6 @@
+node_modules/
+dist/
+local.settings.json
+deploymetadata.json
+bin/
+obj/
