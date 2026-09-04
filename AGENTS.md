@@ -3,19 +3,40 @@
 Conventions for coding agents. Everything here was learned by getting it wrong first; the
 specifics matter more than the general advice.
 
+FabricSimCity renders a Microsoft Fabric capacity as a walkable 3D city and runs as a Fabric App
+on Rayfin. It began as a fork of SQLSimCity, which drew a SQL Server the same way. The
+visualization was kept; the entire .NET collection stack underneath it was deleted. Several rules
+below survive from that build because they were about the renderer, which did not change.
+
 ## Layout and CSS changes must be measured in a real browser
 
 **A UI change is not verified until it has been measured in a running browser.** Run `npm run dev`
-in `web/` and take real numbers.
+and take real numbers.
 
-This is not a style preference. The test suite reads `web/src/App.css` as *source text*: it can
-confirm that a declaration exists, and it cannot see the layout that results. Two real defects in
-this codebase were invisible to a green suite:
+This is not a style preference. The test suite reads `src/App.css` as *source text*: it can confirm
+that a declaration exists, and it cannot see the layout that results. Four real defects have been
+invisible to a green suite:
 
 - The sidebar rendered `.sidebar-scroll` while the stylesheet only styled `.sidebar-body`, so the
   column had no scroll container at all and everything past the fold was unreachable.
 - A fix that added `min-height: 0` to `.sidebar-drawer` squeezed the drawer to **10px** and clipped
-  the summary you click to open it. Every test passed.
+  the summary you click to open it.
+- `.lazy-surface` was rendered with no rule for it at all. Left `static` it collapsed onto the
+  canvas's intrinsic size: measured at 1440x900 the canvas came out **1032x516** and left 384px of
+  dead black below the city. `tsc` was clean and all 610 tests passed.
+- The capacity detail panel was placed directly inside `.sidebar-scroll`, which carries no padding
+  by design, so every label sat flush at **x=0** against the rail's edge.
+
+The last two share a cause worth naming: **a class that appears in JSX and nowhere in the
+stylesheet is invisible to every check in this repo.** After adding markup, diff the class names
+against `App.css`:
+
+```powershell
+$css = Get-Content src\App.css -Raw
+$names = Select-String -Path src\App.tsx -Pattern 'className="([^"]+)"' -AllMatches |
+  ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value -split '\s+' } | Sort-Object -Unique
+foreach ($n in $names) { if ($css -notmatch [regex]::Escape(".$n")) { "UNSTYLED: $n" } }
+```
 
 For any change touching layout, record before/after numbers for the elements involved:
 
@@ -29,49 +50,54 @@ That is the bug signature to look for. Also check that you have not created nest
 and that scrolling does not chain into the map canvas — `.map-shell` is `position: fixed`.
 
 **Zero unreachable pixels is necessary, not sufficient.** A column where the address list is 0px and
-the place card is 12px does not overflow and is still useless — the same class of mistake as the
+the detail panel is 12px does not overflow and is still useless — the same class of mistake as the
 10px drawer. Record the actual heights of the sections that gave way, not just the overflow number,
 and say whether the result is usable.
 
 The sharpest usability check is a **trusted** click. `locator.click()` hit-tests, so it fails when a
-sibling overlaps the target; that is how the #65 column turned out to be uninteractable and not
-merely unreadable. `element.click()` via `evaluate`, and `click({ force: true })`, both bypass
-hit-testing and will pass while the defect is still there — use them only to reach a later state,
-never as evidence. Report the trusted click as its own pass/fail line, with the timing.
+sibling overlaps the target; that is how one column turned out to be uninteractable and not merely
+unreadable. `element.click()` via `evaluate`, and `click({ force: true })`, both bypass hit-testing
+and will pass while the defect is still there — use them only to reach a later state, never as
+evidence. Report the trusted click as its own pass/fail line, with the timing.
 
 Measure at **both** breakpoints. The sidebar is a rail above 860px and a bottom sheet at or below
 it, and the two behave differently on purpose.
 
-Put the measured numbers in the pull request body.
+`tools/measure-browser/measure-atlas-column.js` does all of this against `npm run dev`. Use it
+rather than rebuilding the probe, and put the measured numbers in the pull request body.
 
-### Reaching the city view
-
-`npm run dev` alone serves the atlas but not the city column — that needs the API. Run SQL Server
-locally, point `ConnectionStrings__SqlSimCity` at it, `dotnet run --project src\SqlSimCity.Api
---urls http://127.0.0.1:5080`, and open `?view=city&database=<endpoint>%2Fdatabase%2F<db>`.
-
-The plan finder is empty until Query Store has captured something, and an empty finder is a short
-form that hides every height defect in that drawer. Query Store's default `QUERY_CAPTURE_MODE =
-AUTO` discards cheap ad-hoc queries, so a seed workload can run and still leave one family behind;
-set `QUERY_CAPTURE_MODE = ALL` before seeding. Submitting the finder with an **empty** search term
-lists everything, which is the reliable way to populate it. Measure the real component with real
-rows rather than reconstructing the column out of a different drawer's content.
+**Measure the populated column.** An empty detail region and a closed drawer are short forms that
+hide exactly the height defects the measurement exists to find. Select a capacity and open every
+drawer first — two open drawers are the case where the shared height budget is under real pressure.
 
 ## A new test must fail against the broken state
 
 Before claiming a regression test works, revert the fix and watch the test fail:
 
 ```powershell
-git stash            # or: git checkout origin/main -- web/src/App.css
-npm test -- --run
-git stash pop
+Copy-Item src\App.css $env:TEMP\App.css.bak
+# ...mutate the fix...
+npx vitest run
+Copy-Item $env:TEMP\App.css.bak src\App.css -Force
 ```
 
 A guard that passes against the broken state is worse than no guard, because it advertises
 protection it does not provide. Say in the pull request that you checked this.
 
 The same applies when you refactor test helpers: confirm the *existing* assertions still bind and
-have not started passing vacuously.
+have not started passing vacuously. That risk is unusually high right now — a large mechanical
+rename (`database`→`capacity`, SQL types→Fabric types) ran across this tree, and a source-text
+assertion about a renamed symbol can start matching nothing while still reporting green.
+
+### Prefer an invariant to a count
+
+`leaves the single-drawer atlas column unwrapped` asserted that the atlas had exactly one drawer.
+The atlas legitimately grew a second one and the guard failed for the wrong reason — not because
+the layout broke, but because a count went out of date. It now asserts the rule the wrapper
+actually exists for: a column with sibling drawers wraps them, a column with one does not.
+
+A guard phrased as a count has to be edited every time the thing it counts changes shape, and each
+of those edits is an opportunity to weaken it without noticing.
 
 ### `ownRule()` in `mobileLayout.test.ts` silently retargets
 
@@ -92,6 +118,17 @@ When asserting that a declaration is **absent** — the negative form, which is 
 iterate `rules(css)` and check *every* rule whose selector is the target or starts with `target:`.
 Reserve `ownRule()` for reading a value you expect to be present.
 
+### Source-text guards need a real file path, not `import.meta.url`
+
+Under `environment: 'jsdom'`, `import.meta.url` is an **http** URL, so
+`readFileSync(new URL('./x', import.meta.url))` throws `TypeError: The URL must be of scheme file`.
+This breaks *every* source-text guard in the repo, and it fails at **collect** time, so it reads as
+a missing suite rather than a broken one — the run stays green-looking while seven files of
+protection quietly do nothing.
+
+Each affected suite has a local `sourcePath()` helper resolving against `process.cwd()`, with a
+fallback to `src/pending-port/`. Use it. Do not reintroduce `import.meta.url` for file reads.
+
 ## `App.css` source order is load-bearing
 
 A media query adds no specificity, so same-specificity rules resolve by source order. Base rules
@@ -100,6 +137,11 @@ for `.sidebar-drawer` and friends sit near the **end** of the file, *after* the 
 
 Narrow-width overrides belong in the second `@media (max-width: 860px)` block at the end of the
 file. Verify the line numbers before assuming which rule wins.
+
+New **base** rules go immediately before that final narrow block, so the narrow block can still
+override them. Take care when inserting there: the edit boundary is one line above a rule that is
+easy to clip, and truncating `.map-sidebar { overflow: auto }` out of the narrow block removes the
+bottom sheet's only scroller without failing a single test.
 
 ## `<details>` floors on `::details-content`, not on `<summary>`
 
@@ -122,13 +164,13 @@ body already scrolls. The defect exists only where the box does.
 clamped by its own definite `max-height`. So each drawer still floors at `min(content, cap)` —
 summary always inside that. Two open drawers therefore cannot both shrink out of the way.
 
-That is why the cap is no longer a flat `46vh` per drawer. Two drawers each floored at 46vh floor at
-46vh *each*, and 2 × 368 does not fit an 800px rail: measured at 1115×800 with a populated plan
-finder, 167px of the city column was unreachable, the address list was squeezed to 0px, and its
-entries stopped being clickable at all. So a `.sidebar-drawers` wrapper owns one budget and the
-drawers inside divide it via `--sidebar-drawer-cap`, half each by default and widened by a `:has()`
-rule when only one is open. The drawer's `max-height: var(--sidebar-drawer-cap, 46vh)` fallback is
-what keeps an *unwrapped* drawer — the atlas — byte-identical.
+That is why the cap is not a flat `46vh` per drawer. Two drawers each floored at 46vh floor at
+46vh *each*, and 2 × 368 does not fit an 800px rail: measured at 1115×800, 167px of the column was
+unreachable, the address list was squeezed to 0px, and its entries stopped being clickable at all.
+So a `.sidebar-drawers` wrapper owns one budget and the drawers inside divide it via
+`--sidebar-drawer-cap`, sharing by open count and widened by a `:has()` rule when only one is open.
+The drawer's `max-height: var(--sidebar-drawer-cap, 46vh)` fallback is what keeps an *unwrapped*
+drawer byte-identical.
 
 Two traps in that arrangement, both of which fail quietly:
 
@@ -138,29 +180,28 @@ Two traps in that arrangement, both of which fail quietly:
   failing — Chromium reads the rule back as `:not(:has(:where()))`, which matches everything, so the
   widened cap applies with both drawers open and the overflow returns. Plain `:not(:has(> …))` is
   correct: `:not()` is *not* forgiving, so an engine without `:has()` drops the whole rule and lands
-  on the half share, which always fits.
+  on the smaller share, which always fits.
 - **`display: contents` removes a box, not an element.** At ≤860px the wrapper is `display:
   contents`, so `.map-sidebar > *` goes on matching the *wrapper* while the drawers are the flex
   items — hence `.sidebar-drawers > *` alongside it in that block. Custom properties still inherit
-  through it too, so the drawers keep inheriting a 23vh half-share there; `max-height: none` in the
-  same block is the only thing discarding it, and weakening that gives the sheet a *tighter* cap
-  than existed before the wrapper.
+  through it too, so the drawers keep inheriting a share there; `max-height: none` in the same block
+  is the only thing discarding it, and weakening that gives the sheet a *tighter* cap than existed
+  before the wrapper.
 
-There are three `.sidebar-drawer` instances — one in `App.tsx` and two in `DatabaseCityView.tsx`.
-Check the change against more than one. The two in `DatabaseCityView.tsx` are siblings in the same
-column, so they are the case where the caps compete.
-
-`.sidebar-place-card` is a third `46vh` consumer on that same column and is *not* part of the
-budget. It shrinks freely, so it does not overflow the rail, but it is squeezed hard: measured at
-1115×800 with a place card open and both drawers open, it holds 81px and scrolls its own content.
+The atlas rail in `App.tsx` has two drawers and is wrapped. `src/pending-port/CapacityCityView.tsx`
+has two more that will rejoin the budget when the city view is ported — check the change against
+more than one column.
 
 ## The city scene renders on demand, and the shadow map is not automatic
 
-`DatabaseCityScene.ts` does not run a permanent `requestAnimationFrame` loop. It renders when
-something changed, and `shadowMap.autoUpdate` is **off** — issue #90 measured the shadow pass at
-948 draw calls and 7.6 ms *per frame*, all of it redrawing shadows for a city that had not moved.
-Shadows are re-rendered by setting `shadowMap.needsUpdate = true` at the few moments the scene's
-contents or its light actually change, never on camera movement.
+This applies to `src/pending-port/CapacityCityScene.ts`, which is quarantined but not rewritten.
+The rules below survive the port and are the reason the file was kept rather than deleted.
+
+It does not run a permanent `requestAnimationFrame` loop. It renders when something changed, and
+`shadowMap.autoUpdate` is **off** — the shadow pass measured 948 draw calls and 7.6 ms *per frame*,
+all of it redrawing shadows for a city that had not moved. Shadows are re-rendered by setting
+`shadowMap.needsUpdate = true` at the few moments the scene's contents or its light actually change,
+never on camera movement.
 
 That makes the shadow cost invisible in the usual places. `renderer.info.render.calls` folds the
 shadow pass in with the visible one, and a frame time taken while nothing is animating measures a
@@ -172,239 +213,214 @@ a steady 948 means something re-armed it and a steady 0 means shadows were switc
 Two consequences for any loop added later — both fail silently, and both are pinned by
 `shadowInvalidation.test.ts`:
 
-- **A new loop gets its own handle.** There are now three (`animationHandle` for the render-on-
-  demand pass, `dampingHandle` for orbit inertia, `vehicleHandle` for live vehicles). Reusing one
-  handle for two loops means whichever `cancelAnimationFrame` runs last silently orphans the other,
-  which then runs forever with nothing able to stop it. Cancel every handle in `dispose()`.
+- **A new loop gets its own handle.** There are three (`animationHandle` for the render-on-demand
+  pass, `dampingHandle` for orbit inertia, `vehicleHandle` for live vehicles). Reusing one handle
+  for two loops means whichever `cancelAnimationFrame` runs last silently orphans the other, which
+  then runs forever with nothing able to stop it. Cancel every handle in `dispose()`.
 - **A loop that moves objects must not invalidate the shadow map.** Vehicles animate every frame,
   so a single `shadowMap.needsUpdate = true` inside `runVehicleLoop` re-arms the whole 948-call
-  pass on every frame and gives back exactly what #90 removed. Vehicles are therefore excluded from
-  shadow casting outright (`castShadow = false`), which is also why they need no invalidation.
+  pass on every frame. Vehicles are therefore excluded from shadow casting outright
+  (`castShadow = false`), which is also why they need no invalidation.
 
 A loop must also **stop on its own** when there is nothing left to move — an empty roster ends the
 loop rather than scheduling an idle frame forever. Measure that, do not reason about it: an
 always-scheduled callback that does no work looks identical in a screenshot and identical in the
 test suite, and shows up only as a machine that never goes idle.
 
-`shadowInvalidation.test.ts` guards this by slicing `DatabaseCityScene.ts` as **source text** and
-asserting a region does not mention `needsUpdate`. Two traps follow from that. It strips comments
-first (`code()`), because otherwise a doc comment *explaining* the rule reads as a violation of it.
-And each slice is bounded by a named anchor further down the file, so **adding a function between
-two anchors silently extends the slice above it** and the guard starts asserting about code it was
-never written for. Check the anchors when you add anything near a loop.
+`shadowInvalidation.test.ts` guards this by slicing the scene as **source text** and asserting a
+region does not mention `needsUpdate`. Two traps follow. It strips comments first (`code()`),
+because otherwise a doc comment *explaining* the rule reads as a violation of it. And each slice is
+bounded by a named anchor further down the file, so **adding a function between two anchors silently
+extends the slice above it** and the guard starts asserting about code it was never written for.
+Check the anchors when you add anything near a loop.
 
 Anchors are used the same way outside that file — `cityVehicleAssets.test.ts` and
-`cityVehicleLegibility.test.ts` both slice `VEHICLE_SIZE` out of `DatabaseCityScene.ts` — and there
-the failure is sharper. **Promoting a declaration to module scope moves an anchor, and if it ends up
-*above* the start anchor the window inverts.** `String.slice(from, to)` with `to < from` returns the
-empty string, so every lookup inside the slice finds nothing. Hoisting `VEHICLE_Y` to the top of the
-file to derive the trail height did exactly this to both files at once.
+`cityVehicleLegibility.test.ts` both slice `VEHICLE_SIZE` out of the scene — and there the failure
+is sharper. **Promoting a declaration to module scope moves an anchor, and if it ends up *above* the
+start anchor the window inverts.** `String.slice(from, to)` with `to < from` returns the empty
+string, so every lookup inside the slice finds nothing. Hoisting `VEHICLE_Y` to the top of the file
+to derive the trail height did exactly this to both files at once.
 
 So assert `to > from`, not merely that each `indexOf` cleared `-1`. An inverted window and a renamed
 anchor are different bugs and only the stricter check catches both. Prefer an end anchor that is
 declared close to the start one and is unlikely to be hoisted.
 
-## NuGet lock files move together
+## Never draw a guess
 
-The repo uses Central Package Management (`Directory.Packages.props`) with `packages.lock.json`
-in all 19 projects, and CI restores with `--locked-mode`.
+The single rule the whole visualization rests on. A measurement that is **missing** renders as
+wireframe; it never renders as zero.
 
-Changing any package version means regenerating **all** the lock files, not just the obviously
-affected ones. Transitive and `CentralTransitive` entries appear in projects that never reference
-the package directly — `src/SqlSimCity.Archive.Tool` is the usual casualty:
+A paused capacity and an idle capacity produce identical zeroes and are completely different
+things. `capacityHeight()` returns `null` rather than `0` for unknown CU, `capacitySide()` returns
+`null` for an unrecognised SKU rather than defaulting, and `atlasCity.ts` turns a `null` height into
+`vacant` lots. `capacityAtlas.test.ts` pins this in
+`describe('measurements that are missing rather than zero')`. The fixture roster includes a
+suspended capacity specifically because it is the case most likely to be drawn wrong.
 
-```powershell
-dotnet restore SqlSimCity.slnx --force-evaluate
+`isRejecting()` deliberately excludes `InteractiveDelay`. That stage adds 20s to a request — a busy
+city, not a broken one. Drawing it as a blackout would cry wolf.
+
+## The `CapacitySource` seam
+
+All Fabric access goes through one interface, `src/collect/source.ts`, with three implementations:
+
+```
+semanticModelSource   DAX via the fabric-semanticmodel connector      [default, not yet written]
+eventhouseSource      KQL via the kusto connector                     [not yet written]
+fixtureSource         deterministic synthetic evidence                [the development loop]
 ```
 
-Commit every lock file this touches. Skipping it produces `NU1004` across many projects, where
-the real instruction is buried in the noise.
+`capabilities` is declared up front so the UI decides what to draw *before* it asks. A source
+without per-item CU breakdown degrades to live infrastructure over static buildings rather than
+failing.
 
-Do not weaken `--locked-mode` in CI to get around this. It is a supply-chain control.
+**Fixture mode is the primary development loop, not a fallback.** Rayfin has no local backend and
+no `rayfin dev`; `npm run dev` runs Vite against a *deployed* backend. Without fixtures the city is
+undevelopable without a Fabric tenant. `App.tsx` constructs the source at module scope — that one
+line is the swap point.
 
-## A negative descriptor is a permanent answer unless the cache is stamped
+### A negative result must be stamped if it is cached
 
-Query text is normalized once per `query_text_id` and the *result* is cached — including a
-`Missing` result. That cache is deliberately excluded from plan-cache eviction (a `Missing`
-descriptor is the record of *why* there is no text, so discarding it would re-ask the source for
-something it already refused). The consequence is easy to miss: **improving `SqlTextNormalizer`
-changes nothing on any instance that has already run.** Every text the old normalizer rejected is
-on disk as a rejection, and the read is a hit, so the new code is never reached.
+Carried forward from the SQL build, where it cost real capability: query text was normalized once
+and the *result* was cached, including a `Missing` result. The consequence is easy to miss —
+improving the normalizer changed nothing on any instance that had already run, because every text
+the old code rejected was on disk as a rejection and the read was a hit. Measured against a live
+instance, **167 of 172 query families had no text at all** and the code that would have fixed it
+was never reached.
 
-That is not hypothetical. Query Store records a parameterized statement as its sp_executesql
-parameter declaration followed by the statement — `(@P0 int)SELECT ...` — which no T-SQL parser
-accepts as a batch. On an Azure SQL database driven by any ORM or prepared-statement client that is
-nearly the whole workload: measured against a live instance, **167 of 172 query families had no
-text at all**, which empties the plan finder, strips the labels off the city's query traffic, and
-leaves families split by query hash that normalized text would have merged.
+Any cache added here for a *derived* value must carry a version stamp that feeds the record id, not
+merely the record kind — the id is what retires a record. Restamping only the kind leaves it
+readable, and a test that restamps the kind to prove retirement passes against a broken
+implementation.
 
-So `TextDescriptorKind` carries a version, and it feeds *both* the record kind and the logical kind
-hashed into the record id. The id is what retires a record — `ReadJsonAsync` is keyed by id and
-never looks at the kind — so restamping only the record kind leaves it readable, and a test that
-restamps the kind to prove retirement passes against a broken implementation. Mint the legacy id
-to test this, and mutate `Id(TextDescriptorKind, …)` back to the literal to confirm the guard binds.
+## Rayfin constraints
 
-Bump the stamp whenever the normalizer changes what it accepts or how it renders what it accepts,
-and add the old value to `SupersededTextDescriptorKinds`. That list exists because retiring by id
-makes the old records unreachable, and an unreachable record that no kind list names is storage
-nothing can ever reclaim.
+All verified against `@microsoft/rayfin-*` v1.34.0.
 
-## Validation commands
+- **No cron, no timers, no background workers.** Functions are invocation-triggered only, so there
+  is no in-app collector. Refresh is a client-side `setInterval` while the tab is open.
+- Decorators are TC39 Stage 3. Requires `@vitejs/plugin-react`, **never** `-swc`, which cannot parse
+  them, and `ESNext.Decorators` in the tsconfig `lib`.
+- The root `tsconfig.json` deliberately omits `erasableSyntaxOnly`; it would break `rayfin/`.
+- `tsc --noEmit -p tsconfig.json` reports TS6305 on `src/services/*` because project references are
+  not built. **`tsc -b` is the correct check.**
+- `@text()` without `max` produces `NVARCHAR(MAX)`, which breaks GraphQL schema generation *after*
+  `rayfin up` reports success.
+- Omitting a permission decorator silently grants full CRUD to any signed-in user.
+- `.execute()` silently returns one page with no signal that more exist. Always `.executePaginated()`.
+- Connectors are **private preview** and delegated-auth only: every user needs their own capacity
+  metrics permissions, and there is no service-principal path where the app reads once for everyone.
+- Static bundle caps at 100 MB compressed.
 
-```powershell
-dotnet build SqlSimCity.slnx -c Release        # 0 warnings expected
-dotnet test SqlSimCity.slnx -c Release         # 1,505 tests
-npm test                                       # 647 probe-catalog tests
-cd web; npm ci; npm run build; npm test -- --run   # 1,069 tests / 54 files
-npm run typecheck
-```
+## Fabric telemetry facts
 
-Those counts are the baselines to compare against. Investigate any delta rather than accepting it.
+- **No REST endpoint returns CU utilization.** `api.fabric.microsoft.com/v1` gives topology only.
+- CU telemetry comes from the Capacity Metrics semantic model over DAX, which Microsoft documents
+  as **unsupported** for programmatic access, and whose schema has already changed once. Probe both
+  generations the way Microsoft's own FUAM notebooks do
+  (`'Metrics By Item Operation And Day'` → `'MetricsByItemandOperationandDay'`).
+- Throttling uses **30-second timepoints**, 2,880 per day. The gauges average *future* smoothed
+  usage over 20 / 120 / 2,880 timepoints → interactive delay / interactive rejection / background
+  rejection. The fixture generator carries 24h of future series for exactly this reason.
+- The REST `ItemType` enum (50 values, `DataPipeline`, `SemanticModel`…) and the Capacity Metrics
+  names (`Pipeline`, `Dataflow Gen2`, `LlmPlugin`, `User Data Functions`) disagree. `src/itemKind.ts`
+  is the mapping layer and is where building archetypes get assigned.
 
-`npm run typecheck` and `npm run build` are not the same check. `typecheck` covers the app
-sources; `build` runs `tsc -b` over the whole project graph, which is the first thing that reads
-the `*.test.ts` files. A test that constructs a contract value with a string literal outside its
-union type passes the suite — Vitest strips types — passes `typecheck`, and fails the build. Run
-`npm run build` before pushing, not only at release time.
+## `src/pending-port/`
 
-The root `npm test` is easy to miss because the web suite is the one usually meant by "the
-frontend tests". It validates `sql/manifest.json` against the probe files, and it is what pins
-the shape of the Query Store paging probes — a probe edit can leave both other suites green.
+29 modules and 33 test files from SQLSimCity that the Fabric port has not reached. Excluded from
+`tsconfig.json` and `vitest.config.ts` — **keep those two lists in agreement**; a module excluded
+from one and not the other is either unchecked or unrunnable, and both fail quietly.
 
-### The slow tests are isolated on purpose
+See `src/pending-port/README.md` for what each one needs. Before quarantining anything new, check
+*why* a pure module errors: an iterative "move whatever still errors" loop once dragged the entire
+atlas in, because `mapRibbon` → `cityRoads` → `cityTraffic` for a single type. The fix was moving
+that type to where it belonged, not moving twelve files.
+
+## The slow tests are isolated on purpose
 
 Suite wall time is set by a few individual tests, not by the total, so the layout that spreads
 them out is load-bearing and easy to undo by tidying.
 
 The `cityGrowth` family is four spec files over one `cityGrowth.testkit.ts`, and
-`cityGrowthRetrace.test.ts` holds exactly one test because that test alone is the web suite's
-critical path — it was 17.7s of a 44s run. Vitest schedules a *file* onto a worker, so merging
-these back into one spec re-serialises them and roughly doubles the suite. Add growth tests to
-one of the other three; leave the retrace file alone.
+`cityGrowthRetrace.test.ts` holds exactly one test because that test alone was the critical path —
+17.7s of a 44s run. Vitest schedules a *file* onto a worker, so merging these back into one spec
+re-serialises them and roughly doubles the suite. Add growth tests to one of the other three; leave
+the retrace file alone. The cost is `planCity`, not the scaffolding: measured over counts 80..140,
+planning is 16,150ms against 116ms of signature building.
 
-The cost there is `planCity`, not the test scaffolding: measured over counts 80..140, planning is
-16,150ms against 116ms of signature building. Nothing done in a test file will move it.
+## Validation commands
 
-For the .NET side the rule is the same one `SeedUnrelatedRowsAsync` already illustrates. Seeding
-through `SqliteProtectedRecordStore.PutAsync` costs 19–43ms per row, because the store sets
-`Pooling = false` on purpose and every call therefore opens a connection and commits — an fsync
-apiece. Batching a seed into one connection and one transaction gets the same rows in at ~8µs
-each. Seed in bulk and reserve `PutAsync` for what is actually under test.
+```powershell
+npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
+npx vitest run        # 610 tests / 31 files
+npm run build         # tsc -b + vite build
+npm run dev           # Vite on fixtures -- no tenant needed
+```
+
+Those counts are the baselines to compare against. Investigate any delta rather than accepting it.
+
+`npm run build` and a bare typecheck are not the same check. `build` runs `tsc -b` over the whole
+project graph, which is the first thing that reads the `*.test.ts` files. A test that constructs a
+contract value with a string literal outside its union type passes the suite — Vitest strips types
+— and fails the build. Run `npm run build` before pushing.
 
 ## Every pull request needs a `release:*` label
 
-Merging to `main` with green CI cuts a release automatically (`.github/workflows/auto-release.yml`),
-and the label on the pull request is what picks the version bump. There is no prompt and no second
-chance: the tag is cut, the GitHub Release is written and the image is pushed to GHCR within a
-couple of minutes of the merge.
+**The automation is not wired up yet.** `auto-release.yml` and `release.yml` were deleted with the
+.NET stack — they built and pushed a container image, and this app deploys through `rayfin up`
+instead. Rebuilding that path is the `ci-and-deploy` work.
 
-Apply exactly one before merging. All four already exist, so use `gh pr create --label` or
-`gh pr edit --add-label`:
+Keep labelling anyway. The label is the record of what a change promises, and it is far easier to
+apply while the change is fresh than to reconstruct from a diff months later when the automation
+lands and needs a history to read.
 
 | label | when |
 |---|---|
-| `release:major` | Anyone running the image must change something to stay working — a removed or renamed API route or response field, a renamed configuration key or environment variable, a changed default that alters behaviour, a database or archive format that old readers cannot open. |
-| `release:minor` | New capability that costs the operator nothing — a new view, endpoint, opt-in setting or supported source. Nothing that worked before behaves differently. |
+| `release:major` | Anyone running the app must change something to stay working — a removed or renamed route or response field, a renamed configuration key or environment variable, a changed default that alters behaviour. |
+| `release:minor` | New capability that costs the operator nothing — a new view, endpoint, opt-in setting or supported source. |
 | `release:patch` | Bug fix, performance work, a rendering or layout correction, dependency bumps, refactors with no visible effect. |
-| `release:skip` | Nothing reaches the shipped artifact: docs, `AGENTS.md`, tests, CI workflows, repository chores. Also the deliberate choice when batching a run of changes into one hand-cut release — see below. |
+| `release:skip` | Nothing reaches the shipped artifact: docs, `AGENTS.md`, tests, CI workflows, repository chores. |
 
-**The bump describes the promise to whoever runs the image, not the size of the diff.** A one-line
-change that renames a config key is `major`. A thousand-line refactor that no operator can observe
-is `patch`. Do not reach for the label by counting files.
+**The bump describes the promise to whoever runs the app, not the size of the diff.** A one-line
+change that renames a config key is `major`. A thousand-line refactor nobody can observe is `patch`.
+When a pull request spans categories, take the highest one it earns.
 
-When a pull request spans categories, take the highest one it earns. A feature that also removes an
-old route is `major`, not `minor`.
+### The rules the automation will re-impose
 
-Omitting the label is not neutral — it silently means `patch`, so feature work ships understated.
-That is exactly how v0.7.0 came to need a hand-cut `workflow_dispatch`: #69, #70 and #71 all merged
-unlabelled.
+Recorded now because every one of them cost something in the previous repository, and rebuilding
+the workflow without them would buy the same lessons twice.
 
-If a change genuinely should not ship on its own, prefer `release:skip` over leaving it bare, so the
-intent is recorded rather than inferred.
+Omitting the label was not neutral — it silently meant `patch`, so feature work shipped
+understated. Three unlabelled merges once forced a hand-cut release.
 
-### `release:skip` defers a bump, it does not cancel one
+`release:skip` deferred a bump, it did not cancel one. The skipped change still landed on `main`,
+so skip meant "some later release carries this". When cutting a batched release the bump was the
+**highest bump earned by any pull request merged since the last release** — not the size of
+whichever one triggered it. **When a bump-worthy change is skipped, say so in the pull request
+body**, so whoever cuts the batched release can find it without re-reading every diff since the tag.
 
-Skipping is also used deliberately to batch. Every release builds and pushes an image to GHCR,
-which is far too slow to want on every pull request, so the working practice is to merge a run of
-changes as `release:skip` and then cut one release by hand with `workflow_dispatch` covering
-everything since the last one.
+Auto-release triggered on **CI completing on `main`**, not on the merge, and CI cancels a superseded
+in-progress run. Merging a second pull request before the first one's run finished cancelled that
+run, and the release it would have cut never happened — the commits still landed, but one commit's
+label was never read. Two pull requests merged 94 seconds apart shipped a `release:minor` and a
+`release:patch` together as a **patch**, and it could not be repaired: the workflow declines to cut
+a second release for an already-tagged commit, deliberately.
 
-That moves an obligation rather than removing it. The skipped change still lands on `main`, so
-**`release:skip` does not mean "no bump", it means "some later release carries this, and a decision
-made elsewhere picks its size".**
-
-When you cut that batched release, the bump is the **highest bump earned by any pull request merged
-since the last release** — not the size of whichever one triggered it, and not the size of the
-largest diff. Work out the label each merged pull request would have carried and take the maximum.
-
-This is the same understatement failure as merging unlabelled, reached by a third route. #99 added
-the operator-facing `LiveIncidents:SampleBounds` setting and was relabelled from `release:minor` to
-`release:skip` shortly before merging, so it sits on `main` unreleased. Cut the next release as a
-patch because the pull request prompting it happens to be a bug fix, and a minor-worthy capability
-ships inside a patch.
-
-So when a bump-worthy change is skipped, say so in the pull request body. Whoever cuts the batched
-release can then find it without re-reading every diff since the last tag.
-
-### Merge one pull request at a time, and wait for its release
-
-This section is about pull requests that carry a bump label. When everything in flight is
-`release:skip` there is no release to wait for and no collapse to cause, which is much of the time
-under the batching practice above — but the moment one pull request carries a bump, the following
-applies to it.
-
-The label is only half of it. Auto-release triggers on **CI completing on `main`**, not on the
-merge, and CI cancels a superseded in-progress run. So merging a second pull request before the
-first one's run finishes cancels that run, and the release it would have cut never happens — the
-commits still land, but one commit's label never gets read.
-
-That is not hypothetical. #85 (`release:minor`) and #86 (`release:patch`) were merged 94 seconds
-apart. #85's run on `main` was cancelled, only #86's reached the release job, and both shipped as
-**v0.7.2** — a patch. The new `Atlas:QueryStoreRefreshIntervalSeconds` setting went out understated,
-which is the same understatement failure as merging unlabelled, reached by a different route.
-
-Whether that can be repaired afterwards depends on whether a release was actually cut. If one was,
-it is stuck: the workflow declines to cut a second release for a commit that is already tagged,
-deliberately, so the tag stays where the first release put it. That is the #85/#86 case, and the
-only clean fix is not to cause it. If no release was cut at all — the ordinary batching case above,
-or a collapse where the surviving run carried `release:skip` — then nothing is tagged and a
-`workflow_dispatch` bump from `main`'s tip fixes it cleanly.
-
-Wait for the release to appear before merging the next one. If several pull requests share a bump
-class the collapse is harmless — the version lands in the right place either way — but confirm that
-before relying on it, rather than after.
-
-#### Merge the release-bearing pull request last
-
-Ordering makes the wait unnecessary, which is worth having when the wait is the part that gets
-skipped. The version job reads labels off the merged pull request for the head SHA of the run that
-*completed*, and it tests `release:skip` first — that branch calls `no_release` and wins outright
-over any bump. So the two collapse cases are not symmetric.
-
-Merge a `release:skip` before a bump and the collapse costs nothing: the skip run is the one
-cancelled, and it was never going to cut anything. The bump's run then reaches the release job and
-tags a commit that already contains the skipped work.
-
-Merge them the other way round and the collapse is worse than #85/#86. There the bump run is
-cancelled and the *skip* run reaches the release job, which cuts **nothing at all** — no tag, no
-release, and the bump's change ships silently inside whatever release comes along later. #85/#86 at
-least produced a version, merely understated.
-
-So when pull requests are ready together, merge every `release:skip` first and the release-bearing
-one last. Between two bumps there is no safe order, only the wait.
-
-This holds only while the two merges produce separate merge commits. The label read is an unordered
-union over every merged pull request the API returns for one SHA, so anything that puts both behind
-a single commit — merging one branch into the other before merging to `main`, or otherwise
-collapsing the two — lets the skip suppress the bump, with no ordering left to get right. Ordinary
-sequential merges never do this.
+The mitigation was to **merge the release-bearing pull request last**. The version job tested
+`release:skip` first and that branch won outright over any bump, so the two collapse cases were not
+symmetric. Merge a skip before a bump and the collapse cost nothing — the skip run was cancelled and
+was never going to cut anything. The other way round, the bump run was cancelled and the skip run
+cut **nothing at all**: no tag, and the change shipped silently inside a later release. Between two
+bumps there was no safe order, only the wait.
 
 ## Scratch files
 
 One-off probe pages and ad-hoc measurement scaffolding do not get committed. Delete them and
 confirm `git status` is clean before opening a pull request.
 
-That is about throwaway scratch, not about tooling. `tools/measure/` is the opposite case: a
-deliberate, documented workbench for measuring what a probe costs the instance it runs
-against, kept precisely so the next measurement is reproducible rather than reinvented. Add
-to it rather than growing a private copy beside it.
+That is about throwaway scratch, not about tooling. `tools/measure-browser/` is the opposite case:
+a deliberate, documented workbench for measuring what the city costs the browser and whether the
+rail beside it can be read, kept precisely so the next measurement is reproducible rather than
+reinvented. Add to it, and document what you added in its README, rather than growing a private
+copy beside it.

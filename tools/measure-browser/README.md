@@ -190,3 +190,30 @@ Four things it does that a hand-taken capture reliably gets wrong:
   roughly every other run. The wait is bounded and does not fail the shot if it expires.
 - **It pins the clock to 18:10 and shoots at 3200x1800**, matching the committed images, so the
   README's layout does not move when the pictures are replaced.
+## Measuring the sidebar column
+
+`measure-atlas-column.js` is the other half of the workbench: not what the city costs the GPU, but
+whether the rail beside it can actually be read and clicked. The repo conventions require a real
+browser for anything touching layout, because the test suite reads `App.css` as *source text* — it
+can confirm a declaration exists and cannot see the layout that results.
+
+```powershell
+npm run dev                     # in the repo root, serving fixtures
+node measure-atlas-column.js    # here
+```
+
+It reports, at 1115x800 and 720x800:
+
+- `clientHeight` / `scrollHeight` / `overflowY` for the column, the drawer wrapper, every
+  `.sidebar-scroll` and every drawer body. `scrollHeight > clientHeight` with `overflow: hidden` is
+  content that is unreachable, which is the defect signature.
+- The height each section actually got. **Zero unreachable pixels is necessary, not sufficient**: a
+  column whose address list is 0px does not overflow and is still useless.
+- A **trusted** `locator.click()` on a capacity entry, reported as its own pass/fail line with a
+  timing. Trusted clicks hit-test, so they fail when a sibling overlaps the target. `element.click()`
+  via `evaluate` and `click({ force: true })` both bypass that and will pass while the defect is
+  still there — use them only to reach a later state, never as evidence.
+
+It selects a capacity and opens every drawer before measuring, on purpose. An empty detail region
+and a closed drawer are short forms that hide exactly the height defects this exists to find, and
+two open drawers are the case where the shared height budget is under real pressure.

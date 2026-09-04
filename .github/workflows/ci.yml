@@ -13,111 +13,14 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The four jobs below are deliberately independent and run in parallel.
-#
-# They were one serial `verify` job, which meant the .NET suite, the web suite
-# and the container build queued behind each other for no reason: none of them
-# consumes another's output. Splitting them puts the run's wall time at the
-# slowest single job rather than at the sum.
-#
-# `container` in particular no longer carries `needs: verify`. That gate only
-# ever saved a runner on a red pull request; it cost every green one the full
-# .NET and web suites before the image build could start. Auto-release keys on
-# the CI *workflow* conclusion, not on any one job, so a red suite still blocks
-# a release exactly as before -- the workflow only concludes green when all
-# four jobs do.
-#
-# Keep a step in the job that owns its inputs. `Publish release` needs the .NET
-# restore, so it lives with the .NET suite; the web build needs `npm ci` under
-# web/, so it lives with the web suite. Anything needing both would have to
-# reintroduce a dependency edge, so prefer not to write one.
+# One job. The .NET, probe-catalog and container jobs this replaces are gone along with the stack
+# they verified, and what remains -- typecheck, tests, build -- shares a single `npm ci` and runs
+# in well under a minute. Splitting it would cost three dependency installs to parallelise work
+# that is already faster than the installs.
 jobs:
-  dotnet:
+  verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up .NET
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.x
-          cache: true
-          cache-dependency-path: "**/packages.lock.json"
-
-      - name: Restore .NET dependencies
-        # --locked-mode is a genuine supply-chain control: restore must fail
-        # rather than silently resolve a version that is not in the lock files.
-        # It stays. This wrapper only makes the most common failure legible.
-        #
-        # With Central Package Management, bumping a version in
-        # Directory.Packages.props invalidates the packages.lock.json of every
-        # project that carries a matching transitive/CentralTransitive entry --
-        # including projects nobody edited. The resulting wall of NU1004 buries
-        # the one thing a maintainer needs to know, which is the fix below.
-        run: |
-          set -Eeuo pipefail
-          log="${RUNNER_TEMP}/dotnet-restore.log"
-          status=0
-          dotnet restore SqlSimCity.slnx --locked-mode 2>&1 | tee "${log}" || status=$?
-
-          if [[ ${status} -eq 0 ]]; then
-            exit 0
-          fi
-
-          # Any other restore failure is re-raised untouched, so unrelated
-          # problems are not misdiagnosed as a lock-file drift.
-          if ! grep --quiet --extended-regexp 'NU100[45]|NU1403' "${log}"; then
-            exit "${status}"
-          fi
-
-          {
-            echo "### NuGet lock files are out of sync"
-            echo
-            echo 'Restore refused to run in `--locked-mode` because one or more'
-            echo '`packages.lock.json` files disagree with `Directory.Packages.props`.'
-            echo
-            echo 'Regenerate every lock file and commit the result:'
-            echo
-            echo '```'
-            echo 'dotnet restore SqlSimCity.slnx --force-evaluate'
-            echo 'git add -- "**/packages.lock.json"'
-            echo 'git commit -m "Regenerate NuGet lock files"'
-            echo '```'
-            echo
-            echo 'Projects reporting the mismatch:'
-            echo
-            grep --extended-regexp 'NU100[45]|NU1403' "${log}" \
-              | grep --only-matching --extended-regexp '[^ /\\]+\.csproj' \
-              | sort --unique \
-              | sed 's/^/- /' || true
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-          echo "::error::NuGet lock files are out of sync. Run 'dotnet restore SqlSimCity.slnx --force-evaluate' and commit the regenerated packages.lock.json files. See the job summary for details."
-          exit "${status}"
-
-      - name: Test .NET
-        run: dotnet test SqlSimCity.slnx --configuration Release --no-restore
-
-      - name: Publish release
-        run: >-
-          dotnet publish src/SqlSimCity.Api/SqlSimCity.Api.csproj
-          --configuration Release
-          --no-restore
-          --output artifacts/publish
-          -p:ContinuousIntegrationBuild=true
-          -p:Deterministic=true
-          -p:UseAppHost=false
-
-      - name: Verify published legal notices
-        run: |
-          cmp LICENSE artifacts/publish/legal/LICENSE
-          cmp NOTICE artifacts/publish/legal/NOTICE
-
-  web:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -127,74 +30,16 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: web/package-lock.json
 
-      - name: Install web dependencies
-        working-directory: web
+      - name: Install dependencies
         run: npm ci
 
-      - name: Test web
-        working-directory: web
-        run: npm test
+      - name: Test
+        run: npx vitest run
 
-      - name: Type-check web
-        working-directory: web
-        run: npm run typecheck
-
-      - name: Build web
-        working-directory: web
+      # `tsc -b`, not `tsc --noEmit`. The latter reports TS6305 against `src/services/*` because
+      # the Rayfin project references have not been built, and the build is what reads the
+      # `*.test.ts` files -- a test constructing a contract value with a string literal outside
+      # its union type passes the suite, since Vitest strips types, and fails here.
+      - name: Build
         run: npm run build
-
-  scripts:
-    # The catalog and shell guards need neither the .NET SDK nor web/'s
-    # node_modules -- the root package has no dependencies at all -- so they
-    # finish long before either suite and no longer delay them.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-
-      - name: Validate SQL manifest
-        run: npm test
-
-      - name: Validate fixtures
-        run: node --test fixtures/v1/test/validate-fixtures.test.mjs
-
-      - name: Test operational scripts
-        run: tools/tests/operations.test.sh
-
-      - name: Test dependency-only diff guard
-        run: tools/tests/verify-dependency-only-diff.test.sh
-
-  container:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Build fixture image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          load: true
-          push: false
-          tags: sqlsimcity-ci:${{ github.sha }}
-          build-args: |
-            BUILD_DATE=1970-01-01T00:00:00Z
-            VERSION=ci-${{ github.sha }}
-            REVISION=${{ github.sha }}
-          cache-from: type=gha,scope=sqlsimcity-ci
-          cache-to: type=gha,mode=max,scope=sqlsimcity-ci
-
-      - name: Smoke fixture and fail-closed modes
-        run: tools/container-smoke.sh "sqlsimcity-ci:${GITHUB_SHA}"

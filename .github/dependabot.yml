@@ -12,27 +12,15 @@ updates:
           - patch
     open-pull-requests-limit: 5
 
-  - package-ecosystem: nuget
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    groups:
-      nuget-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-    open-pull-requests-limit: 5
-
+  # The app moved from `web/` to the repository root when the .NET stack was deleted. The nuget
+  # and docker ecosystems went with it.
   - package-ecosystem: npm
-    directory: /web
+    directory: /
     schedule:
       interval: weekly
       day: monday
     groups:
-      web-minor-patch:
+      app-minor-patch:
         patterns:
           - "*"
         update-types:
@@ -40,16 +28,18 @@ updates:
           - patch
     open-pull-requests-limit: 5
 
-  - package-ecosystem: docker
-    directory: /
+  # The measurement workbench pins Playwright and is not part of the shipped app, so it updates
+  # on its own schedule rather than inside the app's group.
+  - package-ecosystem: npm
+    directory: /tools/measure-browser
     schedule:
       interval: weekly
       day: monday
     groups:
-      container-minor-patch:
+      measure-browser-minor-patch:
         patterns:
           - "*"
         update-types:
           - minor
           - patch
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2

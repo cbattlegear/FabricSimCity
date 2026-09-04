@@ -1,159 +1,137 @@
-# SQLSimCity
+# FabricSimCity
 
-**Turn a SQL Server into a city you can walk through.** SQLSimCity is a self-hosted, read-only
-performance tool that draws your instance as an atlas of databases and each database as a city —
-tables are buildings sized by real page counts, query traffic is roads, and waits are lanes leading
-to civic facilities like the Lock Authority and Memory Grant Office.
+**Turn a Microsoft Fabric capacity into a city you can walk through.** FabricSimCity draws your
+tenant as an atlas of capacities and each capacity as a city — items are buildings sized by real
+OneLake storage and CU consumption, operations are traffic, and throttling is a power grid running
+short.
 
 Every shape maps to a measurement you can verify. Nothing is invented, and unavailable evidence is
 drawn as a wireframe rather than a guess.
 
-**[Try the live demo →](https://sqlsimcity.battagler.me/)** · Heavily inspired by
-[PGSimCity](https://github.com/NikolayS/PGSimCity).
+It runs as a **Fabric App** built on [Rayfin](https://rayfin.ai), so it renders the capacity it
+lives in — `AppBackend` is itself an item type, which means FabricSimCity appears as a building in
+its own city.
 
-![The database city: a full-screen 3D map with tables drawn as buildings, query traffic as roads, and waits as lanes into scattered infrastructure facilities, beside a sidebar showing the live query feed and the selected table's measured pages](docs/images/city.png)
+Rebuilt from [SQLSimCity](https://github.com/cbattlegear/SQLSimCity), which drew a SQL Server the
+same way. Heavily inspired by [PGSimCity](https://github.com/NikolayS/PGSimCity).
 
-## What it does
+## The metaphor
 
-- **Server atlas** — every database on the instance as its own city, plot sized by allocated storage
-  and tallest tower by used storage.
-- **Database city** — tables and indexes as buildings, query families as roads, Query Store waits as
-  lanes into tempdb, log, lock, memory-grant, CPU, and I/O facilities.
-- **Two views of the same city** — a flat top-down map for reading structure and traffic, and a 3D
-  city for reading massing. One toggle, one object graph, the same evidence.
-- **Live query feed** — queries scroll past as they run, and each one sends a vehicle down the route
-  its plan actually takes, leaving a light trail that fades. Clicking a query pins its route and its
-  evidence, the same as clicking a query family.
-- **The city directory** — one searchable sidebar region listing query families, tables, and
-  infrastructure together, each with its measured metric and its block address on the map. It is a
-  live document: entries arrive, move, and drop out as the retention window advances, and traffic
-  colour is graded from the last few minutes rather than the whole history.
-- **Incident pins** — live blocking and wait-graph cycles pinned to the building they were measured
-  on, with the source DMV and observation time in the popup.
-- **Offline archives** and an optional **outward-only edge connector** for servers you can't reach directly.
+A Fabric capacity is *literally* a power grid, which makes the city read more honestly than it did
+over SQL Server:
 
-Building placement is deterministic: every lot is derived from a seeded generator keyed on the
-database's own id, so the same database lays out identically on every load and every machine, and
-loading another page of objects never moves a building that is already on screen.
+| Fabric | Drawn as |
+|---|---|
+| Tenant | The atlas — every capacity as its own city |
+| Capacity (F2…F8192) | A city. The real contention boundary. |
+| Workspace | A neighbourhood |
+| Item (Lakehouse, Notebook, Warehouse, Semantic model…) | A building |
+| Operation family | A road, with traffic on it |
+| Interactive vs background operations | Cars vs freight |
+| SKU CU budget | The power plant, and the size of the ground the city is built on |
+| CU smoothing | Reservoirs — 5–64 min interactive, 24 h background |
+| Carry-forward | A debt heap that grows and drains, with a burndown ETA |
+| Throttle stages | Delay gate → rejection gate → background embargo |
+| Overload state | Weather: brownout tinting, then blackout |
 
-SQLSimCity is strictly read-only against monitored servers. Query Store history is aggregate
-evidence, live DMVs are point-in-time samples, and inferred relationships are always labelled with
-their confidence. A subsystem that could not be sampled is drawn as unavailable, never as clear.
+**Plot size is the SKU's CU budget; tower height is the CU seconds actually consumed.** The ratio
+between them is mean utilization, drawn rather than stated: a capacity comfortably inside its
+budget is a low city on wide ground, and a small SKU being hammered is a thin skyscraper on a tiny
+plot. In the fixture tenant, `Fabrikam Dev` is an F2 with the tallest towers in the atlas, and it
+is rejecting everything.
 
-> [!WARNING]
-> **SQLSimCity has no built-in login.** Anyone who can reach the page sees all evidence. Keep it on
-> loopback or a trusted network, or put it behind an authenticating reverse proxy. See
-> [SECURITY.md](SECURITY.md).
+Footprint within a city comes from OneLake bytes, so a cold Lakehouse is a wide flat warehouse and
+a runaway Notebook is a spire on a minimum lot. Compute-only items get a minimum lot, which is
+correct rather than a fallback.
+
+## Never draw a guess
+
+A missing measurement renders as **wireframe**, never as zero.
+
+A paused capacity emits no telemetry at all, and an idle one emits zeroes. Those are completely
+different things and drawing them the same way would be a lie the picture tells confidently. So
+`capacityHeight()` returns `null` rather than `0` for unknown CU, an unrecognised SKU gets no plot
+size rather than a default one, and both end up as bare ground.
 
 ## Quick start
 
-Point it at a SQL Server and it draws that server. One connection string is the whole
-configuration — setting it turns connected mode on by itself.
+No Fabric tenant required. The app ships with a deterministic fixture tenant — six capacities
+covering every state the city can render — and that is the primary development loop, not a
+fallback.
 
 ```powershell
-docker run --rm --name sqlsimcity `
-  --publish 127.0.0.1:8080:8080 `
-  --volume sqlsimcity-data:/data `
-  --env ConnectionStrings__SqlSimCity="Server=sql01.example.internal,1433;Database=master;User Id=sqlsimcity_reader;Password=<password>;TrustServerCertificate=true" `
-  ghcr.io/cbattlegear/sqlsimcity:latest
-```
-
-Open <http://127.0.0.1:8080>. The atlas appears immediately and each database fills in as it is
-measured; Query Store history keeps building for a few minutes after that.
-
-A few notes on that command:
-
-- **A password containing `;` or `=` must be quoted.** Write `Password='p;a=ss'`, single quotes and
-  all, or the value splits into fragments and the string will not parse. A connection string that
-  fails to parse stops startup with a deliberately value-free error, so it never quotes your
-  password back into a log.
-- **`TrustServerCertificate=true` is for self-signed development certificates.** Drop it against a
-  server whose certificate you trust. TLS itself is never optional: `Encrypt=false` is rejected.
-- **`--volume sqlsimcity-data:/data` is what makes history survive a restart.** Connected Query
-  Store history is written there, and without a volume every restart starts the city from an empty
-  window. Captured query text and plan XML are stored **in the clear** — see
-  [SECURITY.md](SECURITY.md).
-- **`master` is only the connection's initial catalog.** SQLSimCity enumerates the server from
-  there; it does not restrict collection to that database. On Azure SQL Database, which cannot
-  enumerate its siblings, name the database you want instead.
-- **`:latest` is for trying it out.** A real deployment should pin the manifest digest, which is
-  what makes a rollback and a signature check possible — see [operations](docs/operations.md).
-
-The password is read into a `SqlCredential` and never lands in a log or a diagnostic, but an
-environment variable is still readable by anything that can read the process environment, and it
-cannot be rotated without a restart. For production, set the connection fields individually and
-mount the password as a read-only file secret — see [connected mode](docs/connected-mode.md) for
-the hardened setup, least-privilege permissions, Azure SQL, Query Store, and live sampling.
-
-### No SQL Server handy?
-
-Fixture mode draws a synthetic city from the sanitized evidence in `fixtures/`, with no server and
-no connection string.
-
-```powershell
-docker compose up --build
-```
-
-Open <http://127.0.0.1:8080>.
-
-## Screenshots
-
-| Flat map view | Server atlas |
-| --- | --- |
-| ![The same city in flat map mode: a north-up paper basemap with white carriageways over grey casings, schema neighbourhoods labelled across the block grid, and the graded query-traffic roads drawn over them](docs/images/map.png) | ![Server atlas showing every database on the instance as its own city, with the plot sized by allocated storage and the tallest tower by used storage, beside the searchable sidebar](docs/images/atlas.png) |
-
-Both surfaces are the same map shell: a full-screen map, a searchable sidebar, and one toggle
-between the flat map and the 3D city. The tile at the bottom-left of the map switches between them.
-
-## Documentation
-
-| Guide | Contents |
-| --- | --- |
-| [Architecture and evidence](docs/architecture.md) | Components, evidence boundaries, visual semantics, scale, and API surfaces |
-| [Connected mode](docs/connected-mode.md) | SQL connection profiles, permissions, Query Store, live incidents, TLS, and secrets |
-| [Operations](docs/operations.md) | Reverse proxy and `AllowedHosts`, backup/restore, upgrades, rollback, SBOM, and provenance |
-| [Security](SECURITY.md) | Threat model, key rotation, Kerberos, Microsoft Entra ID, and fail-closed behavior |
-| [Offline archives](docs/archive-format.md) | Redacted export format and offline import |
-| [Edge connector](docs/edge-connector.md) | Outward-only remote collection, signing, replay defense, and encrypted spool |
-| [SQL probe catalog](sql/README.md) | Read-only probe contracts, permissions, platform scope, and units |
-| [Fixture contract](fixtures/v1/README.md) | Sanitized deterministic evidence used by tests and demos |
-
-## Development
-
-Requires .NET SDK 10 and Node.js 24 (Node 22.12+ also works). Vite serves the UI and proxies
-API/SignalR traffic to port 5080.
-
-```powershell
-# Terminal 1
-dotnet run --project src\SqlSimCity.Api --urls http://127.0.0.1:5080
-
-# Terminal 2
-Set-Location web
 npm install
 npm run dev
 ```
 
-Full validation:
+Open http://localhost:5173. You get `Contoso Ltd`: two healthy capacities, one at each of the three
+throttle stages, and one suspended.
+
+### Against a real tenant
+
+Fabric Apps and the capacity metrics connectors are in **private preview**, and the connectors are
+delegated-auth only — every user signs in as themselves and sees only the capacities they already
+have access to. There is no service-principal path where the app reads once for everyone.
 
 ```powershell
-npm test
-node --test fixtures\v1\test\validate-fixtures.test.mjs
-dotnet test SqlSimCity.slnx
-
-Set-Location web
-npm test; npm run typecheck; npm run build
+rayfin up
 ```
 
-Per-release notes are on the [Releases page](https://github.com/cbattlegear/SQLSimCity/releases);
-[CHANGELOG.md](CHANGELOG.md) carries the breaking changes and the long-form development record.
+Then set `VITE_RAYFIN_API_URL`, `VITE_RAYFIN_PUBLISHABLE_KEY`, `VITE_FABRIC_WORKSPACE_ID`,
+`VITE_FABRIC_ITEM_ID` and `VITE_FABRIC_PORTAL_URL`. Leaving `VITE_RAYFIN_API_URL` unset is what
+selects fixture mode.
+
+## Where the numbers come from
+
+Topology — capacities, workspaces, items — comes from `api.fabric.microsoft.com/v1`, which is fully
+supported and needs no connector.
+
+CU telemetry does not exist on any REST endpoint. It comes from one of two sources behind a single
+`CapacitySource` interface:
+
+- **Capacity Metrics semantic model**, over DAX. This is where the real per-item CU breakdown lives.
+  Microsoft documents programmatic access to it as unsupported and its schema has already changed
+  once, so the implementation probes both generations.
+- **Eventhouse**, over KQL, reading `Microsoft.Fabric.Capacity.Summary` events on their documented
+  30-second cadence. Fully supported, but it carries no per-item breakdown, so the city degrades to
+  live infrastructure over static buildings — which the evidence model already knows how to draw.
+
+Neither is written yet. The seam and the fixture implementation are.
+
+Refresh is client-side polling: Rayfin has no cron, no timers and no background workers, so there
+is no in-app collector and never will be.
+
+## Status
+
+The atlas is on screen and runs on fixtures. The city view is not yet ported — 29 modules sit in
+`src/pending-port/` with a README explaining what each one needs. They were kept rather than
+deleted because each is a solved *rendering* problem waiting on a Fabric field to read.
+
+Ported and working: capacity atlas, SKU-sized plots, CU-driven massing, throttle and state
+rendering, flat-map toggle, kiosk mode, day/night, the sidebar rail and its bottom-sheet form.
+
+## Development
+
+```powershell
+npm run dev       # Vite on fixtures
+npx tsc -b        # the correct typecheck -- see AGENTS.md on TS6305
+npx vitest run    # 610 tests / 31 files
+npm run build     # tsc -b + vite build
+```
+
+`AGENTS.md` carries the conventions, and they are not decorative — most of them exist because
+something passed a green test suite while visibly broken. The short version: **layout changes get
+measured in a real browser at both breakpoints**, and a new guard has to be shown failing against
+the broken state before it counts.
+
+`tools/measure-browser/` is the workbench for both kinds of measurement — what the city costs the
+GPU, and whether the rail beside it can actually be read and clicked.
 
 ## Affiliation
 
-SQLSimCity is independent software. It is not affiliated with, sponsored by, or endorsed by
-Microsoft, Electronic Arts, Maxis, the SimCity franchise, or the PostgreSQL project. No SimCity
-assets are included.
+Not affiliated with or endorsed by Microsoft. "Microsoft Fabric" and "OneLake" are trademarks of
+Microsoft Corporation.
 
 ## License
 
-Copyright 2026 SQLSimCity contributors. Licensed under Apache-2.0; see [LICENSE](LICENSE) and
-[NOTICE](NOTICE).
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).
