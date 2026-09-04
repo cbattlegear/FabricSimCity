@@ -29,6 +29,23 @@ import type { AtlasSnapshot, CapacityAtlasItem, Evidence } from './fabricContrac
 import './App.css'
 
 const AtlasViewport = lazy(() => import('./AtlasViewport').then((m) => ({ default: m.AtlasViewport })))
+const CapacityCityView = lazy(() =>
+  import('./CapacityCityView').then((m) => ({ default: m.CapacityCityView })),
+)
+
+/** The capacity id in the URL, so a city is shareable and survives a reload. */
+function readCityParam(): string | null {
+  if (typeof window === 'undefined') return null
+  return new URLSearchParams(window.location.search).get('capacity')
+}
+
+function writeCityParam(capacityId: string | null): void {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (capacityId === null) url.searchParams.delete('capacity')
+  else url.searchParams.set('capacity', capacityId)
+  window.history.replaceState(null, '', url.toString())
+}
 
 /**
  * How often the atlas re-reads its source.
@@ -48,6 +65,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<MapViewMode>('city')
+  const [cityId, setCityId] = useState<string | null>(() => readCityParam())
   const { kiosk, toggleKiosk } = useKioskMode()
 
   const load = useCallback(async (initial: boolean) => {
@@ -73,6 +91,38 @@ export default function App() {
     return () => window.clearInterval(handle)
   }, [load])
 
+  const openCity = useCallback((capacityId: string) => {
+    setCityId(capacityId)
+    writeCityParam(capacityId)
+  }, [])
+
+  const closeCity = useCallback(() => {
+    setCityId(null)
+    writeCityParam(null)
+  }, [])
+
+  const cityCapacity = cityId
+    ? snapshot?.capacities.find((capacity) => capacity.capacityId === cityId) ?? null
+    : null
+
+  if (cityId && cityCapacity) {
+    return (
+      <ChunkErrorBoundary label="city">
+        <Suspense fallback={<ShellFallback label="Loading city…" />}>
+          <CapacityCityView
+            source={source}
+            capacity={cityCapacity}
+            onBack={closeCity}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            kiosk={kiosk}
+            onToggleKiosk={toggleKiosk}
+          />
+        </Suspense>
+      </ChunkErrorBoundary>
+    )
+  }
+
   return (
     <AtlasLevel
       snapshot={snapshot}
@@ -86,6 +136,7 @@ export default function App() {
       onViewModeChange={setViewMode}
       onSelect={setSelectedId}
       onHover={setHoveredId}
+      onOpenCity={openCity}
     />
   )
 }
@@ -102,6 +153,7 @@ function AtlasLevel({
   onViewModeChange,
   onSelect,
   onHover,
+  onOpenCity,
 }: {
   snapshot: AtlasSnapshot | null
   error: string | null
@@ -114,6 +166,7 @@ function AtlasLevel({
   onViewModeChange: (mode: MapViewMode) => void
   onSelect: (capacityId: string) => void
   onHover: (capacityId: string | null) => void
+  onOpenCity: (capacityId: string) => void
 }) {
   const [term, setTerm] = useState('')
   const capacities = snapshot?.capacities ?? []
@@ -178,7 +231,7 @@ function AtlasLevel({
 
       <div className="sidebar-scroll">
         {selected ? (
-          <DetailPanel capacity={selected} />
+          <DetailPanel capacity={selected} onOpenCity={onOpenCity} />
         ) : (
           <p className="sidebar-empty">Select a capacity.</p>
         )}
@@ -304,7 +357,7 @@ function AtlasLevel({
               viewMode={viewMode}
               onSelect={onSelect}
               onHover={onHover}
-              onOpen={onSelect}
+              onOpen={onOpenCity}
             />
           </LazySurface>
         </ChunkErrorBoundary>
@@ -454,7 +507,7 @@ function SourceCapability({ enabled, title }: { enabled: boolean; title: string 
   )
 }
 
-function DetailPanel({ capacity }: { capacity: CapacityAtlasItem }) {
+function DetailPanel({ capacity, onOpenCity }: { capacity: CapacityAtlasItem; onOpenCity: (capacityId: string) => void }) {
   const { throttle } = capacity
   return (
     <section className="detail-panel">
@@ -464,6 +517,10 @@ function DetailPanel({ capacity }: { capacity: CapacityAtlasItem }) {
           {splitPascal(capacity.state)}
         </StatusChip>
       </header>
+
+      <button type="button" className="enter-city-button" onClick={() => onOpenCity(capacity.capacityId)}>
+        Explore this capacity as a city ›
+      </button>
 
       <dl className="detail-grid">
         <dt>SKU</dt>

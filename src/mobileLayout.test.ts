@@ -263,9 +263,18 @@ describe('the tray cannot fold a warning away', () => {
     expect(city).toMatch(/tone:\s*feedState && feedState !== 'connected' \? 'is-unknown' : ''/)
   })
 
-  it('is actually handed the feed state by the view that owns it', () => {
-    expect(city).toMatch(/feedState\?:\s*LiveFeedConnectionState/)
-    expect(view).toContain('feedState={feedState}')
+  /*
+   * The viewport still *accepts* a feed connection state (the chip logic above is intact), but the
+   * Fabric view no longer hands it one: the SQL SignalR live feed is gone (`liveFeed.ts` →
+   * `timepointClock.ts`), and a Fabric App on Rayfin has no push hub whose connection could be
+   * `reconnecting` or `polling-fallback`. So the guard is inverted — the view must NOT wire a
+   * live-feed connection state, or it would be reintroducing a state Fabric cannot honestly report.
+   */
+  it('does not wire a SQL live-feed connection state that Fabric cannot report', () => {
+    expect(city, 'the viewport still supports a feed state for a future push source')
+      .toMatch(/feedState\?:\s*LiveFeedConnectionState/)
+    expect(view, 'the Fabric view reintroduced the deleted SignalR feed connection state')
+      .not.toContain('feedState={feedState}')
   })
 
   /**
@@ -1096,13 +1105,16 @@ describe('three drawers in one rail share one height budget', () => {
    * owns the whole rail, and a feed wedged beside it would be the squeeze this change just undid.
    */
   it('renders the feed as a rail region beside the address list', () => {
-    const declaration = cityMarkup.indexOf('const liveQueryFeed =')
-    expect(declaration, 'there is no live query feed').toBeGreaterThan(-1)
+    // On Fabric the SQL "live query feed" is gone; the rail region now holds the timepoint clock over
+    // recent operation samples (`liveOperationFeed`). It is still `.sidebar-feed` and still sits
+    // between the place card and the address book, which is what this guard is about.
+    const declaration = cityMarkup.indexOf('const liveOperationFeed =')
+    expect(declaration, 'there is no operation feed region').toBeGreaterThan(-1)
     expect(cityMarkup.slice(declaration, cityMarkup.indexOf('</section>', declaration)),
       'the feed is no longer a region of the rail')
       .toMatch(/<section className="sidebar-feed"/)
 
-    const rendered = cityMarkup.indexOf('{sidebarMode.showsAddressBook && liveQueryFeed}')
+    const rendered = cityMarkup.indexOf('{sidebarMode.showsAddressBook && liveOperationFeed}')
     expect(rendered, 'the feed does not render with the address book').toBeGreaterThan(-1)
     expect(rendered, 'the feed is not above the address book')
       .toBeLessThan(cityMarkup.indexOf('<AddressBook'))

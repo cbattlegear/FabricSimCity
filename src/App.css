@@ -2472,6 +2472,68 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   text-align: center;
 }
 
+/* ---- City view: item/road detail, weather line, operation feed, enter-city button ---- */
+.object-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.object-detail-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.object-detail-head strong { font-size: 0.92rem; }
+.object-detail-head span { font-size: 0.74rem; color: #8fa0b2; }
+
+.city-weather-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px solid #2a3540;
+  background: #0a1118;
+  border-radius: 4px;
+  font-size: 0.76rem;
+}
+.city-weather-line strong { color: #cdd7e1; }
+.city-weather-line span { color: #8fa0b2; }
+.city-weather-line.is-brownout { border-color: #d99a3a; }
+.city-weather-line.is-blackout { border-color: #c8503f; background: #170d0b; }
+.city-weather-line.is-value-unknown { border-style: dashed; border-color: #5f7386; }
+
+.feed-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 0.74rem;
+  color: #aab8c6;
+}
+.feed-row strong { font-weight: 600; overflow-wrap: anywhere; }
+.feed-row.is-rejected { color: #dd6f5e; }
+.feed-row.is-failure { color: #e0a94a; }
+
+.enter-city-button {
+  display: block;
+  width: 100%;
+  margin: 4px 0 10px;
+  padding: 8px 12px;
+  border: 1px solid #2a5a49;
+  border-radius: 6px;
+  background: #123027;
+  color: #8bf0cd;
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+.enter-city-button:hover { background: #17453a; }
+
+.legend-swatch.legend-incident-block { background: #e6b83a; border-color: #f0cd63; color: #1a1206; }
+.legend-swatch.legend-incident-deadlock { background: #c8503f; border-color: #dd6f5e; color: #fff; }
+
 @media (max-width: 860px) {
   .map-sidebar {
     overflow: auto;

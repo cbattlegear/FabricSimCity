@@ -1,16 +1,17 @@
 # Pending port
 
-The React UI mount layer (`CapacityCityView.tsx`, `CapacityCityViewport.tsx`) and one test
-(`cityTour.test.ts`) from SQLSimCity that the Fabric port has not reached yet. They are
-excluded from `tsconfig.json` and from `vitest.config.ts` — deliberately in agreement, so a module
-here is neither type-checked nor run, and nothing in the shipped app imports one. The 3D city scene
-itself (`CapacityCityScene.ts`), the vehicle system (`cityVehicles.ts`) and the camera tour
-(`cityTour.ts`) have been ported out to `src/` and tested — see the `port-city` section below.
+One test (`cityTour.test.ts`) from SQLSimCity that the Fabric port has not reached yet. It is
+excluded from `tsconfig.json` and from `vitest.config.ts` — deliberately in agreement, so it is
+neither type-checked nor run. The React UI mount layer that used to live here (`CapacityCityView.tsx`,
+`CapacityCityViewport.tsx`) has now been ported to `src/` — see the `port-city` section below. The 3D
+city scene (`CapacityCityScene.ts`), the vehicle system (`cityVehicles.ts`) and the camera tour
+(`cityTour.ts`) were ported earlier.
 
-They are kept rather than deleted because each one is a solved rendering problem. The traffic
-system, the incident pins, the disaster survey and the tour camera all work; what they do not have
-is a Fabric field to read. Deleting them would mean re-deriving the geometry as well as the
-semantics, and the geometry is the part that took the longest to get right.
+`cityTour.test.ts` is the lowest-value item and a full rewrite of a 25 KB suite: it builds
+`CapacityCityItem` fixtures with deleted SQL fields (`storageBytes`, `cuSecondsRaw`, `reservedBytes`,
+`usedBytes`, `kind: 'Table'`) and asserts against a `QueryStoreAggregate` evidence source. Its subject
+`cityTour.ts` is already ported and shipping (exercised by the running tour); the test is left
+quarantined rather than rewritten vacuously.
 
 ## Why they could not be ported mechanically
 
@@ -114,11 +115,33 @@ mutation-checked against the broken state):
   `src/` via the `sourcePath()` fallback) rebind to the shipped scene; all three slice anchors still
   hold `to > from` and were mutation-verified.
 
-**Still quarantined** (the React UI mount layer — one coherent blocked unit):
+**Ported out** (the React UI mount layer — done, shipping, browser-verified):
 
-| Module | What it needs |
-|---|---|
-| `CapacityCityView.tsx`, `CapacityCityViewport.tsx` | The scene, `cityVehicles`, and `cityTour` are ported and tested, so the geometry these mount is ready. The **view** is the block: it carries ~146 type errors that are a genuine semantic rewrite, not a rename — its object-detail panel and evidence tables render deleted query-store fields (`attributedExposure`, `directActivity`, `indexes`, `reservedBytes`, `usedBytes`, `storageBytes`, `cuSecondsRaw`), and it calls the pre-Fabric signatures of `projectIncidents(snapshot, objects)`, `projectFacilityTraffic(families, objects)`, `runDisasterSurvey`, `projectCityDisasters`, plus deleted `../api`, `./liveFeed`, `./cityRoute`, and `NormalizedShowplan`. Rewiring these to `surveyCapacityWeather` / `projectCityDisasters({throttle,items,capabilities})` / `projectIncidents({families,items,samples,throttle,capabilities,observedAt})` / `projectFacilityTraffic(families,items,throttle,capabilities)` / `startTimepointClock`, deciding what each Fabric item/family/facility detail panel should show, wiring `AddressPanel` and the `.sidebar-drawers` budget, and then **browser-verifying** the result at both breakpoints — is a task on the scale of the scene port itself. The viewport ports cleanly (verified: it compiles with a local `CityRoute` type, dropping the `liveQueryFeed`/`liveQueries`/`families` inputs, `setVehicles` → `refreshVehicles`, and `FacilityTraffic.unmapped` → `unattributedSeconds`); it is quarantined with the view so the mount layer stays one unit for whoever ports it. |
+- `CapacityCityViewport.tsx` — moved to `src/` verbatim except: a local `CityRoute` type replaces the
+  deleted `./cityRoute`, the `liveQueryFeed`/`liveQueries`/`families` inputs and the `setVehicles`
+  effect were dropped (vehicles derive from the graded roads now, refreshed through `setRoads`), the
+  legend prose was rewritten from Query-Store vocabulary into Fabric vocabulary, and
+  `FacilityTraffic.unmapped` → `unattributedSeconds`.
+- `CapacityCityView.tsx` — **rewritten smaller rather than repaired.** The old SQL-era view depended
+  on six deleted modules (`../api`, `./liveFeed`, `./liveQueryFeed`, `./cityRoute`, plus SQL-only
+  subsystems: a live query feed, a Query-Store plan finder, `subscribeToLiveIncidents`, and a wait-
+  attribution table) with no Fabric analogue, so repairing its ~146 errors meant gutting most of it.
+  The new view mounts the scene through the ported viewport and feeds it one measured Fabric pipeline:
+  `planCity` (passing `workspaces`), `gradeRoads`, `assignWorkloadTraffic`, `projectFacilityTraffic`,
+  `projectIncidents({families,items,samples,throttle,capabilities,observedAt})`,
+  `projectCityDisasters({throttle,items,capabilities})` / `surveyCapacityWeather`, and a
+  `startTimepointClock` mounted on entry and disposed on unmount. It keeps the `sidebarAccordion`
+  four-region rail contract (directory / activity / plans / legend), the `.sidebar-drawers` budget,
+  the place-card-yields-`is-yielding` mechanism, and a `.sidebar-feed` rail region (now the timepoint
+  clock over live operation samples, replacing the deleted SQL live query feed). Reached from the
+  atlas by selecting a capacity and pressing "Explore this capacity as a city" (App writes
+  `?capacity=<id>`). The detail panels were each given a Fabric measurement — see the session report.
+- `App.tsx` — grew the atlas → city drill-down route.
+
+The two view-slicing guards (`mobileLayout.test.ts`, `sidebarAccordion.test.ts`) were retargeted at
+the Fabric view: the accordion/layout assertions bind unchanged, and two SQL-only assertions (a
+SignalR `feedState` pass-through, and the `liveQueryFeed` variable name) were updated to the honest
+Fabric reality.
 
 
 ### `power-grid` — the civic infrastructure

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import type { CapacityCityItem, OperationFamily } from '../capacityCityContracts'
+import type { CapacityCityItem } from './capacityCityContracts'
 import {
   createDatabaseCityScene,
   type CameraNudge,
@@ -8,19 +8,28 @@ import {
 } from './CapacityCityScene'
 import { CONGESTION_COLORS, CONGESTION_GRADES, CONGESTION_LABELS, type RoadTraffic } from './cityTraffic'
 import type { FacilityTraffic } from './cityFacilityTraffic'
-import { type Facility } from '../cityInfrastructure'
-import type { CityRoute } from './cityRoute'
+import { type Facility } from './cityInfrastructure'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import type { CityPlan } from './cityPlan'
-import type { MapViewMode } from '../mapStyle'
+import type { MapViewMode } from './mapStyle'
 import type { IncidentProjection } from './cityIncidents'
-import type { IncidentPlacement } from '../cityIncidentPlacement'
-import type { LiveFeedConnectionState } from '../liveIncidents'
-import type { LiveQueryEvent } from './liveQueryFeed'
+import type { IncidentPlacement } from './cityIncidentPlacement'
+import type { LiveFeedConnectionState } from './liveIncidents'
 import type { VehicleRoster } from './cityVehicles'
 import type { TourStop, TourStopKind } from './cityTour'
-import { IncidentPopup } from '../IncidentPopup'
-import { MapTray, useNarrowViewport, type TrayItem } from '../MapTray'
+import { IncidentPopup } from './IncidentPopup'
+import { MapTray, useNarrowViewport, type TrayItem } from './MapTray'
+
+/**
+ * The selected-route highlight is retired on Fabric — its SQL builder parsed showplan XML to infer a
+ * path between objects, and Capacity Metrics attributes each operation to an item directly, so there
+ * is no lineage path to reconstruct. The scene keeps the drawing plumbing behind this minimal shape
+ * (mirrored from `CapacityCityScene.ts`) so a future Fabric lineage-route source can feed it.
+ */
+export type CityRoute = {
+  readonly polyline: readonly { readonly x: number; readonly z: number }[]
+  readonly stops: readonly { readonly x: number | null; readonly z: number | null }[]
+}
 
 type Props = {
   objects: readonly CapacityCityItem[]
@@ -77,20 +86,6 @@ type Props = {
    * the kerb rather than on the building, because the damage is to the street the traffic uses.
    */
   waterMainObjectIds?: readonly string[]
-  /**
-   * The executions the live feed has observed, newest first, and the families they are matched
-   * against.
-   *
-   * The same list the sidebar's live query feed is scrolling, so a row appearing there and a car
-   * pulling away here are one event rather than two that happen to coincide.
-   *
-   * Passed as the two raw inputs rather than as a finished roster because the join needs the roads
-   * *as drawn*, which only the scene knows: a vehicle is placed on a road this scene put down, and a
-   * family whose road was not drawn has nowhere to drive. The scene reports what it made of them
-   * through {@link onVehicleRoster}.
-   */
-  liveQueries?: readonly LiveQueryEvent[] | null
-  families?: readonly OperationFamily[]
   /** What the scene actually drew, so the legend can disclose it honestly. */
   onVehicleRoster?: (roster: VehicleRoster) => void
   /**
@@ -195,8 +190,6 @@ export function CapacityCityViewport({
   staleStatsObjectIds = EMPTY_STALE_STATS,
   fireObjectIds = EMPTY_FIRES,
   waterMainObjectIds = EMPTY_WATER_MAINS,
-  liveQueries = null,
-  families,
   onVehicleRoster,
   openIncidentId = null,
   onOpenIncident,
@@ -289,10 +282,6 @@ export function CapacityCityViewport({
   useEffect(() => sceneRef.current?.setLayers(layers), [layers])
   useEffect(() => sceneRef.current?.setViewMode(viewMode), [viewMode])
   useEffect(() => sceneRef.current?.setIncidents(incidents?.markers ?? []), [incidents])
-  useEffect(
-    () => sceneRef.current?.setVehicles(liveQueries ?? null, families ?? []),
-    [liveQueries, families],
-  )
   useEffect(() => sceneRef.current?.setTour(touring, cityName), [touring, cityName])
 
   // Opening a pin from the sidebar centres its object first, because a marker outside the frustum
@@ -388,23 +377,17 @@ export function CapacityCityViewport({
       <div className="legend-scroll">
       <ul className="legend-encoded">
         <li>
-          <i className="legend-swatch legend-footprint" /> Footprint — log₂ of exact reserved 8-KiB pages
+          <i className="legend-swatch legend-footprint" /> Footprint — log₂ of OneLake storage bytes
         </li>
         <li>
-          <i className="legend-swatch legend-height" /> Height — log₂ of exact used 8-KiB pages
+          <i className="legend-swatch legend-height" /> Height — log₂ of CU-seconds consumed
         </li>
         <li>
-          <i className="legend-swatch legend-attributed" /> Solid amber roof cap — Query Store CPU measured for this object alone
-        </li>
-        <li>
-          <i className="legend-swatch legend-shared" /> Outlined amber cap — CPU of queries that also named other tables; not additive across buildings
-        </li>
-        <li>
-          <i className="legend-swatch legend-direct" /> Index annex width — direct DMV operations
+          <i className="legend-swatch legend-attributed" /> Red roof cap — CU regressed week-over-week; taller cap is a larger regression
         </li>
         <li>
           <i className="legend-swatch legend-route" /> Road width — one constant. Every road is drawn
-          the same width, so colour is the only thing saying how a road is doing. Captured executions
+          the same width, so colour is the only thing saying how a road is doing. Measured operations
           are still reported in the hover readout and the evidence tables.
         </li>
         {CONGESTION_GRADES.map(grade => (
@@ -414,66 +397,57 @@ export function CapacityCityViewport({
           </li>
         ))}
         <li>
-          <i className="legend-swatch legend-solid" /> Unbroken road — confirmed reference
+          <i className="legend-swatch legend-solid" /> Unbroken road — confirmed dependency
         </li>
         <li>
-          <i className="legend-swatch legend-dashed" /> Long dashes — probable reference
+          <i className="legend-swatch legend-dashed" /> Long dashes — probable dependency
         </li>
         <li>
-          <i className="legend-swatch legend-sparse" /> Short dashes — inferred reference
+          <i className="legend-swatch legend-sparse" /> Short dashes — shared-operation reference
         </li>
         <li>
-          <i className="legend-swatch legend-incident-block">⚠</i> Yellow pin — a waiter is blocked
+          <i className="legend-swatch legend-incident-block">⚠</i> Yellow pin — an interactive delay
           right now, placed on the road rather than on a building
         </li>
         <li>
-          <i className="legend-swatch legend-incident-deadlock">✖</i> Red pin — a deadlock the engine
-          already recorded and resolved, read from <code>system_health</code>
+          <i className="legend-swatch legend-incident-deadlock">✖</i> Red pin — an operation the
+          capacity is rejecting at a throttle gate
         </li>
         <li>
-          <i className="legend-swatch legend-disaster-fire" /> Flame and smoke on a roof — a plan
-          that ran against this table asked for an index the engine could not find
+          <i className="legend-swatch legend-disaster-fire" /> Flame and smoke on a roof — this
+          item had operations rejected at a throttle gate (measured rejected count above zero)
         </li>
         <li>
-          <i className="legend-swatch legend-disaster-water" /> Water jet and puddle — a plan against
-          this table compiled with a warning the optimiser raised about it
-        </li>
-        <li>
-          <i className="legend-swatch legend-disaster-wreck" /> Wreckage on a road — both of that
-          road&apos;s tables were named in the same recorded deadlock
+          <i className="legend-swatch legend-disaster-wreck" /> Wreckage on a road — an item on that
+          road had operations rejected at a throttle gate
         </li>
         <li>
           <i className="legend-swatch legend-disaster-weathered" /> Grimy facade, boarded windows —
-          this table&apos;s own statistics are past the engine&apos;s auto-update threshold
+          this item&apos;s measurement is stale
         </li>
         <li>
           <i className="legend-swatch legend-unknown">×</i> Wireframe — unavailable evidence, no quantity claimed
         </li>
       </ul>
       <p className="legend-caveat">
-        Disasters are drawn far larger than true scale, for the same reason vehicles are: at true
-        scale a plume is a few pixels and nothing that cannot be seen is evidence of anything. Their
-        sizes are a legibility floor and encode no quantity — a bigger fire is not a worse one, and
-        two fires are not comparable by eye. What is being claimed is only <em>which</em> object the
-        evidence named. Every plume leans the same way because one fixed wind makes an overhead
-        plume readable as a smear rather than a dot; the direction means nothing.
+        Incidents and weathering are drawn far larger than true scale, for the same reason vehicles
+        are: at true scale a marker is a few pixels and nothing that cannot be seen is evidence of
+        anything. Their sizes are a legibility floor and encode no quantity — a bigger pin is not a
+        worse one, and two are not comparable by eye. What is being claimed is only <em>which</em>
+        item the evidence named.
       </p>
       <p className="legend-caveat">
-        Road colour is graded from one measured ratio: captured wait milliseconds per captured
-        execution. It accounts for <strong>every</strong> wait category Query Store captured for the
-        queries on that road, not a chosen few — the per-facility split that used to be drawn as
-        separate coloured lanes is now in the road&apos;s hover readout and in the evidence tables
-        instead of competing with the road for the same piece of map. A road with no colour is grey,
-        not green: grey means no captured family named both of its endpoints, which is not a claim
-        that the road is quiet. {facilityTraffic.note}
-        {facilityTraffic.unmapped.length > 0 &&
-          ` ${facilityTraffic.unmapped.length} captured wait category/categories have no facility` +
-          ' on this map and are listed in the evidence tables rather than folded into one.'}
+        Road colour is graded from one measured ratio: throttling seconds per operation. A road with
+        no colour is grey, not green: grey means no measured family named both of its endpoints, which
+        is not a claim that the road is quiet. {facilityTraffic.note}
+        {facilityTraffic.unattributedSeconds > 0 &&
+          ` ${Math.round(facilityTraffic.unattributedSeconds)} measured throttling second(s)` +
+          ' identified no honest gate on this map and carry no lane rather than being folded into one.'}
       </p>
       <p className="legend-decoration">
         Roofs, windows, doors, chimneys, setbacks, crowns, and sidewalks are decoration. They are
-        seeded from each object&apos;s stable id and encode nothing. A neighbourhood&apos;s hue
-        says which schema owns it and nothing more: hues are handed out in catalogue order, so
+        seeded from each item&apos;s stable id and encode nothing. A neighbourhood&apos;s hue
+        says which workspace owns it and nothing more: hues are handed out in catalogue order, so
         one is never warmer, larger or busier than another.
       </p>
       </div>
