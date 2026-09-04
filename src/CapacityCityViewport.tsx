@@ -14,7 +14,6 @@ import type { CityPlan } from './cityPlan'
 import type { MapViewMode } from './mapStyle'
 import type { IncidentProjection } from './cityIncidents'
 import type { IncidentPlacement } from './cityIncidentPlacement'
-import type { LiveFeedConnectionState } from './liveIncidents'
 import type { VehicleRoster } from './cityVehicles'
 import type { TourStop, TourStopKind } from './cityTour'
 import { IncidentPopup } from './IncidentPopup'
@@ -30,6 +29,25 @@ export type CityRoute = {
   readonly polyline: readonly { readonly x: number; readonly z: number }[]
   readonly stops: readonly { readonly x: number | null; readonly z: number | null }[]
 }
+
+/**
+ * The connection state of a push-based live feed.
+ *
+ * Nothing supplies this today. Fabric reports 30-second capacity timepoints that land late, and a
+ * Fabric App on Rayfin has no push hub whose connection could be `reconnecting` or
+ * `polling-fallback` — so the Fabric view deliberately leaves `feedState` unset rather than
+ * reporting a connection it does not have. `mobileLayout.test.ts` pins both halves of that: the
+ * viewport must keep supporting the state, and the view must not wire one.
+ *
+ * Declared here rather than imported because the module it came from (`liveIncidents.ts`) was SQL
+ * DMV vocabulary end to end — blocking references, waiting tasks, memory grants — and was deleted.
+ * This type was the only part of it with a future.
+ */
+export type LiveFeedConnectionState =
+  | 'connected'
+  | 'reconnecting'
+  | 'polling-fallback'
+  | 'disconnected'
 
 type Props = {
   objects: readonly CapacityCityItem[]
@@ -72,7 +90,7 @@ type Props = {
    * needs in order not to do that.
    */
   feedState?: LiveFeedConnectionState
-  /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
+  /** Live throttling pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
   /** Items whose telemetry evidence is stale enough to weather their building facades. */
   staleStatsObjectIds?: readonly string[]

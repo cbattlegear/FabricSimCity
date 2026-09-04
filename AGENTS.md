@@ -357,7 +357,7 @@ planning is 16,150ms against 116ms of signature building.
 
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,104 tests / 66 files
+npx vitest run        # 1,083 tests / 66 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```
