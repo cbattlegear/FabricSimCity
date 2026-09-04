@@ -48,7 +48,7 @@ unique, ASCII-lowercase safe paths with no backslashes, absolute roots, drive ro
 
 ## Sections
 
-Version 1 supports independently optional capability, Query Store, database-city, live, and findings
+Version 1 supports independently optional capability, Query Store, database-city, and live
 sections around the required atlas snapshot:
 
 | Section | Contents |
@@ -58,12 +58,38 @@ sections around the required atlas snapshot:
 | `query-store` | Collector status, bounded metric/database page chunks, family index, family detail chunks, normalized-plan chunks |
 | `database-city` | Summary snapshot and bounded page index/chunks |
 | `live` | At most one latest imported point-in-time response |
-| `findings` | Original bounded evaluation/export with explicit engine/rule versions; current UI reevaluates through the same source-neutral engine |
 
 Query Store family details and normalized plans remain separate indexed chunks. API requests read
 only the chunks needed for one bounded page or selected family/plan; neither the browser nor the API
-materializes every family detail. Findings run through the existing deterministic engine against
-imported evidence and disclose the engine/rule versions carried by the archive.
+materializes every family detail.
+
+Database-city pages carry an optional `queryStoreDatabaseId` binding separately from their full
+`databaseId` owner identity. Both use database identifier redaction, so a proven binding stays equal
+to the captured Query Store families' database IDs through export and import. Explicit `null` remains
+null and disables the plan finder; no binding is inferred from a display name or database-name
+suffix. For older pages without the field, the shared namespace resolver requires one consistent
+namespace proved by exact captured `TopQueryFamilies.FamilyId` matches or by an exact full owner-ID
+match to a captured query family's database ID. The owner must uniquely identify a database in both
+atlas and city summaries, and no other full city owner may claim that namespace. Otherwise the reader
+publishes explicit null. This check uses identically redacted identities captured during startup
+validation, not a new family scan per page request. It never revives an explicit null or binds cities
+merely because their database names match.
+
+New exports contain no Findings section, payload, descriptor, `findings-evidence-v1` feature, or
+`offline-findings-reevaluation` capability. Findings are no longer displayed or reevaluated.
+
+Older format-1 archives declaring `findings-evidence-v1` remain readable for their retained evidence.
+The reader validates the legacy snapshot and descriptor using private, read-only compatibility types,
+then discards them. They are not part of the public archive API. The feature, snapshot, and descriptor
+must appear together; their sections, engine/rule versions, and record counts must agree. Unknown
+fields, missing required fields, null required records, invalid enums, and malformed JSON are rejected.
+The same byte/record/depth bounds, canonical encoding, and digest checks apply to legacy entries;
+unknown required features still reject the whole archive before publication. Archive information
+omits the retired Findings section, feature, descriptor, and reevaluation capability, even when
+they were declared by the old producer.
+
+The independently pinned [pre-removal fixture](../tests/SqlSimCity.Archive.Tests/Fixtures/README.md)
+documents provenance and verifies this compatibility without relying on the current exporter.
 
 ## Privacy and redaction
 

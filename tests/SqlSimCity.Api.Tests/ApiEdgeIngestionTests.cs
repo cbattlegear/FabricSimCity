@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -56,7 +58,9 @@ public sealed class ApiEdgeIngestionTests : IDisposable
         return builder.Build(Guid.NewGuid().ToString("N"), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch);
     }
 
-    private static async Task<ObservationBatchV1> FullProjectionBatchAsync()
+    private static async Task<ObservationBatchV1> FullProjectionBatchAsync(
+        Action<JsonObject>? changeCity = null,
+        Func<QueryFamilyDetailV1, QueryFamilyDetailV1>? changeFamily = null)
     {
         var now = new DateTimeOffset(2026, 8, 18, 1, 0, 0, TimeSpan.Zero);
         var freshness = new ObservationFreshnessV1(now, now, now.AddMinutes(1));
@@ -75,7 +79,7 @@ public sealed class ApiEdgeIngestionTests : IDisposable
         {
             var detail = await querySource.GetFamilyAsync(family.FamilyId, CancellationToken.None);
             Assert.NotNull(detail);
-            families.Add(detail);
+            families.Add(changeFamily?.Invoke(detail) ?? detail);
             foreach (var plan in detail.Plans)
             {
                 if (await querySource.GetPlanAsync(plan.PlanId, CancellationToken.None) is { } normalized)
@@ -106,19 +110,23 @@ public sealed class ApiEdgeIngestionTests : IDisposable
                 "Connector captured one point-in-time sample.", 0, 0));
 
         var builder = new ObservationBatchBuilder("edge-1", "target-1", "epoch-1", "boot-1");
+        var capabilities = (await FixtureCapabilitiesSource.CreateAsync(new FakeTimeProvider(now))).GetCurrent();
+        capabilities = capabilities with { Targets = [capabilities.Targets[0] with { TargetId = "target-1" }] };
         builder.AddSection(
             ObservationSection.Atlas, 1, now, freshness,
             new AtlasObservationV1(atlas, atlasSource.GetStatus()));
         builder.AddSection(
             ObservationSection.Capabilities, 1, now, freshness,
-            new CapabilitiesSnapshotV1("1", now, []));
+            capabilities);
         builder.AddSection(
             ObservationSection.QueryStore, 1, now, freshness,
             new QueryStoreObservationV1(
                 await querySource.GetStatusAsync(CancellationToken.None), families, plans.Values.ToArray()));
+        var city = JsonSerializer.SerializeToNode(new DatabaseCityObservationV1(summaries, pages), EdgeJson.Options)!.AsObject();
+        changeCity?.Invoke(city);
         builder.AddSection(
             ObservationSection.DatabaseCity, 1, now, freshness,
-            new DatabaseCityObservationV1(summaries, pages));
+            city);
         builder.AddSection(ObservationSection.Live, 1, now, freshness, live);
         return builder.Build("full-projection", now, now);
     }
@@ -180,6 +188,74 @@ public sealed class ApiEdgeIngestionTests : IDisposable
         using var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("mapped", "sales")]
+    [InlineData("null", null)]
+    [InlineData("legacy", "sales")]
+    [InlineData("legacy-exact", "fixture-target-primary/database/sales")]
+    [InlineData("legacy-unmatched", null)]
+    [InlineData("legacy-conflict", null)]
+    [InlineData("null-exact", null)]
+    public async Task EdgeNamespacePreservesCapturedMappingNullAndExactLegacyFallback(string mode, string? expected)
+    {
+        await using var factory = EnabledFactory();
+        using var client = factory.CreateClient();
+        var batch = await FullProjectionBatchAsync(city =>
+        {
+            foreach (var node in city["pages"]!.AsArray())
+            {
+                var page = node!.AsObject();
+                if (mode.StartsWith("legacy", StringComparison.Ordinal))
+                    Assert.True(page.Remove("queryStoreDatabaseId"));
+                else if (mode.StartsWith("null", StringComparison.Ordinal))
+                    page["queryStoreDatabaseId"] = null;
+                if (mode is "legacy-exact" or "legacy-unmatched")
+                    page["topQueryFamilies"] = new JsonArray();
+            }
+            if (mode == "legacy-conflict")
+            {
+                var original = city["pages"]!.AsArray().First(page =>
+                    page!["databaseId"]!.GetValue<string>() == "fixture-target-primary/database/sales")!;
+                var competing = original.DeepClone().AsObject();
+                competing["databaseId"] = "foreign-endpoint/database/sales";
+                city["pages"]!.AsArray().Add(competing);
+            }
+        }, family => mode.EndsWith("exact", StringComparison.Ordinal) && family.Family.DatabaseId == "sales"
+            ? family with
+            {
+                Family = family.Family with
+                {
+                    DatabaseId = "fixture-target-primary/database/sales",
+                    PhysicalQueries = family.Family.PhysicalQueries.Select(query =>
+                        query with { DatabaseId = "fixture-target-primary/database/sales" }).ToArray(),
+                },
+            }
+            : family);
+        using (var request = SignedRequest(EdgeJson.SerializeToUtf8Bytes(batch)))
+        using (var response = await client.SendAsync(request))
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+
+        const string owner = "fixture-target-primary/database/sales";
+        string? token = null;
+        do
+        {
+            var cursor = token is null ? string.Empty : $"&pageToken={Uri.EscapeDataString(token)}";
+            using var document = JsonDocument.Parse(await client.GetStringAsync(
+                $"/api/v1/database-city/{Uri.EscapeDataString(owner)}?pageSize=2{cursor}"));
+            Assert.Equal(owner, document.RootElement.GetProperty("databaseId").GetString());
+            Assert.Equal(expected, document.RootElement.GetProperty("queryStoreDatabaseId").GetString());
+            token = document.RootElement.GetProperty("nextPageToken").GetString();
+        } while (token is not null);
+        if (expected is not null)
+        {
+            using var queries = JsonDocument.Parse(await client.GetStringAsync(
+                $"/api/v1/query-store/queries?databaseId={Uri.EscapeDataString(expected)}&metric=cpu&pageSize=10"));
+            var families = queries.RootElement.GetProperty("items").EnumerateArray().ToArray();
+            Assert.NotEmpty(families);
+            Assert.All(families, family => Assert.Equal(expected, family.GetProperty("databaseId").GetString()));
+        }
     }
 
     [Fact]
@@ -271,20 +347,25 @@ public sealed class ApiEdgeIngestionTests : IDisposable
             Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
         var atlas = await client.GetStringAsync("/api/v1/atlas");
+        var capabilities = await client.GetStringAsync("/api/v1/capabilities");
         var query = await client.GetStringAsync("/api/v1/query-store/queries?metric=cpu&pageSize=10");
         var city = await client.GetStringAsync("/api/v1/database-city");
         var live = await client.GetStringAsync("/api/v1/live");
-        var findings = await client.GetStringAsync("/api/v1/findings?pageSize=10");
+        using var findings = await client.GetAsync(new Uri("/api/v1/findings?pageSize=10", UriKind.Relative));
 
         Assert.Contains("\"mode\":\"Edge\"", atlas, StringComparison.Ordinal);
         Assert.Contains("\"targetId\":\"target-1\"", atlas, StringComparison.Ordinal);
+        Assert.Contains("\"targetId\":\"target-1\"", capabilities, StringComparison.Ordinal);
+        Assert.Contains("\"sourceTimestamp\":\"2026-08-18T01:00:00+00:00\"", capabilities, StringComparison.Ordinal);
+        Assert.DoesNotContain("azure-sql-managed-instance", capabilities, StringComparison.Ordinal);
         Assert.Contains("\"source\":\"EdgeConnector\"", query, StringComparison.Ordinal);
         Assert.Contains("\"status\":\"Disconnected\"", query, StringComparison.Ordinal);
         Assert.Contains("\"source\":\"EdgeConnector\"", city, StringComparison.Ordinal);
         Assert.Contains("\"status\":\"Disconnected\"", city, StringComparison.Ordinal);
         Assert.Contains("EdgeConnector point-in-time sample", live, StringComparison.Ordinal);
         Assert.Contains("\"state\":\"Stopped\"", live, StringComparison.Ordinal);
-        Assert.Contains("\"targetId\":\"target-1\"", findings, StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.Gone, findings.StatusCode);
+        Assert.Equal("application/json", findings.Content.Headers.ContentType?.MediaType);
     }
 
     [Fact]

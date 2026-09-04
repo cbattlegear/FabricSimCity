@@ -4,10 +4,11 @@ using System.Text;
 using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
+using SqlSimCity.Domain.DatabaseCity;
 
 namespace SqlSimCity.Archive;
 
-public sealed class ArchiveSource :
+public sealed partial class ArchiveSource :
     IAtlasSnapshotSource,
     IAtlasCollectorStatusSource,
     ICapabilitiesSource,
@@ -24,8 +25,6 @@ public sealed class ArchiveSource :
     public const string QueryStoreIndexEntry = "query-store/index.json";
     public const string CitySummariesEntry = "database-city/summaries.json";
     public const string CityIndexEntry = "database-city/index.json";
-    public const string FindingsSnapshotEntry = "findings/snapshot.json";
-    public const string FindingsDescriptorEntry = "findings/descriptor.json";
 
     private readonly ArchivePackage _package;
     private readonly ArchiveRedactor _redactor;
@@ -37,15 +36,16 @@ public sealed class ArchiveSource :
     private readonly QueryStoreArchiveIndex _queryStoreIndex;
     private readonly DatabaseCitySummarySnapshotV1 _citySummaries;
     private readonly DatabaseCityArchiveIndex _cityIndex;
-    private readonly FindingsArchiveDescriptor? _findingsDescriptor;
+    private readonly IReadOnlyDictionary<string, string> _legacyQueryStoreMappings;
 
     private ArchiveSource(ArchivePackage package)
     {
         _package = package;
         _redactor = new ArchiveRedactor(package.Manifest.Redaction.ProtectedIdentifiersIncluded);
         RequireFeatures(package.Manifest);
+        var sourceAtlas = ReadRequired<AtlasSnapshotV1>(AtlasSnapshotEntry);
         var archivedAtlas = _redactor.Redact(
-            ReadRequired<AtlasSnapshotV1>(AtlasSnapshotEntry),
+            sourceAtlas,
             package.Manifest.Target.DisplayAlias);
         _atlas = Import(archivedAtlas);
         _atlasStatus = ReadOptional<AtlasCollectorStatusV1>(AtlasStatusEntry) ??
@@ -71,14 +71,14 @@ public sealed class ArchiveSource :
                 new Dictionary<string, string>(StringComparer.Ordinal),
                 new Dictionary<string, string>(StringComparer.Ordinal),
                 new Dictionary<string, ArchivePageSeries>(StringComparer.Ordinal));
-        _citySummaries = Import(_redactor.Redact(
-            ReadOptional<DatabaseCitySummarySnapshotV1>(CitySummariesEntry) ??
-            new DatabaseCitySummarySnapshotV1("1.0", package.Manifest.CreatedAt, [])));
+        var sourceCities = ReadOptional<DatabaseCitySummarySnapshotV1>(CitySummariesEntry) ??
+            new DatabaseCitySummarySnapshotV1("1.0", package.Manifest.CreatedAt, []);
+        _citySummaries = Import(_redactor.Redact(sourceCities));
         _cityIndex = ReadOptional<DatabaseCityArchiveIndex>(CityIndexEntry) ??
             new DatabaseCityArchiveIndex(
                 new Dictionary<string, IReadOnlyDictionary<string, ArchivePageSeries>>(StringComparer.Ordinal));
-        _findingsDescriptor = ReadOptional<FindingsArchiveDescriptor>(FindingsDescriptorEntry);
-        ValidateIndexes();
+        _legacyQueryStoreMappings = ValidateIndexes();
+        ValidateLegacyFindings();
     }
 
     public ArchiveInfo Info => new(
@@ -87,15 +87,13 @@ public sealed class ArchiveSource :
         _package.Manifest.ProducerVersion,
         _package.Manifest.CreatedAt,
         _package.Manifest.Target,
-        _package.Manifest.IncludedSections,
+        _package.Manifest.IncludedSections.Where(section => section != "findings").ToArray(),
         _package.Manifest.Redaction,
-        _package.Manifest.Features,
-        _package.Manifest.Capabilities,
+        _package.Manifest.Features.Where(feature => feature != LegacyFindingsFeature).ToArray(),
+        _package.Manifest.Capabilities
+            .Where(capability => capability != "offline-findings-reevaluation").ToArray(),
         _package.Length,
-        _package.Manifest.Entries.Count)
-    {
-        ArchivedFindings = _findingsDescriptor,
-    };
+        _package.Manifest.Entries.Count);
 
     public static ArchiveSource Open(ArchiveSourceOptions options)
     {
@@ -276,7 +274,7 @@ public sealed class ArchiveSource :
         var archivedPages = ReadRequired<IReadOnlyList<DatabaseCityPageV1>>(series.Entries[chunkIndex]);
         if (archivedPages.Count != 1)
             throw new ArchiveValidationException("Archive database city chunk must contain exactly one page.");
-        var page = Import(_redactor.Redact(archivedPages[0]));
+        var page = Import(RedactCityPage(archivedPages[0]));
         if (series.TotalCount == 0)
             return Task.FromResult<DatabaseCityPageV1?>(page with { PageSize = pageSize, NextPageToken = null });
 
@@ -291,7 +289,7 @@ public sealed class ArchiveSource :
             var wrappers = ReadRequired<IReadOnlyList<DatabaseCityPageV1>>(series.Entries[chunkIndex]);
             if (wrappers.Count != 1)
                 throw new ArchiveValidationException("Archive database city chunk must contain exactly one page.");
-            var chunkPage = Import(_redactor.Redact(wrappers[0]));
+            var chunkPage = Import(RedactCityPage(wrappers[0]));
             if (contributingChunks.Add(chunkIndex))
                 contributingPages.Add(chunkPage);
             var withinChunk = checked((int)(currentOffset % series.ChunkSize));
@@ -338,6 +336,26 @@ public sealed class ArchiveSource :
         _package.Manifest.Entries.Any(value => value.Name == entry)
             ? ReadRequired<T>(entry)
             : null;
+
+    private DatabaseCityPageV1 RedactCityPage(DatabaseCityPageV1 page)
+    {
+        // Redaction writes the property and marks it present, so resolve legacy omission first.
+        if (!page.HasQueryStoreDatabaseId)
+        {
+            page = page with
+            {
+                QueryStoreDatabaseId = _legacyQueryStoreMappings.GetValueOrDefault(
+                    _redactor.Identifier(page.DatabaseId, "database")),
+            };
+        }
+        return _redactor.Redact(page);
+    }
+
+    private static HashSet<string> UniqueDatabaseIds(IEnumerable<string> databaseIds) =>
+        databaseIds.GroupBy(value => value, StringComparer.Ordinal)
+            .Where(group => group.Count() == 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.Ordinal);
 
     private List<T> ReadSeries<T>(
         ArchivePageSeries series,
@@ -529,7 +547,7 @@ public sealed class ArchiveSource :
         };
     }
 
-    private void ValidateIndexes()
+    private IReadOnlyDictionary<string, string> ValidateIndexes()
     {
         RequireSection(AtlasSnapshotEntry, "atlas");
         RequireOptionalSection(AtlasStatusEntry, "atlas");
@@ -539,16 +557,17 @@ public sealed class ArchiveSource :
         RequireOptionalSection(QueryStoreIndexEntry, "query-store");
         RequireOptionalSection(CitySummariesEntry, "database-city");
         RequireOptionalSection(CityIndexEntry, "database-city");
-        RequireOptionalSection(FindingsSnapshotEntry, "findings");
-        RequireOptionalSection(FindingsDescriptorEntry, "findings");
 
         ValidateIndexMap(_queryStoreIndex.FamilyEntries, "Query Store family");
         ValidateIndexMap(_queryStoreIndex.PlanEntries, "Query Store plan");
+        var capturedFamilies = new HashSet<(string FamilyId, string DatabaseId)>();
         foreach (var (familyId, entry) in _queryStoreIndex.FamilyEntries)
         {
-            var family = _redactor.Redact(ReadRequired<QueryFamilyDetailV1>(entry));
+            var archived = ReadRequired<QueryFamilyDetailV1>(entry);
+            var family = _redactor.Redact(archived);
             if (!string.Equals(family.Family.FamilyId, familyId, StringComparison.Ordinal))
                 throw new ArchiveValidationException($"Archive family index key '{familyId}' does not match its payload.");
+            capturedFamilies.Add((family.Family.FamilyId, family.Family.DatabaseId));
         }
         foreach (var (planId, entry) in _queryStoreIndex.PlanEntries)
         {
@@ -575,8 +594,14 @@ public sealed class ArchiveSource :
                         !string.Equals(imported.DatabaseId, parts[1], StringComparison.Ordinal))
                         throw new ArchiveValidationException(
                             $"Archive Query Store metric key '{key}' does not match a payload database.");
+                    capturedFamilies.Add((imported.FamilyId, imported.DatabaseId));
                 });
         }
+        var catalogIds = UniqueDatabaseIds(_atlas.Databases.Select(database => database.DatabaseId))
+            .Intersect(UniqueDatabaseIds(_citySummaries.Databases.Select(database => database.DatabaseId)),
+                StringComparer.Ordinal);
+        var resolver = new DatabaseCityNamespaceResolver(capturedFamilies, catalogIds);
+        capturedFamilies.Clear();
         foreach (var (databaseId, metrics) in _cityIndex.Pages)
         {
             ValidateIndexKey(databaseId, "database city database");
@@ -593,60 +618,16 @@ public sealed class ArchiveSource :
                     pageWrappers: true,
                     validateItem: page =>
                     {
-                        var imported = _redactor.Redact(page);
+                        var imported = _redactor.RedactForNamespaceResolution(page);
                         if (!string.Equals(imported.DatabaseId, databaseId, StringComparison.Ordinal) ||
                             imported.Metric != parsedMetric)
                             throw new ArchiveValidationException(
                                 $"Archive database city key '{databaseId}|{metric}' does not match its payload.");
+                        resolver.Observe(imported);
                     });
             }
         }
-        ArchiveFindingsSnapshot? findings = null;
-        var hasFindingsSnapshot = _package.Manifest.Entries.Any(entry => entry.Name == FindingsSnapshotEntry);
-        var hasFindingsDescriptor = _package.Manifest.Entries.Any(entry => entry.Name == FindingsDescriptorEntry);
-        var declaresFindings = _package.Manifest.Features.Contains(
-            "findings-evidence-v1", StringComparer.Ordinal);
-        if (hasFindingsSnapshot)
-        {
-            findings = ReadRequired<ArchiveFindingsSnapshot>(FindingsSnapshotEntry);
-            if (findings.Evaluation.SchemaVersion != "1.0" ||
-                findings.Export.SchemaVersion != "1.0" ||
-                string.IsNullOrWhiteSpace(findings.Evaluation.EngineVersion) ||
-                findings.Evaluation.Rules.Select(rule => rule.RuleId)
-                    .Distinct(StringComparer.Ordinal).Count() != findings.Evaluation.Rules.Count ||
-                findings.Evaluation.Rules.Any(rule =>
-                    string.IsNullOrWhiteSpace(rule.RuleId) || string.IsNullOrWhiteSpace(rule.RuleVersion)) ||
-                findings.Export.EngineVersion != findings.Evaluation.EngineVersion ||
-                findings.Export.Findings.Any(finding =>
-                    finding.SchemaVersion != "1.0" ||
-                    string.IsNullOrWhiteSpace(finding.RuleId) ||
-                    string.IsNullOrWhiteSpace(finding.RuleVersion)))
-                throw new ArchiveValidationException("Archive findings engine or rule version metadata is invalid.");
-        }
-        if (_findingsDescriptor is not null)
-        {
-            if (_findingsDescriptor.Mode != "ReevaluateImportedEvidence" ||
-                string.IsNullOrWhiteSpace(_findingsDescriptor.EngineVersion) ||
-                _findingsDescriptor.EngineVersion.Length > 64 ||
-                _findingsDescriptor.RuleVersions.Count > ArchiveFormat.MaxManifestListItems ||
-                _findingsDescriptor.RuleVersions.Any(pair =>
-                    string.IsNullOrWhiteSpace(pair.Key) || pair.Key.Length > 128 ||
-                    string.IsNullOrWhiteSpace(pair.Value) || pair.Value.Length > 64) ||
-                findings is null ||
-                findings.Evaluation.EngineVersion != _findingsDescriptor.EngineVersion ||
-                findings.Evaluation.Rules.Count != _findingsDescriptor.RuleVersions.Count ||
-                findings.Evaluation.Rules.Any(rule =>
-                    !_findingsDescriptor.RuleVersions.TryGetValue(rule.RuleId, out var version) ||
-                    version != rule.RuleVersion) ||
-                findings.Export.Findings.Any(finding =>
-                    !_findingsDescriptor.RuleVersions.TryGetValue(finding.RuleId, out var version) ||
-                    version != finding.RuleVersion))
-                throw new ArchiveValidationException("Archive findings descriptor is inconsistent.");
-        }
-        if (hasFindingsSnapshot != hasFindingsDescriptor ||
-            declaresFindings != hasFindingsSnapshot)
-            throw new ArchiveValidationException(
-                "Archive findings feature, snapshot, and descriptor must be present together.");
+        return resolver.GetMappings();
     }
 
     private void ValidateIndexMap(IReadOnlyDictionary<string, string> values, string kind)
@@ -729,7 +710,7 @@ public sealed class ArchiveSource :
         var known = new HashSet<string>(StringComparer.Ordinal)
         {
             "atlas-v1", "capabilities-v1", "query-store-v1", "database-city-v1",
-            "live-point-in-time-v1", "findings-evidence-v1", "canonical-json-v1",
+            "live-point-in-time-v1", LegacyFindingsFeature, "canonical-json-v1",
             "uncompressed-container-v1",
         };
         var unsupported = manifest.Features.Where(feature => !known.Contains(feature)).ToArray();
