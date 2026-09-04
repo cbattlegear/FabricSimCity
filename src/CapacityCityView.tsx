@@ -446,7 +446,7 @@ export function CapacityCityView({
         )}
       </div>
 
-      {sidebarMode.showsAddressBook && liveOperationFeed}
+      {sidebarMode.showsAddressBook && !selectedRoad && liveOperationFeed}
 
       <AddressBook
         entries={addressEntries}
