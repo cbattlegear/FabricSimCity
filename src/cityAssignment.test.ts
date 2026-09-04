@@ -287,7 +287,7 @@ describe('tourDemands', () => {
     ])
   })
 
-  it('generates nothing for a family that touches one table', () => {
+  it('generates nothing for a family that touches one item', () => {
     expect(tourDemands('family', [4], 500)).toEqual([])
     expect(tourDemands('family', [], 500)).toEqual([])
   })

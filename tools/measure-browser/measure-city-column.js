@@ -167,8 +167,10 @@ async function measureShadow() {
 
   const summarise = (frames) => ({
     frames: frames.length,
+    frameMs: stats(frames.map((f) => f.cpuMs)),
     visibleCalls: stats(frames.map((f) => f.calls)),
     offscreenCalls: stats(frames.map((f) => f.offCalls)),
+    offscreenMs: stats(frames.map((f) => f.offMs)),
   })
 
   const result = {
@@ -187,15 +189,30 @@ async function measureFixture(name) {
   await page.setViewportSize({ width: 1115, height: 800 })
   await instrument(page)
   await enterCity(page, name)
+  await openDirectory(page)
   // Open the activity drawer so the weather line is rendered.
   const activity = page.locator('.sidebar-drawer', { hasText: 'Throttling activity' }).locator('summary').first()
   if (await activity.count()) { await activity.click(); await page.waitForTimeout(500) }
 
   const info = await page.evaluate(() => {
     const text = document.body.innerText
+    const facilityNames = [
+      'Power Plant',
+      'Smoothing Reservoir',
+      'Carry-forward Yard',
+      'Delay Gate',
+      'Interactive Rejection Gate',
+      'Background Rejection Gate',
+      'Surge Substation',
+    ]
+    const addressText = [...document.querySelectorAll('.address-entry')]
+      .map((entry) => entry.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+    const facilityEntries = facilityNames
+      .filter((name) => addressText.some((entry) => entry.includes(name)))
     return {
       weather: document.querySelector('.city-weather-line')?.textContent?.trim() ?? null,
       incidentSummary: [...document.querySelectorAll('.drawer-badge')].map((b) => b.textContent?.trim()),
+      facilityEntries,
       vacantEntries: text.split('\n').filter((l) => /unmeasured|Vacant|not fully measured/i.test(l)).slice(0, 3),
       rejectingText: text.split('\n').filter((l) => /reject|blackout/i.test(l)).slice(0, 3),
     }
@@ -209,9 +226,10 @@ async function measureFixture(name) {
 async function run() {
   const column = await measureColumn()
   const shadow = await measureShadow()
+  const contoso = await measureFixture('Contoso Analytics')
   const tailspin = await measureFixture('Tailspin Archive')
   const fabrikam = await measureFixture('Fabrikam Dev')
-  console.log(JSON.stringify({ column, shadow, fixtures: [tailspin, fabrikam] }, null, 2))
+  console.log(JSON.stringify({ column, shadow, fixtures: [contoso, tailspin, fabrikam] }, null, 2))
 }
 
 run().catch((e) => { console.error(e); process.exit(1) })

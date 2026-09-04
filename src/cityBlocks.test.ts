@@ -133,8 +133,8 @@ describe('buildBlocks', () => {
   })
 
   /*
-   * Neighbourhoods grow over this adjacency, so an asymmetric link would let a schema claim ground
-   * it cannot reach and leave its tables scattered - which is the thing the user asked to fix.
+   * Neighbourhoods grow over this adjacency, so an asymmetric link would let a workspace claim ground
+   * it cannot reach and leave its items scattered - which is the thing the user asked to fix.
    */
   it('records adjacency symmetrically', () => {
     const byId = new Map(FIELD.blocks.map(block => [block.id, block]))

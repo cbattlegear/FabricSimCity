@@ -18,6 +18,7 @@ import {
 } from './cityBuildings'
 import { assignQueryRoutes } from './cityQueryTraffic'
 import { ROAD_WIDTH, type RoadTraffic } from './cityTraffic'
+import { POWER_GRID_STATE_COLORS, type FacilityTraffic } from './cityFacilityTraffic'
 import type { WorkloadTraffic } from './cityWorkloadTraffic'
 import {
   claimLane,
@@ -277,6 +278,8 @@ export type DatabaseCitySceneController = {
   /** The aggregate street-load layer built from the workload's executions and apportioned waits. */
   setTraffic(traffic: WorkloadTraffic): void
   setFacilities(facilities: readonly Facility[]): void
+  /** Lanes from buildings to the power-grid gates that held their work. */
+  setFacilityTraffic(traffic: FacilityTraffic): void
   setRoute(route: CityRoute | null): void
   setSelected(itemId: string | null): void
   /** Highlights one road and pins both of its endpoints. */
@@ -837,6 +840,20 @@ export function createDatabaseCityScene(
     }
     return material
   }
+  const facilityStateMaterials = new Map<number, THREE.MeshStandardMaterial>()
+  const facilityStateMaterial = (color: number) => {
+    let material = facilityStateMaterials.get(color)
+    if (!material) {
+      material = new THREE.MeshStandardMaterial({
+        color,
+        emissive: color,
+        emissiveIntensity: 0.14,
+        roughness: 0.58,
+      })
+      facilityStateMaterials.set(color, material)
+    }
+    return material
+  }
   /**
    * One wash material per neighbourhood hue.
    *
@@ -1283,6 +1300,8 @@ export function createDatabaseCityScene(
   const roadGroup = new THREE.Group()
   /** Streets carrying workload traffic, drawn once per street rather than once per query pair. */
   const trafficGroup = new THREE.Group()
+  /** Power-grid lanes from buildings to the gates that held their work. */
+  const facilityLaneGroup = new THREE.Group()
   /** Wider ribbons drawn beneath the road fill. Map mode only — casings are a basemap idiom. */
   const roadCasingGroup = new THREE.Group()
   roadCasingGroup.visible = false
@@ -1317,6 +1336,7 @@ export function createDatabaseCityScene(
     districtGroup,
     roadCasingGroup,
     trafficGroup,
+    facilityLaneGroup,
     roadGroup,
     roadHighlightGroup,
     buildingGroup,
@@ -1340,6 +1360,7 @@ export function createDatabaseCityScene(
   let currentRoads: readonly RoadTraffic[] = []
   let currentObjects: readonly CapacityCityItem[] = []
   let currentTraffic: WorkloadTraffic | null = null
+  let currentFacilityTraffic: FacilityTraffic | null = null
   let currentRoute: CityRoute | null = null
   let currentFacilities: readonly Facility[] = []
   let currentIncidents: readonly IncidentMarker[] = []
@@ -1440,6 +1461,7 @@ export function createDatabaseCityScene(
     roadGroup.visible = layers.paths
     roadCasingGroup.visible = layers.paths && flatMode
     trafficGroup.visible = layers.traffic
+    facilityLaneGroup.visible = layers.traffic && layers.infrastructure
     roadHighlightGroup.visible = layers.traffic || layers.paths
     infrastructureGroup.visible = layers.infrastructure
     routeGroup.visible = layers.route
@@ -3844,6 +3866,49 @@ export function createDatabaseCityScene(
   }
 
   /**
+   * Draws measured throttling lanes into the power-grid gates.
+   *
+   * The facility traffic projection only emits lanes for attributed measured seconds. Unsupported,
+   * unmeasured, or off-page work therefore draws nothing rather than a quiet green lane. The lane
+   * target is the facility's reserved site, so a gate is a real place in the same deterministic city
+   * plan as the building that sent work to it.
+   */
+  function buildFacilityLanes(traffic: FacilityTraffic | null) {
+    clearGroup(facilityLaneGroup)
+    if (!plan || !traffic || traffic.lanes.length === 0) return
+
+    const corridorLanes = new Map<string, Set<number>>()
+    for (const lane of traffic.lanes) {
+      const lot = plan.lots.get(lane.itemId)
+      const site = facilitySites.get(lane.facility)
+      if (!lot || !site) continue
+      const route = streetRoute(
+        plan,
+        { x: lot.accessX, z: lot.accessZ },
+        { x: site.x, z: site.z },
+      )
+      if (route.points.length < 2) continue
+
+      const claimed = claimLane(corridorLanes, corridorKeys(route.nodeIds))
+      const offset = laneOffset(claimed)
+      const ribbon = ribbonGeometry(
+        route.points,
+        lane.width,
+        lane.outcome === 'refused' ? DASH_PATTERNS.dashed : null,
+        offset,
+      )
+      if (!ribbon) continue
+      const mesh = new THREE.Mesh(
+        track(ribbon),
+        roadMaterial(lane.color, lane.grade === 'unknown', GROUND_RANK.facilityLane),
+      )
+      mesh.position.y = ROAD_Y - ROAD_LANE_STEP + claimed * ROAD_LANE_STEP
+      mesh.renderOrder = 1
+      facilityLaneGroup.add(mesh)
+    }
+  }
+
+  /**
    * Draws every graded road. Roads that share a street leg are pushed into their own lane so a
    * busy corridor reads as several distinct routes instead of one stack of overlapping ribbons.
    */
@@ -3962,7 +4027,9 @@ export function createDatabaseCityScene(
       addPoiPin(
         site.x,
         site.z,
-        facility.known ? MAP_PALETTE.pinFacility : 0x8a8f94,
+        facility.known
+          ? POWER_GRID_STATE_COLORS[facility.state ?? 'unbuilt']
+          : POWER_GRID_STATE_COLORS.unbuilt,
         MAP_PIN.facilityRadius,
         MAP_PIN.facilityHeight,
       )
@@ -3986,7 +4053,7 @@ export function createDatabaseCityScene(
 
       // The architecture is always drawn, so a facility's location stays learnable even with no
       // evidence. It is fixed decoration and never varies with a measurement.
-      group.add(buildFacilityArchitecture(facility.kind, site.radius, facility.known))
+      group.add(buildFacilityArchitecture(facility, site.radius))
 
       if (!facility.known) {
         infrastructureGroup.add(group)
@@ -4006,7 +4073,7 @@ export function createDatabaseCityScene(
         const material = unit.fill === null
           ? materials.facilityUnknown
           : unit.alert
-            ? materials.facilityAlert
+            ? facilityStateMaterial(POWER_GRID_STATE_COLORS[facility.state ?? 'unbuilt'])
             : materials.facilityFill
         const geometry = slot.form === 'cylinder'
           ? new THREE.CylinderGeometry(slot.radius, slot.radius, height, 14)
@@ -4039,22 +4106,30 @@ export function createDatabaseCityScene(
    *
    * Prefers the authored landmark from `landmarks.glb`, which is modelled to a plot radius of 1 and
    * therefore scaled rather than rebuilt. Falls back to the procedural shell when the kit has not
-   * arrived — or never arrives. Either way the architecture is decoration: it is identical for a
-   * facility carrying a terabyte of evidence and one carrying none, and only the units inside it move.
-   * An unmeasured facility is drawn in the wireframe material for exactly that reason.
+   * arrived — or never arrives. Either way the architecture's shape is decoration. The power plant is
+   * the exception for scale: its massing follows the measured SKU budget, while an unknown SKU stays at
+   * the fallback size and wireframe material rather than claiming a capacity.
    */
-  function buildFacilityArchitecture(kind: FacilityKind, radius: number, known: boolean): THREE.Group {
+  function buildFacilityArchitecture(facility: Facility, radius: number): THREE.Group {
     const group = new THREE.Group()
+    const kind = facility.kind
+    const known = facility.known
+    const scale = kind === 'powerPlant' && facility.size !== null && facility.size !== undefined
+      ? 0.72 + facility.size * 0.44
+      : 1
+    const body = known
+      ? facilityStateMaterial(POWER_GRID_STATE_COLORS[facility.state ?? 'unbuilt'])
+      : materials.facilityUnknown
     const kit = assets?.landmarks
     const asset = LANDMARK_ASSETS[kind]
     if (kit && kit.has(asset)) {
-      group.scale.setScalar(radius)
+      group.scale.set(radius * scale, radius * scale, radius * scale)
       for (const role of kit.roles(asset)) {
         const geometry = kit.geometry(asset, role)
         if (!geometry) continue
         // Kit geometry is shared across every rebuild, so it is deliberately not tracked for disposal.
-        const mesh = new THREE.Mesh(geometry, known ? KIT_MATERIALS[role] : materials.facilityUnknown)
-        // Landmarks always cast: there are six of them, and they are what you navigate by.
+        const mesh = new THREE.Mesh(geometry, role === 'body' ? body : known ? KIT_MATERIALS[role] : materials.facilityUnknown)
+        // Landmarks always cast: there are few of them, and they are what you navigate by.
         mesh.castShadow = true
         mesh.receiveShadow = true
         group.add(mesh)
@@ -4062,14 +4137,14 @@ export function createDatabaseCityScene(
       return group
     }
 
-    const shell = facilityShell(kind, radius)
+    const shell = facilityShell(kind, radius * scale)
     const add = (geometry: THREE.BufferGeometry, material: THREE.Material) => {
       const mesh = new THREE.Mesh(track(geometry), material)
       mesh.castShadow = true
       mesh.receiveShadow = true
       group.add(mesh)
     }
-    add(shell.body, known ? materials.facility : materials.facilityUnknown)
+    add(shell.body, body)
     if (shell.trim) add(shell.trim, known ? materials.trim : materials.facilityUnknown)
     if (shell.glass) add(shell.glass, known ? materials.window : materials.facilityUnknown)
     return group
@@ -4383,6 +4458,7 @@ export function createDatabaseCityScene(
       buildRoads(currentRoads, plan)
       if (currentTraffic) buildTraffic(currentTraffic)
       buildInfrastructure(currentFacilities)
+      buildFacilityLanes(currentFacilityTraffic)
       buildRoute(currentRoute)
       buildIncidents(currentIncidents)
       // After the incidents, because wreckage is placed at the pins they just computed.
@@ -4420,6 +4496,12 @@ export function createDatabaseCityScene(
     setFacilities(facilities) {
       currentFacilities = facilities
       buildInfrastructure(facilities)
+      buildFacilityLanes(currentFacilityTraffic)
+      requestRender()
+    },
+    setFacilityTraffic(traffic) {
+      currentFacilityTraffic = traffic
+      buildFacilityLanes(traffic)
       requestRender()
     },
     setRoute(route) {
@@ -4648,6 +4730,7 @@ export function createDatabaseCityScene(
       for (const material of Object.values(disasterMaterials)) material.dispose()
       for (const material of archetypeMaterials.values()) material.dispose()
       for (const material of roadMaterials.values()) material.dispose()
+      for (const material of facilityStateMaterials.values()) material.dispose()
       for (const material of poiMaterials.values()) material.dispose()
       for (const material of incidentPinMaterials.values()) {
         material?.map?.dispose()

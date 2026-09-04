@@ -93,7 +93,7 @@ describe('the ordering stays derived, so the stack cannot outgrow it again', () 
  * It was a flat `TRAIL_WIDTH = 1.9` world units applied to all five classes -- about a car's width
  * (1.87), so it was right for one rung and wrong for the other four. At the bottom of the ladder it
  * was wrong by a lot and in the direction that shows: a bicycle is 0.52 wide and 1.77 long, so its
- * wake was 3.6x wider than the bike and wider than the bike was long. On the sample database 71% of
+ * wake was 3.6x wider than the bike and wider than the bike was long. On the sample capacity 71% of
  * vehicles are bicycles, so that was the ordinary case.
  *
  * These read the class table out of the source because `VEHICLE_SIZE` is a local inside the scene

@@ -6,13 +6,13 @@ import {
   cityOf,
   lotsOf,
   movedBuildings,
-  objectIdFor,
+  itemIdFor,
   planOf,
   streetSignature,
 } from './cityGrowth.testkit'
 
 /*
- * The street half of the growth guarantee: what the network does when the database changes under it.
+ * The street half of the growth guarantee: what the network does when the capacity changes under it.
  * See `cityGrowth.testkit.ts` for the fixtures and for why this family is split across files.
  */
 
@@ -64,18 +64,18 @@ describe('the shared street network', () => {
   })
 })
 
-describe('adding a table to the database', () => {
-  it.each(GROWTH_SIZES)('leaves the street network untouched, at %i objects', count => {
+describe('adding an item to the capacity', () => {
+  it.each(GROWTH_SIZES)('leaves the street network untouched, at %i items', count => {
     expect(streetSignature(planOf(count + 1))).toBe(streetSignature(planOf(count)))
   }, PLAN_TIMEOUT_MS)
 
   /*
    * The honest half of the trade. Growth cannot be both continuous and stable: either every added
-   * table moves the map a little, or the map holds still and rebuilds on a rung. This asserts the
+   * item moves the map a little, or the map holds still and rebuilds on a rung. This asserts the
    * rebuild really does happen there, so the ladder is a documented behaviour rather than a gap in
    * the tests above.
    */
-  it('does rebuild the city when the database climbs a rung', () => {
+  it('does rebuild the city when the capacity climbs a rung', () => {
     expect(streetSignature(planOf(77))).not.toBe(streetSignature(planOf(76)))
   })
 })
@@ -83,9 +83,9 @@ describe('adding a table to the database', () => {
 describe('an item growing', () => {
   /** The same capacity, with one item holding more OneLake bytes and CU than it did before. */
   function grownBy(count: number, index: number, bytes: string): CityPlan {
-    const { objects, options } = cityOf(count)
-    const grown = objects.map(item =>
-      item.itemId === objectIdFor(index)
+    const { items, options } = cityOf(count)
+    const grown = items.map(item =>
+      item.itemId === itemIdFor(index)
         ? {
             ...item,
             storage: { ...item.storage, bytes },

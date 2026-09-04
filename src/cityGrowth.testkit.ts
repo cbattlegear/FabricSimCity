@@ -1,12 +1,12 @@
 /**
- * The fixtures behind the `cityGrowth*` specs: a synthetic database of `count` objects, and the
+ * The fixtures behind the `cityGrowth*` specs: a synthetic capacity of `count` items, and the
  * comparisons that decide whether adding one to it moved anything.
  *
- * Does the city survive the database changing under it?
+ * Does the city survive the capacity changing under it?
  *
- * Issue #47 measured that above 75 objects, adding a single table retraced every street and moved
- * every building, so nothing a user had learned about where things are survived a schema change.
- * Those specs are that measurement, kept: they plan a city, add a table, and compare the two plans
+ * Issue #47 measured that above 75 items, adding a single item retraced every street and moved
+ * every building, so nothing a user had learned about where things are survived a workspace change.
+ * Those specs are that measurement, kept: they plan a city, add an item, and compare the two plans
  * street by street and building by building.
  *
  * The property under test is deliberately narrow and absolute -- *no* existing building moves --
@@ -32,12 +32,12 @@ const evidence: Evidence = {
   freshUntil: null,
 }
 
-const SCHEMA_COUNT = 3
+const WORKSPACE_COUNT = 3
 
 /**
  * Sizes spanning the ones issue #47 measured, chosen to sit *between* rungs of the growth ladder,
- * because that is where almost every database sits: a rung is a 25% jump, so at a hundred tables
- * only one added table in twenty-five lands on one. The rungs themselves are asserted separately
+ * because that is where almost every capacity sits: a rung is a 25% jump, so at a hundred items
+ * only one added item in twenty-five lands on one. The rungs themselves are asserted separately
  * rather than quietly excluded.
  */
 export const GROWTH_SIZES = [5, 15, 74, 100, 200, 500]
@@ -50,8 +50,8 @@ export const GROWTH_SIZES = [5, 15, 74, 100, 200, 500]
  */
 export const PLAN_TIMEOUT_MS = 60_000
 
-function schemaIdFor(index: number): string {
-  return `schema:s${index % SCHEMA_COUNT}`
+function workspaceIdFor(index: number): string {
+  return `workspace:s${index % WORKSPACE_COUNT}`
 }
 
 /**
@@ -71,23 +71,23 @@ function storageBytesFor(index: number): string {
  *
  * Unpadded on purpose. Placement hands out ground in catalogue order and relies on a newly created
  * item sorting after every item already there; compared as text an unpadded id breaks that, because
- * `object/9` sorts after `object/1234567`. Padding these in the test would hide the one property the
+ * `item/9` sorts after `item/1234567`. Padding these in the test would hide the one property the
  * specs exist to prove. The base of 3 puts the run across both the 9-to-10 and 99-to-100
  * boundaries, where a text comparison and a numeric one disagree.
  */
-export function objectIdFor(index: number): string {
-  return `db:growth/object/${index + 3}`
+export function itemIdFor(index: number): string {
+  return `capacity:growth/item/${index + 3}`
 }
 
-function object(index: number): CapacityCityItem {
-  const workspaceId = schemaIdFor(index)
+function item(index: number): CapacityCityItem {
+  const workspaceId = workspaceIdFor(index)
   const bytes = storageBytesFor(index)
   const cuSeconds = String(Math.floor(Number(bytes) * 0.8))
   return {
-    itemId: objectIdFor(index),
+    itemId: itemIdFor(index),
     workspaceId,
-    workspaceName: workspaceId.replace('schema:', ''),
-    name: `t${index}`,
+    workspaceName: workspaceId.replace('workspace:', ''),
+    name: `item${index}`,
     kind: 'Lakehouse',
     archetype: 'Storage',
     storage: { bytes, status: 'Known', evidence },
@@ -105,7 +105,7 @@ function object(index: number): CapacityCityItem {
     throttlingMinutes: null,
     performanceDeltaPercent: null,
     layout: {
-      neighborhoodOrdinal: index % SCHEMA_COUNT,
+      neighborhoodOrdinal: index % WORKSPACE_COUNT,
       // The collector numbers items across the whole capacity in item-id order.
       itemOrdinal: index,
     },
@@ -114,14 +114,14 @@ function object(index: number): CapacityCityItem {
   }
 }
 
-function schemasFor(objects: readonly CapacityCityItem[]): CapacityCityWorkspace[] {
+function workspacesFor(items: readonly CapacityCityItem[]): CapacityCityWorkspace[] {
   const counts = new Map<string, number>()
-  for (const item of objects) counts.set(item.workspaceId, (counts.get(item.workspaceId) ?? 0) + 1)
+  for (const item of items) counts.set(item.workspaceId, (counts.get(item.workspaceId) ?? 0) + 1)
   return [...counts.entries()]
     .sort((left, right) => (left[0] < right[0] ? -1 : 1))
     .map(([workspaceId, count], index) => ({
       workspaceId,
-      name: workspaceId.replace('schema:', ''),
+      name: workspaceId.replace('workspace:', ''),
       neighborhoodOrdinal: index,
       itemCount: String(count),
       evidence,
@@ -129,21 +129,21 @@ function schemasFor(objects: readonly CapacityCityItem[]): CapacityCityWorkspace
 }
 
 /** The city a capacity of `count` items reports, exactly as a completed page walk would carry it. */
-export function cityOf(count: number): { objects: CapacityCityItem[]; options: CityPlanOptions } {
-  const objects = Array.from({ length: count }, (_, index) => object(index))
+export function cityOf(count: number): { items: CapacityCityItem[]; options: CityPlanOptions } {
+  const items = Array.from({ length: count }, (_, index) => item(index))
   return {
-    objects,
+    items,
     options: {
-      seed: 'db:growth',
+      seed: 'capacity:growth',
       totalItems: String(count),
-      workspaces: schemasFor(objects),
+      workspaces: workspacesFor(items),
     },
   }
 }
 
 export function planOf(count: number): CityPlan {
-  const { objects, options } = cityOf(count)
-  return planCity(objects, options)
+  const { items, options } = cityOf(count)
+  return planCity(items, options)
 }
 
 /** Every street's identity and drawn shape, so a retraced network cannot compare equal to the old one. */

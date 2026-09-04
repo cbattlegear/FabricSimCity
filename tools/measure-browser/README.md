@@ -213,6 +213,9 @@ It reports, at 1115x800 and 720x800:
   timing. Trusted clicks hit-test, so they fail when a sibling overlaps the target. `element.click()`
   via `evaluate` and `click({ force: true })` both bypass that and will pass while the defect is
   still there — use them only to reach a later state, never as evidence.
+- The three fixture capacities' city evidence readouts and the power-grid facility entries present
+  in the city directory, so a paused capacity can be checked as "not observed" rather than a healthy
+  empty grid while the conditional surge substation stays absent unless reported active.
 
 It selects a capacity and opens every drawer before measuring, on purpose. An empty detail region
 and a closed drawer are short forms that hide exactly the height defects this exists to find, and

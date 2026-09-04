@@ -326,16 +326,20 @@ All verified against `@microsoft/rayfin-*` v1.34.0.
   names (`Pipeline`, `Dataflow Gen2`, `LlmPlugin`, `User Data Functions`) disagree. `src/itemKind.ts`
   is the mapping layer and is where building archetypes get assigned.
 
-## `src/pending-port/`
+## The port is finished; the quarantine is gone
 
-29 modules and 33 test files from SQLSimCity that the Fabric port has not reached. Excluded from
-`tsconfig.json` and `vitest.config.ts` — **keep those two lists in agreement**; a module excluded
-from one and not the other is either unchecked or unrunnable, and both fail quietly.
+`src/pending-port/` no longer exists. Every SQLSimCity module was either ported or deliberately
+deleted, and the `pending-port` excludes are out of `tsconfig.json` and `vitest.config.ts`.
 
-See `src/pending-port/README.md` for what each one needs. Before quarantining anything new, check
-*why* a pure module errors: an iterative "move whatever still errors" loop once dragged the entire
-atlas in, because `mapRibbon` → `cityRoads` → `cityTraffic` for a single type. The fix was moving
-that type to where it belonged, not moving twelve files.
+Two lessons from it are worth keeping, because both cost real time:
+
+- **If you ever quarantine again, keep the `tsconfig.json` and `vitest.config.ts` exclude lists in
+  agreement.** A module excluded from one and not the other is either unchecked or unrunnable, and
+  both fail quietly.
+- **Check *why* a pure module errors before moving it.** An iterative "move whatever still errors"
+  loop once dragged the entire atlas into quarantine, because `mapRibbon` → `cityRoads` →
+  `cityTraffic` for a single type. The fix was moving that type to where it belonged, not moving
+  twelve files.
 
 ## The slow tests are isolated on purpose
 
@@ -353,7 +357,7 @@ planning is 16,150ms against 116ms of signature building.
 
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 610 tests / 31 files
+npx vitest run        # 1,104 tests / 66 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```

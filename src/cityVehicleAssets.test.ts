@@ -25,11 +25,11 @@ import * as THREE from 'three'
  * the whole thing to null. That is right for what is in it: landmarks and scenery are decoration, and
  * a city that loses its trees is still a correct city drawn with procedural shells.
  *
- * Vehicles are not decoration. A vehicle is a statement that a particular query was running when the
+ * Vehicles are not decoration. A vehicle is a statement that a particular operation was running when the
  * collector last looked, and an empty street is itself a finding — it says nothing was sampled there.
  * So if a failed fetch of a *bush* could delete the vehicles, a network hiccup would silently turn a
- * busy instance into one that looks idle. That is a decorative failure being laundered into a false
- * claim about the database, and it is the one coupling this file exists to prevent.
+ * busy capacity into one that looks idle. That is a decorative failure being laundered into a false
+ * claim about the capacity, and it is the one coupling this file exists to prevent.
  */
 
 const loadAsync = vi.fn<(url: string) => Promise<{ scene: THREE.Object3D }>>()

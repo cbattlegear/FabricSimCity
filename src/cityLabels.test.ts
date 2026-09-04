@@ -26,7 +26,7 @@ import {
 } from './cityLabels'
 
 describe('buildingLabelText', () => {
-  it('names a building without its schema, because the neighbourhood it stands in already says that', () => {
+  it('names a building without its workspace, because the neighbourhood it stands in already says that', () => {
     expect(buildingLabelText('Orders')).toBe('Orders')
   })
 
@@ -38,7 +38,7 @@ describe('buildingLabelText', () => {
 })
 
 describe('neighborhoodLabelText', () => {
-  it('sets a schema name as a tracked uppercase place name, the way a basemap names a district', () => {
+  it('sets a workspace name as a tracked uppercase place name, the way a basemap names a district', () => {
     expect(neighborhoodLabelText('Sales')).toBe('S\u2009A\u2009L\u2009E\u2009S')
   })
 
@@ -50,7 +50,7 @@ describe('neighborhoodLabelText', () => {
 })
 
 describe('capacityLabelText', () => {
-  it('names a database city without qualifying it, because nothing qualifies a database', () => {
+  it('names a capacity city without qualifying it, because nothing qualifies a capacity', () => {
     expect(capacityLabelText('sales')).toBe('sales')
   })
 
@@ -60,7 +60,7 @@ describe('capacityLabelText', () => {
     expect(label).toContain('…')
   })
 
-  it('stays narrower than a database-city label, since atlas labels are drawn larger', () => {
+  it('stays narrower than a capacity-city label, since atlas labels are drawn larger', () => {
     expect(ATLAS_LABEL_MAX_CHARS).toBeLessThan(LABEL_MAX_CHARS)
   })
 })
@@ -174,11 +174,11 @@ describe('isLabelLegible', () => {
 })
 
 describe('buildingLabelWorldHeight', () => {
-  it('letters a large table larger than a small one, so its name survives to a wider zoom', () => {
+  it('letters a large item larger than a small one, so its name survives to a wider zoom', () => {
     expect(buildingLabelWorldHeight(60)).toBeGreaterThan(buildingLabelWorldHeight(24))
   })
 
-  it('clamps at both ends so one enormous table cannot flatten every other name', () => {
+  it('clamps at both ends so one enormous item cannot flatten every other name', () => {
     expect(buildingLabelWorldHeight(24)).toBeCloseTo(LABEL_WORLD_HEIGHT)
     expect(buildingLabelWorldHeight(1)).toBeCloseTo(LABEL_WORLD_HEIGHT)
     expect(buildingLabelWorldHeight(60)).toBeCloseTo(LABEL_WORLD_HEIGHT_MAX)
@@ -197,11 +197,11 @@ describe('buildingLabelWorldHeight', () => {
    * range would have big names sprawling across neighbouring lots -- and it would start to look
    * like a readable measurement, which it is not.
    */
-  it('spans well under a factor of two, so no page count can be read off a label', () => {
+  it('spans well under a factor of two, so no building measurement can be read off a label', () => {
     expect(LABEL_WORLD_HEIGHT_MAX / LABEL_WORLD_HEIGHT).toBeLessThan(2)
   })
 
-  it('gives an unmeasured table the baseline height rather than lettering it as a small one', () => {
+  it('gives an unmeasured item the baseline height rather than lettering it as a small one', () => {
     expect(buildingLabelWorldHeight(null)).toBeCloseTo(LABEL_WORLD_HEIGHT)
     expect(buildingLabelWorldHeight(Number.NaN)).toBeCloseTo(LABEL_WORLD_HEIGHT)
     expect(buildingLabelWorldHeight(0)).toBeCloseTo(LABEL_WORLD_HEIGHT)

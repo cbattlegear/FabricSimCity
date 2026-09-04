@@ -52,14 +52,15 @@ export interface CityAssets {
   readonly scenery: AssetKit
 }
 
-/** Which landmark stands on which facility's plot. */
+/** Which authored landmark stands on which facility's plot, when the kit carries one. */
 export const LANDMARK_ASSETS: Record<FacilityKind, string> = {
-  cpu: 'cpu',
-  memory: 'memory',
-  storage: 'storage',
-  tempdb: 'tempdb',
-  log: 'log',
-  lock: 'lock',
+  powerPlant: 'power_plant',
+  reservoir: 'reservoir',
+  carryForwardYard: 'carry_forward_yard',
+  delayGate: 'delay_gate',
+  interactiveRejectionGate: 'interactive_rejection_gate',
+  backgroundRejectionGate: 'background_embargo',
+  surgeSubstation: 'surge_substation',
 }
 
 /**

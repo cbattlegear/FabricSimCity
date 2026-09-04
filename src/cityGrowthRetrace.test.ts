@@ -10,13 +10,13 @@ import { planOf, streetSignature } from './cityGrowth.testkit'
  * within one. Anything sharing this file would wait on it for no reason.
  */
 
-describe('adding a table to the database', () => {
+describe('adding an item to the capacity', () => {
   /*
    * A quantised city redraws on a ladder step rather than never. The promise is that growth is rare
    * and bounded, so this walks a long stretch of it and counts how often the network is retraced
    * rather than asserting it never is.
    */
-  it('retraces the streets rarely rather than on every added table', () => {
+  it('retraces the streets rarely rather than on every added item', () => {
     let retraced = 0
     let previous = streetSignature(planOf(80))
     for (let count = 81; count <= 140; count += 1) {

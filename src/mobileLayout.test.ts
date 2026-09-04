@@ -65,6 +65,27 @@ function ownRule(selector: string, source: string = css): string | null {
   return own.length === 0 ? null : own[own.length - 1].body
 }
 
+/** Every rule whose selector targets `selector` exactly, including state variants of that selector. */
+function rulesTargeting(selector: string, source: string = css): { selector: string; body: string }[] {
+  return rules(source).filter((rule) => rule.selector
+    .split(',')
+    .some((one) => {
+      const trimmed = one.trim()
+      return trimmed === selector || (trimmed.startsWith(`${selector}:`) && !trimmed.startsWith(`${selector}::`))
+    }))
+}
+
+function expectNoTargetedDeclaration(
+  selector: string,
+  source: string,
+  pattern: RegExp,
+  message: string,
+): void {
+  const matching = rulesTargeting(selector, source)
+  expect(matching.length, `no rule targets ${selector}`).toBeGreaterThan(0)
+  for (const rule of matching) expect(rule.body, message).not.toMatch(pattern)
+}
+
 /**
  * The width below which the sidebar becomes a bottom sheet.
  *
@@ -154,9 +175,7 @@ describe('map overlays on a narrow viewport', () => {
    */
   it('never hides a map overlay outright', () => {
     for (const selector of ['.hud-bottom-left', '.map-tray', '.map-tray-chips', '.incident-summary']) {
-      const body = ownRule(selector)
-      expect(body, `${selector} has no rule at all`).not.toBeNull()
-      expect(body, `${selector} is switched off`).not.toMatch(/display:\s*none/)
+      expectNoTargetedDeclaration(selector, css, /display:\s*none/, `${selector} is switched off`)
     }
   })
 
@@ -183,8 +202,7 @@ describe('map overlays on a narrow viewport', () => {
     expect(view).toContain('open={incidentDemandsAttention(incidents)}')
     // Still reachable at narrow width: the wrapper dissolves, the drawers do not.
     expect(narrowRule('.sidebar-drawers')).toMatch(/display:\s*contents/)
-    expect(narrowRule('.sidebar-drawer'), 'the sheet drawers are switched off')
-      .not.toMatch(/display:\s*none/)
+    expectNoTargetedDeclaration('.sidebar-drawer', narrowCss, /display:\s*none/, 'the sheet drawers are switched off')
     expect(tray).toContain('if (alerting) setOpenId(alerting)')
   })
 
@@ -225,11 +243,11 @@ describe('map overlays on a narrow viewport', () => {
   })
 
   /**
-   * A schema-qualified object name is a single unbreakable word and some run past fifty characters.
+   * A workspace-qualified item name is a single unbreakable word and some run past fifty characters.
    * Measured on a phone they ran off the side of the sidebar and were clipped: no ellipsis, no
    * scroll, no way to read the end of the name you were searching for.
    */
-  it('wraps long object names in the address list instead of clipping them', () => {
+  it('wraps long item names in the address list instead of clipping them', () => {
     const rule = ownRule('.address-text > \\*')
     expect(css).toMatch(/\.address-text > \*\s*\{[^}]*overflow-wrap:\s*anywhere/)
     expect(css).toMatch(/\.address-text > \*\s*\{[^}]*min-width:\s*0/)
@@ -433,12 +451,12 @@ describe('the sidebar column scrolls its own overflow', () => {
       expect(body, `${selector} is not a column`).toMatch(/flex-direction:\s*column/)
     }
     // The inner sections no longer pin a height of their own, or the wrapper could not shrink them.
-    expect(desktopRule('.sidebar-drawer-body')).not.toMatch(/max-height/)
+    expectNoTargetedDeclaration('.sidebar-drawer-body', desktopCss, /max-height/, '.sidebar-drawer-body keeps a height cap')
     expect(css).not.toMatch(/\.sidebar-place-card \.place-card\s*\{[^}]*max-height/)
   })
 
   /**
-   * A query route takes the whole rail over. When one is open the address book is not rendered, so
+   * An operation route takes the whole rail over. When one is open the address book is not rendered, so
    * the route card is the only section under the header and must fill the column rather than sit
    * under the shared-with-a-list `46vh` cap that would strand the rest of the rail empty. The base
    * card keeps its cap (asserted above); the `.is-full` modifier lifts it and lets the card grow.
@@ -495,13 +513,11 @@ describe('the sidebar column scrolls its own overflow', () => {
    * summary always inside that -- so the control stays clickable however hard the column pushes.
    *
    * The ban is checked at every width, not just on the desktop rule, because a narrow override would
-   * apply to the same element. Note the filter is an exact string match: it is deliberately blind to
-   * `.sidebar-drawer::details-content`, which is a different box and *is* meant to shrink, but it is
-   * equally blind to any future rule that reaches this element by some other selector.
+   * apply to the same element. The filter includes pseudo-state selectors for the same element, but
+   * not `.sidebar-drawer::details-content`, which is a different box and *is* meant to shrink.
    */
   it('never shrinks the legend drawer past its own summary', () => {
-    const drawerRules = rules().filter((one) => one.selector.split(',')
-      .some((part) => part.trim() === '.sidebar-drawer'))
+    const drawerRules = rulesTargeting('.sidebar-drawer')
     // Or the loop below would pass by matching nothing at all.
     expect(drawerRules.length, 'no .sidebar-drawer rule to check').toBeGreaterThan(1)
     for (const rule of drawerRules) {
@@ -546,8 +562,7 @@ describe('the sidebar column scrolls its own overflow', () => {
    * address book becomes unreachable rather than merely closed.
    */
   it('never shrinks the directory past its own summary', () => {
-    const own = rules().filter((one) => one.selector.split(',')
-      .some((part) => part.trim() === '.sidebar-directory'))
+    const own = rulesTargeting('.sidebar-directory')
     expect(own.length, 'no .sidebar-directory rule to check').toBeGreaterThan(0)
     for (const rule of own) {
       expect(rule.body, 'a .sidebar-directory rule sets min-height: 0').not.toMatch(/min-height:\s*0/)
@@ -678,11 +693,11 @@ describe('the sidebar column scrolls its own overflow', () => {
    * 252px, 202px and 224px at those three sizes, with five rows of the evidence list on screen at
    * 1440x900 and the rest reachable inside the card's own scroller.
    *
-   * Checked at every width, like the drawer's ban: a narrow override would reach the same element.
+   * Checked at every width, like the drawer's ban: a narrow override or pseudo-state rule would
+   * reach the same element.
    */
   it('never squeezes the place card past its own evidence', () => {
-    const cardRules = rules().filter((one) => one.selector.split(',')
-      .some((part) => part.trim() === '.sidebar-place-card'))
+    const cardRules = rulesTargeting('.sidebar-place-card')
     // Or the loop below would pass by matching nothing at all.
     expect(cardRules.length, 'no .sidebar-place-card rule to check').toBeGreaterThan(1)
     for (const rule of cardRules) {
@@ -709,7 +724,7 @@ describe('the sidebar column scrolls its own overflow', () => {
    * 18vh rather than the 16vh two drawers shared or the 24vh three did. Another drawer does not make
    * the region cheaper: 16vh three ways is 42.6px at an 800px viewport, a 35px summary and a 7.6px
    * body, which overflows nothing and is unreadable -- the "necessary, not sufficient" failure again.
-   * 24vh four ways reproduced it exactly: measured at 1115x800 the live query feed held 15px of body
+   * 24vh four ways reproduced it exactly: measured at 1115x800 the live operation feed held 15px of body
    * at rest and 12px with everything open, and widening to 28vh only took that to 26px and 5px. The
    * feed is a region of its own now (see `.sidebar-feed`), so these three are reference material
    * again and the budget goes back down -- the 10vh released pays for the feed's floor instead.
@@ -906,8 +921,7 @@ describe('three drawers in one rail share one height budget', () => {
    * wrapper would simply spill its drawers back out of a clipped rail -- the #63 defect one level out.
    */
   it('never lets the wrapper shrink out from under its drawers', () => {
-    const wrapperRules = rules().filter((one) => one.selector.split(',')
-      .some((part) => part.trim() === '.sidebar-drawers'))
+    const wrapperRules = rulesTargeting('.sidebar-drawers')
     expect(wrapperRules.length, 'no .sidebar-drawers rule to check').toBeGreaterThan(0)
     for (const rule of wrapperRules) {
       expect(rule.body, 'a .sidebar-drawers rule sets min-height: 0').not.toMatch(/min-height:\s*0/)
@@ -1024,13 +1038,13 @@ describe('three drawers in one rail share one height budget', () => {
     // The metric stays outside: it is `flex: none` and shrinking it was never the problem.
     expect(wrapped).not.toContain('sidebar-metric')
     /*
-     * And the live query feed is deliberately *not* in it. As a fourth drawer sharing this budget it
+     * And the live operation feed is deliberately *not* in it. As a fourth drawer sharing this budget it
      * measured 26px of body at rest and 5px with everything open at 1115x800 -- a fraction of one
      * 54px row -- because an evenly divided budget cannot say that one surface is the primary one.
      * It is a region of its own now; see `.sidebar-feed`.
      */
-    expect(wrapped, 'the live query feed is back inside the drawer budget that starved it')
-      .not.toContain('liveQueryFeed')
+    expect(wrapped, 'the live operation feed is back inside the drawer budget that starved it')
+      .not.toContain('liveOperationFeed')
   })
 
   /**
@@ -1043,7 +1057,7 @@ describe('three drawers in one rail share one height budget', () => {
    * all of it and hits 0px before the feed gives up anything, and without the cap the feed claims its
    * full content height and does the same thing harder. 132px is the head plus two whole 54px rows.
    */
-  it('gives the live query feed a floor and a ceiling of its own', () => {
+  it('gives the live operation feed a floor and a ceiling of its own', () => {
     const feed = desktopRule('.sidebar-feed')
     expect(feed, '.sidebar-feed has no rule at all').not.toBeNull()
     expect(feed, 'the feed does not take its space from content').toMatch(/flex:\s*1\s+1\s+auto/)
@@ -1205,8 +1219,12 @@ describe('the count beside a drawer title', () => {
   it('reaches the trailing edge by a means that works outside flex and grid', () => {
     const rule = desktopRule('.drawer-badge') ?? ''
     expect(rule, 'the count no longer reaches the trailing edge').toMatch(/float:\s*inline-end/)
-    expect(rule, 'margin auto is inert on a list-item summary and will not move the badge')
-      .not.toMatch(/margin-inline-start:\s*auto/)
+    expectNoTargetedDeclaration(
+      '.drawer-badge',
+      desktopCss,
+      /margin-inline-start:\s*auto/,
+      'margin auto is inert on a list-item summary and will not move the badge',
+    )
   })
 
   /*

@@ -21,7 +21,6 @@
     "skipLibCheck": true,
     "types": ["vite/client"]
   },
-  "exclude": ["src/pending-port"],
   "include": ["src"],
   "references": [{ "path": "./rayfin" }]
 }

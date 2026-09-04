@@ -3,6 +3,7 @@ import { blockAddress, buildAddressBook, columnLabel, searchAddressBook } from '
 import { planCity, type CityPlan } from './cityPlan'
 import { FACILITY_ORDER, type Facility } from './cityInfrastructure'
 import { itemArchetype } from './itemKind'
+import { POWER_GRID_FACILITIES } from './powerGrid'
 import type {
   CapacityCityItem,
   OperationFamily,
@@ -35,7 +36,7 @@ function item(
   return {
     itemId,
     workspaceId,
-    workspaceName: workspaceId.replace('schema:', ''),
+    workspaceName: workspaceId.replace('workspace:', ''),
     name,
     kind,
     archetype: itemArchetype(kind),
@@ -70,7 +71,7 @@ function family(
     operationName,
     itemId: itemIds[0] ?? '',
     itemIds,
-    workspaceId: 'schema:dbo',
+    workspaceId: 'workspace:dbo',
     operationClass: 'Interactive',
     billingType: 'Billable',
     cuSeconds,
@@ -91,27 +92,43 @@ function family(
 }
 
 function facility(kind: Facility['kind'], label: string, known = true): Facility {
+  const definition = POWER_GRID_FACILITIES[kind]
+  const status: Evidence['status'] = known ? 'Available' : 'Unknown'
+  const measurementEvidence = { ...evidence, status }
   return {
     kind,
     label,
+    civicRole: definition.civicRole,
+    measurement: {
+      kind: definition.measurement,
+      status: known ? 'Known' : 'Unknown',
+      evidence: measurementEvidence,
+      value: known ? 42 : null,
+      detail: known ? '42% utilised' : 'not sampled',
+    },
+    sizing: null,
+    state: known ? 'healthy' : null,
+    load: known ? 0.42 : null,
+    trafficStage: definition.trafficStage,
     known,
     headline: known ? '42% utilised' : 'not sampled',
-    status: known ? 'Available' : 'Unknown',
+    status,
     reason: known ? 'live snapshot' : 'the probe returned no row',
     units: [],
     alertCount: 0,
+    size: null,
   }
 }
 
 const items = [
-  item('object:dbo:100', 'schema:dbo', 'Customer', 0, 0, '8192'),
-  item('object:dbo:101', 'schema:dbo', 'Orders', 0, 1, '4096'),
-  item('object:rep:300', 'schema:reporting', 'DailyTotals', 1, 0, null),
+  item('object:dbo:100', 'workspace:dbo', 'Customer', 0, 0, '8192'),
+  item('object:dbo:101', 'workspace:dbo', 'Orders', 0, 1, '4096'),
+  item('object:rep:300', 'workspace:reporting', 'DailyTotals', 1, 0, null),
 ]
 
 const workspaces: CapacityCityWorkspace[] = [
-  { workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '2', evidence },
-  { workspaceId: 'schema:reporting', name: 'reporting', neighborhoodOrdinal: 1, itemCount: '1', evidence },
+  { workspaceId: 'workspace:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '2', evidence },
+  { workspaceId: 'workspace:reporting', name: 'reporting', neighborhoodOrdinal: 1, itemCount: '1', evidence },
 ]
 
 const families = [
@@ -122,7 +139,7 @@ const families = [
 const facilities = FACILITY_ORDER.map((kind, index) => facility(kind, `Facility ${index}`))
 
 function samplePlan(): CityPlan {
-  return planCity(items, { seed: 'db:sales', totalItems: '3', workspaces })
+  return planCity(items, { seed: 'capacity:sales', totalItems: '3', workspaces })
 }
 
 describe('columnLabel', () => {
@@ -301,9 +318,9 @@ describe('searchAddressBook', () => {
 describe('where the address book is ordered', () => {
   // Deliberately not in rank order, so an implementation that returns the input untouched fails.
   const unsorted = [
-    item('object:dbo:1', 'schema:dbo', 'Small', 0, 0, '10'),
-    item('object:dbo:2', 'schema:dbo', 'Largest', 0, 1, '9000'),
-    item('object:dbo:3', 'schema:dbo', 'Middling', 0, 2, '500'),
+    item('object:dbo:1', 'workspace:dbo', 'Small', 0, 0, '10'),
+    item('object:dbo:2', 'workspace:dbo', 'Largest', 0, 1, '9000'),
+    item('object:dbo:3', 'workspace:dbo', 'Middling', 0, 2, '500'),
   ]
   const unsortedFamilies = [
     family('family:cheap', 'Notebook run', [], '10'),
@@ -312,9 +329,9 @@ describe('where the address book is ordered', () => {
 
   it('hands back a book that is already in order, so searching never has to sort', () => {
     const plan = planCity(unsorted, {
-      seed: 'db:order',
+      seed: 'capacity:order',
       totalItems: '3',
-      workspaces: [{ workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '3', evidence }],
+      workspaces: [{ workspaceId: 'workspace:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '3', evidence }],
     })
     const built = buildAddressBook(unsorted, unsortedFamilies, facilities, plan)
 
@@ -331,7 +348,7 @@ describe('where the address book is ordered', () => {
     // Reversed on the way in. A search that sorts would put Customer back on top; one that only
     // filters must hand back exactly the order it received.
     const reversed = [...buildAddressBook(items, families, facilities, plan)].reverse()
-    const tables = searchAddressBook(reversed, 'dbo').find(group => group.kind === 'item')?.entries ?? []
-    expect(tables.map(entry => entry.name)).toEqual(['dbo.Orders', 'dbo.Customer'])
+    const foundItems = searchAddressBook(reversed, 'dbo').find(group => group.kind === 'item')?.entries ?? []
+    expect(foundItems.map(entry => entry.name)).toEqual(['dbo.Orders', 'dbo.Customer'])
   })
 })

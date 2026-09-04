@@ -16,10 +16,10 @@ import { labelScreenScale } from './cityLabels'
  * {@link labelScreenScale} returns `min(maxGrowth, minimumPx / projected)`, which is the whole
  * subtlety of this area: the two constants are alternatives, not a pair, so **raising one alone can
  * be completely neutralised by the other**. Which one binds depends only on how far the camera is
- * out, and both regimes really occur — a 60-object database frames from about 1,500 world units
+ * out, and both regimes really occur — a 60-item capacity frames from about 1,500 world units
  * where the floor binds, and a 4,000-object one pulls back past 4,000 units where the cap does. The
  * two framings below are one assertion each so that a change touching only one constant fails on the
- * other, instead of passing and quietly leaving half the databases with invisible traffic.
+ * other, instead of passing and quietly leaving half the capacities with invisible traffic.
  */
 
 /*
@@ -71,9 +71,9 @@ const MAX_GROWTH = constant('VEHICLE_MAX_GROWTH')
 const BIKE = vehicleLength('bike')
 const SEMI = vehicleLength('semiTruck')
 
-/** The measured whole-city framing of the 60-object database, in a 1032x900 canvas at fov 46. */
+/** The measured whole-city framing of the 60-item capacity, in a 1032x900 canvas at fov 46. */
 const CLOSE = { distance: 1495, fov: 46, viewport: 900 } as const
-/** A 4,000-object database, where the camera has pulled back far enough that the cap takes over. */
+/** A 4,000-item capacity, where the camera has pulled back far enough that the cap takes over. */
 const FAR = { distance: 4000, fov: 46, viewport: 900 } as const
 
 function bikePixels(framing: { distance: number; fov: number; viewport: number }): number {
@@ -89,7 +89,7 @@ describe('a live vehicle is drawn large enough to be recognised', () => {
    * floor is the term that binds and the cap could be raised to any number at all without moving
    * this. Measured in Chromium against the real scene: 5.7 px before the fix, 12.9 px after.
    */
-  it('resolves a bicycle at the framing a small database opens at', () => {
+  it('resolves a bicycle at the framing a small capacity opens at', () => {
     expect(bikePixels(CLOSE)).toBeGreaterThanOrEqual(12)
   })
 
@@ -97,7 +97,7 @@ describe('a live vehicle is drawn large enough to be recognised', () => {
    * Pins VEHICLE_MAX_GROWTH. Far out, `minimumPx / projected` is about 34 and the cap is 18, so the
    * cap binds and the floor is inert. This is the assertion a floor-only change fails.
    */
-  it('resolves a bicycle once the camera has pulled back over a large database', () => {
+  it('resolves a bicycle once the camera has pulled back over a large capacity', () => {
     expect(bikePixels(FAR)).toBeGreaterThanOrEqual(8)
   })
 
@@ -117,10 +117,13 @@ describe('a live vehicle is drawn large enough to be recognised', () => {
    * A per-class clamp would flatten it at exactly the wide framings where it is needed most.
    */
   it('magnifies every class by one shared factor', () => {
-    const place = scene.slice(
-      scene.indexOf('function placeVehicles()'),
-      scene.indexOf('const written = writeTrails('),
-    )
+    const from = scene.indexOf('function placeVehicles()')
+    const to = scene.indexOf('const written = writeTrails(')
+    expect(from, 'placeVehicles has been renamed and this guard now covers nothing')
+      .toBeGreaterThan(-1)
+    expect(to, 'writeTrails no longer follows placeVehicles, inverting this slice')
+      .toBeGreaterThan(from)
+    const place = scene.slice(from, to)
     expect(place.match(/labelScreenScale\(/g) ?? []).toHaveLength(1)
     expect(place).toMatch(/vehicleScale\.setScalar\(magnify\)/)
   })

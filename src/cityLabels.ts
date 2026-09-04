@@ -70,9 +70,9 @@ const LABEL_SCALE_MAX_BUILDING_HEIGHT = 60
  * Label height for one building, from the height that building was already given.
  *
  * This is a *decoration derived from a measurement*, not a measurement: it is clamped at both ends
- * and spans well under a factor of two, so no page count can be read back off a label. Building
- * height and footprint remain the only things that state a table's size. A building whose size was
- * never measured gets the baseline height, so an unmeasured table is never lettered as though it
+ * and spans well under a factor of two, so no measurement can be read back off a label. Building
+ * height and footprint remain the only things that state an item's size. A building whose size was
+ * never measured gets the baseline height, so an unmeasured item is never lettered as though it
  * were a small one.
  */
 export function buildingLabelWorldHeight(buildingHeight: number | null): number {

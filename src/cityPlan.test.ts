@@ -45,7 +45,7 @@ function object(
   return {
     itemId,
     workspaceId,
-    workspaceName: workspaceId.replace('schema:', ''),
+    workspaceName: workspaceId.replace('workspace:', ''),
     name: itemId,
     kind,
     archetype: itemArchetype(kind),
@@ -72,26 +72,26 @@ function object(
 function sampleCity(): CapacityCityItem[] {
   const objects: CapacityCityItem[] = []
   for (let index = 0; index < 11; index += 1) {
-    objects.push(object(`object:dbo:${100 + index}`, 'schema:dbo', 0, index))
+    objects.push(object(`object:dbo:${100 + index}`, 'workspace:dbo', 0, index))
   }
   for (let index = 0; index < 5; index += 1) {
-    objects.push(object(`object:rep:${300 + index}`, 'schema:reporting', 1, index))
+    objects.push(object(`object:rep:${300 + index}`, 'workspace:reporting', 1, index))
   }
-  objects.push(object('object:arc:900', 'schema:archive', 2, 0, null, null))
+  objects.push(object('object:arc:900', 'workspace:archive', 2, 0, null, null))
   return objects
 }
 
 /** The workspace list and totals every page of {@link sampleCity} would carry. */
-function sampleSchemas(): CapacityCityWorkspace[] {
+function sampleWorkspaces(): CapacityCityWorkspace[] {
   return [
-    { workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '11', evidence },
-    { workspaceId: 'schema:reporting', name: 'reporting', neighborhoodOrdinal: 1, itemCount: '5', evidence },
-    { workspaceId: 'schema:archive', name: 'archive', neighborhoodOrdinal: 2, itemCount: '1', evidence },
+    { workspaceId: 'workspace:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '11', evidence },
+    { workspaceId: 'workspace:reporting', name: 'reporting', neighborhoodOrdinal: 1, itemCount: '5', evidence },
+    { workspaceId: 'workspace:archive', name: 'archive', neighborhoodOrdinal: 2, itemCount: '1', evidence },
   ]
 }
 
 function options(overrides: Partial<CityPlanOptions> = {}): CityPlanOptions {
-  return { seed: 'db:sales', totalItems: '17', workspaces: sampleSchemas(), ...overrides }
+  return { seed: 'capacity:sales', totalItems: '17', workspaces: sampleWorkspaces(), ...overrides }
 }
 
 /** Turns a world position back into the block grid coordinates the plan placed it on. */
@@ -144,7 +144,7 @@ describe('lot massing comes from the capacity keystone', () => {
   it('carries itemFootprint and itemHeight onto the lot, so a building shares the atlas scale', () => {
     // A city building is sized by exactly the same functions the atlas capacity is, one level down.
     // Forking a footprint or height formula here would put an item and its capacity on two scales.
-    const item = object('object:dbo:1', 'schema:dbo', 0, 0, '1048576', '2048')
+    const item = object('object:dbo:1', 'workspace:dbo', 0, 0, '1048576', '2048')
     const lot = planCity([item], options()).lots.get('object:dbo:1')!
     expect(lot.footprint).toBe(itemFootprint(item))
     expect(lot.height).toBe(itemHeight(item))
@@ -153,14 +153,14 @@ describe('lot massing comes from the capacity keystone', () => {
   it('fences a storage item whose bytes are missing rather than drawing it at a guessed size', () => {
     // A Lakehouse that reported no bytes is missing evidence, not an empty item: null footprint, and
     // a vacant parcel that claims no size.
-    const item = object('object:dbo:1', 'schema:dbo', 0, 0, null, '2048')
+    const item = object('object:dbo:1', 'workspace:dbo', 0, 0, null, '2048')
     const lot = planCity([item], options()).lots.get('object:dbo:1')!
     expect(lot.footprint).toBeNull()
     expect(lot.archetype).toBe('vacant')
   })
 
   it('fences a lot whose consumption is unknown, never claiming a height of zero', () => {
-    const item = object('object:dbo:1', 'schema:dbo', 0, 0, '1048576', null)
+    const item = object('object:dbo:1', 'workspace:dbo', 0, 0, '1048576', null)
     const lot = planCity([item], options()).lots.get('object:dbo:1')!
     expect(lot.height).toBeNull()
     expect(lot.archetype).toBe('vacant')
@@ -169,24 +169,24 @@ describe('lot massing comes from the capacity keystone', () => {
 
 describe('buildingArchetype', () => {
   it('selects a style family from exact OneLake bytes', () => {
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '1', '1'))).toBe('house')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '1048575', '1'))).toBe('house')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '1048576', '1'))).toBe('rowhouse')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '16777215', '1'))).toBe('rowhouse')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '16777216', '1'))).toBe('midrise')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '268435456', '1'))).toBe('tower')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '4294967296', '1'))).toBe('skyscraper')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '1', '1'))).toBe('house')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '1048575', '1'))).toBe('house')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '1048576', '1'))).toBe('rowhouse')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '16777215', '1'))).toBe('rowhouse')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '16777216', '1'))).toBe('midrise')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '268435456', '1'))).toBe('tower')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '4294967296', '1'))).toBe('skyscraper')
   })
 
   it('renders unknown size as a vacant parcel that makes no quantity claim', () => {
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, null, null))).toBe('vacant')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '4096', null))).toBe('vacant')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, null, null))).toBe('vacant')
+    expect(buildingArchetype(object('a', 'workspace:dbo', 0, 0, '4096', null))).toBe('vacant')
   })
 
   it('stands a compute-only item on a measured minimum lot rather than fencing it', () => {
     // A Notebook holds no OneLake bytes by nature, so null storage is a complete measurement. With
     // known consumption it is a built house, not the wireframe a storage kind with null bytes gets.
-    const notebook = object('a', 'schema:dbo', 0, 0, null, '2048', 'Notebook')
+    const notebook = object('a', 'workspace:dbo', 0, 0, null, '2048', 'Notebook')
     expect(buildingArchetype(notebook)).toBe('house')
   })
 })
@@ -215,21 +215,21 @@ describe('planCity placement', () => {
     expect([...second.facilities.entries()]).toEqual([...first.facilities.entries()])
   })
 
-  it('gives a different database a different city', () => {
-    const sales = planCity(sampleCity(), options({ seed: 'db:sales' }))
-    const archive = planCity(sampleCity(), options({ seed: 'db:archive' }))
+  it('gives a different capacity a different city', () => {
+    const sales = planCity(sampleCity(), options({ seed: 'capacity:sales' }))
+    const archive = planCity(sampleCity(), options({ seed: 'capacity:archive' }))
     const moved = [...sales.lots.entries()].filter(([itemId, lot]) => {
       const other = archive.lots.get(itemId)!
       return other.x !== lot.x || other.z !== lot.z
     })
-    // Two databases of identical shape must not produce the same town, or the seed is doing nothing.
+    // Two capacities of identical shape must not produce the same town, or the seed is doing nothing.
     expect(moved.length).toBeGreaterThan(sales.lots.size / 2)
   })
 
   it('keeps a building on the same lot when a later bounded page is appended', () => {
-    const firstPage = sampleCity().filter(item => item.workspaceId === 'schema:dbo')
-    // The totals and schema list are identical on every page, which is what lets the first page be
-    // planned against the whole database rather than against itself.
+    const firstPage = sampleCity().filter(item => item.workspaceId === 'workspace:dbo')
+    // The totals and workspace list are identical on every page, which is what lets the first page be
+    // planned against the whole capacity rather than against itself.
     const planned = planCity(firstPage, options())
     const withMorePages = planCity(sampleCity(), options())
     for (const item of firstPage) {
@@ -240,37 +240,37 @@ describe('planCity placement', () => {
     expect([...withMorePages.facilities.entries()]).toEqual([...planned.facilities.entries()])
   })
 
-  it('sizes the city from the database total, not from collector-assigned slot ordinals', () => {
+  it('sizes the city from the capacity total, not from collector-assigned slot ordinals', () => {
     /*
-     * The connected collector numbers `layout.itemOrdinal` across the whole database, in object-id
-     * order, while the fixture numbers it within each schema. The layout adds a schema offset to
-     * that ordinal to get a slot, so against a real instance the slots ran far past the object count
+     * The connected collector numbers `layout.itemOrdinal` across the whole capacity, in item-id
+     * order, while the fixture numbers it within each workspace. The layout adds a workspace offset to
+     * that ordinal to get a slot, so against a real instance the slots ran far past the item count
      * — and landed somewhere different on every page, because the offsets are built from per-page
-     * schema counts. When those slots were allowed to size the city, a seventy-five table database
+     * workspace counts. When those slots were allowed to size the city, a seventy-five item capacity
      * asked for hundreds of block columns and re-planned its whole street network the moment a
      * second page arrived.
      *
      * The city is sized from `totalItems` alone, so a global ordinal cannot inflate or move it.
      */
-    const perSchema = largeCity()
-    const global = perSchema.map((item, index) => ({
+    const perWorkspace = largeCity()
+    const global = perWorkspace.map((item, index) => ({
       ...item,
       layout: { ...item.layout, itemOrdinal: index },
     }))
 
-    const fromPerSchema = planCity(perSchema, largeOptions())
+    const fromPerWorkspace = planCity(perWorkspace, largeOptions())
     const fromGlobal = planCity(global, largeOptions())
 
-    expect(fromGlobal.blockCols).toBe(fromPerSchema.blockCols)
+    expect(fromGlobal.blockCols).toBe(fromPerWorkspace.blockCols)
     expect(fromGlobal.streets.map(street => street.id))
-      .toEqual(fromPerSchema.streets.map(street => street.id))
-    expect(fromGlobal.lots.size).toBe(perSchema.length)
+      .toEqual(fromPerWorkspace.streets.map(street => street.id))
+    expect(fromGlobal.lots.size).toBe(perWorkspace.length)
   })
 
-  it('keeps the street network identical while pages with per-page schema counts arrive', () => {
-    // `page.schemas` counts only that page's objects, so the counts a plan sees genuinely change as
-    // pages land, and the collector's object ordinals are database-global. The streets must not
-    // notice either: they are sized from the database total alone.
+  it('keeps the street network identical while pages with per-page workspace counts arrive', () => {
+    // `page.workspaces` counts only that page's items, so the counts a plan sees genuinely change as
+    // pages land, and the collector's item ordinals are capacity-global. The streets must not
+    // notice either: they are sized from the capacity total alone.
     const all = largeCity().map((item, index) => ({
       ...item,
       layout: { ...item.layout, itemOrdinal: index },
@@ -391,12 +391,12 @@ describe('planCity placement', () => {
 
   it('gives every building its own block, ringed by street', () => {
     const objects = Array.from({ length: 9 }, (_unused, index) =>
-      object(`object:dbo:${index}`, 'schema:dbo', 0, index))
+      object(`object:dbo:${index}`, 'workspace:dbo', 0, index))
     const plan = planCity(objects, options())
     const blocks = new Set([...plan.lots.values()].map(lot => lot.blockId))
 
-    // The separation that schema tints used to provide now lives in the street network, so no two
-    // buildings share a block: one lot per block, and every object the schema holds is placed.
+    // The separation that workspace tints used to provide now lives in the street network, so no two
+    // buildings share a block: one lot per block, and every item the workspace holds is placed.
     expect(plan.lots.size).toBe(objects.length)
     expect(blocks.size).toBe(plan.lots.size)
     expect(CELLS_PER_BLOCK).toBe(1)
@@ -430,7 +430,7 @@ describe('planCity placement', () => {
   })
 
   it('plans a usable city from a single object', () => {
-    const plan = planCity([object('object:dbo:1', 'schema:dbo', 0, 0)], options())
+    const plan = planCity([object('object:dbo:1', 'workspace:dbo', 0, 0)], options())
     expect(plan.lots.size).toBe(1)
     expect(plan.streets.length).toBeGreaterThan(0)
     expect(plan.bounds.width).toBeGreaterThan(0)
@@ -444,7 +444,7 @@ describe('planCity placement', () => {
   })
 })
 
-describe('schema neighborhoods', () => {
+describe('workspace neighborhoods', () => {
   /** Mean world distance between every pair of lots drawn from `lots`. */
   function spread(_plan: CityPlan, lots: readonly { x: number; z: number }[]): number {
     let total = 0
@@ -458,7 +458,7 @@ describe('schema neighborhoods', () => {
     return pairs === 0 ? 0 : total / pairs
   }
 
-  it('stands a schema\u2019s tables together instead of spreading them over the whole map', () => {
+  it('stands a workspace\u2019s items together instead of spreading them over the whole map', () => {
     const plan = planCity(largeCity(), largeOptions())
     const all = [...plan.lots.values()]
     for (const district of plan.districts) {
@@ -490,7 +490,7 @@ describe('schema neighborhoods', () => {
     // one absolute distance cannot serve a district near the centre and one on the rim at once. The
     // test asks that the bulk of a district forms a single cluster rather than that every last block
     // does: a river carves a district in two and proximity growth can leave a lone block across the
-    // water, and neither means the schema is scattered across the map.
+    // water, and neither means the workspace is scattered across the map.
     for (const district of plan.districts) {
       if (district.blocks.length < 4) continue
       const centres = district.blocks.map(block => blockCentre(plan, block))
@@ -522,24 +522,24 @@ describe('schema neighborhoods', () => {
         }
         largest = Math.max(largest, size)
       }
-      // The main body of the district must hold the overwhelming majority of its ground; a schema split
-      // into equal islands would fail this, a schema with one stray across the river passes it.
+      // The main body of the district must hold the overwhelming majority of its ground; a workspace split
+      // into equal islands would fail this, a workspace with one stray across the river passes it.
       expect(largest).toBeGreaterThanOrEqual(district.blocks.length * 0.85)
     }
   })
 
-  it('gives a schema ground in proportion to how many tables it holds', () => {
+  it('gives a workspace ground in proportion to how many items it holds', () => {
     const plan = planCity(sampleCity(), options())
     const size = (id: string) => plan.districts.find(district => district.districtId === id)!.blocks.length
-    expect(size('schema:dbo')).toBeGreaterThan(size('schema:reporting'))
-    expect(size('schema:reporting')).toBeGreaterThanOrEqual(size('schema:archive'))
-    // Every table needs somewhere to stand, however small its schema.
-    expect(size('schema:archive')).toBeGreaterThanOrEqual(1)
+    expect(size('workspace:dbo')).toBeGreaterThan(size('workspace:reporting'))
+    expect(size('workspace:reporting')).toBeGreaterThanOrEqual(size('workspace:archive'))
+    // Every item needs somewhere to stand, however small its workspace.
+    expect(size('workspace:archive')).toBeGreaterThanOrEqual(1)
   })
 
-  it('settles a neighborhood\u2019s shape before its tables arrive, so a later page fills it in', () => {
+  it('settles a neighborhood\u2019s shape before its items arrive, so a later page fills it in', () => {
     const full = planCity(sampleCity(), options())
-    // The same database, one page in: fewer objects, but every page carries the whole schema list.
+    // The same capacity, one page in: fewer items, but every page carries the whole workspace list.
     const firstPage = planCity(sampleCity().slice(0, 4), options())
     for (const district of firstPage.districts) {
       const same = full.districts.find(item => item.districtId === district.districtId)!
@@ -560,7 +560,7 @@ describe('schema neighborhoods', () => {
 
 describe('facility scatter', () => {
   it('places every facility well clear of every other', () => {
-    for (const seed of ['db:sales', 'db:archive', 'db:1', 'db:2', 'db:3']) {
+    for (const seed of ['capacity:sales', 'capacity:archive', 'capacity:1', 'capacity:2', 'capacity:3']) {
       const plan = planCity(sampleCity(), options({ seed }))
       const sites = [...plan.facilities.values()]
       expect(sites).toHaveLength(FACILITY_ORDER.length)
@@ -740,15 +740,15 @@ describe('street graph', () => {
 /** A city big enough to earn a ring boulevard, diagonals and a river. */
 function largeCity(count = 220): CapacityCityItem[] {
   const objects: CapacityCityItem[] = []
-  const perSchema = Math.ceil(count / 3)
+  const perWorkspace = Math.ceil(count / 3)
   for (let index = 0; index < count; index += 1) {
-    const ordinal = Math.floor(index / perSchema)
+    const ordinal = Math.floor(index / perWorkspace)
     objects.push(
       object(
         `object:${index}`,
-        `schema:s${ordinal}`,
+        `workspace:s${ordinal}`,
         ordinal,
-        index % perSchema,
+        index % perWorkspace,
         String(1024 * (1 + (index % 40))),
         String(512 * (1 + (index % 40))),
       ),
@@ -757,12 +757,12 @@ function largeCity(count = 220): CapacityCityItem[] {
   return objects
 }
 
-function largeOptions(seed = 'db:sales'): CityPlanOptions {
+function largeOptions(seed = 'capacity:sales'): CityPlanOptions {
   return {
     seed,
     totalItems: '220',
     workspaces: [0, 1, 2].map(ordinal => ({
-      workspaceId: `schema:s${ordinal}`,
+      workspaceId: `workspace:s${ordinal}`,
       name: `s${ordinal}`,
       neighborhoodOrdinal: ordinal,
       itemCount: '74',
@@ -810,7 +810,7 @@ function junctionDegrees(plan: CityPlan) {
  */
 describe('junction topology', () => {
   it('does not meet four streets at every corner, the way a grid does', () => {
-    for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops']) {
+    for (const seed of ['capacity:sales', 'capacity:warehouse', 'capacity:archive', 'capacity:ops']) {
       const plan = planCity(largeCity(), largeOptions(seed))
       const degrees = junctionDegrees(plan)
       expect(degrees.fourWay).toBeLessThan(0.3)
@@ -828,7 +828,7 @@ describe('junction topology', () => {
   })
 
   it('leaves roughly one street in seven to end rather than continue', () => {
-    for (const seed of ['db:sales', 'db:ops']) {
+    for (const seed of ['capacity:sales', 'capacity:ops']) {
       const degrees = junctionDegrees(planCity(largeCity(), largeOptions(seed)))
       expect(degrees.deadEnds).toBeGreaterThan(0.07)
       // A city of nothing but cul-de-sacs is as unreal as a city of nothing but crossroads.
@@ -837,7 +837,7 @@ describe('junction topology', () => {
   })
 
   it('leaves no junction stranded with no street to reach it by', () => {
-    for (const seed of ['db:sales', 'db:warehouse']) {
+    for (const seed of ['capacity:sales', 'capacity:warehouse']) {
       const plan = planCity(largeCity(), largeOptions(seed))
       expect(junctionDegrees(plan).orphans).toBe(0)
     }
@@ -851,7 +851,7 @@ describe('junction topology', () => {
     // see it. The sweep is kept small because each plan is a full city and the point is coverage of
     // distinct seeds and scales, not exhaustiveness.
     const split: string[] = []
-    for (const seed of ['db:sales', 'db:archive', 'db:ops']) {
+    for (const seed of ['capacity:sales', 'capacity:archive', 'capacity:ops']) {
       for (const count of [60, 300]) {
         const plan = planCity(largeCity(count), { ...largeOptions(seed), totalItems: String(count) })
         const neighbours = new Map<string, string[]>()
@@ -913,7 +913,7 @@ describe('street network', () => {
     // The single invariant that lets roads curve at all: a bowed street, an embankment shifted onto
     // the far bank and a diagonal avenue must all still miss every footprint the catalogue measured.
     const violations: string[] = []
-    for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops']) {
+    for (const seed of ['capacity:sales', 'capacity:warehouse', 'capacity:archive', 'capacity:ops']) {
       const plan = planCity(largeCity(), largeOptions(seed))
       const lots = [...plan.lots.values()].filter(lot => lot.footprint !== null)
       for (const street of plan.streets) {
@@ -1001,7 +1001,7 @@ describe('street network', () => {
     }
   })
 
-  it('draws the same city twice for the same database', () => {
+  it('draws the same city twice for the same capacity', () => {
     const first = planCity(largeCity(), largeOptions())
     const second = planCity(largeCity(), largeOptions())
     expect(second.streets).toEqual(first.streets)

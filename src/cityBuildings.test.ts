@@ -17,7 +17,7 @@ function luma(color: number): number {
 }
 
 describe('neighborhoodHue', () => {
-  it('gives one schema the same hue every time, so a city never repaints itself between loads', () => {
+  it('gives one workspace the same hue every time, so a city never repaints itself between loads', () => {
     expect(neighborhoodHue(4)).toBe(neighborhoodHue(4))
     expect(neighborhoodTint(4)).toBe(neighborhoodTint(4))
   })
@@ -29,14 +29,14 @@ describe('neighborhoodHue', () => {
     }
   })
 
-  it('separates consecutive schemas far enough to tell two neighbourhoods apart at a glance', () => {
+  it('separates consecutive workspaces far enough to tell two neighbourhoods apart at a glance', () => {
     for (let ordinal = 0; ordinal < 24; ordinal += 1) {
       const step = Math.abs(neighborhoodHue(ordinal) - neighborhoodHue(ordinal + 1))
       expect(Math.min(step, 1 - step)).toBeGreaterThan(0.2)
     }
   })
 
-  it('hands every schema a distinct hue well past the number of schemas a database usually has', () => {
+  it('hands every workspace a distinct hue well past the number of workspaces a capacity usually has', () => {
     const hues = new Set(Array.from({ length: 64 }, (_, ordinal) => neighborhoodHue(ordinal).toFixed(4)))
     expect(hues.size).toBe(64)
   })

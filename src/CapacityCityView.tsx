@@ -212,7 +212,8 @@ export function CapacityCityView({
   )
   const cityPlan = useMemo(() => planCity(items, planOptions), [items, planOptions])
 
-  const facilities = useMemo(() => projectFacilities(null), [])
+  const powerGrid = useMemo(() => projectPowerGrid(capacity), [capacity])
+  const facilities = useMemo(() => projectFacilities(powerGrid), [powerGrid])
 
   const trafficEvidence = useMemo(
     () => describeTrafficEvidence(source.capabilities, families),
@@ -270,8 +271,6 @@ export function CapacityCityView({
     () => buildAddressBook(items, families, facilities, cityPlan),
     [items, families, facilities, cityPlan],
   )
-
-  const powerGrid = useMemo(() => projectPowerGrid(capacity), [capacity])
 
   const trafficWindow = useMemo(
     () => describeTrafficWindow(families, page?.evidence.observedAt ?? null, refreshIntervalMs(source.capabilities)),
@@ -332,8 +331,8 @@ export function CapacityCityView({
   }
 
   const sidebarMode = resolveSidebarMode({
-    databaseName: capacity.displayName,
-    totalObjectsLabel: page?.totalItems ?? String(items.length),
+    capacityName: capacity.displayName,
+    totalItemsLabel: page?.totalItems ?? String(items.length),
     route: null,
   })
 

@@ -205,7 +205,7 @@ export interface CityPlan {
    */
   readonly terrain: CityTerrain
   /**
-   * Where the CPU / memory / storage / tempdb / log / lock facilities stand.
+   * Where the capacity power-grid facilities stand.
    *
    * Facilities are scattered across the grid rather than gathered into one civic quarter, because a
    * single infrastructure block turns into a corner of the map you look at once. Spread out, they
@@ -1483,11 +1483,11 @@ function nearestUnclaimed(
 }
 
 /**
- * Chooses six blocks for the infrastructure facilities, every pair at least `minSpacing` apart.
+ * Chooses one block per infrastructure facility, every pair at least `minSpacing` apart.
  *
  * Each attempt greedily walks a freshly shuffled block list and takes any block that still clears the
  * spacing — a random maximal independent set, which scatters the facilities across the city instead of
- * lining them up. If an attempt runs out of ground before placing all six it is discarded and the next
+ * lining them up. If an attempt runs out of ground before placing all sites it is discarded and the next
  * shuffle tried, so a lucky-but-cramped partial layout never ships. Spacing is a world distance now,
  * not a block count, because blocks are no longer a fixed size.
  *
@@ -1818,4 +1818,3 @@ function isDigit(value: string, at: number): boolean {
   const code = value.charCodeAt(at)
   return code >= 48 && code <= 57
 }
-

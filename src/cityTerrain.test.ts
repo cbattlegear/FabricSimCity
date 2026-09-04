@@ -18,7 +18,7 @@ import {
 
 const CELL = 40
 const STREET = 15
-const DISTRICTS = ['schema:dbo', 'schema:reporting', 'schema:archive']
+const DISTRICTS = ['workspace:dbo', 'workspace:reporting', 'workspace:archive']
 
 /**
  * Builds a real block field the way `cityPlan` does, because terrain now dresses the faces of the
@@ -62,7 +62,7 @@ function buildField(seed: string, radius: number, separation: number): CityBlock
 function scene(
   overrides: { seed?: string; radius?: number; separation?: number } = {},
 ): TerrainInput {
-  const seed = overrides.seed ?? 'db:sales'
+  const seed = overrides.seed ?? 'capacity:sales'
   const radius = overrides.radius ?? 700
   const separation = overrides.separation ?? 58
   const span = radius * 1.1
@@ -86,9 +86,9 @@ describe('planTerrain', () => {
     expect(second.relief).toEqual(first.relief)
   })
 
-  it('gives two different databases two different landscapes', () => {
-    const sales = planTerrain(scene({ seed: 'db:sales' }))
-    const warehouse = planTerrain(scene({ seed: 'db:warehouse' }))
+  it('gives two different capacities two different landscapes', () => {
+    const sales = planTerrain(scene({ seed: 'capacity:sales' }))
+    const warehouse = planTerrain(scene({ seed: 'capacity:warehouse' }))
     expect(warehouse.river).not.toEqual(sales.river)
   })
 
@@ -139,7 +139,7 @@ describe('planTerrain', () => {
   })
 
   it('leaves a small town dry rather than drowning it', () => {
-    const seed = 'db:sales'
+    const seed = 'capacity:sales'
     const field = buildField(seed, 700, 58)
     // A crossing under the minimum span gets no river at all, however large the field beneath it.
     const landform = planLandform({ seed, minX: -120, maxX: 120, minZ: -120, maxZ: 120, streetWidth: STREET, cell: CELL })
@@ -157,7 +157,7 @@ describe('planTerrain', () => {
   })
 
   it('never floods a measured building', () => {
-    for (const seed of ['db:sales', 'db:warehouse', 'db:archive', 'db:ops', 'db:telemetry']) {
+    for (const seed of ['capacity:sales', 'capacity:warehouse', 'capacity:archive', 'capacity:ops', 'capacity:telemetry']) {
       const input = scene({ seed })
       const terrain = planTerrain(input)
       if (input.landform.river.length < 2) continue

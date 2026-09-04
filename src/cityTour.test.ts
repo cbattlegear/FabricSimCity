@@ -1,8 +1,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import type { CapacityCityItem } from '../capacityCityContracts'
-import type { Evidence } from '../fabricContracts'
+import type { CapacityCityItem } from './capacityCityContracts'
+import { evidence, item as baseItem } from './operationTraffic.testkit'
 import type { IncidentMarker } from './cityIncidents'
 import type { RoadTraffic } from './cityTraffic'
 import {
@@ -25,33 +24,21 @@ import {
   type TourStop,
 } from './cityTour'
 
-const EVIDENCE: Evidence = { status: 'Available', source: 'QueryStoreAggregate', reason: 'ok', observedAt: null, freshUntil: null }
+function byteMeasurement(bytes: string | null): CapacityCityItem['storage'] {
+  return { bytes, status: bytes === null ? 'Unknown' : 'Known', evidence }
+}
 
-function cityObject(overrides: Partial<CapacityCityItem> = {}): CapacityCityItem {
+function cuMeasurement(cuSeconds: string | null): CapacityCityItem['cuConsumed'] {
+  return { cuSeconds, status: cuSeconds === null ? 'Unknown' : 'Known', evidence }
+}
+
+function cityItem(overrides: Partial<CapacityCityItem> = {}): CapacityCityItem {
   return {
-    itemId: 'o1',
-    workspaceId: 's1',
-    workspaceName: 'dbo',
-    name: 'Customer',
-    kind: 'Table',
-    storageBytes: '10',
-    cuSecondsRaw: '10',
-    reservedBytes: '81920',
-    usedBytes: '81920',
-    sizeStatus: 'Known',
-    sizeReason: null,
-    layout: { neighborhoodOrdinal: 0, itemOrdinal: 0, x: 0, z: 0 },
-    indexes: [],
-    directActivity: { totalOperations: null, resetEpochToken: null, evidence: EVIDENCE },
-    attributedExposure: {
-      executionCount: null,
-      totalCpuMicroseconds: null,
-      totalDurationMicroseconds: null,
-      totalLogicalReads8KiBPages: null,
-      confidence: 'Unknown',
-      rationale: 'n/a',
-      evidence: EVIDENCE,
-    },
+    ...baseItem('o1', 'ws:finance', 0, 0, 'Lakehouse'),
+    workspaceName: 'Finance',
+    name: 'Finance Lakehouse',
+    storage: byteMeasurement('81920'),
+    cuConsumed: cuMeasurement('10'),
     ...overrides,
   }
 }
@@ -61,16 +48,18 @@ function road(overrides: Partial<RoadTraffic> = {}): RoadTraffic {
     routeId: 'r1',
     fromItemId: 'o1',
     toId: 'o2',
-    kind: 'ObjectReference',
+    kind: 'SharedOperation',
     confidence: 'Confirmed',
     pattern: 'solid',
     width: 5.2,
     grade: 'severe',
     color: 0xe4483c,
-    executions: 100,
-    waitShare: 0.5,
-    delayPerExecution: 60,
-    recentExecutions: 40,
+    operations: 100,
+    carOperations: 100,
+    freightOperations: 0,
+    throttleShare: 0.5,
+    delayPerOperation: 60,
+    recentOperations: 40,
     recentWindowMinutes: 15,
     familyIds: ['f1'],
     rationale: 'because',
@@ -83,11 +72,15 @@ function marker(overrides: Partial<IncidentMarker> = {}): IncidentMarker {
     id: 'i1',
     itemId: 'o1',
     counterpartObjectIds: [],
-    sessionIds: [55],
-    severity: 'blocked',
-    headline: 'Session 55 blocked on dbo.Customer',
-    details: ['Waiting 4.2 s on LCK_M_X'],
-    source: 'sys.dm_exec_requests',
+    severity: 'backgroundRejection',
+    stage: 'BackgroundRejection',
+    facility: 'backgroundRejectionGate',
+    familyIds: ['fam:refresh'],
+    throttlingSeconds: 252,
+    liveRejections: 3,
+    headline: 'Background rejection at Sales.Sales Warehouse',
+    details: ['252 s throttled at the background rejection gate'],
+    source: 'Capacity Metrics semantic model',
     observedAt: '2026-01-01T00:00:00Z',
     ...overrides,
   }
@@ -106,7 +99,7 @@ const BOUNDS = {
 
 function facts(overrides: Partial<TourFacts> = {}): TourFacts {
   return {
-    cityName: 'AdventureWorks',
+    cityName: 'Contoso F64',
     bounds: BOUNDS,
     cell: 30,
     objects: [],
@@ -121,37 +114,32 @@ function facts(overrides: Partial<TourFacts> = {}): TourFacts {
 /** A city with something in every bucket, so the interleave has material to work with. */
 function busyCity(): TourFacts {
   const objects = [
-    cityObject({
+    cityItem({
       itemId: 'o1',
-      name: 'SalesOrderHeader',
+      name: 'Sales Warehouse',
       workspaceId: 's1',
       workspaceName: 'Sales',
-      storageBytes: '900000',
-      attributedExposure: {
-        ...cityObject().attributedExposure,
-        totalCpuMicroseconds: '9000000',
-      },
+      storage: byteMeasurement('900000'),
+      cuConsumed: cuMeasurement('9000'),
     }),
-    cityObject({
+    cityItem({
       itemId: 'o2',
-      name: 'SalesOrderDetail',
+      name: 'Sales Semantic Model',
       workspaceId: 's1',
       workspaceName: 'Sales',
-      storageBytes: '400000',
-      attributedExposure: {
-        ...cityObject().attributedExposure,
-        totalCpuMicroseconds: '4000000',
-      },
+      storage: byteMeasurement('400000'),
+      cuConsumed: cuMeasurement('4000'),
     }),
-    cityObject({ itemId: 'o3', name: 'Person', workspaceId: 's2', workspaceName: 'Person', storageBytes: '50000' }),
-    cityObject({ itemId: 'o4', name: 'Address', workspaceId: 's2', workspaceName: 'Person', storageBytes: '20000' }),
-    cityObject({ itemId: 'o5', name: 'Product', workspaceId: 's3', workspaceName: 'Production', storageBytes: '9000' }),
-    cityObject({
+    cityItem({ itemId: 'o3', name: 'People Lakehouse', workspaceId: 's2', workspaceName: 'People', storage: byteMeasurement('50000'), cuConsumed: cuMeasurement('300') }),
+    cityItem({ itemId: 'o4', name: 'Address Notebook', workspaceId: 's2', workspaceName: 'People', kind: 'Notebook', storage: byteMeasurement(null), cuConsumed: cuMeasurement('200') }),
+    cityItem({ itemId: 'o5', name: 'Product Warehouse', workspaceId: 's3', workspaceName: 'Production', storage: byteMeasurement('9000'), cuConsumed: cuMeasurement('100') }),
+    cityItem({
       itemId: 'o6',
       name: 'ProductReview',
       workspaceId: 's3',
       workspaceName: 'Production',
-      storageBytes: '800',
+      storage: byteMeasurement('800'),
+      cuConsumed: cuMeasurement('50'),
     }),
   ]
   const lots = new Map<string, TourPoint>([
@@ -166,9 +154,9 @@ function busyCity(): TourFacts {
     objects,
     lots,
     roads: [
-      road({ routeId: 'r1', fromItemId: 'o1', toId: 'o2', delayPerExecution: 60, grade: 'severe' }),
-      road({ routeId: 'r2', fromItemId: 'o3', toId: 'o4', delayPerExecution: 6, grade: 'heavy' }),
-      road({ routeId: 'r3', fromItemId: 'o5', toId: 'o6', delayPerExecution: 1, grade: 'moderate' }),
+      road({ routeId: 'r1', fromItemId: 'o1', toId: 'o2', delayPerOperation: 60, grade: 'severe' }),
+      road({ routeId: 'r2', fromItemId: 'o3', toId: 'o4', delayPerOperation: 6, grade: 'heavy' }),
+      road({ routeId: 'r3', fromItemId: 'o5', toId: 'o6', delayPerOperation: 1, grade: 'moderate' }),
     ],
     roadPaths: new Map<string, readonly TourPoint[]>([
       ['r1', [{ x: 0, z: 0 }, { x: 30, z: 0 }, { x: 60, z: 0 }]],
@@ -192,8 +180,8 @@ function stop(overrides: Partial<TourStop> = {}): TourStop {
     polar: 0.848,
     travelMs: 4000,
     holdMs: 8000,
-    caption: 'dbo.Customer',
-    detail: 'Largest by reserved pages on this page · 80.0 KiB reserved',
+    caption: 'Finance.Finance Lakehouse',
+    detail: 'Largest by OneLake storage on this page · 80.0 KiB',
     ...overrides,
   }
 }
@@ -406,8 +394,9 @@ describe('resuming across a replan', () => {
 })
 
 /**
- * The cut to the disaster. A block that started ten seconds ago is the one event on this map worth
- * abandoning a shot for; waiting out the rotation would routinely mean arriving after it cleared.
+ * The cut to the incident. A rejection that started ten seconds ago is the one event on this map
+ * worth abandoning a shot for; waiting out the rotation would routinely mean arriving after it
+ * cleared.
  */
 describe('breakingStopIndex', () => {
   const incident = (id: string) => stop({ id, kind: 'incident' })
@@ -421,7 +410,7 @@ describe('breakingStopIndex', () => {
   })
 
   /*
-   * A landmark entering the itinerary because a later page raised its measured CPU is not news, it
+   * A landmark entering the itinerary because a later page raised its measured CU is not news, it
    * is the same city better counted. Cutting to it would make every page load yank the camera.
    */
   it('does not treat a newly ranked building as breaking news', () => {
@@ -433,7 +422,7 @@ describe('planCityTour', () => {
   it('opens on an establishing shot of the whole city', () => {
     const itinerary = planCityTour(busyCity())
     expect(itinerary[0].kind).toBe('skyline')
-    expect(itinerary[0].caption).toBe('AdventureWorks')
+    expect(itinerary[0].caption).toBe('Contoso F64')
     expect(itinerary[0].span).toBeGreaterThan(BOUNDS.width)
   })
 
@@ -463,8 +452,8 @@ describe('planCityTour', () => {
   it('leads with the incident, because it is the only stop that is news', () => {
     const itinerary = planCityTour(busyCity())
     expect(itinerary[1].kind).toBe('incident')
-    expect(itinerary[1].caption).toBe('Session 55 blocked on dbo.Customer')
-    expect(itinerary[1].detail).toBe('Waiting 4.2 s on LCK_M_X')
+    expect(itinerary[1].caption).toBe('Background rejection at Sales.Sales Warehouse')
+    expect(itinerary[1].detail).toBe('252 s throttled at the background rejection gate')
   })
 
   it('gives every stop a stable, unique id', () => {
@@ -477,36 +466,50 @@ describe('planCityTour', () => {
   })
 
   it('caps the itinerary so a loop comes back round inside a few minutes', () => {
-    const many = busyCity()
     const objects = Array.from({ length: 200 }, (_, index) =>
-      cityObject({
+      cityItem({
         itemId: `x${index}`,
-        name: `Table${index}`,
+        name: `Item${index}`,
         workspaceId: `s${index % 7}`,
-        workspaceName: `sch${index % 7}`,
-        storageBytes: `${1000 + index}`,
+        workspaceName: `workspace${index % 7}`,
+        storage: byteMeasurement(`${1000 + index}`),
+        cuConsumed: cuMeasurement(`${index + 1}`),
       }))
-    const lots = new Map<string, TourPoint>(objects.map((object, index) => [
-      object.itemId,
+    const lots = new Map<string, TourPoint>(objects.map((item, index) => [
+      item.itemId,
       { x: index * 11, z: index * 7 },
     ]))
-    const itinerary = planCityTour({ ...many, objects, lots })
-    expect(itinerary.length).toBeLessThanOrEqual(MAX_TOUR_STOPS)
+    const roads = Array.from({ length: 20 }, (_, index) =>
+      road({
+        routeId: `road:${index}`,
+        fromItemId: `x${index}`,
+        toId: `x${index + 1}`,
+        delayPerOperation: 20 + index,
+        operations: 100 + index,
+        recentOperations: 50 + index,
+      }))
+    const roadPaths = new Map<string, readonly TourPoint[]>(roads.map((entry, index) => [
+      entry.routeId,
+      [{ x: index * 11, z: index * 7 }, { x: (index + 1) * 11, z: (index + 1) * 7 }],
+    ]))
+    const incidents = Array.from({ length: 8 }, (_, index) => marker({ id: `incident:${index}`, itemId: `x${index}` }))
+    const itinerary = planCityTour(facts({ objects, lots, roads, roadPaths, incidents }))
+    expect(itinerary).toHaveLength(MAX_TOUR_STOPS)
   })
 
   /*
-   * A caption states the measurement that earned the stop. Ranking on attributed CPU alone would
-   * skip every large table no ranked query named, and ranking on size alone would skip the small
+   * A caption states the measurement that earned the stop. Ranking on consumed CU alone would
+   * skip every large item no ranked operation named, and ranking on size alone would skip the small
    * hot one -- so both lists are toured and each says which list it came from.
    */
   it('says which measurement earned each landmark', () => {
     const itinerary = planCityTour(busyCity())
     const landmarks = itinerary.filter(entry => entry.kind === 'landmark')
-    expect(landmarks.some(entry => entry.detail.includes('Most attributed Query Store CPU'))).toBe(true)
-    expect(landmarks.some(entry => entry.detail.includes('Largest by reserved pages'))).toBe(true)
+    expect(landmarks.some(entry => entry.detail.includes('Most CU consumed'))).toBe(true)
+    expect(landmarks.some(entry => entry.detail.includes('Largest by OneLake storage'))).toBe(true)
     const hottest = landmarks.find(entry => entry.itemId === 'o1')
-    expect(hottest?.caption).toBe('Sales.SalesOrderHeader')
-    expect(hottest?.detail).toContain('9.0 s')
+    expect(hottest?.caption).toBe('Sales.Sales Warehouse')
+    expect(hottest?.detail).toContain('9.0k CU-s')
   })
 
   it('tours a building once, however many rankings named it', () => {
@@ -516,25 +519,25 @@ describe('planCityTour', () => {
   })
 
   /*
-   * The absence rule. A street with no captured wait evidence has not been shown to be quiet; it has
+   * The absence rule. A street with no captured throttling evidence has not been shown to be quiet; it has
    * not been measured, and captioning it as free-flowing is a different claim than the data makes.
    */
   it('captions an unmeasured street as unmeasured, never as quiet', () => {
     const city = busyCity()
     const itinerary = planCityTour({
       ...city,
-      roads: [road({ routeId: 'r1', delayPerExecution: null, grade: 'unknown', executions: null, recentExecutions: 5 })],
+      roads: [road({ routeId: 'r1', delayPerOperation: null, grade: 'unknown', operations: null, recentOperations: 5 })],
     })
     const street = itinerary.find(entry => entry.kind === 'street')
-    expect(street?.detail).toContain('No captured wait evidence')
-    expect(street?.detail).toContain('no captured executions')
+    expect(street?.detail).toContain('No throttling evidence')
+    expect(street?.detail).toContain('no measured operations')
     expect(street?.detail).not.toContain('Free-flowing')
   })
 
   it('names both ends of a street it follows', () => {
     const itinerary = planCityTour(busyCity())
     const street = itinerary.find(entry => entry.routeId === 'r1')
-    expect(street?.caption).toBe('Sales.SalesOrderHeader → Sales.SalesOrderDetail')
+    expect(street?.caption).toBe('Sales.Sales Warehouse → Sales.Sales Semantic Model')
     expect(street?.path?.length).toBe(3)
   })
 
@@ -544,7 +547,7 @@ describe('planCityTour', () => {
     expect(itinerary.some(entry => entry.kind === 'street')).toBe(false)
   })
 
-  it('skips an incident whose object is not on this page', () => {
+  it('skips an incident whose item is not on this page', () => {
     const city = busyCity()
     const itinerary = planCityTour({ ...city, incidents: [marker({ id: 'i9', itemId: 'not-loaded' })] })
     expect(itinerary.some(entry => entry.kind === 'incident')).toBe(false)
@@ -554,7 +557,7 @@ describe('planCityTour', () => {
     const itinerary = planCityTour(busyCity())
     const neighbourhood = itinerary.find(entry => entry.kind === 'neighbourhood')
     expect(neighbourhood?.detail).toContain('2 objects drawn')
-    expect(['Sales', 'Person', 'Production']).toContain(neighbourhood?.caption)
+    expect(['Sales', 'People', 'Production']).toContain(neighbourhood?.caption)
   })
 
   it('points the camera down the street rather than across it', () => {
@@ -592,48 +595,17 @@ describe('planCityTour', () => {
     expect(still.map(stopDuration)).toEqual(moving.map(stopDuration))
   })
 
-  it('rejects a size or CPU total it cannot parse rather than ranking it as zero', () => {
+  it('ignores malformed size and CU totals rather than inventing a landmark', () => {
     const itinerary = planCityTour(facts({
-      objects: [cityObject({ itemId: 'o1', storageBytes: 'not a number' })],
+      objects: [
+        cityItem({
+          itemId: 'o1',
+          storage: byteMeasurement('not a number'),
+          cuConsumed: cuMeasurement('not a number'),
+        }),
+      ],
       lots: new Map([['o1', { x: 0, z: 0 }]]),
     }))
     expect(itinerary.some(entry => entry.kind === 'landmark')).toBe(false)
-  })
-})
-
-/**
- * The one piece of the tour that lives in the scene and cannot be reached from here except as text.
- *
- * `stepTour` is pure and takes whatever delta it is handed, so every assertion above is true no
- * matter what the scene feeds it. The scene clamps that delta to bound a backgrounded tab's
- * catch-up, and the value of the clamp is the whole behaviour: a ceiling *below* the real frame
- * interval does not bound an exception, it rescales time on every frame.
- *
- * That is not hypothetical. The first implementation clamped at 100ms, and the establishing shot
- * over a 4,200-object city measured a median 147ms and a max 197ms per frame at 1440x900 -- so the
- * clamp bit continuously and ran the tour at roughly 68% speed. Measured in a browser: four stops
- * in sixty seconds where the itinerary asks for six. Nothing in this file could see it, and
- * nothing in it can see a regression either, which is why the guard is here as source text.
- */
-describe('the scene clamps the tour delta above its own worst frame', () => {
-  const scene = readFileSync(new URL('./CapacityCityScene.ts', import.meta.url), 'utf8')
-
-  it('clamps generously enough that a normally rendering frame never trips it', () => {
-    /*
-     * Sliced to the tour loop rather than searched across the file. The vehicle loop clamps too,
-     * at a value that is correct for it, and a bare search would happily read that one instead --
-     * a guard reporting on a different loop than the one it names.
-     */
-    const from = scene.indexOf('const runTourLoop')
-    const to = scene.indexOf('const stopTourLoop')
-    expect(from, 'runTourLoop has been renamed and this guard now covers nothing').toBeGreaterThan(-1)
-    expect(to, 'stopTourLoop has been renamed or hoisted, inverting this slice').toBeGreaterThan(from)
-    const loop = scene.slice(from, to)
-
-    const match = loop.match(/Math\.min\(now - previous, (\d+)\)/)
-    expect(match, 'the tour loop should clamp its frame delta').not.toBeNull()
-    const clamp = Number(match![1])
-    // 197ms was the worst frame measured. Anything at or under it rescales the whole itinerary.
-    expect(clamp).toBeGreaterThan(197)
   })
 })

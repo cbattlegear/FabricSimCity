@@ -267,6 +267,7 @@ export function CapacityCityViewport({
   useEffect(() => sceneRef.current?.setRoads(roads), [roads])
   useEffect(() => sceneRef.current?.setTraffic(traffic), [traffic])
   useEffect(() => sceneRef.current?.setFacilities(facilities), [facilities])
+  useEffect(() => sceneRef.current?.setFacilityTraffic(facilityTraffic), [facilityTraffic])
   useEffect(() => sceneRef.current?.setRoute(route), [route])
   useEffect(() => sceneRef.current?.setSelected(selectedId), [selectedId])
   useEffect(() => sceneRef.current?.setSelectedRoad(selectedRoadId), [selectedRoadId])

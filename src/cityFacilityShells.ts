@@ -2,8 +2,7 @@ import * as THREE from 'three'
 import type { FacilityKind } from './cityInfrastructure'
 
 /**
- * Decorative architecture for the six civic facilities, so CPU, memory, storage, tempdb, log, and
- * lock read as *places* on the map rather than coloured blocks.
+ * Decorative architecture for Fabric capacity power-grid facilities.
  *
  * **Evidence boundary.** Nothing in this file is measured. Every shell is a fixed function of the
  * facility kind and its plot radius, so it is identical on every render and never changes when the
@@ -114,175 +113,132 @@ function apron(radius: number): THREE.BufferGeometry[] {
 
 export function facilityShell(kind: FacilityKind, radius: number): FacilityShell {
   switch (kind) {
-    case 'cpu':
-      return schedulerYard(radius)
-    case 'memory':
-      return grantOffice(radius)
-    case 'storage':
-      return ioDepot(radius)
-    case 'tempdb':
-      return tempdbWorks(radius)
-    case 'log':
-      return logYard(radius)
-    default:
-      return lockAuthority(radius)
+    case 'powerPlant':
+      return powerPlant(radius)
+    case 'reservoir':
+      return smoothingReservoir(radius)
+    case 'carryForwardYard':
+      return carryForwardYard(radius)
+    case 'delayGate':
+      return delayGate(radius)
+    case 'interactiveRejectionGate':
+      return interactiveGate(radius)
+    case 'backgroundRejectionGate':
+      return backgroundEmbargo(radius)
+    case 'surgeSubstation':
+      return surgeSubstation(radius)
   }
 }
 
-/**
- * CPU Scheduler Yard: a control block with a stair tower, a gantry spanning the yard, and floodlight
- * masts. Scheduler towers rise between the gantry legs.
- */
-function schedulerYard(radius: number): FacilityShell {
+/** Power Plant: turbine hall, cooling stacks and a central chimney. */
+function powerPlant(radius: number): FacilityShell {
   const body: THREE.BufferGeometry[] = apron(radius)
   const trim: THREE.BufferGeometry[] = []
   const glass: THREE.BufferGeometry[] = []
 
-  const controlWidth = radius * 0.72
-  body.push(box(controlWidth, 7, radius * 0.5, -radius + controlWidth / 2 + 1, 4, -radius * 0.55))
-  body.push(box(radius * 0.22, 11, radius * 0.22, -radius + 1.6, 6, -radius * 0.55))
-  trim.push(box(controlWidth + 1.2, 0.7, radius * 0.5 + 1.2, -radius + controlWidth / 2 + 1, 7.85, -radius * 0.55))
-  glass.push(box(controlWidth * 0.86, 2.4, radius * 0.52, -radius + controlWidth / 2 + 1, 5.4, -radius * 0.55))
+  body.push(box(radius * 1.25, 13, radius * 0.85, 0, 7, -radius * 0.2))
+  body.push(box(radius * 0.55, 21, radius * 0.55, -radius * 0.55, 11, -radius * 0.18))
+  body.push(cylinder(radius * 0.18, radius * 0.28, 31, radius * 0.55, 16, -radius * 0.25, 18))
+  trim.push(box(radius * 1.34, 1, radius * 0.94, 0, 13.9, -radius * 0.2))
+  trim.push(cylinder(radius * 0.28, radius * 0.28, 0.8, radius * 0.55, 31.8, -radius * 0.25, 18))
+  glass.push(box(radius * 0.95, 4, radius * 0.88, 0, 8.5, -radius * 0.2))
+  return assemble(body, trim, glass)
+}
 
-  // Gantry: two legs and a beam over the tower row.
-  const gantryY = 15
+/** Smoothing Reservoir: paired tanks and a gauge house. */
+function smoothingReservoir(radius: number): FacilityShell {
+  const body: THREE.BufferGeometry[] = apron(radius)
+  const trim: THREE.BufferGeometry[] = []
+  const glass: THREE.BufferGeometry[] = []
+
   for (const side of [-1, 1]) {
-    body.push(box(1.5, gantryY, 1.5, side * (radius - 2), gantryY / 2, radius * 0.35))
+    body.push(cylinder(radius * 0.34, radius * 0.4, 15, side * radius * 0.35, 8, -radius * 0.12, 24))
+    trim.push(cylinder(radius * 0.36, radius * 0.36, 0.8, side * radius * 0.35, 15.9, -radius * 0.12, 24))
   }
-  trim.push(box(radius * 2 - 2, 1.3, 2.2, 0, gantryY + 0.65, radius * 0.35))
+  body.push(box(radius * 0.72, 6, radius * 0.44, 0, 3.5, radius * 0.54))
+  glass.push(box(radius * 0.48, 2.2, radius * 0.46, 0, 4.4, radius * 0.54))
+  trim.push(box(radius * 1.25, 0.6, 0.8, 0, 12.2, -radius * 0.12))
+  return assemble(body, trim, glass)
+}
+
+/** Carry-forward Yard: a fenced debt heap with a small burndown office. */
+function carryForwardYard(radius: number): FacilityShell {
+  const body: THREE.BufferGeometry[] = apron(radius)
+  const trim: THREE.BufferGeometry[] = []
+  const glass: THREE.BufferGeometry[] = []
+
+  body.push(box(radius * 0.72, 6, radius * 0.52, -radius * 0.55, 3.5, -radius * 0.52))
+  glass.push(box(radius * 0.48, 2, radius * 0.54, -radius * 0.55, 4.2, -radius * 0.52))
+  for (const z of [-0.1, 0.32, 0.74]) {
+    trim.push(box(radius * 1.45, 0.5, 0.5, radius * 0.16, 2.1 + z * 2, radius * z))
+  }
+  for (const side of [-1, 1]) {
+    trim.push(box(0.5, 3, radius * 1.55, side * radius * 0.82, 2, radius * 0.18))
+  }
+  return assemble(body, trim, glass)
+}
+
+/** Delay Gate: an open checkpoint with queue gantries. */
+function delayGate(radius: number): FacilityShell {
+  const body: THREE.BufferGeometry[] = apron(radius)
+  const trim: THREE.BufferGeometry[] = []
 
   for (const side of [-1, 1]) {
-    body.push(cylinder(0.3, 0.42, 13, side * (radius - 2.2), 7, -radius + 2.2, 6))
-    trim.push(box(2.4, 0.8, 1.2, side * (radius - 2.2), 13.6, -radius + 2.2))
+    body.push(box(radius * 0.2, 13, radius * 0.28, side * radius * 0.42, 7, -radius * 0.12))
   }
-  return assemble(body, trim, glass)
-}
-
-/**
- * Memory Grant Office: a setback office block with a glazed facade, an entrance canopy on columns,
- * and a queue rail outside the door where waiting grants line up.
- */
-function grantOffice(radius: number): FacilityShell {
-  const body: THREE.BufferGeometry[] = apron(radius)
-  const trim: THREE.BufferGeometry[] = []
-  const glass: THREE.BufferGeometry[] = []
-
-  const width = radius * 1.5
-  const depth = radius * 0.85
-  const z = -radius * 0.35
-  body.push(box(width, 16, depth, 0, 8.5, z))
-  body.push(box(width * 0.7, 6, depth * 0.75, 0, 19.5, z))
-  trim.push(box(width + 1.4, 0.9, depth + 1.4, 0, 16.9, z))
-  trim.push(box(width * 0.7 + 1.2, 0.8, depth * 0.75 + 1.2, 0, 22.8, z))
-  glass.push(box(width * 0.92, 11, depth + 0.5, 0, 9.5, z))
-
-  // Entrance canopy on two columns.
-  const canopyZ = z + depth / 2 + radius * 0.3
-  trim.push(box(width * 0.55, 0.7, radius * 0.62, 0, 6.2, canopyZ))
-  for (const side of [-1, 1]) {
-    body.push(cylinder(0.4, 0.4, 5.8, side * width * 0.22, 3.4, canopyZ + radius * 0.24, 10))
-  }
-  // Queue rail: posts the waiting-grant markers stand beside.
-  for (let post = 0; post < 4; post += 1) {
-    trim.push(cylinder(0.16, 0.16, 1.6, -radius * 0.55 + post * radius * 0.36, 1.3, radius * 0.72, 6))
-  }
-  return assemble(body, trim, glass)
-}
-
-/**
- * Storage & I/O Depot: a long warehouse with a barrel roof, a stepped loading dock, and bay openings
- * along the front. Each file's shutter fills its bay.
- */
-function ioDepot(radius: number): FacilityShell {
-  const body: THREE.BufferGeometry[] = apron(radius)
-  const trim: THREE.BufferGeometry[] = []
-  const glass: THREE.BufferGeometry[] = []
-
-  const width = radius * 1.8
-  const depth = radius * 0.9
-  const z = -radius * 0.3
-  body.push(box(width, 11, depth, 0, 6, z))
-  // Barrel roof, approximated with a half cylinder laid along x.
-  const roof = new THREE.CylinderGeometry(depth * 0.52, depth * 0.52, width, 14, 1, false, 0, Math.PI)
-  roof.rotateZ(Math.PI / 2)
-  roof.translate(0, 11.5, z)
-  trim.push(roof)
-  // Loading dock apron in front of the bays.
-  body.push(box(width, 1.6, radius * 0.5, 0, 1.3, z + depth / 2 + radius * 0.25))
-  trim.push(box(width, 0.4, 0.5, 0, 2.15, z + depth / 2 + radius * 0.5))
-  glass.push(box(width * 0.8, 1.6, 0.4, 0, 9.4, z - depth / 2 - 0.1))
-  return assemble(body, trim, glass)
-}
-
-/** tempdb Works: three silos linked by pipe bridges, with a chimney and a plant shed. */
-function tempdbWorks(radius: number): FacilityShell {
-  const body: THREE.BufferGeometry[] = apron(radius)
-  const trim: THREE.BufferGeometry[] = []
-  const glass: THREE.BufferGeometry[] = []
-
-  body.push(box(radius * 0.8, 6, radius * 0.6, -radius * 0.5, 3.5, radius * 0.55))
-  trim.push(box(radius * 0.86, 0.6, radius * 0.66, -radius * 0.5, 6.8, radius * 0.55))
-  glass.push(box(radius * 0.6, 1.8, radius * 0.62, -radius * 0.5, 4.2, radius * 0.55))
-
-  body.push(cylinder(1.0, 1.3, 20, radius * 0.62, 10.5, radius * 0.6, 10))
-  trim.push(cylinder(1.25, 1.25, 0.7, radius * 0.62, 20.8, radius * 0.6, 10))
-
-  // Pipe bridge linking the silo row.
-  trim.push(box(radius * 1.5, 0.5, 0.5, 0, 13.5, -radius * 0.35))
-  return assemble(body, trim, glass)
-}
-
-/** Log Yard: one large tank with a catwalk ring, an access ladder, and a bund wall. */
-function logYard(radius: number): FacilityShell {
-  const body: THREE.BufferGeometry[] = apron(radius)
-  const trim: THREE.BufferGeometry[] = []
-
-  const tankRadius = radius * 0.52
-  // Bund wall around the tank.
-  for (const [dx, dz] of [[0, -1], [0, 1], [-1, 0], [1, 0]] as const) {
-    body.push(
-      box(
-        dx === 0 ? tankRadius * 2.9 : 0.8,
-        2.2,
-        dz === 0 ? tankRadius * 2.9 : 0.8,
-        dx * tankRadius * 1.45,
-        1.6,
-        dz * tankRadius * 1.45,
-      ),
-    )
-  }
-  trim.push(cylinder(tankRadius + 0.55, tankRadius + 0.55, 0.5, 0, 15.5, 0, 20))
-  trim.push(cylinder(tankRadius * 0.98, tankRadius * 0.98, 0.8, 0, 16.6, 0, 20))
-  // Ladder.
-  for (let rung = 0; rung < 7; rung += 1) {
-    trim.push(box(1.5, 0.16, 0.16, tankRadius + 0.9, 2 + rung * 2.1, 0))
+  trim.push(box(radius * 1.05, 1.3, radius * 0.26, 0, 13.9, -radius * 0.12))
+  for (let lane = 0; lane < 3; lane += 1) {
+    trim.push(box(radius * 1.25, 0.35, 0.35, 0, 1.7, radius * (0.18 + lane * 0.23)))
   }
   return assemble(body, trim, [])
 }
 
-/** Lock Authority: a civic hall with a columned portico, a pediment, and a rooftop beacon plinth. */
-function lockAuthority(radius: number): FacilityShell {
+/** Interactive Rejection Gate: a closed security gate and control booth. */
+function interactiveGate(radius: number): FacilityShell {
   const body: THREE.BufferGeometry[] = apron(radius)
   const trim: THREE.BufferGeometry[] = []
   const glass: THREE.BufferGeometry[] = []
 
-  const width = radius * 1.4
-  const depth = radius * 0.8
-  const z = -radius * 0.25
-  body.push(box(width, 12, depth, 0, 6.5, z))
-  trim.push(box(width + 1.6, 1.1, depth + 1.6, 0, 13.05, z))
-  glass.push(box(width * 0.86, 6, depth + 0.4, 0, 7.5, z))
-
-  // Portico: six columns under a pediment slab.
-  const porticoZ = z + depth / 2 + radius * 0.28
-  for (let column = 0; column < 6; column += 1) {
-    body.push(cylinder(0.5, 0.55, 9, -width * 0.42 + column * (width * 0.84 / 5), 5, porticoZ, 10))
+  body.push(box(radius * 0.55, 8, radius * 0.55, -radius * 0.55, 4.5, -radius * 0.28))
+  glass.push(box(radius * 0.4, 3, radius * 0.57, -radius * 0.55, 5.2, -radius * 0.28))
+  for (const side of [-1, 1]) {
+    body.push(box(radius * 0.16, 12, radius * 0.18, side * radius * 0.38, 6.5, radius * 0.12))
   }
-  trim.push(box(width, 1.2, radius * 0.62, 0, 10.1, porticoZ))
-  trim.push(box(width * 0.72, 1.6, radius * 0.5, 0, 11.5, porticoZ))
-  // Beacon plinth on the roof; the scene puts the alert beacon on top of it.
-  body.push(box(radius * 0.3, 3, radius * 0.3, 0, 15.1, z))
+  trim.push(box(radius * 1.05, 1, radius * 0.22, 0, 12.8, radius * 0.12))
+  trim.push(box(radius * 0.9, 3.2, 0.6, radius * 0.12, 4.4, radius * 0.12))
   return assemble(body, trim, glass)
+}
+
+/** Background Embargo: freight depot with a shuttered bay. */
+function backgroundEmbargo(radius: number): FacilityShell {
+  const body: THREE.BufferGeometry[] = apron(radius)
+  const trim: THREE.BufferGeometry[] = []
+  const glass: THREE.BufferGeometry[] = []
+
+  const width = radius * 1.55
+  const depth = radius * 0.8
+  body.push(box(width, 10, depth, 0, 5.5, -radius * 0.25))
+  body.push(box(width * 0.86, 1.4, radius * 0.55, 0, 1.2, radius * 0.45))
+  trim.push(box(width + 1.1, 0.8, depth + 1.1, 0, 10.9, -radius * 0.25))
+  trim.push(box(width * 0.68, 0.5, 0.5, 0, 5.8, radius * 0.16))
+  glass.push(box(width * 0.74, 1.8, 0.4, 0, 8.2, -radius * 0.67))
+  return assemble(body, trim, glass)
+}
+
+/** Surge Substation: transformers, bus bars and lightning masts. */
+function surgeSubstation(radius: number): FacilityShell {
+  const body: THREE.BufferGeometry[] = apron(radius)
+  const trim: THREE.BufferGeometry[] = []
+
+  for (const side of [-1, 1]) {
+    body.push(box(radius * 0.34, 7, radius * 0.42, side * radius * 0.32, 4, -radius * 0.1))
+    trim.push(cylinder(radius * 0.14, radius * 0.14, 9, side * radius * 0.32, 8.8, -radius * 0.1, 12))
+  }
+  trim.push(box(radius * 1.3, 0.5, 0.5, 0, 12.2, -radius * 0.1))
+  for (const x of [-0.62, 0, 0.62]) {
+    trim.push(cylinder(0.18, 0.24, 15, radius * x, 8, radius * 0.55, 6))
+  }
+  return assemble(body, trim, [])
 }
 
 /**
@@ -294,120 +250,84 @@ export function facilitySlots(kind: FacilityKind, radius: number, count: number)
   if (count <= 0) return slots
 
   switch (kind) {
-    case 'cpu': {
-      // Scheduler towers in a row under the gantry.
-      const columns = Math.min(count, 8)
-      const rows = Math.ceil(count / columns)
-      const pitch = (radius * 1.7) / columns
-      for (let index = 0; index < count; index += 1) {
-        const col = index % columns
-        const row = Math.floor(index / columns)
-        slots.push({
-          x: (col - (columns - 1) / 2) * pitch,
-          y: 0.5,
-          z: radius * 0.35 + (row - (rows - 1) / 2) * pitch * 0.9,
-          width: pitch * 0.5,
-          depth: pitch * 0.5,
-          minHeight: 2.5,
-          maxHeight: 13,
-          form: 'column',
-          radius: pitch * 0.25,
-        })
-      }
+    case 'powerPlant':
+      slots.push({
+        x: radius * 0.55,
+        y: 0.5,
+        z: -radius * 0.25,
+        width: radius * 0.32,
+        depth: radius * 0.32,
+        minHeight: 4,
+        maxHeight: 30,
+        form: 'cylinder',
+        radius: radius * 0.16,
+      })
       return slots
-    }
-    case 'memory': {
-      // Waiting grants queue along the rail in front of the office.
-      const pitch = (radius * 1.5) / Math.max(count, 4)
-      for (let index = 0; index < count; index += 1) {
-        slots.push({
-          x: -radius * 0.6 + index * pitch,
-          y: 0.5,
-          z: radius * 0.55,
-          width: Math.min(pitch * 0.62, 2.2),
-          depth: Math.min(pitch * 0.62, 2.2),
-          minHeight: 1.6,
-          maxHeight: 7,
-          form: 'column',
-          radius: Math.min(pitch * 0.3, 1.1),
-        })
-      }
+    case 'reservoir':
+      slots.push({
+        x: 0,
+        y: 0.5,
+        z: -radius * 0.12,
+        width: radius * 0.9,
+        depth: radius * 0.9,
+        minHeight: 2.5,
+        maxHeight: 14,
+        form: 'cylinder',
+        radius: radius * 0.43,
+      })
       return slots
-    }
-    case 'storage': {
-      // One roller shutter per loading bay along the depot front.
-      const bays = Math.min(count, 10)
-      const pitch = (radius * 1.7) / bays
-      for (let index = 0; index < count; index += 1) {
-        const bay = index % bays
-        slots.push({
-          x: (bay - (bays - 1) / 2) * pitch,
-          y: 2.1,
-          z: -radius * 0.3 + radius * 0.45 + 0.35,
-          width: pitch * 0.72,
-          depth: 0.6,
-          minHeight: 0.9,
-          maxHeight: 7,
-          form: 'panel',
-          radius: pitch * 0.36,
-        })
-      }
+    case 'carryForwardYard':
+      slots.push({
+        x: radius * 0.22,
+        y: 0.5,
+        z: radius * 0.22,
+        width: radius * 1.05,
+        depth: radius * 0.82,
+        minHeight: 1.2,
+        maxHeight: 12,
+        form: 'column',
+        radius: radius * 0.26,
+      })
       return slots
-    }
-    case 'tempdb': {
-      // Silo contents.
-      const pitch = (radius * 1.5) / Math.max(count, 3)
-      for (let index = 0; index < count; index += 1) {
-        slots.push({
-          x: -radius * 0.55 + index * pitch,
-          y: 0.5,
-          z: -radius * 0.35,
-          width: pitch * 0.7,
-          depth: pitch * 0.7,
-          minHeight: 3,
-          maxHeight: 17,
-          form: 'cylinder',
-          radius: Math.min(pitch * 0.36, radius * 0.26),
-        })
-      }
+    case 'delayGate':
+    case 'interactiveRejectionGate':
+      slots.push({
+        x: 0,
+        y: 1,
+        z: radius * 0.13,
+        width: radius * 0.9,
+        depth: 0.7,
+        minHeight: 0.8,
+        maxHeight: 8,
+        form: 'panel',
+        radius: radius * 0.34,
+      })
       return slots
-    }
-    case 'log': {
-      for (let index = 0; index < count; index += 1) {
-        slots.push({
-          x: 0,
-          y: 0.5,
-          z: 0,
-          width: radius,
-          depth: radius,
-          minHeight: 1.5,
-          maxHeight: 15,
-          form: 'cylinder',
-          radius: radius * 0.5,
-        })
-      }
+    case 'backgroundRejectionGate':
+      slots.push({
+        x: 0,
+        y: 1.6,
+        z: radius * 0.16,
+        width: radius * 1.05,
+        depth: 0.8,
+        minHeight: 1.2,
+        maxHeight: 8.5,
+        form: 'panel',
+        radius: radius * 0.38,
+      })
       return slots
-    }
-    default: {
-      // Lock Authority incident board: beacons on the roof parapet.
-      const columns = Math.min(count, 6)
-      const pitch = (radius * 1.2) / columns
-      for (let index = 0; index < count; index += 1) {
-        const col = index % columns
-        const row = Math.floor(index / columns)
-        slots.push({
-          x: (col - (columns - 1) / 2) * pitch,
-          y: 13.6,
-          z: -radius * 0.25 + row * pitch * 0.8,
-          width: pitch * 0.45,
-          depth: pitch * 0.45,
-          minHeight: 1.2,
-          maxHeight: 5.5,
-          form: 'column',
-          radius: pitch * 0.22,
-        })
-      }
+    case 'surgeSubstation':
+      slots.push({
+        x: 0,
+        y: 0.5,
+        z: radius * 0.55,
+        width: radius * 0.32,
+        depth: radius * 0.32,
+        minHeight: 3,
+        maxHeight: 16,
+        form: 'cylinder',
+        radius: radius * 0.16,
+      })
       return slots
-    }
   }
 }
