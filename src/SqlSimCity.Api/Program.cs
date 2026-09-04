@@ -104,7 +104,6 @@ else
         services => services.GetRequiredService<LiveIncidentSamplerService>());
     builder.Services.AddHostedService(services => services.GetRequiredService<LiveIncidentSamplerService>());
 }
-builder.Services.AddFindings();
 
 if (acquisitionMode == AcquisitionMode.Fixture && atlasConnected)
 {
@@ -423,7 +422,13 @@ else
     app.MapGet("/api/v1/archive", () => Results.NotFound());
     app.MapHub<CurrentSnapshotHub>("/hubs/current-snapshot");
 }
-app.MapFindings();
+app.Map("/api/v1/findings/{**path}", (HttpContext context) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Json(
+        new { error = "Findings has been removed. Use the retained evidence APIs." },
+        statusCode: StatusCodes.Status410Gone);
+});
 app.MapEdgeIngestion();
 if (edgeMode)
 {
