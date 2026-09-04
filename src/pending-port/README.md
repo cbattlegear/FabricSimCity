@@ -95,12 +95,20 @@ mutation-checked against the broken state):
   Substation. Each facility exposes its stable identity, driving measurement and derived
   healthy/loaded/brownout/blackout state; a missing driving measurement yields
   `MeasurementStatus.Unknown` plus a null state for wireframe rendering.
+- `cityFacilityTraffic.ts` — wires each `(item, stage)` throttle attribution into a drawable lane
+  from the building to the gate that held its work. Lanes are coloured by
+  `congestionFromDelay(throttlingSeconds / operations)` — the *same* rule the roads grade by — so a
+  lane and the street beside it never disagree; the delay gate is `delayed` load and never a
+  `refused` blackout; a family with no measured throttling seconds draws no lane, and a lane with no
+  operation count grades `unknown` (grey) rather than `free` (green). Exports
+  `POWER_GRID_STATE_LEGEND`, `POWER_GRID_FACILITY_LEGEND` and `FACILITY_LANE_LEGEND` as data for the
+  scene to render (the city legend still lives in the quarantined `CapacityCityView.tsx`).
 
-**Still quarantined** (blocked on `cityPlan` geometry):
+**Still quarantined** (nothing remains in this todo — the scene port is the next wave):
 
 | Module | What it needs |
 |---|---|
-| `cityFacilityTraffic.ts` | Wait-category facilities become the power/reservoir/carry-forward/gate set. The lane routing survives; only the facility roster changes. |
+| _(none — the domain layer is fully ported; `CapacityCityScene.ts` wiring is the next wave)_ | — |
 
 ### `operation-traffic` — roads and vehicles
 
@@ -159,20 +167,70 @@ and the source-cannot-report-families capability collapsing into measured-quiet.
 |---|---|
 | `cityVehicles.ts` | The vehicle geometry and loop, ported only when the scene needs it because the scene owns the vehicle loop and the `cityVehicleAssets.test.ts`/`cityVehicleLegibility.test.ts` slice anchors live there. `trafficModeForClass` in `cityTraffic.ts` gives it the car/freight decision from the domain side. |
 
-### `throttle-incidents` and `capacity-disasters`
+### `throttle-incidents`
+
+**Ported out** (moved to `src/`, rewritten against the Fabric contracts, tested, and each guard
+mutation-checked against the broken state):
+
+- `cityBlocking.ts` — the blocked-session model, re-pointed onto rejected operations. Blocking has no
+  Fabric analogue, so this is a rewrite: `liveRejectionEdges(samples, items, capabilities)` resolves
+  live `OperationSample`s with `status === 'Rejected'` onto the loaded items they name, split by the
+  class that decides which gate refused them (interactive / background / unknown). It keeps the
+  `LiveBlockingEdge` wire into `cityTraffic.gradeRoads` intact — `edges` is exactly that shape, so a
+  rejected item's roads still grade to the blocking band. Only `status === 'Rejected'` is an edge: a
+  delayed-but-succeeded operation carries `status === 'Success'` and is deliberately not one, which is
+  the severity ladder held at the source. Follows `cityTraffic`'s `unsupported`/`none`/`measured`
+  vocabulary — a source that reports `operationSamples: false` withholds the layer (`unsupported`)
+  rather than drawing a clean bill of health.
+- `cityIncidents.ts` — the keystone. A SQL blocking chain becomes a **throttling incident**: one item
+  × one throttle stage, pinned to the item whose operations drove the overload. It composes the landed
+  layers rather than re-deriving them — `cityThrottleAttribution.attributedThrottling` supplies the
+  retained-window markers (item, stage, facility, seconds, responsible families), `cityBlocking`
+  supplies live corroboration and stands up a live-only marker where the retained window has not caught
+  up, and `powerGrid` names the gate. Severity is `delay` < `interactiveRejection` < `backgroundRejection`;
+  `stopsTraffic` returns true only for a rejection, so an interactive delay is drawn as busy, never as a
+  crash, exactly as `capacityAtlas.isRejecting` excludes it. `incidentEvidenceState` is the "cannot know"
+  rule: with no markers it says `unsupported` (not observed) whenever the throttle gauges are unmeasured
+  **or** the source can report neither families nor samples, and only says `none` for a readable, quiet
+  capacity. `incidentSummaryLabel` returns "Not observed" for `unsupported`, never "No throttling".
+- `IncidentPopup.tsx` — the HTML popup (`IncidentPopup`) plus the folded one-line status
+  (`IncidentSummary`). Rewritten for the new `IncidentProjection`: it reads `incidentSummaryLabel`/
+  `incidentSummaryTone`, surfaces off-map and unclassed rejections, and renders each marker's stage,
+  responsible operations and carry-forward from the marker `details`. `IncidentSummary` also lists the
+  markers as buttons so the popups are reachable by keyboard, not only by picking a sphere.
+
+Guarded by fresh Fabric-typed tests (`cityIncidents.test.ts`, `cityBlocking.test.ts`). Mutation-checked:
+(a) an unmeasured gauge / a source that cannot report families or samples collapsing into "No throttling"
+(three tests fail against the broken state); (b) `InteractiveDelay` promoted to rejection severity —
+`stopsTraffic(delay)` and the delay-is-not-a-rejection-incident tests fail against the broken state.
+
+**Scene wiring left for the scene wave**: `CapacityCityScene.ts` must call `projectIncidents({ families,
+items, samples, throttle, capabilities, observedAt })`, place each `IncidentMarker` with
+`cityIncidentPlacement.placeIncident(marker.itemId, marker.counterpartObjectIds, …)`, render
+`IncidentPopup`/`IncidentSummary`, halt a vehicle at a marker only when `stopsTraffic(marker)`, and pass
+`projection.liveRejections.edges` to `gradeRoads`.
+
+### `capacity-disasters`
 
 | Module | What it needs |
 |---|---|
-| `cityIncidents.ts`, `IncidentPopup.tsx` | Rejected and failed operations in place of blocking chains. |
-| `cityBlocking.ts` | Blocking has no Fabric analogue. The nearest thing is throttle queueing, which is a capacity-wide state, not a pairwise one — likely a rewrite rather than a port. |
-| `cityDisasters.ts`, `cityDisasterSurvey.ts` | Overload states as brownout/blackout weather, keyed on `CapacityStateReason`. |
+| `cityDisasters.ts`, `cityDisasterSurvey.ts` | **Ported out** (rewritten to `src/`, tested, mutation-checked). The SQL versions (showplan surveys, missing-index fires, deadlock crashes, stats decay) were deleted, not adapted — every input they read has no Fabric field behind it, exactly like `cityRoute`/`planCost`. `cityDisasterSurvey.ts` now holds `surveyCapacityWeather`, which reads the sky from the capacity throttle ladder (clear → overcast/gathering-storm at interactive delay or carry-forward debt → rolling-blackout at interactive rejection → blackout at background rejection), keeping the delay-is-weather / rejection-is-disaster line `isRejecting()` draws. `cityDisasters.ts` holds `projectCityDisasters`, which pins the blackout to buildings with a *measured* rejected count. An unmeasured capacity (paused/disconnected) renders `unknown`, never `clear` — a paused capacity's `stage` is `None` just like a clear one, so the verdict keys on measured evidence, not stage. `cityWeathering.test.ts` stays quarantined: it slices `CapacityCityScene.ts` as source text with no `sourcePath()` fallback, so it can only rejoin `src/` with the scene. |
 
 ### `live-timepoints`
 
-| Module | What it needs |
+**Ported out** (rewritten to `src/`, tested, mutation-checked). The SQL "live query feed" polled
+`sys.dm_exec_requests` for sessions *running right now*; Fabric has no such thing. The Capacity
+Metrics app reports 30-second `CapacityTimepoint`s that land with `latencySeconds` delay, so the
+honest replacement is a **timepoint clock**, not a live feed, and it is named for what it is.
+
+| Module | What happened |
 |---|---|
-| `liveFeed.ts`, `liveQueryFeed.ts` | 30-second capacity timepoints in place of DMV samples. Cadence is fixed and documented, so the clock gets simpler, not harder. |
-| `cityRefresh.ts` | Closest to portable. Rayfin has no cron or background workers, so client-side polling is the only option and this already does exactly that. |
+| `liveQueryFeed.ts` | **Renamed to `src/timepointFeed.ts`.** Pure fold `advanceTimepointFeed` that advances one timepoint at a time and reports the **age** of the newest landed timepoint; it never labels it "live" or "now". Evidence follows `cityTraffic`'s vocabulary — `timepointEvidenceState` returns `unsupported` (capability absent → *cannot know*) / `none` (capable, nothing landed → measured absence) / `measured`, keyed on the capability flag not the array length. Future-dated timepoints (the throttle gauge's forward-smoothing series) are never landed. `describeTimepointEvidence`, `timepointClockLabel`, `timepointAgeSeconds` surface the age so stale is never drawn as current. |
+| `liveFeed.ts` | **Deleted, replaced by `src/timepointClock.ts`.** The SignalR transport talked to a deleted .NET hub; a Fabric App on Rayfin has no push hub (no cron/worker/channel). `startTimepointClock` is a cancellable client-side poller over the `CapacitySource` seam: it polls at `refreshIntervalMs`, **schedules no loop at all** for a source without the `timepoints` capability, and its disposer clears the interval + aborts in-flight + drops a late result. |
+| `cityRefresh.ts` | **Ported to `src/cityRefresh.ts`.** The hardcoded `CITY_REFRESH_INTERVAL_MS = 30_000` became `refreshIntervalMs(capabilities) = max(TIMEPOINT_SECONDS, latencySeconds) * 1000` — cadence derived from the source's declared latency, never faster than a 30-second timepoint can land. Content-stability signatures rewritten onto Fabric fields. |
+| `api.test.ts`, `edgeUi.test.ts` | **Deleted, not ported.** `api.test.ts` tested `liveFeed.ts`'s SignalR `subscribeToLiveIncidents` against `../api` (deleted). `edgeUi.test.ts` was a source-text guard over edge-connector/deployment-notice UI in `App.tsx`/`api.ts` that no longer exists. Both test infrastructure with no Fabric analogue; keeping them would raise a count with dead assertions. |
+
+**Scene wiring left for the scene wave**: `CapacityCityScene.ts`/`cityVehicles.ts` still `import type { LiveQueryEvent } from './liveQueryFeed'` (now gone) — those consumers must be rewired to `TimepointFeed`; mount `startTimepointClock` + fold with `advanceTimepointFeed`; pass `refreshIntervalMs(source.capabilities)` to `describeTrafficWindow`; render `timepointClockLabel`/`describeTimepointEvidence`. The vehicle roster / operation-sample feed is the vehicle agent's separate concern.
 
 ### Test kits
 

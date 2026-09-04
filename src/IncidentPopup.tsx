@@ -1,8 +1,14 @@
-import { deadlockSummaryLabel, SEVERITY_LABELS, type IncidentMarker, type IncidentProjection } from './cityIncidents'
-import type { IncidentPlacement } from '../cityIncidentPlacement'
+import {
+  incidentSummaryLabel,
+  incidentSummaryTone,
+  SEVERITY_LABELS,
+  type IncidentMarker,
+  type IncidentProjection,
+} from './cityIncidents'
+import type { IncidentPlacement } from './cityIncidentPlacement'
 
 /**
- * The incident callout.
+ * The throttling incident callout.
  *
  * Rendered as HTML over the canvas rather than as scene geometry, so the text is real text:
  * selectable, screen-reader reachable, and legible at any zoom. Positioning is handed in already
@@ -18,8 +24,8 @@ export function IncidentPopup({
   marker: IncidentMarker
   /**
    * Where the pin ended up and why. Stated rather than assumed: a pin on the measured road between
-   * two named objects and a pin at one object's kerb are different claims, and a reader who cannot
-   * tell them apart is being misled by the more confident one.
+   * two named items and a pin at one item's kerb are different claims, and a reader who cannot tell
+   * them apart is being misled by the more confident one.
    */
   placement?: IncidentPlacement | null
   x: number
@@ -50,10 +56,11 @@ export function IncidentPopup({
 }
 
 /**
- * The one-line status the map shows about incidents.
+ * The one-line status the map shows about throttling incidents.
  *
- * This exists so the map can never imply "all clear". When the probe did not report, it says so;
- * when waits resolved off this page or to no object at all, it says how many and why.
+ * This exists so the map can never imply "all clear". When the throttle gauges or operation evidence
+ * were not observed, it says so; when overload was measured but could not be pinned to a drawn item,
+ * it says how much and why. Only a genuinely readable-and-quiet capacity says "No throttling".
  *
  * The marker list is also the keyboard route to the popups. A pin is a sphere in a 3D scene, so
  * pointer-picking it is the only way in for a mouse; that would leave keyboard and screen-reader
@@ -68,17 +75,24 @@ export function IncidentSummary({
   openId?: string | null
   onOpen?: (markerId: string) => void
 }) {
-  const { markers, offPageCount, unresolved, probeReported, reason, deadlocks } = projection
+  const {
+    markers,
+    evidence,
+    reason,
+    offPageRejectionCount,
+    unattributedSeconds,
+    unclassedRejectionCount,
+  } = projection
   return (
     <div className="incident-summary" role="status">
-      {!probeReported && <span className="is-unknown">Blocking not observed</span>}
-      {probeReported && markers.length === 0 && <span>No blocked waiter named a loaded object</span>}
-      {probeReported && markers.length > 0 && (
-        <span className="is-alert">{markers.length} object(s) with a blocked waiter</span>
+      <span className={incidentSummaryTone(projection)}>{incidentSummaryLabel(projection)}</span>
+      {evidence === 'unsupported' && (
+        <span className="is-unknown">Throttling not observed</span>
       )}
-      <span className={deadlocks.observed && deadlocks.retainedCount > 0 ? 'is-alert' : deadlocks.observed ? '' : 'is-unknown'}>
-        Deadlocks · {deadlockSummaryLabel(projection)}
-      </span>
+      {evidence === 'none' && markers.length === 0 && <span>No item is being throttled</span>}
+      {markers.length > 0 && (
+        <span className="is-alert">{markers.length} item(s) throttled</span>
+      )}
       {onOpen && markers.length > 0 && (
         <ul className="incident-list">
           {markers.map(marker => (
@@ -97,17 +111,19 @@ export function IncidentSummary({
         </ul>
       )}
       <small>{reason}</small>
-      <small>{deadlocks.reason}</small>
-      {offPageCount > 0 && (
-        <small>{offPageCount} resolved lock wait(s) name an object outside this bounded page.</small>
+      {offPageRejectionCount > 0 && (
+        <small>{offPageRejectionCount} live rejection(s) name an item outside this bounded page.</small>
       )}
-      {unresolved.length > 0 && (
-        <small>{unresolved.length} lock wait(s) name no object: {unresolved[0].reason}</small>
-      )}
-      {deadlocks.observed && deadlocks.retainedCount > deadlocks.pinnedCount && (
+      {unclassedRejectionCount > 0 && (
         <small>
-          {deadlocks.retainedCount - deadlocks.pinnedCount} recorded deadlock(s) name no object on
-          this bounded page, so they are counted here rather than pinned anywhere.
+          {unclassedRejectionCount} live rejection(s) named no operation class, so no gate is claimed
+          for them.
+        </small>
+      )}
+      {unattributedSeconds > 0 && (
+        <small>
+          {Math.round(unattributedSeconds).toLocaleString()} throttling second(s) could not be pinned
+          to one honest gate, so they are counted here rather than drawn on a building.
         </small>
       )}
     </div>
