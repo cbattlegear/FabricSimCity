@@ -1,78 +1,93 @@
 import { describe, expect, it } from 'vitest'
 import { blockAddress, buildAddressBook, columnLabel, searchAddressBook } from './addressBook'
 import { planCity, type CityPlan } from './cityPlan'
-import { FACILITY_ORDER, type Facility } from '../cityInfrastructure'
+import { FACILITY_ORDER, type Facility } from './cityInfrastructure'
+import { itemArchetype } from './itemKind'
 import type {
   CapacityCityItem,
   OperationFamily,
   CapacityCityWorkspace,
-} from '../capacityCityContracts'
-import type { Evidence } from '../fabricContracts'
+  FabricItemKind,
+} from './capacityCityContracts'
+import type { Evidence } from './fabricContracts'
 
 const evidence: Evidence = {
-  source: 'CatalogSnapshot',
+  source: 'SemanticModel',
   status: 'Available',
   observedAt: null,
   freshUntil: null,
-  reason: 'test',
 }
 
-function object(
+/**
+ * One city item. `storageBytes` and `cuSeconds` are the OneLake bytes and CU-seconds the keystone
+ * (`capacityCity.ts`) turns into a footprint and a height, so a null in `storageBytes` is a missing
+ * (or, for a compute-only kind, an absent-by-nature) storage measurement.
+ */
+function item(
   itemId: string,
   workspaceId: string,
   name: string,
   neighborhoodOrdinal: number,
   itemOrdinal: number,
-  reservedPages: string | null = '4096',
+  storageBytes: string | null = '4096',
+  kind: FabricItemKind = 'Lakehouse',
 ): CapacityCityItem {
   return {
     itemId,
     workspaceId,
     workspaceName: workspaceId.replace('schema:', ''),
     name,
-    kind: 'Table',
-    storageBytes: reservedPages,
-    cuSecondsRaw: reservedPages === null ? null : '2048',
-    reservedBytes: reservedPages === null ? null : String(BigInt(reservedPages) * 8192n),
-    usedBytes: reservedPages === null ? null : String(2048n * 8192n),
-    sizeStatus: reservedPages === null ? 'Unknown' : 'Known',
-    sizeReason: reservedPages === null ? 'sys.allocation_units returned no row' : null,
-    layout: { neighborhoodOrdinal, itemOrdinal, x: 0, z: 0 },
-    indexes: [],
-    directActivity: { totalOperations: '1', resetEpochToken: null, evidence },
-    attributedExposure: {
-      executionCount: null,
-      totalCpuMicroseconds: null,
-      totalDurationMicroseconds: null,
-      totalLogicalReads8KiBPages: null,
-      confidence: 'Unknown',
-      rationale: 'test',
-      evidence,
+    kind,
+    archetype: itemArchetype(kind),
+    storage: { bytes: storageBytes, status: storageBytes === null ? 'Unknown' : 'Known', evidence },
+    cuConsumed: { cuSeconds: '2048', status: 'Known', evidence },
+    durationSeconds: null,
+    operations: {
+      total: '1',
+      successful: null,
+      rejected: null,
+      failed: null,
+      invalid: null,
+      cancelled: null,
     },
+    distinctUsers: null,
+    throttlingMinutes: null,
+    performanceDeltaPercent: null,
+    layout: { neighborhoodOrdinal, itemOrdinal },
+    sizeStatus: storageBytes === null ? 'Unknown' : 'Known',
+    evidence,
   }
 }
 
 function family(
   familyId: string,
-  familyId: string,
+  operationName: string,
   itemIds: string[],
-  cpu = '5000',
+  cuSeconds = '5000',
 ): OperationFamily {
   return {
     familyId,
-    familyId,
+    operationName,
+    itemId: itemIds[0] ?? '',
     itemIds,
-    executionCount: '120',
-    totalCpuMicroseconds: cpu,
-    totalDurationMicroseconds: '9000',
-    totalLogicalReads8KiBPages: '400',
-    throttlingSeconds: '80',
-    waitMillisecondsByCategory: {},
-    confidence: 'Probable',
-    rationale: 'plan references both objects',
-    waitCategories: [],
+    workspaceId: 'schema:dbo',
+    operationClass: 'Interactive',
+    billingType: 'Billable',
+    cuSeconds,
+    durationSeconds: 9,
+    operationCount: '120',
+    throttlingSeconds: 80,
+    distinctUsers: null,
+    counts: {
+      total: '120',
+      successful: null,
+      rejected: null,
+      failed: null,
+      invalid: null,
+      cancelled: null,
+    },
     evidence,
-  } as unknown as OperationFamily
+  }
 }
 
 function facility(kind: Facility['kind'], label: string, known = true): Facility {
@@ -82,32 +97,32 @@ function facility(kind: Facility['kind'], label: string, known = true): Facility
     known,
     headline: known ? '42% utilised' : 'not sampled',
     status: known ? 'Available' : 'Unknown',
-    reason: known ? 'live snapshot' : 'the DMV returned no row',
+    reason: known ? 'live snapshot' : 'the probe returned no row',
     units: [],
     alertCount: 0,
   }
 }
 
-const objects = [
-  object('object:dbo:100', 'schema:dbo', 'Customer', 0, 0, '8192'),
-  object('object:dbo:101', 'schema:dbo', 'Orders', 0, 1, '4096'),
-  object('object:rep:300', 'schema:reporting', 'DailyTotals', 1, 0, null),
+const items = [
+  item('object:dbo:100', 'schema:dbo', 'Customer', 0, 0, '8192'),
+  item('object:dbo:101', 'schema:dbo', 'Orders', 0, 1, '4096'),
+  item('object:rep:300', 'schema:reporting', 'DailyTotals', 1, 0, null),
 ]
 
-const schemas: CapacityCityWorkspace[] = [
+const workspaces: CapacityCityWorkspace[] = [
   { workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '2', evidence },
   { workspaceId: 'schema:reporting', name: 'reporting', neighborhoodOrdinal: 1, itemCount: '1', evidence },
 ]
 
 const families = [
-  family('family:1', '0xAABBCC', ['object:dbo:100', 'object:dbo:101'], '90000'),
-  family('family:2', '0xDDEEFF', ['object:rep:300'], '1000'),
+  family('family:1', 'Warehouse Query', ['object:dbo:100', 'object:dbo:101'], '90000'),
+  family('family:2', 'Semantic model refresh', ['object:rep:300'], '1000'),
 ]
 
 const facilities = FACILITY_ORDER.map((kind, index) => facility(kind, `Facility ${index}`))
 
 function samplePlan(): CityPlan {
-  return planCity(objects, { seed: 'db:sales', totalItems: '3', schemas })
+  return planCity(items, { seed: 'db:sales', totalItems: '3', workspaces })
 }
 
 describe('columnLabel', () => {
@@ -154,16 +169,16 @@ describe('blockAddress', () => {
 
 describe('buildAddressBook', () => {
   it('carries all three kinds in one flat list', () => {
-    const entries = buildAddressBook(objects, families, facilities, samplePlan())
+    const entries = buildAddressBook(items, families, facilities, samplePlan())
     expect(entries.filter(entry => entry.kind === 'query')).toHaveLength(families.length)
-    expect(entries.filter(entry => entry.kind === 'table')).toHaveLength(objects.length)
+    expect(entries.filter(entry => entry.kind === 'item')).toHaveLength(items.length)
     expect(entries.filter(entry => entry.kind === 'facility')).toHaveLength(facilities.length)
   })
 
-  it('gives every table an address on the map it is drawn on', () => {
+  it('gives every item an address on the map it is drawn on', () => {
     const plan = samplePlan()
-    const entries = buildAddressBook(objects, families, facilities, plan)
-    for (const entry of entries.filter(candidate => candidate.kind === 'table')) {
+    const entries = buildAddressBook(items, families, facilities, plan)
+    for (const entry of entries.filter(candidate => candidate.kind === 'item')) {
       const lot = plan.lots.get(entry.targetId)!
       expect(entry.address).toBe(blockAddress(plan, lot.x, lot.z, entry.address!.split(' · ')[0]))
       expect(entry.address).toMatch(/Block [A-Z]+\d+$/)
@@ -171,50 +186,50 @@ describe('buildAddressBook', () => {
   })
 
   it('says an unknown size is unavailable rather than calling it zero', () => {
-    const entries = buildAddressBook(objects, families, facilities, samplePlan())
+    const entries = buildAddressBook(items, families, facilities, samplePlan())
     const unknown = entries.find(entry => entry.targetId === 'object:rep:300')!
     expect(unknown.meta).toContain('size unavailable')
-    expect(unknown.meta).not.toContain('0 reserved')
+    expect(unknown.meta).not.toContain('0 ')
   })
 
-  it('names the objects a query visits, and distinguishes the two kinds of silence', () => {
-    // One id that resolves to nothing is a reference into another database, not an absence of one.
-    const otherDatabase = buildAddressBook(objects, [
-      family('family:3', '0x112233', ['object:elsewhere:1']),
+  it('names the items an operation visits, and distinguishes the two kinds of silence', () => {
+    // One id that resolves to nothing is a reference to an item off the loaded page, not an absence.
+    const offPage = buildAddressBook(items, [
+      family('family:3', 'Pipeline run', ['object:elsewhere:1']),
     ], facilities, samplePlan())
-    expect(otherDatabase[0].address).toBe('Names one object in another database')
+    expect(offPage[0].address).toBe('References one item outside this page')
 
-    const otherDatabaseMany = buildAddressBook(objects, [
-      family('family:4', '0x445566', ['object:elsewhere:1', 'object:elsewhere:2']),
+    const offPageMany = buildAddressBook(items, [
+      family('family:4', 'Pipeline run', ['object:elsewhere:1', 'object:elsewhere:2']),
     ], facilities, samplePlan())
-    expect(otherDatabaseMany[0].address).toBe('Names 2 objects in another database')
+    expect(offPageMany[0].address).toBe('References 2 items outside this page')
 
-    // A family whose plans named no object at all says exactly that, not that one is elsewhere.
-    const nowhere = buildAddressBook(objects, [
-      family('family:5', '0x778899', []),
+    // A family that named no item at all says exactly that, not that one is off-page.
+    const nowhere = buildAddressBook(items, [
+      family('family:5', 'Capacity heartbeat', []),
     ], facilities, samplePlan())
-    expect(nowhere[0].address).toBe('Plans named no object in this database')
+    expect(nowhere[0].address).toBe('References no item')
 
-    const visiting = buildAddressBook(objects, families, facilities, samplePlan())
+    const visiting = buildAddressBook(items, families, facilities, samplePlan())
       .find(entry => entry.targetId === 'family:1')!
     expect(visiting.address).toContain('dbo.Customer')
     expect(visiting.address).toContain('dbo.Orders')
   })
 
-  it('counts the cross-database references alongside the tables a query does visit', () => {
-    // A plan that touches a local table and one in another database gets both truths: the local
-    // stop by name, and a count of what it reached across the boundary the map cannot draw.
-    const mixed = buildAddressBook(objects, [
-      family('family:6', '0xAA00BB', ['object:dbo:100', 'object:elsewhere:9']),
+  it('counts the off-page references alongside the items an operation does visit', () => {
+    // An operation that touches a loaded item and one that is off the page gets both truths: the
+    // local stop by name, and a count of what it reached beyond what the map can draw.
+    const mixed = buildAddressBook(items, [
+      family('family:6', 'Warehouse Query', ['object:dbo:100', 'object:elsewhere:9']),
     ], facilities, samplePlan())
-    expect(mixed[0].address).toBe('Visits dbo.Customer (+1 in another database)')
-    // The cross-database id stays in the haystack so the query is still findable by it.
+    expect(mixed[0].address).toBe('Visits dbo.Customer (+1 outside this page)')
+    // The off-page id stays in the haystack so the operation is still findable by it.
     expect(mixed[0].searchText).toContain('object:elsewhere:9')
   })
 
   it('reports an unsampled facility with its status rather than hiding it', () => {
     const partial = [facility(FACILITY_ORDER[0], 'CPU', false), ...facilities.slice(1)]
-    const entries = buildAddressBook(objects, families, partial, samplePlan())
+    const entries = buildAddressBook(items, families, partial, samplePlan())
     const cpu = entries.find(entry => entry.id === `facility:${FACILITY_ORDER[0]}`)!
     expect(cpu.meta).toContain('Unknown')
     expect(cpu.meta).toContain('not sampled')
@@ -222,26 +237,26 @@ describe('buildAddressBook', () => {
 })
 
 describe('searchAddressBook', () => {
-  const entries = buildAddressBook(objects, families, facilities, samplePlan())
-  const groupOf = (term: string, kind: 'query' | 'table' | 'facility') =>
+  const entries = buildAddressBook(items, families, facilities, samplePlan())
+  const groupOf = (term: string, kind: 'query' | 'item' | 'facility') =>
     searchAddressBook(entries, term).find(group => group.kind === kind)?.entries ?? []
 
   it('groups in a fixed order and drops empty groups', () => {
     expect(searchAddressBook(entries, '').map(group => group.kind))
-      .toEqual(['query', 'table', 'facility'])
+      .toEqual(['query', 'item', 'facility'])
     expect(searchAddressBook(entries, 'utilised').map(group => group.kind)).toEqual(['facility'])
   })
 
-  it('finds a table by schema, by name, and by qualified name', () => {
-    expect(groupOf('dbo', 'table').map(entry => entry.name)).toEqual(['dbo.Customer', 'dbo.Orders'])
-    expect(groupOf('orders', 'table').map(entry => entry.name)).toEqual(['dbo.Orders'])
-    expect(groupOf('dbo.customer', 'table').map(entry => entry.name)).toEqual(['dbo.Customer'])
+  it('finds an item by workspace, by name, and by qualified name', () => {
+    expect(groupOf('dbo', 'item').map(entry => entry.name)).toEqual(['dbo.Customer', 'dbo.Orders'])
+    expect(groupOf('orders', 'item').map(entry => entry.name)).toEqual(['dbo.Orders'])
+    expect(groupOf('dbo.customer', 'item').map(entry => entry.name)).toEqual(['dbo.Customer'])
   })
 
-  it('finds a query by its hash, its rationale, and the tables it visits', () => {
-    expect(groupOf('0xaabbcc', 'query').map(entry => entry.targetId)).toEqual(['family:1'])
-    expect(groupOf('plan references', 'query')).toHaveLength(families.length)
-    // Searching a table name surfaces the queries that drive traffic to it, which is the point of
+  it('finds an operation by its family id, its name, and the items it visits', () => {
+    expect(groupOf('family:1', 'query').map(entry => entry.targetId)).toEqual(['family:1'])
+    expect(groupOf('warehouse query', 'query').map(entry => entry.targetId)).toEqual(['family:1'])
+    // Searching an item name surfaces the operations that drive traffic to it, which is the point of
     // one unified list: you look up a place, not a category.
     expect(groupOf('customer', 'query').map(entry => entry.targetId)).toEqual(['family:1'])
   })
@@ -258,7 +273,7 @@ describe('searchAddressBook', () => {
   })
 
   it('is case-insensitive', () => {
-    expect(groupOf('CUSTOMER', 'table').map(entry => entry.name)).toEqual(['dbo.Customer'])
+    expect(groupOf('CUSTOMER', 'item').map(entry => entry.name)).toEqual(['dbo.Customer'])
   })
 
   it('returns nothing rather than everything when nothing matches', () => {
@@ -266,7 +281,7 @@ describe('searchAddressBook', () => {
   })
 
   it('ranks the heaviest first within a group', () => {
-    expect(groupOf('', 'table')[0].name).toBe('dbo.Customer')
+    expect(groupOf('', 'item')[0].name).toBe('dbo.Customer')
     expect(groupOf('', 'query')[0].targetId).toBe('family:1')
   })
 
@@ -286,24 +301,24 @@ describe('searchAddressBook', () => {
 describe('where the address book is ordered', () => {
   // Deliberately not in rank order, so an implementation that returns the input untouched fails.
   const unsorted = [
-    object('object:dbo:1', 'schema:dbo', 'Small', 0, 0, '10'),
-    object('object:dbo:2', 'schema:dbo', 'Largest', 0, 1, '9000'),
-    object('object:dbo:3', 'schema:dbo', 'Middling', 0, 2, '500'),
+    item('object:dbo:1', 'schema:dbo', 'Small', 0, 0, '10'),
+    item('object:dbo:2', 'schema:dbo', 'Largest', 0, 1, '9000'),
+    item('object:dbo:3', 'schema:dbo', 'Middling', 0, 2, '500'),
   ]
   const unsortedFamilies = [
-    family('family:cheap', '0x111111', [], '10'),
-    family('family:dear', '0x222222', [], '99000'),
+    family('family:cheap', 'Notebook run', [], '10'),
+    family('family:dear', 'Warehouse Query', [], '99000'),
   ]
 
   it('hands back a book that is already in order, so searching never has to sort', () => {
     const plan = planCity(unsorted, {
       seed: 'db:order',
       totalItems: '3',
-      schemas: [{ workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '3', evidence }],
+      workspaces: [{ workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '3', evidence }],
     })
     const built = buildAddressBook(unsorted, unsortedFamilies, facilities, plan)
 
-    expect(built.filter(entry => entry.kind === 'table').map(entry => entry.name))
+    expect(built.filter(entry => entry.kind === 'item').map(entry => entry.name))
       .toEqual(['dbo.Largest', 'dbo.Middling', 'dbo.Small'])
     expect(built.filter(entry => entry.kind === 'query').map(entry => entry.targetId))
       .toEqual(['family:dear', 'family:cheap'])
@@ -315,8 +330,8 @@ describe('where the address book is ordered', () => {
     const plan = samplePlan()
     // Reversed on the way in. A search that sorts would put Customer back on top; one that only
     // filters must hand back exactly the order it received.
-    const reversed = [...buildAddressBook(objects, families, facilities, plan)].reverse()
-    const tables = searchAddressBook(reversed, 'dbo').find(group => group.kind === 'table')?.entries ?? []
+    const reversed = [...buildAddressBook(items, families, facilities, plan)].reverse()
+    const tables = searchAddressBook(reversed, 'dbo').find(group => group.kind === 'item')?.entries ?? []
     expect(tables.map(entry => entry.name)).toEqual(['dbo.Orders', 'dbo.Customer'])
   })
 })

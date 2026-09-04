@@ -16,7 +16,7 @@
  * disclaims the path and its congestion alongside the rest of the scenery.
  */
 
-import { assignTraffic, tourDemands, type TravelDemand } from '../cityAssignment'
+import { assignTraffic, tourDemands, type TravelDemand } from './cityAssignment'
 import { dedupePoints, intersectionId, nearestIntersectionId, type CityPlan } from './cityPlan'
 import type { RoadTraffic } from './cityTraffic'
 
@@ -56,14 +56,14 @@ export function assignQueryRoutes(
   const demands: TravelDemand[] = []
   for (const road of roads) {
     roadById.set(road.routeId, road)
-    // A ribbon with no captured executions has no measured weight to spread, and one that leaves the
+    // A ribbon with no captured operations has no measured weight to spread, and one that leaves the
     // city on a ramp has no second junction on the network; neither belongs in the assignment.
-    if (road.executions === null) continue
+    if (road.operations === null) continue
     if (!plan.lots.has(road.toId)) continue
     const from = nodeFor(road.fromItemId)
     const to = nodeFor(road.toId)
     if (from === null || to === null) continue
-    for (const demand of tourDemands(road.routeId, [from, to], road.executions)) demands.push(demand)
+    for (const demand of tourDemands(road.routeId, [from, to], road.operations)) demands.push(demand)
   }
 
   const assignment = assignTraffic(plan.graph, plan.roadProperties, demands)

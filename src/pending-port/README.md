@@ -1,6 +1,6 @@
 # Pending port
 
-22 modules and 23 test files from SQLSimCity that the Fabric port has not reached yet. They are
+14 modules and 16 test files from SQLSimCity that the Fabric port has not reached yet. They are
 excluded from `tsconfig.json` and from `vitest.config.ts` — deliberately in agreement, so a module
 here is neither type-checked nor run, and nothing in the shipped app imports one.
 
@@ -56,6 +56,17 @@ guard mutation-checked against the broken state):
   a `CityLot` and a `BuildingArchetype` and needed no logic change, only its import paths. Guarded by
   `cityBuildings.test.ts` (colour/tint). Its weathering guard, `cityWeathering.test.ts`, stays
   quarantined because it slices `CapacityCityScene.ts` as source text — it rejoins when the scene ports.
+- `addressBook.ts` + `AddressPanel.tsx` — the flat searchable index of everywhere the map can take
+  you (operation families, items, facilities) and the panel that renders it. Rewritten against the
+  Fabric contracts: item footprint reads `item.storage` (a `ByteMeasurement`) rather than SQL
+  `storageBytes`, operation rows read `operationName`/`operationCount`/`cuSeconds` rather than the
+  query-store `executionCount`/`totalCpuMicroseconds`/`rationale`, the `table` address kind is now
+  `item`, and the cross-reference wording ("in another database") is now off-page wording ("outside
+  this page") since a Fabric city is one capacity. Facilities still come from `cityInfrastructure`,
+  matching the facility set the current `cityPlan` scatters. Guarded by `addressBook.test.ts`
+  (rebuilt with Fabric fixtures and mutation-checked against the missing-rather-than-zero rule). The
+  panel is not yet rendered — `CapacityCityView.tsx` is what mounts it — but the module is portable
+  and tested on its own.
 - `cityPlan.testkit.ts` and the `cityGrowth*` family (`cityGrowth.testkit.ts` +
   `cityGrowthLots/Placement/Retrace/Streets.test.ts`) — moved with their subject. The four-files-over-one-testkit
   layout is preserved intact (`cityGrowthRetrace.test.ts` is left alone on the critical path); do not merge them.
@@ -64,9 +75,10 @@ guard mutation-checked against the broken state):
 
 | Module | What it needs |
 |---|---|
-| `CapacityCityScene.ts` | Mostly domain-agnostic (221 KB) — it consumes a `CityPlan`, which now exists. Unblocked. **Read `AGENTS.md` on shadow invalidation before touching its loops**, and check the `shadowInvalidation.test.ts` / `cityVehicle*` slice anchors. |
-| `CapacityCityView.tsx`, `CapacityCityViewport.tsx`, `AddressPanel.tsx`, `addressBook.ts` | Follow the contracts; no independent decision. Blocked on the scene. Note: `CapacityCityView.tsx` passes the plan `workspaces` option (was `schemas`). |
-| `cityWeathering.test.ts` | A cityBuildings weathering guard that also slices `CapacityCityScene.ts` via `import.meta.url`; moves to `src/` with the scene. |
+| `CapacityCityScene.ts` | Mostly domain-agnostic (221 KB) — it consumes a `CityPlan`, which now exists. The traffic set it imports (`cityQueryTraffic`, `cityTraffic`, `cityWorkloadTraffic`) is now ported to `src/`, and the showplan modules it used to reach through (`cityRoute`, `planCost`) were deleted by `operation-traffic`, so the scene consumes `RoadTraffic`/`StreetLoad` directly. **Still blocked in practice**: it also imports the incident set (`cityIncidents`), the live feed (`liveQueryFeed`) and the tour (`cityTour`), none of which are ported to Fabric yet, and moving the scene into `src/` would make the source-text guards (`shadowInvalidation`, `cityVehicle*`) bind against uncompilable vehicle/tour/live code. Its building paint also reads `object.attributedExposure.totalCpuMicroseconds`, a query-store field with no Fabric analogue — colour has to be re-derived from `cuConsumed`/`operations`/`performanceDeltaPercent`, which is a semantics decision, not a rename. **Read `AGENTS.md` on shadow invalidation before touching its loops**, and check the `shadowInvalidation.test.ts` / `cityVehicle*` slice anchors. |
+| `CapacityCityViewport.tsx`, `cityVehicles.ts` | Blocked on the scene. `cityVehicles.ts` is only ported when the scene needs it, because the scene owns the vehicle loop and the slice anchors live there. |
+| `CapacityCityView.tsx` | Follows the contracts; passes the plan `workspaces` option (was `schemas`) and mounts `AddressPanel`. Blocked on the scene. |
+| `cityWeathering.test.ts` | A cityBuildings weathering guard that also slices `CapacityCityScene.ts`; moves to `src/` with the scene. |
 
 
 ### `power-grid` — the civic infrastructure
@@ -92,12 +104,60 @@ mutation-checked against the broken state):
 
 ### `operation-traffic` — roads and vehicles
 
+**Ported out** (moved to `src/`, rewritten against the Fabric contracts, tested, and each guard
+mutation-checked against the broken state):
+
+- `operationMapping.ts` — the keystone (renamed from `queryFamilyMapping.ts`). Operation name × item
+  in place of query hash × object. It only ever read `itemIds`, so it ported almost verbatim:
+  `familyOnMap`/`placedObjectIds`/`splitQueryFamiliesByMap` still decide which ranked families this
+  paged city can actually draw and disclose how many it hid. Guarded by a trimmed
+  `operationMapping.test.ts` over the pure functions; the old view-integration guards that sliced
+  `CapacityCityView.tsx` and imported `addressBook.ts` were dropped and belong with the scene, which
+  must re-add them when it mounts the families table.
+- `cityTraffic.ts` — the road grader, now domain-fed by operation families. A road is an
+  `OperationFamily` naming both endpoints (`route.fromItemId`/`toItemId` ∈ `family.itemIds`); its
+  colour is the mean **throttling seconds per operation** over the pair, replacing SQL's mean wait
+  milliseconds. The GPS ladder (`congestionFromDelay`) is unchanged in shape, only its unit and
+  thresholds. New: `trafficModeForClass` (interactive → car, background → freight, unknown → neither);
+  `carOperations`/`freightOperations` on every road; and
+  `trafficEvidenceState`/`describeTrafficEvidence`, which turn the source's separate
+  `operationFamilies` capability into a first-class `unsupported`/`none`/`measured` state, so a source
+  that cannot see roads at all withholds the layer rather than drawing an empty-but-measured city. A
+  pair no family names grades `unknown` (grey), never `free`.
+- `cityWorkloadTraffic.ts` — the aggregate street loader. Drives each family through the items it
+  touched, once per measured operation, and colours each street by throttling-per-operation on the
+  same ladder. The showplan cost/wait attribution it used to import from `cityThrottleAttribution`
+  (`familyCostShares`, `familyWaitByObject`) is gone — those fields do not exist on Fabric — and is
+  replaced with local logic: the journey starts at the family's primary item (`itemIds[0]`), and the
+  measured `throttlingSeconds` is split **evenly** across the items it touched, which is the only
+  defensible model because Capacity Metrics never attributes throttling below the family. Streets and
+  trips carry the car/freight split. `congestionFromDelay` is re-exported (the same function object,
+  pinned by a test) so a street and its co-reference road grade identically.
+- `cityQueryTraffic.ts` — the co-reference ribbon assigner, domain-agnostic; only its import paths and
+  the `executions`→`operations` field rename changed. It still spreads measured ribbons across the
+  street network via `assignTraffic` so a busy corridor reads as several routes.
+
+Guarded by fresh Fabric-typed tests (`cityTraffic.test.ts`, `cityWorkloadTraffic.test.ts`,
+`cityQueryTraffic.test.ts`, `operationMapping.test.ts`) over a shared `operationTraffic.testkit.ts`.
+Mutation-checked: an unmeasured family grading as `free`/zero (road **and** street paths), interactive
+and background collapsing to one vehicle class (road split, street split, and `trafficModeForClass`),
+and the source-cannot-report-families capability collapsing into measured-quiet.
+
+**Deleted, not ported:**
+
+- `cityRoute.ts` and `planCost.ts` (with their tests). Both existed solely to parse **showplan XML**
+  and infer which objects a query touched. Fabric's Capacity Metrics attributes each operation to an
+  `Item Id` directly, and `OperationFamily.itemIds` already carries both endpoints of a lineage
+  operation, so the inference is obsolete. Their `NormalizedShowplan`/`ShowplanNode` inputs have no
+  Fabric contract behind them at all. No lineage operation here needs two endpoints the family does
+  not already provide, so deleting them removed dead inference rather than a capability — the
+  "deleting them is a legitimate outcome" the todo endorsed.
+
+**Still quarantined** (owned by the scene port):
+
 | Module | What it needs |
 |---|---|
-| `operationMapping.ts` | Renamed from `queryFamilyMapping.ts`. Operation name × item, in place of query hash × object. |
-| `cityQueryTraffic.ts`, `cityWorkloadTraffic.ts` | Split on operation class: interactive → cars, background → freight. The vehicle system already carries both types. |
-| `cityTraffic.ts`, `cityVehicles.ts` | Domain-agnostic once fed. `cityVehicles.ts` is pinned by shadow and legibility guards — check the slice anchors. |
-| `cityRoute.ts`, `planCost.ts` | **These may not survive.** Both exist to parse showplan XML and work out which objects a query touched. Capacity Metrics attributes each operation to an `Item Id` directly, so the inference is unnecessary. `OperationFamily.itemIds` carries the endpoints. Port only if a lineage operation genuinely needs two. |
+| `cityVehicles.ts` | The vehicle geometry and loop, ported only when the scene needs it because the scene owns the vehicle loop and the `cityVehicleAssets.test.ts`/`cityVehicleLegibility.test.ts` slice anchors live there. `trafficModeForClass` in `cityTraffic.ts` gives it the car/freight decision from the domain side. |
 
 ### `throttle-incidents` and `capacity-disasters`
 

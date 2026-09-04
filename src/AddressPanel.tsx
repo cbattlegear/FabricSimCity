@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode } from 'react'
-import { SearchField } from '../MapShell'
+import { SearchField } from './MapShell'
 import { searchAddressBook, type AddressEntry, type AddressKind } from './addressBook'
 
 /**
@@ -14,7 +14,7 @@ import { searchAddressBook, type AddressEntry, type AddressKind } from './addres
 
 const ICONS: Readonly<Record<AddressKind, string>> = {
   query: '◈',
-  table: '▤',
+  item: '▤',
   facility: '⌂',
 }
 

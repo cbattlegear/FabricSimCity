@@ -1,27 +1,28 @@
 import type { CityPlan } from './cityPlan'
-import type { Facility } from '../cityInfrastructure'
-import type { CapacityCityItem, OperationFamily } from '../capacityCityContracts'
+import type { Facility } from './cityInfrastructure'
+import type { CapacityCityItem, OperationFamily } from './capacityCityContracts'
+import { formatBytes } from './capacityAtlas'
 
 /**
  * The address book: one flat, searchable index of everything the map can take you to.
  *
- * A city has three kinds of destination — the query families that generate the traffic, the tables
- * those queries visit, and the infrastructure facilities where their waits end up. Splitting them
- * across three lists would make you know which list a thing lives in before you could look it up,
- * so they share one list and one search box, grouped only for legibility.
+ * A city has three kinds of destination — the operation families that generate the traffic, the
+ * items those operations visit, and the infrastructure facilities where their load ends up.
+ * Splitting them across three lists would make you know which list a thing lives in before you
+ * could look it up, so they share one list and one search box, grouped only for legibility.
  *
  * Every entry carries an **address** derived from the city plan, which is what makes this an address
  * book rather than a table of contents: it tells you where on the map the thing actually is. An
- * entry whose object was not on the loaded page has no lot and therefore no address, and says so
+ * entry whose item was not on the loaded page has no lot and therefore no address, and says so
  * rather than inventing a location.
  */
 
-export type AddressKind = 'query' | 'table' | 'facility'
+export type AddressKind = 'query' | 'item' | 'facility'
 
 export interface AddressEntry {
   readonly id: string
   readonly kind: AddressKind
-  /** Stable target used by the map: object id, facility kind, or query family id. */
+  /** Stable target used by the map: item id, facility kind, or query family id. */
   readonly targetId: string
   readonly name: string
   /** One-line measured summary. Never a verdict, always a quantity or an explicit unavailability. */
@@ -41,8 +42,8 @@ export interface AddressGroup {
 }
 
 const GROUP_LABELS: Readonly<Record<AddressKind, string>> = {
-  query: 'Query families',
-  table: 'Tables and views',
+  query: 'Operation families',
+  item: 'Items',
   facility: 'Infrastructure',
 }
 
@@ -83,22 +84,27 @@ function compactCount(value: string | null): string {
   return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(parsed)
 }
 
-function objectEntry(object: CapacityCityItem, plan: CityPlan): AddressEntry {
-  const lot = plan.lots.get(object.itemId)
-  const district = plan.districts.find(candidate => candidate.districtId === object.workspaceId)
-  const name = `${object.workspaceName}.${object.name}`
-  const size = object.sizeStatus === 'Known'
-    ? `${compactCount(object.storageBytes)} reserved pages`
-    : 'size unavailable'
+function itemEntry(item: CapacityCityItem, plan: CityPlan): AddressEntry {
+  const lot = plan.lots.get(item.itemId)
+  const district = plan.districts.find(candidate => candidate.districtId === item.workspaceId)
+  const name = `${item.workspaceName}.${item.name}`
+  // Three cases, kept apart so a compute-only item is never confused with a missing measurement:
+  // an unknown storage measurement is unavailable; a *known* null is an item that stores nothing
+  // in OneLake by nature (a Notebook, a Pipeline); a known byte count is a real footprint.
+  const size = item.storage.status !== 'Known'
+    ? 'size unavailable'
+    : item.storage.bytes === null
+      ? 'no OneLake storage'
+      : `${formatBytes(item.storage)} in OneLake`
   return {
-    id: `table:${object.itemId}`,
-    kind: 'table',
-    targetId: object.itemId,
+    id: `item:${item.itemId}`,
+    kind: 'item',
+    targetId: item.itemId,
     name,
-    meta: `${object.kind} · ${size}`,
+    meta: `${item.kind} · ${size}`,
     address: lot ? blockAddress(plan, lot.x, lot.z, district?.name) : null,
-    searchText: `${name} ${object.kind} ${object.workspaceName} ${object.name}`.toLowerCase(),
-    rank: toNumber(object.storageBytes),
+    searchText: `${name} ${item.kind} ${item.workspaceName} ${item.name}`.toLowerCase(),
+    rank: toNumber(item.storage.bytes),
   }
 }
 
@@ -116,39 +122,41 @@ export function queryAddressId(familyId: string): string {
   return `query:${familyId}`
 }
 
-function queryEntry(family: OperationFamily, objectNames: ReadonlyMap<string, string>): AddressEntry {
+function queryEntry(family: OperationFamily, itemNames: ReadonlyMap<string, string>): AddressEntry {
   const stops = family.itemIds
-    .map(id => objectNames.get(id))
+    .map(id => itemNames.get(id))
     .filter((value): value is string => value !== undefined)
-  // Ids that did not resolve are references to objects in *other* databases: the collector carries
-  // them as three-part names it cannot place on this city's map. Distinguishing that from "no
-  // reference at all" is the same distinction the collector draws between absent and cross-database
-  // evidence, and collapsing both into one phrase is what made real multi-object plans read as empty.
+  // Ids that did not resolve are references to items that were not on the loaded page: the metrics
+  // model attributes an operation to an item id the ranked page need not contain. Distinguishing
+  // that from "no reference at all" is the same distinction the source draws between absent and
+  // off-page evidence, and collapsing both into one phrase is what made real multi-item operations
+  // read as empty.
   const unresolved = family.itemIds.length - stops.length
   let address: string
   if (stops.length > 0) {
     const visits = stops.slice(0, 3).join(', ') + (stops.length > 3 ? ` +${stops.length - 3} more` : '')
     address = unresolved > 0
-      ? `Visits ${visits} (+${unresolved} in another database)`
+      ? `Visits ${visits} (+${unresolved} outside this page)`
       : `Visits ${visits}`
   } else if (family.itemIds.length > 0) {
     address = family.itemIds.length === 1
-      ? 'Names one object in another database'
-      : `Names ${family.itemIds.length} objects in another database`
+      ? 'References one item outside this page'
+      : `References ${family.itemIds.length} items outside this page`
   } else {
-    address = 'Plans named no object in this database'
+    address = 'References no item'
   }
   return {
     id: queryAddressId(family.familyId),
     kind: 'query',
     targetId: family.familyId,
-    name: `Query ${family.familyId}`,
-    meta: `${compactCount(family.executionCount)} executions · ${compactCount(family.totalCpuMicroseconds)} µs CPU`,
+    name: family.operationName,
+    meta: `${compactCount(family.operationCount)} operations · ${compactCount(family.cuSeconds)} CU-s`,
     address,
-    // Search over every reference the family named, resolved names and the raw ids of the
-    // cross-database ones alike, so a query stays findable by a table it touches in either database.
-    searchText: `${family.familyId} ${family.familyId} ${stops.join(' ')} ${family.itemIds.join(' ')} ${family.rationale}`.toLowerCase(),
-    rank: toNumber(family.totalCpuMicroseconds),
+    // Search over every reference the family named — resolved names and the raw ids of the off-page
+    // ones alike, plus the operation name and family id — so an operation stays findable by an item
+    // it touches whether or not that item is on the page.
+    searchText: `${family.familyId} ${family.operationName} ${stops.join(' ')} ${family.itemIds.join(' ')}`.toLowerCase(),
+    rank: toNumber(family.cuSeconds),
   }
 }
 
@@ -178,25 +186,25 @@ function byRankThenName(left: AddressEntry, right: AddressEntry): number {
 }
 
 export function buildAddressBook(
-  objects: readonly CapacityCityItem[],
+  items: readonly CapacityCityItem[],
   families: readonly OperationFamily[],
   facilities: readonly Facility[],
   plan: CityPlan,
 ): AddressEntry[] {
-  const objectNames = new Map(objects.map(object => [object.itemId, `${object.workspaceName}.${object.name}`]))
+  const itemNames = new Map(items.map(item => [item.itemId, `${item.workspaceName}.${item.name}`]))
   /*
    * Sorted here, once, rather than on every keystroke.
    *
    * The order within a group never depends on the search term, so establishing it when the book is
    * built and letting `filter` — which is stable — carry it through is exactly equivalent to sorting
    * the survivors, and it takes the comparator out of the typing path. Each kind is sorted on its
-   * own because the three ranks are three different quantities: reserved pages, CPU microseconds and
-   * a fixed landmark order are not comparable with one another, and only ever get compared with
-   * their own kind.
+   * own because the three ranks are three different quantities: OneLake bytes, CU-seconds and a
+   * fixed landmark order are not comparable with one another, and only ever get compared with their
+   * own kind.
    */
   return [
-    ...families.map(family => queryEntry(family, objectNames)).sort(byRankThenName),
-    ...objects.map(object => objectEntry(object, plan)).sort(byRankThenName),
+    ...families.map(family => queryEntry(family, itemNames)).sort(byRankThenName),
+    ...items.map(item => itemEntry(item, plan)).sort(byRankThenName),
     ...facilities.map((facility, index) => facilityEntry(facility, plan, index)).sort(byRankThenName),
   ]
 }
@@ -220,7 +228,7 @@ export function searchAddressBook(entries: readonly AddressEntry[], term: string
     ? entries
     : entries.filter(entry => tokens.every(token => entry.searchText.includes(token)))
 
-  const order: AddressKind[] = ['query', 'table', 'facility']
+  const order: AddressKind[] = ['query', 'item', 'facility']
   return order
     .map(kind => ({
       kind,

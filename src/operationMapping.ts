@@ -1,4 +1,4 @@
-import type { OperationFamily, CapacityCityItem } from '../capacityCityContracts'
+import type { OperationFamily, CapacityCityItem } from './capacityCityContracts'
 
 /**
  * Which ranked query families this city can actually draw, and how to say so.
