@@ -1,4 +1,8 @@
 using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using SqlSimCity.Collection.Probes;
 using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Storage;
@@ -156,6 +160,111 @@ public sealed class QueryStoreReliabilityTests : IDisposable
     }
 
     [Fact]
+    public async Task TransientTextRetrySurvivesRestartAndRecoversWithoutClearingStorage()
+    {
+        var source = new ReliabilitySource(_clock)
+        {
+            TextFailure = new ProbeTransientConnectionException("connection reset", 10054, 20),
+        };
+        string familyId;
+        using (var store = await OpenStoreAsync())
+        {
+            var repository = new ProtectedQueryStoreRepository(store);
+            familyId = await PrepareTextFamilyAsync(repository, source);
+            using var history = History(repository, source);
+            var results = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => history.GetFamilyAsync(familyId, default)));
+            Assert.All(results, family => Assert.Equal(QueryTextAvailability.Missing, family!.Family.Text.Availability));
+            Assert.Equal(1, source.TextReads);
+            Assert.Null(await repository.ReadTextDescriptorAsync("db", "text"));
+        }
+        using (var store = await OpenStoreAsync())
+        {
+            var repository = new ProtectedQueryStoreRepository(store);
+            using var history = History(repository, source);
+            source.TextFailure = null;
+            _clock.Advance(TimeSpan.FromSeconds(59));
+            Assert.Equal(QueryTextAvailability.Missing, (await history.GetFamilyAsync(familyId, default))!.Family.Text.Availability);
+            Assert.Equal(1, source.TextReads);
+            _clock.Advance(TimeSpan.FromSeconds(1));
+            Assert.Equal(QueryTextAvailability.Available, (await history.GetFamilyAsync(familyId, default))!.Family.Text.Availability);
+            Assert.Equal(2, source.TextReads);
+            Assert.Null(await repository.ReadTextRetryAsync("db", "text"));
+            _clock.Advance(TimeSpan.FromHours(1));
+            await history.GetFamilyAsync(familyId, default);
+            Assert.Equal(2, source.TextReads);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyTransientDescriptorIdDoesNotSuppressRecovery()
+    {
+        using var store = await OpenStoreAsync();
+        var repository = new ProtectedQueryStoreRepository(store);
+        var source = new ReliabilitySource(_clock);
+        var familyId = await PrepareTextFamilyAsync(repository, source);
+        const string legacyKind = "query-store-text-descriptor-v2";
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"{legacyKind}\ndb\ntext"));
+        await store.PutAsync(new($"qs:{Convert.ToHexString(hash).ToLowerInvariant()}"), legacyKind, Now,
+            StorageResolution.Detail, JsonSerializer.SerializeToUtf8Bytes(new QueryTextDescriptorV1(
+                QueryTextAvailability.Missing, null, null, "Query Store text is unavailable from the connected source.")));
+        using var history = History(repository, source);
+
+        var family = await history.GetFamilyAsync(familyId, default);
+
+        Assert.Equal(QueryTextAvailability.Available, family!.Family.Text.Availability);
+        Assert.Equal(1, source.TextReads);
+        Assert.True((await store.MeasureUsageAsync()).StoredBytesForKinds(
+            ProtectedQueryStoreRepository.PlanCacheRecordKinds) > 0);
+        Assert.Contains(legacyKind, ProtectedQueryStoreRepository.PlanCacheRecordKinds);
+    }
+
+    [Theory]
+    [InlineData("missing", QueryTextAvailability.Missing)]
+    [InlineData("permission", QueryTextAvailability.Restricted)]
+    [InlineData("unsupported", QueryTextAvailability.Missing)]
+    public async Task TerminalTextOutcomesRemainCached(string outcome, QueryTextAvailability expected)
+    {
+        using var store = await OpenStoreAsync();
+        var repository = new ProtectedQueryStoreRepository(store);
+        var source = new ReliabilitySource(_clock)
+        {
+            Text = outcome == "missing" ? null : "SELECT 1",
+            TextFailure = outcome switch
+            {
+                "permission" => new ProbePermissionDeniedException("denied", 297, 14),
+                "unsupported" => new ProbeObjectUnavailableException("unsupported", 208, 16),
+                _ => null,
+            },
+        };
+        var familyId = await PrepareTextFamilyAsync(repository, source);
+        using var history = History(repository, source);
+        Assert.Equal(expected, (await history.GetFamilyAsync(familyId, default))!.Family.Text.Availability);
+        _clock.Advance(TimeSpan.FromHours(1));
+        source.TextFailure = null;
+        source.Text = "SELECT 1";
+        Assert.Equal(expected, (await history.GetFamilyAsync(familyId, default))!.Family.Text.Availability);
+        Assert.Equal(1, source.TextReads);
+    }
+
+    private ConnectedQueryStoreHistorySource History(ProtectedQueryStoreRepository repository, ReliabilitySource source) =>
+        new(repository, source, new SecureShowplanParser(), new QueryStoreCollectionStatusTracker(), _clock);
+
+    private async Task<string> PrepareTextFamilyAsync(ProtectedQueryStoreRepository repository, ReliabilitySource source)
+    {
+        await CollectAsync(repository, source);
+        var snapshot = (await repository.ReadPublishedSnapshotAsync())!;
+        var missing = new QueryTextDescriptorV1(QueryTextAvailability.Missing, null, null, "not requested");
+        var family = snapshot.Families.Single(item => item.Family.DatabaseId == "db");
+        family = family with { Family = family.Family with
+        {
+            Text = missing,
+            PhysicalQueries = family.Family.PhysicalQueries.Select(identity => identity with { Text = missing }).ToArray(),
+        }};
+        await repository.PublishSnapshotAsync(snapshot with { Families = [family] });
+        return family.Family.FamilyId;
+    }
+
+    [Fact]
     public async Task ArchivedDetailedIntervalsRollUpTogetherAfterRestart()
     {
         using (var store = await OpenStoreAsync())
@@ -287,6 +396,9 @@ public sealed class QueryStoreReliabilityTests : IDisposable
     {
         public Dictionary<string, QueryStoreCollectionState> States { get; } = [];
         public Action? CancelOnRuntime { get; set; }
+        public ProbeExecutionException? TextFailure { get; set; }
+        public string? Text { get; set; } = "SELECT 1";
+        public int TextReads { get; private set; }
 
         public Task<IReadOnlyList<string>> DiscoverDatabasesAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<string>>(["db", "sibling"]);
@@ -330,7 +442,12 @@ public sealed class QueryStoreReliabilityTests : IDisposable
                 QueryStoreExecutionType.Regular, "primary", count, 2, 1, 1));
 
         public Task<QueryTextPayload> ReadQueryTextAsync(
-            string databaseId, string queryTextId, CancellationToken cancellationToken) => throw new NotSupportedException();
+            string databaseId, string queryTextId, CancellationToken cancellationToken)
+        {
+            TextReads++;
+            if (TextFailure is { } failure) throw failure;
+            return Task.FromResult(new QueryTextPayload(Text, false, false));
+        }
         public Task<string?> ReadPlanXmlAsync(
             string databaseId, string planId, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
