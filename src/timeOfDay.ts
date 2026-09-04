@@ -6,8 +6,8 @@
  *
  * Two things this deliberately is not:
  *
- * - It is **not evidence**. The sun encodes nothing whatsoever about the database — a healthy
- *   instance and a failing one are lit identically at the same hour, exactly as the seeded scenery
+ * - It is **not evidence**. The sun encodes nothing whatsoever about the capacity — a healthy
+ *   capacity and a failing one are lit identically at the same hour, exactly as the seeded scenery
  *   is. Every quantity either drawing claims is still computed in `cityPlan`, `cityTraffic`, and
  *   `cityFacilityTraffic`, and none of it moves when the hour does.
  * - It is **not a second palette**. Every surface in both scenes is a `MeshStandardMaterial` lit by
@@ -93,7 +93,7 @@ export type CityAtmosphere = {
 }
 
 /**
- * The four looks for the database city.
+ * The four looks for the capacity city.
  *
  * `evening` is the historical golden hour, value for value. It is pinned by a test so the look the
  * city has always had cannot drift while the other three are being tuned.

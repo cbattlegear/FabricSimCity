@@ -389,7 +389,7 @@
  * and the address list's basis is its whole scroll height, so the list kept its space and the card
  * lost nearly all of its own. Measured at 1440x900 with the drawers open -- two of them, before the
  * live-activity drawer joined them -- the card held 72px of 472px of content -- title, kind and
- * nothing else -- with 414px of the selected object's measured evidence reachable only by scrolling
+ * nothing else -- with 414px of the selected item's measured evidence reachable only by scrolling
  * a 72px window. At 1280x720 it was 47px.
  *
  * The cap is 34vh rather than 46vh because the card no longer shrinks. 46vh floors the card at 414px
@@ -398,7 +398,7 @@
  * defect rebuilt one section over. 34vh floors it at 306px, which holds the title and the whole
  * six-row evidence list at 1440x900, and leaves the rail whole.
  *
- * 16vh rather than that 34vh since the live query feed joined the rail. Because the card floors, it
+ * 16vh rather than that 34vh since the timepoint feed joined the rail. Because the card floors, it
  * is the one section that does not participate in the squeeze, so its cap sets what everything below
  * it may have: measured at 1115x800 the card sat at its full 272px while the feed -- the surface this
  * view now exists to show -- held 15px of body and the address list held 69px. Giving 18vh back moves
@@ -425,7 +425,7 @@
 }
 
 /*
- * A query route takes the whole rail over.
+ * A selected route takes the whole rail over.
  *
  * When a route is open the address book — search, list, metric footer, every drawer — is not
  * rendered, so the card is the only thing under the header. The shared-with-a-list `16vh` cap would
@@ -686,7 +686,7 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
 .legend-direct, .legend-attributed, .legend-shared, .legend-route { display: inline-block; width: 18px; height: 8px; }
 .legend-direct { border: 2px solid #68d6c1; }
 .legend-attributed { background: #e2a957; }
-/* Outlined, like the wireframe cap it stands for: an amount that was never measured for one object. */
+/* Outlined, like the wireframe cap it stands for: an amount that was never measured for one item. */
 .legend-shared { border: 2px solid #e2a957; }
 .legend-route { height: 2px; background: repeating-linear-gradient(90deg, #bdc8d0 0 5px, transparent 5px 8px); }
 /*
@@ -745,7 +745,7 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font: 0.72rem/1.45 ui-mon
  * and the measurement that earned the visit. The detail line is the load-bearing one; without it
  * this is a slideshow, and with it every shot says why the camera came here.
  *
- * Two rows rather than three columns so a long object name wraps under its own chip instead of
+ * Two rows rather than three columns so a long item name wraps under its own chip instead of
  * squeezing the number that justifies it down to an ellipsis.
  */
 .hud-tour {
@@ -1369,10 +1369,10 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .address-entry.kind-query .address-icon { color: #8be7ce; }
 .address-text { min-width: 0; display: grid; gap: 2px; }
 /*
- * A schema-qualified object name is one unbreakable word, and some of them are fifty characters
+ * A workspace-qualified item name is one unbreakable word, and some of them are fifty characters
  * long. Without this the name simply ran off the side of a phone and was clipped by the sidebar --
  * no ellipsis, no scroll, no way to read the end of it. Wrapping is the right answer rather than
- * truncation, because this list is how you find an object by name.
+ * truncation, because this list is how you find an item by name.
  */
 .address-text > * { min-width: 0; overflow-wrap: anywhere; }
 .address-name {
@@ -1541,7 +1541,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * via `--sidebar-drawer-cap`. The region then costs the column what a single drawer costs today.
  *
  * The share is `budget / openCount`, and the count is four because the city column now stacks the
- * live query feed, Live activity, the plan finder and the legend. The arithmetic that has to hold is
+ * timepoint feed, Live activity, the plan finder and the legend. The arithmetic that has to hold is
  * `cap x openCount + 35px x closedCount <= budget`, since every closed drawer still spends its
  * summary; raising the cap and trusting shrink to sort it out does not work, for the reason above.
  *
@@ -1607,7 +1607,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  *
  * The card, the list and the drawers are three claims on one rail. The card now floors instead of
  * shrinking (see `.sidebar-place-card`), so something else has to give, and the drawers are the
- * right thing: "Legend & evidence" is reference material, while the card is the object the reader
+ * right thing: "Legend & evidence" is reference material, while the card is the item the reader
  * just asked for by name. Measured at 1440x900 with the drawers open -- two of them, at the time --
  * taking the card's floor out
  * of the list instead left the list at 78px, and at 1280x720 it left it at 0px with 6px of the rail
@@ -1619,7 +1619,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  * drawer at an 800px viewport -- a 35px summary and a 7.6px body, which overflows nothing and can be
  * read by nobody. That is the failure this file already warns about twice: zero unreachable pixels is
  * necessary and not sufficient. 24vh reproduced it with four drawers -- measured at 1115x800, the
- * live query feed held 15px of body at rest and 12px with everything open, and 28vh only took that to
+ * timepoint feed held 15px of body at rest and 12px with everything open, and 28vh only took that to
  * 26px and 5px. The feed is a region of its own now (see `.sidebar-feed`) and these three are back to
  * being reference material, so the budget goes back down and the 10vh released pays for the feed's
  * floor rather than for a fourth equal share that helped nobody.
@@ -1729,7 +1729,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 /*
  * The address book, behind a disclosure, and closed by default.
  *
- * It holds the retained view -- every query family, table and facility the collector has
+ * It holds the retained view -- every operation family, item and facility the collector has
  * accumulated -- while `.sidebar-feed` above it holds what is executing right now. Only one of the
  * two changes while you watch it, so the rail defaults to that one and this waits behind a click.
  *
@@ -1875,7 +1875,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 }
 
 
-/* --- Live query feed ----------------------------------------------------------------------- */
+/* --- Timepoint and operation feed ----------------------------------------------------------- */
 /*
  * The rail's second scrolling region, and a peer of the address list rather than a drawer.
  *
@@ -1948,23 +1948,23 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 }
 
 
-/* --- Live query ticker --------------------------------------------------------------------- */
+/* --- Operation ticker ---------------------------------------------------------------------- */
 /*
  * A log, not a table, and styled to read as one.
  *
  * The list is ordered by arrival and by nothing else, so nothing here may imply a ranking: no row
  * is emphasised over another by size or weight, and the only colour that varies is the state rail
- * on the left, which encodes running / blocked / gone. A feed that highlighted the expensive rows
+ * on the left, which encodes running / throttled / gone. A feed that highlighted the expensive rows
  * would be a leaderboard with a clock on it, which is the thing the legend's exposure table already
  * is and the thing this is deliberately not.
  *
- * Rows are `content-visibility: auto` because the list is capped at 60 and a busy instance rewrites
+ * Rows are `content-visibility: auto` because the list is capped at 60 and a busy capacity rewrites
  * it every couple of seconds, next to a WebGL canvas that is trying to hold a frame budget.
  *
  * Two lines, and as tight as two lines go. A row is what the reader watches arrive, so its height is
  * what decides how much of the feed is a feed: at three lines the row measured 81.8px, so even the
- * 132px floor `.sidebar-feed` guarantees would have shown one row and a sliver. Folding the session
- * and command up into the timestamp line takes the row to 54px without dropping a field, which is
+ * 132px floor `.sidebar-feed` guarantees would have shown one row and a sliver. Folding secondary
+ * fields up into the timestamp line takes the row to 54px without dropping a field, which is
  * two whole rows inside that floor and five in the 22vh the region takes when the rail has room.
  */
 .query-ticker { display: grid; }
@@ -2028,8 +2028,8 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .query-ticker-flag.is-blocked { color: #f7c98f; background: #33240f; }
 .query-ticker-flag.is-gone { color: #93a8ba; background: #16202a; }
 /*
- * The execution multiplier. Reads as information rather than as a warning -- a query running four
- * times is the instance working, not a problem -- so it is deliberately cooler and quieter than
+ * The execution multiplier. Reads as information rather than as a warning -- an operation running
+ * four times is the capacity working, not a problem -- so it is deliberately cooler and quieter than
  * `.is-blocked` beside it. `margin-left: auto` on the base rule pushes only the first flag, so when
  * this appears alongside another they sit together at the end of the line rather than splitting it.
  */

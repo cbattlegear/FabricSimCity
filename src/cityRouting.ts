@@ -21,8 +21,8 @@ import type { Point } from './cityStreamlines'
  * the main roads and stay there until they are close to their destination.
  *
  * Everything in this module is decoration. Road class and speed limit are cartographic properties of
- * a *drawn* street, derived from the seeded geometry alone; they say nothing about the database, and
- * no measured quantity is read here. What routes *along* these streets — the query traffic — is the
+ * a *drawn* street, derived from the seeded geometry alone; they say nothing about the capacity, and
+ * no measured quantity is read here. What routes *along* these streets — the operation traffic — is the
  * measurement, and it is untouched.
  */
 
@@ -71,8 +71,8 @@ const CLASS_PROPERTIES: Record<RoadClass, { speed: number; width: number }> = {
  * promoted to arterial. A third of the streets being main roads is not a hierarchy, and the map
  * stops being readable from the weight of its lines, which is the one job the classification has.
  *
- * Fixing the proportions instead guarantees the ladder reads on any network, from a six-table
- * database to a six-thousand-table one, and it is honest about what betweenness measures: not an
+ * Fixing the proportions instead guarantees the ladder reads on any network, from a six-item
+ * capacity to a six-thousand-item one, and it is honest about what betweenness measures: not an
  * absolute importance but a ranking. "This street is in the busiest three per cent" is exactly the
  * claim the algorithm supports.
  *
@@ -163,7 +163,7 @@ export function classifyRoads(graph: PlanarGraph): Map<number, RoadProperties> {
  * arbitrary scale of the city and would rank a single long suburban road above the short busy streets
  * of a centre that everything actually passes through.
  *
- * Exact betweenness is `O(V·E)`, and a six-thousand-table database draws a city with five thousand
+ * Exact betweenness is `O(V·E)`, and a six-thousand-item capacity draws a city with five thousand
  * junctions, so the exact figure costs several seconds of a blocked main thread. Above
  * `BETWEENNESS_MAX_SOURCES` junctions the sweep runs from a sample of sources and the totals are
  * scaled back up, which is the standard estimator for this measure (Brandes and Pich, 2007). The
@@ -171,7 +171,7 @@ export function classifyRoads(graph: PlanarGraph): Map<number, RoadProperties> {
  * needs to land in the right band of the hierarchy, not to carry a correct absolute figure, and the
  * band boundaries are quantiles of the same sampled distribution. The sample is a fixed stride
  * through the junctions rather than a random draw, so it is spread evenly and, more importantly,
- * identical on every run — the same database must always draw the same city.
+ * identical on every run — the same capacity must always draw the same city.
  */
 export function edgeBetweenness(
   graph: PlanarGraph,

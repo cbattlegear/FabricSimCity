@@ -6,19 +6,20 @@ import { mergeAndDispose } from './mergeGeometry'
 /**
  * Procedural building geometry, one merged {@link THREE.BufferGeometry} per building.
  *
- * **Evidence boundary.** Only three things here are measured: the building's `footprint` (log2 of
- * exact reserved pages), its `height` (log2 of exact used pages), and its `archetype` (exact reserved
- * page thresholds). Everything else -- bay rhythm, roof form, cornices, balconies, storefronts,
- * canopies, rooftop plant, palette -- is decoration derived from the lot's stable `seed` and its
- * district's character, and encodes nothing. A building's decoration never changes when its
- * measurements change, and never varies between renders of the same object.
+ * **Evidence boundary.** Only three values from the lot reach geometry: the building's `footprint`
+ * (log2 of exact OneLake bytes), its `height` (log2 of exact CU-seconds), and its `archetype` (the
+ * OneLake-byte band). Everything else inside that chosen archetype -- bay rhythm, roof form,
+ * cornices, balconies, storefronts, canopies, rooftop plant, palette -- is decoration derived from
+ * the lot's stable `seed` and its district's character, and encodes nothing. A building's
+ * intra-archetype decoration never changes when its measurements change, and never varies between
+ * renders of the same item.
  *
- * A lot whose size is unknown gets `archetype: 'vacant'` and renders as a fenced empty parcel, so an
- * unmeasured object can never be mistaken for a small one.
+ * A lot whose footprint or height is unknown gets `archetype: 'vacant'` and renders as a fenced empty
+ * parcel, so an unmeasured item can never be mistaken for a small one.
  *
  * **How the massing is composed.** Every archetype is assembled from the same kit: a plinth, one or
  * more shafts, a facade, and a crown. The facade is bay-based rather than a fixed grid of quads --
- * the number of bays follows the building's own width, so a wide table and a narrow one are visibly
+ * the number of bays follows the building's own width, so a wide item and a narrow one are visibly
  * different buildings rather than the same texture stretched. Bay count follows geometry, never data.
  */
 
@@ -44,13 +45,13 @@ export interface BuildingGeometrySet {
   readonly footprint: number
 }
 
-/** Footprint and height used when the object's page counts are unavailable. */
+/** Footprint and height used when the item's measurements are unavailable. */
 const VACANT_FENCE_HEIGHT = 2.2
 
 /**
  * A hard ceiling on drawn window panels per building.
  *
- * A large instance can produce thousands of buildings, and the facade system multiplies bays by
+ * A large capacity can produce thousands of buildings, and the facade system multiplies bays by
  * floors by four faces. Past this count the extra panels are invisible at any camera distance that
  * fits the building on screen, so they are spent on nothing.
  */
@@ -581,7 +582,7 @@ function tower(
   return { body: merge(bodies)!, windows: merge(windows), trim: merge(trim), height: top, footprint }
 }
 
-/** Indexed views get a civic hall: a colonnaded base, steps, and a glazed barrel vault over the hall. */
+/** Civic archetypes get a hall: a colonnaded base, steps, and a glazed barrel vault over the hall. */
 function civic(
   footprint: number,
   height: number,
@@ -678,9 +679,9 @@ export const ARCHETYPE_COLORS: Readonly<Record<BuildingArchetype, number>> = {
 /**
  * Per-character shifts on the archetype palette.
  *
- * A district's character is hashed from its schema id, so this is styling and nothing else: two
- * schemas with identical contents can and will be different colours. It exists so a city has
- * neighbourhoods you can navigate by, not so a colour can be looked up in a table and believed.
+ * A district's character is hashed from its workspace id, so this is styling and nothing else: two
+ * workspaces with identical contents can and will be different colours. It exists so a city has
+ * neighbourhoods you can navigate by, not so a colour can be looked up as evidence and believed.
  */
 const CHARACTER_TINTS: Readonly<Record<DistrictCharacter, Readonly<Record<BuildingArchetype, number>>>> = {
   residential: {
@@ -716,7 +717,7 @@ const NEIGHBORHOOD_TINT_WEIGHT = 0.44
  *
  * Map mode draws every building as one grey plate, because height is a 3D claim. That leaves the
  * plates free to carry the neighbourhood instead, which is the clearest possible answer to *which
- * schema is this* on a printed-looking map: a whole quarter of pale green, next to a quarter of pale
+ * workspace is this* on a printed-looking map: a whole quarter of pale green, next to a quarter of pale
  * rose. Lower than the 3D weight only because paper wants less colour than a lit facade does.
  */
 const MAP_NEIGHBORHOOD_TINT_WEIGHT = 0.36
@@ -727,8 +728,8 @@ const MAP_NEIGHBORHOOD_TINT_WEIGHT = 0.36
  * The hue itself comes from {@link neighborhoodHue} so the sidebar swatch and the map agree. Strongly
  * saturated and mid-light: this colour is never drawn directly, only ever mixed at a fraction of its
  * strength and then rebalanced back to the base's brightness, so a timid source colour arrives as no
- * colour at all. It says *these buildings are the same schema* and nothing else — the ordinal it comes
- * from is the schema's place in the catalogue's own listing, not a rank, a size or a score.
+ * colour at all. It says *these buildings are the same workspace* and nothing else — the ordinal it comes
+ * from is the workspace's place in the catalogue's own listing, not a rank, a size or a score.
  */
 export function neighborhoodTint(ordinal: number): number {
   return new THREE.Color().setHSL(neighborhoodHue(ordinal), 0.7, 0.5).getHex()
@@ -816,10 +817,10 @@ export function relativeLuma(color: number): number {
 }
 
 /*
- * How a building whose statistics the engine is owed an update on is drawn.
+ * How a building whose telemetry evidence is past its freshness window is drawn.
  *
  * The first version of this was a single 35% blend of the body colour toward a mid grey, and
- * measured against a real instance it was invisible: a stale tower stood beside two fresh ones and
+ * measured against a real tenant it was invisible: a stale tower stood beside two fresh ones and
  * no reader could pick it out, because the neighbourhood tint already spans a wider range than the
  * blend moved the facade. Windows, trim and roof all stayed pristine, so the only thing that changed
  * was a fraction of one of the several colours a building is made of.
@@ -829,9 +830,9 @@ export function relativeLuma(color: number): number {
  * the facade takes on grime, the glazing goes out, and the trim dulls. Any one of them alone is a
  * shade; all three at once is a derelict building.
  *
- * It stays an honest per-object claim. Nothing here is drawn from a threshold anyone tuned by eye —
- * an object is weathered exactly when the engine's own AUTO_UPDATE_STATISTICS threshold has been
- * passed on at least one of its statistics, and never otherwise.
+ * It stays an honest per-item claim. Nothing here is drawn from a threshold anyone tuned by eye —
+ * an item is weathered exactly when its own evidence has passed its freshness window, and never
+ * otherwise.
  */
 
 /** Soot and dirt: warm, very dark and nearly neutral, so the blend both darkens and desaturates. */
@@ -851,7 +852,7 @@ const WEATHERED_BODY_WEIGHT = 0.58
  * The same on the basemap, held back a little.
  *
  * Map plates carry the neighbourhood, and a plate blended as hard as a lit facade lands on the same
- * near-black whatever schema it belongs to, which trades one reading for another. This is still far
+ * near-black whatever workspace it belongs to, which trades one reading for another. This is still far
  * past the point of being obvious on paper.
  */
 const WEATHERED_MAP_WEIGHT = 0.46

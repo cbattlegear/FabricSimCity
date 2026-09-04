@@ -16,9 +16,9 @@ import vehiclesUrl from './assets/vehicles.glb?url'
  *
  * The **vehicle** kit is the one place that argument stops short, which is why it is loaded
  * separately by {@link loadVehicleAssets}. Its meshes are no more a measurement than a tree is, but
- * *whether one is drawn at all* is: a vehicle on a road is a live sampled request. Falling back to a
- * procedural shell is therefore fine and drawing nothing is not, and the two kits must not be able
- * to fail for each other.
+ * *whether one is drawn at all* is: a vehicle on a road is a measured share of operation traffic.
+ * Falling back to a procedural shell is therefore fine and drawing nothing is not, and the two kits
+ * must not be able to fail for each other.
  *
  * The geometry is authored by `blender/simcity_kit.py`, which is checked in so every byte of the
  * binaries is reproducible from source. See that file for the naming and orientation contract.
@@ -68,7 +68,7 @@ export const LANDMARK_ASSETS: Record<FacilityKind, string> = {
  *
  * Parked cars are parked and confined to parking areas because they are *decoration*: they are
  * scattered by a block's own seed and measure nothing. A **moving** vehicle is a different claim
- * entirely — it is a live sampled request — and it comes from {@link VEHICLE_ASSETS} below, which is
+ * entirely — it is measured operation traffic — and it comes from {@link VEHICLE_ASSETS} below, which is
  * a separate kit for exactly that reason.
  */
 export const SCENERY_ASSETS = [
@@ -204,8 +204,8 @@ export function loadCityAssets(): Promise<CityAssets | null> {
  * single catch that returns `null` for everything, so folding vehicles into it would couple two
  * failures that must stay independent — and one direction of that coupling is a correctness bug: a
  * failed fetch of decorative scenery would silently erase the vehicles, and a city with no vehicles
- * is indistinguishable from an instance on which nothing ran. That turns a missing decoration into a
- * false statement about the database.
+ * is indistinguishable from a capacity on which nothing ran. That turns a missing decoration into a
+ * false statement about the capacity.
  *
  * Null here therefore means "draw the procedural shells", never "draw nothing". The caller falls
  * back the way `buildFacilityArchitecture` already does for missing landmark geometry.

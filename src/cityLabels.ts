@@ -5,11 +5,11 @@ import * as THREE from 'three'
  *
  * A label carries identity and nothing else. It never restates a measurement and never qualifies
  * one: footprint, height, roof cap, road width, lane width, and colour keep their documented
- * meanings, and reading a label tells you only which object you are looking at.
+ * meanings, and reading a label tells you only which item or facility you are looking at.
  *
- * A building label is the bare object name. It used to be schema-qualified, because a schema was a
- * tint you could not read and the qualifier was the only way to find out which one a building
- * belonged to. Schemas are neighbourhoods now, so that fact is written once over the neighbourhood
+ * A building label is the bare item name. It used to be schema-qualified in SQLSimCity, because a
+ * schema was a tint you could not read and the qualifier was the only way to find out which one a
+ * building belonged to. Workspaces are neighbourhoods now, so that fact is written once over the neighbourhood
  * instead of repeated on every building inside it — which is both how a map does it and how the
  * building's own name gets the width it needs.
  *
@@ -47,7 +47,7 @@ export const LABEL_WORLD_HEIGHT = 11
  *
  * A basemap does not set every place name at one size: a city is lettered larger than a hamlet, so
  * the reader sees the important names first and the rest as they zoom in. The same idea here, keyed
- * to the height the building was already given from its measured page count.
+ * to the height the building was already given from its measured CU seconds.
  *
  * Deliberately a narrow range. Label *width* scales with height, so a name set much larger than this
  * would sprawl across several lots and start naming the wrong ground. The point is a legible
@@ -58,9 +58,9 @@ export const LABEL_WORLD_HEIGHT_MAX = 16
 /**
  * The building heights the label scale is stretched between.
  *
- * `buildingHeight` in `cityPlan` is `log2(1 + usedPages) * 4.8`, so these are about 32 pages (a
- * small table) and about 6,000 pages (a large one). Both ends are clamped: the scale is a coarse
- * three-or-four-step hierarchy for reading order, and clamping keeps one enormous table from
+ * `lot.height` comes from `capacityCity.itemHeight`, so these are lower and upper landmarks on the
+ * same CU-seconds world-height scale the skyline uses. Both ends are clamped: the scale is a coarse
+ * three-or-four-step hierarchy for reading order, and clamping keeps one enormous item from
  * flattening every other name into the same size.
  */
 const LABEL_SCALE_MIN_BUILDING_HEIGHT = 24
@@ -174,7 +174,7 @@ export const LABEL_MAX_CHARS = 24
 const ELLIPSIS = '…'
 
 /**
- * Names one building. The bare object name: the schema it belongs to is written over the
+ * Names one building. The bare item name: the workspace it belongs to is written over the
  * neighbourhood it stands in, so repeating it here would spend width saying the same thing twice.
  */
 export function buildingLabelText(name: string): string {
@@ -182,7 +182,7 @@ export function buildingLabelText(name: string): string {
 }
 
 /**
- * Names one schema's neighbourhood.
+ * Names one workspace's neighbourhood.
  *
  * Set in capitals with the letters spaced apart, which is how a basemap distinguishes the name of an
  * *area* from the name of a thing standing in it. Nothing is added to it — no count, no size — because
@@ -316,10 +316,10 @@ export const NEIGHBORHOOD_LABEL_WORLD_HEIGHT = 34
 /**
  * Scales a neighbourhood name to the ground it covers.
  *
- * A ten-table schema and a five-hundred-table schema get very different amounts of city, and one
+ * A ten-item workspace and a five-hundred-item workspace get very different amounts of city, and one
  * fixed type size either shouts over the small one or disappears on the large one. Sizing by the
  * square root of the claimed area tracks the territory's *width* rather than its area, so the name
- * grows the way the place does. Clamped at both ends so a two-block schema still gets a readable
+ * grows the way the place does. Clamped at both ends so a two-block workspace still gets a readable
  * name and a dominant one does not write across the entire map.
  */
 export function neighborhoodLabelHeight(blockCount: number, blockPitch: number): number {
@@ -328,7 +328,7 @@ export function neighborhoodLabelHeight(blockCount: number, blockPitch: number):
 }
 
 /**
- * Longest database label drawn on the server atlas before elision.
+ * Longest capacity label drawn on the tenant atlas before elision.
  *
  * Shorter than {@link LABEL_MAX_CHARS} because atlas labels are drawn larger, and a city's plot and
  * its neighbours' plots sit on a fixed grid pitch: a name wide enough to cross into the next city
@@ -336,7 +336,7 @@ export function neighborhoodLabelHeight(blockCount: number, blockPitch: number):
  */
 export const ATLAS_LABEL_MAX_CHARS = 18
 
-/** Names a database city on the server atlas. Database names are not qualified by anything. */
+/** Names a capacity city on the tenant atlas. Capacity names are not qualified by anything. */
 export function capacityLabelText(name: string): string {
   return elideMiddle(name, ATLAS_LABEL_MAX_CHARS)
 }
@@ -423,8 +423,8 @@ type RasterizedLabel = {
  * textures for text that never changed. Sprites are cheap wrappers over the shared material, so
  * only {@link CityLabels.dispose} frees GPU memory.
  *
- * `worldHeight` sets how large a sprite is in the scene that asked for it. The database city and the
- * server atlas are drawn at very different world scales -- a city block against a hundred cities on
+ * `worldHeight` sets how large a sprite is in the scene that asked for it. The capacity city and the
+ * tenant atlas are drawn at very different world scales -- a city block against a hundred cities on
  * one grid -- so a single fixed height would leave one of them unreadable. The rasterization is
  * identical either way; only the sprite scale differs.
  */

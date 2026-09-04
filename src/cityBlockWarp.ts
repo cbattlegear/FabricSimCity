@@ -15,7 +15,7 @@ import type { CityBlockField } from './cityBlocks'
  * block is no longer a quadrilateral, so `blockCorners` returns a polygon of however many sides the
  * street network left behind rather than the old four-tuple. Nothing here is a measurement: block
  * shapes come from the seeded streets, and which world point lands in which block is geometry, not a
- * claim about the database.
+ * claim about the capacity.
  */
 export interface CityWarp {
   readonly minX: number

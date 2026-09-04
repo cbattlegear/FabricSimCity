@@ -110,8 +110,8 @@ export type CityLayerToggles = {
   traffic: boolean
   /**
    * The individual co-reference ribbons. Off by default: a map covered in one ribbon per pair of
-   * tables is a picture of the workload's shape, not of its traffic, and the two read as noise
-   * together. Turn it on to see which tables are named together; leave it off to read the streets.
+   * items is a picture of the workload's shape, not of its traffic, and the two read as noise
+   * together. Turn it on to see which items are named together; leave it off to read the streets.
    */
   paths: boolean
   infrastructure: boolean
@@ -146,7 +146,7 @@ const MAP_DISTRICT_OPACITY = 0.17
  * It cannot on a large city. Depth resolution falls off with the square of the distance to the
  * fragment, and the camera has to stand back in proportion to the plan in order to frame it, so the
  * coarsest step the buffer can represent at ground level grows roughly linearly with the size of
- * the database. A 900-table instance plans an ~8,000-unit city, which frames from ~11,000 units
+ * the capacity. A 900-item capacity plans an ~8,000-unit city, which frames from ~11,000 units
  * away, and at that range one representable step is about 0.13 units — wider than the whole stack
  * from kerb to centre line, and ten times the gap between two kinds of land cover. Every sheet then
  * wins and loses per pixel, and because the orbit damping keeps nudging the camera the winner
@@ -164,9 +164,9 @@ const MAP_DISTRICT_OPACITY = 0.17
  * left of them is thinner than the ambiguity this exists to correct.
  */
 export const GROUND_RANK = {
-  /** Shared wait lanes, drawn over the exclusive ones they overlap. */
+  /** Burst-main puddles, drawn under the power-grid lanes they overlap. */
   sharedLane: 1,
-  /** Exclusive wait lanes, and the selected building's plate. */
+  /** Power-grid lanes, and the selected building's plate. */
   facilityLane: 2,
   /** Graded road ribbons. Lane order refines this — see `roadRank`. */
   road: 3,
@@ -275,7 +275,7 @@ export type DatabaseCitySceneController = {
   setObjects(objects: readonly CapacityCityItem[], cityPlan: CityPlan): void
   /** Roads are graded outside the scene so the map and the HUD read the same numbers. */
   setRoads(roads: readonly RoadTraffic[]): void
-  /** The aggregate street-load layer built from the workload's executions and apportioned waits. */
+  /** The aggregate street-load layer built from the workload's operations and apportioned throttling. */
   setTraffic(traffic: WorkloadTraffic): void
   setFacilities(facilities: readonly Facility[]): void
   /** Lanes from buildings to the power-grid gates that held their work. */
@@ -285,22 +285,22 @@ export type DatabaseCitySceneController = {
   /** Highlights one road and pins both of its endpoints. */
   setSelectedRoad(routeId: string | null): void
   /**
-   * Weathers the buildings whose statistics are stale. Per object rather than a whole-city flag,
+   * Weathers the buildings whose evidence is stale. Per item rather than a whole-city flag,
    * because a city-wide wash would weather buildings whose statistics are fresh.
    */
   setStaleStatsObjects(itemIds: readonly string[]): void
   /**
    * Sets the buildings alight.
    *
-   * One fire is one table the optimizer asked for a high-impact index on. Per object for the same
-   * reason weathering is: the evidence is per table, and a city-wide flag would burn buildings the
-   * optimizer never named.
+   * One fire is one item whose rejected-operation count was measured above zero. Per item for the
+   * same reason weathering is: the evidence is per item, and a city-wide flag would burn buildings
+   * whose work was not measured as refused.
    */
   setFireObjects(itemIds: readonly string[]): void
   /**
-   * Bursts a water main at the kerb of each building whose plan work carries a degrading warning —
-   * a spill to tempdb, a plan-affecting convert, a join with no predicate, columns with no
-   * statistics.
+   * Bursts a water main at the kerb of each building a caller explicitly marks for that overlay.
+   * Fabric's current disaster projection leaves this set empty; keeping it caller-supplied means a
+   * future item-level throttling cause can use the cue only when real evidence names the item.
    *
    * Drawn at the frontage rather than on the roof because it is infrastructure under the street,
    * and because a building can be on fire at the same time and the two cues must stay separable.
@@ -322,7 +322,7 @@ export type DatabaseCitySceneController = {
   /**
    * Where one incident pin ended up and which rung of the placement ladder put it there, or null
    * when it is not drawn. The popup states the rung, because a pin on the measured road between two
-   * named objects and a pin at an object's kerb are different claims.
+   * named items and a pin at an item's kerb are different claims.
    */
   incidentPlacement(id: string): IncidentPlacement | null
   /**
@@ -350,7 +350,7 @@ export type DatabaseCitySceneController = {
    * Runs or stops the guided tour: the camera flying itself around the city indefinitely.
    *
    * The itinerary is planned by `cityTour.ts` from what this scene has actually been given and
-   * actually drew, and it is replanned whenever those change — so a block that starts while the
+   * actually drew, and it is replanned whenever those change — so an incident that starts while the
    * tour is running gets visited rather than waiting for the next switch-on. `cityName` is only
    * used for the establishing shot's caption.
    *
@@ -428,7 +428,7 @@ export function createDatabaseCityScene(
    *
    * Read from the clock on the machine looking at it, and re-read on a timer further down so a tab
    * left open crosses into the next phase on its own. The light is decoration and encodes nothing —
-   * the sun sits in the same place for a healthy instance and a failing one at the same hour. See
+   * the sun sits in the same place for a healthy capacity and a failing one at the same hour. See
    * `timeOfDay.ts` for why the four looks are four *rigs* rather than four palettes.
    */
   let timeOfDay: TimeOfDay = resolveTimeOfDay(new Date())
@@ -476,7 +476,7 @@ export function createDatabaseCityScene(
    * The 3D city is lit as a real hour rather than as a neutral studio, because a directional sun is
    * the cheapest and most honest depth cue available: every building's own shadow states its height
    * a second time, and the ~47% of ground that carries no building finally has something on it. The
-   * light is decoration and encodes nothing — the sun sits in the same place for a healthy instance
+   * light is decoration and encodes nothing — the sun sits in the same place for a healthy capacity
    * and a failing one at the same hour.
    *
    * Which hour is `timeOfDay`, and every colour and intensity below is overwritten by
@@ -612,8 +612,8 @@ export function createDatabaseCityScene(
     unknownIndex: new THREE.MeshBasicMaterial({ color: 0x82919d, wireframe: true }),
     exposure: new THREE.MeshStandardMaterial({ color: 0xe2a957, emissive: 0x3a2400, roughness: 0.55 }),
     // Wireframe carries the same meaning here as on unknownIndex and facilityUnknown: the figure it
-    // draws was never measured for this building. Shared exposure belongs to the queries that named
-    // it alongside other tables, so it is outlined rather than solid.
+    // draws was never measured for this building. Shared exposure belongs to operation families that
+    // named it alongside other items, so it is outlined rather than solid.
     sharedExposure: new THREE.MeshBasicMaterial({ color: 0xe2a957, wireframe: true }),
     // The plane the city sits on runs past the fog in every direction, so it is doing the job of
     // countryside rather than of floor. Kept close in value to the built parcels it abuts: a big
@@ -679,12 +679,12 @@ export function createDatabaseCityScene(
     }),
 
     /*
-     * Live vehicles.
+     * Moving workload vehicles.
      *
      * Deliberately *not* the kit materials the parked cars use, even though a driving car and a
-     * parked one are the same silhouette. A parked car is decoration and a driving one is a sampled
-     * running request, and the two must not be confusable — least of all under reduced motion, where
-     * the vehicle stands still and motion can no longer tell them apart. So live vehicles are the
+     * parked one are the same silhouette. A parked car is decoration and a driving one is measured
+     * operation traffic, and the two must not be confusable — least of all under reduced motion, where
+     * the vehicle stands still and motion can no longer tell them apart. So workload vehicles are the
      * one bright, near-white thing on a street, and everything decorative around them is the cool
      * blue-grey of the kit.
      */
@@ -703,12 +703,12 @@ export function createDatabaseCityScene(
       flatShading: true,
     }),
     /*
-     * The vehicle drawn when the retained plans did not state how much data one execution moves.
+     * The vehicle drawn when the source did not state the operation class.
      *
-     * Featureless and grey on purpose. Every authored vehicle carries a length that means something,
-     * so an unknown drawn as any of them would be read as that band; a shape that is on none of the
-     * rungs is the only honest way to say the ladder was never entered. It is not a bicycle: absent
-     * means "the plans did not say", which is not "this query moves very little".
+     * Featureless and grey on purpose. Every authored vehicle carries a class meaning, so an unknown
+     * drawn as any of them would be read as that class; a shape that is on none of the rungs is the
+     * only honest way to say the ladder was never entered. It is not a car or freight: absent means
+     * "the source did not say", which is not "this operation is interactive or background".
      */
     vehicleUnknown: new THREE.MeshStandardMaterial({ color: 0x99a3ab, roughness: 0.78 }),
   }
@@ -720,7 +720,7 @@ export function createDatabaseCityScene(
    * view modes need two entirely different palettes, and swapping a colour on ten materials is free
    * where rebuilding a vertex-colour buffer across thousands of blocks is not.
    *
-   * None of this is measured. Land use is drawn from the database id's seed, exactly like block
+   * None of this is measured. Land use is drawn from the capacity id's seed, exactly like block
    * placement, and the legend says so.
    */
   const LAND_USES = Object.keys(LANDUSE_CITY_COLORS) as LandUse[]
@@ -755,7 +755,7 @@ export function createDatabaseCityScene(
    * mode — white arterials over a dark casing, quieter greys for collectors, exactly the way a
    * printed basemap grades its roads.
    *
-   * Street *class* is a plan property, not a measurement. What a road carries — executions, dash
+   * Street *class* is a plan property, not a measurement. What a road carries — operations, dash
    * confidence, congestion colour — is drawn in `roadGroup` and is untouched by any of this.
    */
   const STREET_CLASSES: readonly StreetClass[] = ['motorway', 'primary', 'secondary', 'tertiary', 'residential', 'service']
@@ -824,7 +824,7 @@ export function createDatabaseCityScene(
    * Ribbon materials, cached by colour, fade *and* depth rank.
    *
    * Rank is part of the key rather than a property set at draw time because traffic, roads and the
-   * two kinds of wait lane are four sheets stacked within a quarter of a world unit that all draw
+   * power-grid lanes and disaster puddles are four sheets stacked within a quarter of a world unit that all draw
    * from this one factory. Sharing a material across them would share a rank, and they would be back
    * to settling their order in world units the depth buffer cannot resolve.
    */
@@ -881,7 +881,7 @@ export function createDatabaseCityScene(
    * Map mode is not the 3D city seen from above — it is a different drawing of the same plan:
    * paper-grey land, white carriageways over grey casings, flattened footprint plates, and POI pins.
    * The switch changes colour, massing, and camera. It never changes a measurement: footprints,
-   * road widths, congestion colours, and wait-lane widths are computed once, outside this file, and
+   * road widths, congestion colours, and power-grid lane widths are computed once, outside this file, and
    * both modes draw exactly those numbers.
    */
   const CITY_COLORS: Record<string, number> = {    unknown: 0x6e7d88, window: 0xd8e8f4, trim: 0x93a1ae, index: 0x68d6c1, unknownIndex: 0x82919d,
@@ -953,9 +953,9 @@ export function createDatabaseCityScene(
   scene.add(poiGroup)
 
   /**
-   * Live incident pins. Unlike POI pins these are drawn in *both* modes: a blocked waiter is the
-   * one thing on this map worth interrupting you for, and hiding it behind a mode switch would be a
-   * way of not telling you.
+   * Live incident pins. Unlike POI pins these are drawn in *both* modes: a throttling incident is
+   * the one thing on this map worth interrupting you for, and hiding it behind a mode switch would
+   * be a way of not telling you.
    *
    * They sit on the **road** rather than on a roof — see {@link ./cityIncidentPlacement} for why and
    * for the fallback ladder — and they are sprites, so they face the camera from every angle and
@@ -1298,7 +1298,7 @@ export function createDatabaseCityScene(
   const districtGroup = new THREE.Group()
   const buildingGroup = new THREE.Group()
   const roadGroup = new THREE.Group()
-  /** Streets carrying workload traffic, drawn once per street rather than once per query pair. */
+  /** Streets carrying workload traffic, drawn once per street rather than once per operation family. */
   const trafficGroup = new THREE.Group()
   /** Power-grid lanes from buildings to the gates that held their work. */
   const facilityLaneGroup = new THREE.Group()
@@ -1308,8 +1308,8 @@ export function createDatabaseCityScene(
   const roadHighlightGroup = new THREE.Group()
   const infrastructureGroup = new THREE.Group()
   /**
-   * Live vehicles. Drawn in both view modes, because a running query is a measurement and hiding a
-   * measurement behind a mode switch is a way of not reporting it.
+   * Workload vehicles. Drawn in both view modes, because measured operation traffic is evidence and
+   * hiding evidence behind a mode switch is a way of not reporting it.
    */
   const vehicleGroup = new THREE.Group()
   /**
@@ -1399,12 +1399,12 @@ export function createDatabaseCityScene(
   /** Vehicles that are not stopped. Zero means there is nothing to animate and the loop must end. */
   let movingVehicles = 0
   let staleStatsObjectIds = new Set<string>()
-  /** Tables the optimizer asked a high-impact index for; their buildings burn. */
+  /** Items with measured rejected operations; their buildings burn. */
   let fireObjectIds = new Set<string>()
-  /** Tables whose plan work carries a degrading warning; their kerb has a burst main. */
+  /** Caller-supplied burst-main item ids; current Fabric wiring leaves this empty. */
   let waterMainObjectIds = new Set<string>()
   /**
-   * Roof height per object, in world units, recorded as each building is built.
+   * Roof height per item, in world units, recorded as each building is built.
    *
    * A fire is drawn on the roof, and the roof height comes out of `buildBuildingGeometry` — which
    * runs in `buildBuildings` and nowhere else. Recording it there is what lets the disaster pass
@@ -1420,7 +1420,7 @@ export function createDatabaseCityScene(
   let disasterHandle = 0
   /** Animated time consumed by the disaster loop, in ms. Never the wall clock. */
   let disasterClock = 0
-  /** Placements keyed by the session they were pinned for, so a blocked vehicle stops at its pin. */
+  /** Placements keyed by the item they were pinned for, so a rejection-stopped vehicle stops at its pin. */
   const blockedPlacements = new Map<string, IncidentPlacement>()
   const layers: CityLayerToggles = {
     traffic: true,
@@ -1476,7 +1476,7 @@ export function createDatabaseCityScene(
    *
    * Names are dropped rather than drawn tiny, which is ordinary cartographic practice: a basemap
    * sheds street names as you zoom out instead of shrinking them into illegibility. Because larger
-   * tables are lettered larger, they survive to a wider zoom than small ones, so zooming in reveals
+   * buildings are lettered larger, they survive to a wider zoom than small ones, so zooming in reveals
    * names roughly in order of size instead of switching all seventy-five on at once.
    *
    * Neighbourhood names are the tier that holds the wide view, so they cannot be dropped for being
@@ -1567,7 +1567,7 @@ export function createDatabaseCityScene(
       skyDome.position.set(camera.position.x, 0, camera.position.z)
       skyDome.scale.setScalar(camera.far * 0.4)
       /*
-       * Haze is keyed to how far away you are standing, not to how big the database is.
+       * Haze is keyed to how far away you are standing, not to how big the capacity is.
        *
        * A fixed distance derived from the plan looks right at one zoom and wrong at every other:
        * pulled back it swallows the city, pushed in it disappears. Anchoring both planes to the
@@ -1634,14 +1634,14 @@ export function createDatabaseCityScene(
    *   under it — leaving a second rAF chain that nothing can ever cancel, including `dispose()`.
    * - **It stops itself.** The guard is re-tested every frame, so the loop ends on the frame after
    *   the last moving vehicle goes away, whether that is because the roster emptied, because every
-   *   remaining request is blocked, or because the scene was disposed.
+   *   remaining vehicle is stopped by a rejection, or because the scene was disposed.
    * - **It calls `draw()` directly.** Not `requestRender()`, which would set
    *   `renderer.shadowMap.needsUpdate` on every single frame and re-arm the 948-draw-call shadow
    *   pass issue #90 removed. Nothing under this loop casts a shadow, so nothing it does can
    *   invalidate a shadow map, and it must not claim otherwise.
    *
    * Under `prefers-reduced-motion` it never starts at all. The vehicles are still drawn, still sized
-   * by class, and still stopped where they are blocked — they simply stand at their phase offsets.
+   * by class, and still stopped where rejections halted them — they simply stand at their phase offsets.
    * The roster's own disclosure is what carries the information; motion is a garnish on it.
    */
   const runVehicleLoop = () => {
@@ -1676,11 +1676,12 @@ export function createDatabaseCityScene(
    * ----------------------------------------------------------------------------------------------
    * Disasters.
    *
-   * Three of the four things `cityDisasters.ts` reports had nowhere to be drawn, so the sidebar
-   * described a city that never changed: fires and burst mains were computed and discarded, and a
-   * recorded deadlock got a flat pin and no wreckage. They are drawn here, on the same terms the
-   * weathering already had — per object, from the object's own evidence, and never as a city-wide
-   * wash.
+   * Fabric disasters are throttling-driven. Capacity-wide throttle state changes the sky;
+   * per-item rejected-operation counts light the named buildings; rejection incidents leave wreckage
+   * at their pins. Burst mains remain a caller-supplied overlay, and the current Fabric projection
+   * leaves that set empty until real item-level evidence exists. Everything drawn here follows the
+   * same terms weathering already had — per item, from the item's own evidence, and never as a
+   * city-wide wash.
    *
    * Everything below obeys the three rules the vehicle block established, for the same reasons:
    *
@@ -1729,13 +1730,13 @@ export function createDatabaseCityScene(
    *
    * A band rather than a bare minimum, because one shared magnification can only clear a floor for
    * the smallest part *and* leave the largest part inside the frame if the ladder between them is
-   * short. Uncapped, a fire on the largest table in the city was fifteen world units where a jet on
+   * short. Uncapped, a fire on the largest item in the city was fifteen world units where a jet on
    * the smallest was two, and no single factor serves a 7:1 spread: the factor that made the jet
    * legible turned the fire into a wall.
    *
    * Capping the top is honest here in a way it would not be for a building, because a disaster's
    * size is a legibility floor and is not claiming a quantity -- the legend says so outright. What
-   * is being claimed is *which* object the evidence named, and that survives the cap intact.
+   * is being claimed is *which* item the evidence named, and that survives the cap intact.
    */
   const DISASTER_SIZE_MIN = 5
   const DISASTER_SIZE_MAX = 8
@@ -1891,7 +1892,7 @@ export function createDatabaseCityScene(
   let animatedDisasters = 0
 
   /**
-   * A deterministic hash of an object id, in 0..1.
+   * A deterministic hash of an item id, in 0..1.
    *
    * Phases are seeded from the id rather than from `Math.random()` so a rebuild — a refresh, a
    * layer toggle, a mode switch — puts every flame back where it was instead of resetting the whole
@@ -2390,7 +2391,7 @@ export function createDatabaseCityScene(
    * Rebuild the itinerary against data that has moved, without throwing away where the tour is.
    *
    * Called from every setter that changes what there is to look at. Restarting at stop zero on each
-   * of those would pin a busy instance on its establishing shot forever, because the live feed moves
+   * of those would pin a busy capacity on its establishing shot forever, because the live feed moves
    * more often than a single stop lasts.
    */
   function refreshTour() {
@@ -2405,7 +2406,7 @@ export function createDatabaseCityScene(
     }
     const breaking = breakingStopIndex(previous, next)
     if (breaking !== -1) {
-      // Something is blocked that was not blocked a moment ago. That is the one thing on this map
+      // A rejection incident appeared where there was not one a moment ago. That is the one thing on this map
       // worth abandoning a shot for; see `breakingStopIndex`.
       tourState = { index: breaking, elapsed: 0 }
       tourFrom = cameraShot()
@@ -2445,10 +2446,10 @@ export function createDatabaseCityScene(
   /*
    * The ground.
    *
-   * Rebuilt as merged geometry rather than one mesh per quad: a large instance has thousands of
+   * Rebuilt as merged geometry rather than one mesh per quad: a large capacity has thousands of
    * street legs, and the previous four-meshes-per-street layout put the draw call count in the tens
    * of thousands. Everything here is decoration — land cover, water, kerbs, lane markings — so it can
-   * be batched freely. The measured layer (buildings, road traffic, wait lanes) is drawn elsewhere
+   * be batched freely. The measured layer (buildings, road traffic, power-grid lanes) is drawn elsewhere
    * and stays individually addressable for picking.
    */
   function buildGround(cityPlan: CityPlan) {
@@ -2475,12 +2476,12 @@ export function createDatabaseCityScene(
    * Street furniture, trees and parked cars.
    *
    * Every placement is a pure function of the block's own seed, which is itself a pure function of
-   * the database id — so the same database always grows the same trees in the same places. None of
+   * the capacity id — so the same capacity always grows the same trees in the same places. None of
    * it is measured, and the legend says as much. Parked cars are parked and never move: a moving
    * vehicle would imply flow, and flow on this map is evidence.
    *
    * Drawn with one `InstancedMesh` per (asset, role) so a few thousand props cost a few dozen draw
-   * calls, and capped so a ten-thousand-table instance does not spend its frame budget on shrubbery.
+   * calls, and capped so a ten-thousand-item capacity does not spend its frame budget on shrubbery.
    */
   const MAX_SCENERY = 2600
   /** How many buildings may cast into the shadow map before the frame cost outgrows the depth cue. */
@@ -2539,12 +2540,12 @@ export function createDatabaseCityScene(
 
   /*
    * ----------------------------------------------------------------------------------------------
-   * Live vehicles.
+   * Moving workload vehicles.
    *
-   * One vehicle is one execution the engine reported — a row of `sys.dm_exec_requests` caught running,
-   * or an advance in a `sys.dm_exec_query_stats` execution counter.
-   * Which of the five shells it gets comes from the estimated bytes its plan moves; `cityVehicles.ts`
-   * owns that decision and the join behind it, and everything below is drawing.
+   * One vehicle is a measured share of a road's operation traffic, not one execution. Which shell it
+   * gets comes from the operation class the source reported: interactive work drives as a car,
+   * background work as freight, and unknown stays a cube off the ladder. `cityVehicles.ts` owns that
+   * decision and the roster behind it, and everything below is drawing.
    *
    * Three properties of this block are load-bearing and all three fail silently:
    *
@@ -2600,9 +2601,9 @@ export function createDatabaseCityScene(
     /*
      * A cube, and on purpose.
      *
-     * Every one of the four above says something with its length. An unknown has no length to say —
-     * `planDataVolume` is absent, which means the retained plans never stated both a row count and a
-     * row size, and that is not the same claim as "this query moves very little". Drawing it as any
+     * Every one of the four above says something with its class and length. An unknown has no class
+     * to say — the source did not split the operations into interactive or background, and that is
+     * not the same claim as "this traffic is a car" or "this traffic is freight". Drawing it as any
      * of the four would put it on a rung it was never measured onto, and drawing it at some size
      * between two rungs would invite a reader to interpolate. A shape whose length, width and height
      * are all equal has no length channel to read, which is the only honest shape available.
@@ -2614,34 +2615,34 @@ export function createDatabaseCityScene(
    * How fast a vehicle travels, in world units per second.
    *
    * Speed *is* a channel, which reverses what this comment said until recently. What it encodes is
-   * the family's mean duration per execution — a Query Store aggregate — scaled to ±15% around the
-   * base speed, so a historically quick query drives a quick car.
+   * the road's mean throttling seconds per operation, scaled to ±15% around the base speed, so heavily
+   * throttled operation traffic crawls and free-flowing traffic moves briskly.
    *
-   * The distinction that keeps this honest is between a *duration aggregate* and *progress*. SQL
-   * Server still reports nothing about how far through a running statement is, so a vehicle's pace is
-   * never a claim about the execution it represents; it is a claim about what executions of that
-   * query have typically cost, which is measured. It is also why the scale comes off the family and
-   * not off the live request's elapsed time: the live figure grows between samples, and a car whose
-   * speed changed under it would jump down the road on every tick.
+   * The distinction that keeps this honest is between a *throttling aggregate* and *progress*. Fabric
+   * reports operation-family totals, not how far through any one operation is, so a vehicle's pace is
+   * never a claim about individual progress; it is a claim about what the operations on that road
+   * were charged in throttling, which is measured. It is also why the scale comes off the road and
+   * not off a changing live figure, which would make a car jump down the road
+   * on every tick.
    *
-   * Size still carries the larger claim, and the ±15% band is deliberately too narrow to compete
-   * with it — see `VEHICLE_SPEED_VARIATION`.
+   * Class and length still carry the larger claim, and the ±15% band is deliberately too narrow to
+   * compete with them — see `VEHICLE_SPEED_VARIATION`.
    *
    * The numbers themselves live in `cityVehicles.ts` beside {@link travelledFraction}, because the
-   * roster has to know them too: they are what decide when a finished car has reached the end of its
-   * road and can leave the map. Two copies would drift, and the symptom would be cars vanishing early
-   * or lingering — neither of which looks like a bug in a constant.
+   * roster has to know them too: they are what decide where each lapping car sits on its road. Two
+   * copies would drift, and the symptom would be cars jumping or bunching — neither of which looks
+   * like a bug in a constant.
    */
 
   /**
    * The shortest a bicycle may be allowed to get on screen, in CSS pixels.
    *
    * Framed on a whole city, 1.77 m projects to well under a pixel and the smallest class simply
-   * vanishes — and an empty street is *already* meaningful here (nothing was sampled on it), so a
+   * vanishes — and an empty street is *already* meaningful here (no vehicles were honestly placed on it), so a
    * vehicle that disappears through being small tells the reader something false.
    *
    * 16 rather than the 7 this started at, because "does not vanish" turned out to be a much weaker
-   * requirement than "can be recognised". Measured against a 60-object database at whole-city
+   * requirement than "can be recognised". Measured against a 60-item capacity at whole-city
    * framing (1032x900 canvas, fov 46, ~1495 units out), 7 px put a bicycle at 5.7 px and a car at
    * 13.4 px on screen — a smudge two or three pixels wide, which is why the authored shells were
    * reported as "just blocks" even though the kit had loaded and every model was drawing correctly.
@@ -2656,7 +2657,7 @@ export function createDatabaseCityScene(
    * **This number and {@link VEHICLE_MIN_PX} have to move together.** {@link labelScreenScale}
    * returns `min(maxGrowth, minimumPx / projected)`, so whichever term is smaller is the only one
    * that has any effect and raising the other alone changes nothing at all. Which term binds depends
-   * on how far out the camera is, so both framings have to be checked: on a small database the
+   * on how far out the camera is, so both framings have to be checked: on a small capacity the
    * camera is close, `minimumPx / projected` is small, and the floor binds; on a large one the
    * camera pulls back until that ratio exceeds the cap, and from there the cap alone sets the size.
    * A change that raised only the floor would therefore be invisible on exactly the big cities where
@@ -2731,8 +2732,8 @@ export function createDatabaseCityScene(
          * The kit did not load, or this is the unknown class, which has no authored shell.
          *
          * Either way a box at the class's real dimensions keeps the ladder intact, which matters far
-         * more than the silhouette: the reader is being told how much data a query moves, and a
-         * plain box of the right length says that as well as a modelled truck does.
+         * more than the silhouette: the reader is being told which operation class this traffic
+         * belongs to, and a plain box of the right length says that as well as a modelled truck does.
          */
         const size = VEHICLE_SIZE[klass]
         const geometry = track(new THREE.BoxGeometry(size.width, size.height, size.length))
@@ -2779,15 +2780,15 @@ export function createDatabaseCityScene(
    * ----------------------------------------------------------------------------------------------
    * Paint.
    *
-   * Each live vehicle's body is tinted from a hash of its id, so half a dozen requests on one street
+   * Each workload vehicle's body is tinted from a hash of its id, so half a dozen vehicles on one street
    * read as half a dozen vehicles rather than one shell drawn six times. `vehiclePaintHue` in
    * `cityVehicles.ts` owns the hash and explains why it is a hash; the two constants below are the
    * whole of the appearance decision.
    *
-   * Saturation and lightness are fixed for every vehicle, and that is the point. Length is the only
-   * measured channel on this map, and a colour that also varied in depth or brightness would read as
-   * a second one. Holding both flat leaves hue saying exactly one thing — *which* request this is —
-   * and nothing about how big it is. It also keeps every vehicle equally bright, so paint can never
+   * Saturation and lightness are fixed for every vehicle, and that is the point. Class is the only
+   * semantic channel on this map, and a colour that also varied in depth or brightness would read as
+   * a second one. Holding both flat leaves hue saying exactly one thing — *which* vehicle this is —
+   * and nothing about what kind of work it carries. It also keeps every vehicle equally bright, so paint can never
    * be the reason one of them is harder to see than its neighbour.
    *
    * Three things about how this reaches the GPU, each of which fails silently:
@@ -2802,8 +2803,8 @@ export function createDatabaseCityScene(
    * 2. **The body role only.** Glass, trim and metal keep their authored materials, so a painted car
    *    still reads as a car with windows rather than a solid lozenge. `unknown` is left alone
    *    entirely — it draws with `materials.vehicleUnknown`, which this never touches — because
-   *    "the retained plans never stated a volume" has to stay visibly off the ladder, and a painted
-   *    unknown is just one more car.
+   *    "the source did not state a class" has to stay visibly off the ladder, and a painted unknown
+   *    is just one more car.
    * 3. **White in map mode.** `instanceColor` *multiplies* the material colour, and map mode inverts
    *    the vehicle ladder to a dark ink so it survives on a light basemap. A hue multiplied into
    *    that ink is near-black, not colour. White is the identity, so a printed basemap comes out
@@ -2843,7 +2844,7 @@ export function createDatabaseCityScene(
   /*
    * The light trail behind a moving vehicle.
    *
-   * A car appearing in the live list is the one moment on this map that is worth catching out of the
+   * A vehicle appearing on a measured road is the one moment on this map that is worth catching out of the
    * corner of an eye, and a 4 m shell a few pixels long on a whole-city framing does not catch one.
    * The trail is what makes the arrival legible: a short ribbon along the road the car has just
    * covered, brightest at the bumper and fading to nothing behind it, plus a brief flare over the
@@ -2851,15 +2852,15 @@ export function createDatabaseCityScene(
    *
    * What it is, precisely: **the last stretch of road that vehicle covered**, drawn at the same
    * magnification as the shell in front of it and so about six car-lengths long at any zoom. That is
-   * a statement about the drawing, not about the query. It is not exhaust, not throughput, not
+   * a statement about the drawing, not about the operation. It is not exhaust, not throughput, not
    * progress; a longer trail means the car has been on screen long enough to have one, and nothing
    * else. The length is fixed for every class for the same reason the speed is — see `VEHICLE_SPEED`
    * — so the ribbon never becomes a second, contradictory size channel.
    *
    * Three constraints shape the implementation, and all three are load-bearing:
    *
-   * - **It must not touch the shadow map.** The vehicle loop runs for as long as anything is
-   *   executing on the instance, so anything it dirties per frame is dirtied indefinitely. The mesh
+   * - **It must not touch the shadow map.** The vehicle loop runs for as long as operation traffic is
+   *   moving on the capacity, so anything it dirties per frame is dirtied indefinitely. The mesh
    *   neither casts nor receives, exactly like the vehicles it follows, and nothing here sets
    *   `needsUpdate`. See `shadowInvalidation.test.ts`.
    * - **It is one mesh, allocated once.** A mesh per vehicle would add up to 120 draw calls and 120
@@ -2899,10 +2900,10 @@ export function createDatabaseCityScene(
    * ribbon was sized for exactly one of the five rungs and wrong for the other four in both
    * directions. It read worst at the bottom, which is also where most of the traffic is: a bicycle is
    * 0.52 m wide and 1.77 m long, so its wake was **3.6x wider than the bike** and half again wider
-   * than the bike was *long*. Measured at whole-city framing on a 60-object database (magnify 12.7),
-   * that is a 15.4 px-wide ribbon trailing a 4.2 px-wide, 14.3 px-long shell — which is not a wake,
-   * it is a smudge with a speck at the front of it. And 71% of the vehicles on that database are
-   * bicycles, so it was the common case rather than an edge one.
+   * than the bike was *long*. Measured at whole-city framing on the 60-object SQLSimCity case that
+   * exposed this (magnify 12.7), that is a 15.4 px-wide ribbon trailing a 4.2 px-wide, 14.3 px-long
+   * shell — which is not a wake, it is a smudge with a speck at the front of it. And 71% of the
+   * vehicles in that measurement were bicycles, so it was the common case rather than an edge one.
    *
    * Deriving it from {@link VEHICLE_SIZE} rather than restating a number is the same lesson the trail
    * *height* taught one screen up: two independent literals is what lets a ribbon and the thing it
@@ -2916,7 +2917,7 @@ export function createDatabaseCityScene(
    *
    * Deliberately *not* floored at a minimum width. A floor is what {@link VEHICLE_MIN_PX} does for
    * the shells, and it is right there because a vehicle that vanishes tells the reader something
-   * false — an empty street already means "nothing was sampled here". A trail carries no such
+   * false — an empty street already means "no vehicle was honestly placed here". A trail carries no such
    * meaning on its own, and a floor would flatten the bottom of exactly the ladder this restores. The
    * narrowest case stays legible anyway because the ribbon is long: at the cap, a bicycle's wake is
    * about a pixel across and some 330 world units back, and a one-pixel streak that long is not
@@ -3006,7 +3007,7 @@ export function createDatabaseCityScene(
    * Rewrites the trail ribbon for every moving vehicle.
    *
    * Returns the number of vertices written, which bounds the draw. Stopped vehicles get nothing: a
-   * blocked request is not moving, so there is no recent road behind it to draw and a trail there
+   * stopped vehicle is not moving, so there is no recent road behind it to draw and a trail there
    * would read as motion that is not happening.
    */
   function writeTrails(seconds: number, magnify: number): number {
@@ -3641,14 +3642,14 @@ export function createDatabaseCityScene(
   }
 
   /**
-   * Washes each schema's neighbourhood over the ground it claimed.
+   * Washes each workspace's neighbourhood over the ground it claimed.
    *
    * One quad per claimed block rather than one bounding rectangle: territories are grown, so their
    * real shape is ragged, and a bounding box would paint over the neighbours either side of an
    * L-shaped one. Drawn at low opacity under the roads, so it tints the land without hiding what is
    * on it — the same way a basemap shades a district behind its streets rather than in front of them.
    *
-   * Facilities are not washed. They belong to the whole city rather than to any schema, and a tinted
+   * Facilities are not washed. They belong to the whole city rather than to any workspace, and a tinted
    * plate under one would say it belonged to the neighbourhood that happens to surround it.
    */
   function buildDistricts(cityPlan: CityPlan) {
@@ -3696,8 +3697,8 @@ export function createDatabaseCityScene(
 
   /** Places a label on the pavement in front of a building, in world space so it never rotates with the lot. */
   function addBuildingLabel(object: CapacityCityItem, lot: CityLot) {
-    // Larger tables are lettered larger, so their names survive to a wider zoom than a small
-    // table's. The height is kept on the sprite because that is what the legibility test reads.
+    // Taller buildings are lettered larger, so their names survive to a wider zoom than a short
+    // building's. The height is kept on the sprite because that is what the legibility test reads.
     const worldHeight = buildingLabelWorldHeight(lot.height)
     const sprite = labelFactory.make(buildingLabelText(object.name), {
       variant: 'building',
@@ -3715,30 +3716,30 @@ export function createDatabaseCityScene(
     clearGroup(buildingLabelGroup)
     buildingTops.clear()
     pickable.length = 0
-    // Every building in a schema takes the same hue, which is what makes a neighbourhood read as one
+    // Every building in a workspace takes the same hue, which is what makes a neighbourhood read as one
     // place from the air rather than as a run of unrelated blocks that happen to be adjacent.
     const tints = new Map<string, number>(
       cityPlan.districts.map(district => [district.districtId, neighborhoodTint(district.neighborhoodOrdinal)]),
     )
     /*
-     * Weathering is per object, not a city-wide wash.
+     * Weathering is per item, not a city-wide wash.
      *
-     * Staleness is measured per object, so a single flag would weather buildings whose statistics
-     * were rebuilt an hour ago just because some other table's were not — which reads as a claim
+     * Staleness is measured per item, so a single flag would weather buildings whose evidence was
+     * refreshed a moment ago just because some other item's was not — which reads as a claim
      * about those buildings that the evidence does not make.
      *
      * Three parts of the building change together — facade, glazing and trim — because a single
-     * colour blend on the body alone was measured against a real instance and could not be seen.
+     * colour blend on the body alone was measured against a real capacity and could not be seen.
      * See the weathering block in `cityBuildings.ts` for what each cue is doing.
      */
     const weathered = (itemId: string): boolean => staleStatsObjectIds.has(itemId)
     /*
      * Shadow casting is capped rather than universal.
      *
-     * Every caster is another draw of the whole building into the depth map, so a ten-thousand-table
-     * instance would spend its entire frame budget rendering the scene twice. Casters are taken from
-     * the front of the object list, which the planner has already ordered deterministically, so the
-     * same database always casts the same shadows. Everything still *receives* shadow, which is where
+     * Every caster is another draw of the whole building into the depth map, so a ten-thousand-item
+     * capacity would spend its entire frame budget rendering the scene twice. Casters are taken from
+     * the front of the item list, which the planner has already ordered deterministically, so the
+     * same capacity always casts the same shadows. Everything still *receives* shadow, which is where
      * most of the depth cue actually comes from.
      */
     const casters = Math.min(objects.length, MAX_SHADOW_CASTERS)
@@ -3841,10 +3842,11 @@ export function createDatabaseCityScene(
   /**
    * Draws the workload's traffic on the streets that carry it.
    *
-   * One ribbon per street, not one per query, all at the same {@link ROAD_WIDTH}. Colour is the
-   * whole story: it comes from the waiting those executions carried, so a dark-red street is one the
-   * workload waits on — which is the thing you want to see standing back from a city. Executions no
-   * longer change the width; they are still reported on the street and in the evidence tables.
+   * One ribbon per street, not one per operation family, all at the same {@link ROAD_WIDTH}. Colour
+   * is the whole story: it comes from the throttling those operations carried, so a dark-red street
+   * is one whose work is held at a throttle gate — which is the thing you want to see standing back
+   * from a city. Operation counts no longer change the width; they are still reported on the street
+   * and in the evidence tables.
    */
   function buildTraffic(traffic: WorkloadTraffic) {
     clearGroup(trafficGroup)
@@ -3919,13 +3921,13 @@ export function createDatabaseCityScene(
     roadPaths.clear()
 
     // Busiest first, so the heaviest traffic keeps the centre line and the light roads move aside.
-    // Every ribbon is the same width now, so executions do the ordering they used to do by proxy.
+    // Every ribbon is the same width now, so operations do the ordering they used to do by proxy.
     const ordered = [...roads].sort(
       (left, right) => (right.operations ?? -1) - (left.operations ?? -1) || left.routeId.localeCompare(right.routeId),
     )
     const corridorLanes = new Map<string, Set<number>>()
 
-    // Every on-map ribbon's path, spread across the network by loading the measured executions as
+    // Every on-map ribbon's path, spread across the network by loading the measured operations as
     // demand. This only chooses the way each ribbon takes; its width, colour and pattern are the
     // measured quantities set by `gradeRoads` and are applied unchanged below.
     const assigned = assignQueryRoutes(cityPlan, roads)
@@ -3934,7 +3936,7 @@ export function createDatabaseCityScene(
       const from = cityPlan.lots.get(road.fromItemId)
       if (!from) continue
       const to = cityPlan.lots.get(road.toId)
-      // A cross-database reference leaves the city on a ramp through the nearest boundary.
+      // An off-page route endpoint leaves the city on a ramp through the nearest boundary.
       const target = to ? { x: to.accessX, z: to.accessZ } : rampPoint(cityPlan, from)
       const spread = to ? assigned.get(road.routeId) : undefined
       const route = spread ?? streetRoute(cityPlan, { x: from.accessX, z: from.accessZ }, target)
@@ -4036,7 +4038,7 @@ export function createDatabaseCityScene(
 
       // Facilities are scattered across the grid now, so there is no civic rectangle to tint. Each
       // one carries its own pad instead, which keeps it legible as a place of its own rather than
-      // part of whichever schema's neighbourhood happens to surround it.
+      // part of whichever workspace's neighbourhood happens to surround it.
       addQuad(
         infrastructureGroup,
         site.radius * 2,
@@ -4227,7 +4229,7 @@ export function createDatabaseCityScene(
    * hold the apparent size steady, so a city framed at 2,400 units obliquely needs ~8,800 flat. A
    * 4,000-unit ceiling clamped that on arrival: the map snapped to roughly twice the intended
    * magnification and then refused to zoom back out, because it was already sitting on the stop.
-   * The same fixed ceiling also meant a large database could never be framed at all.
+   * The same fixed ceiling also meant a large capacity could never be framed at all.
    *
    * So both ends are expressed as things you can see instead. The far stop is a whole-city framing
    * plus headroom; the near stop is the distance at which about one lot fills the view. Both are
@@ -4433,7 +4435,7 @@ export function createDatabaseCityScene(
    *
    * `loadCityAssets` resolves a single `Promise.all` over the landmark and scenery kits, so any one
    * of them rejecting resolves the lot to null. Scenery is decoration — losing it costs the map some
-   * trees. Vehicles are a measurement of what is running right now, and a failure to fetch a bush
+   * trees. Vehicles are a measurement of operation traffic, and a failure to fetch a bush
    * must not be able to delete it. Keeping this on its own promise means the two failure modes stay
    * independent in the direction that matters.
    */
@@ -4474,7 +4476,7 @@ export function createDatabaseCityScene(
         framedOnce = true
         frame(cityBox())
       }
-      // A page that loaded more objects has more landmarks worth visiting, and the buildings the
+      // A page that loaded more items has more landmarks worth visiting, and the buildings the
       // tour was already touring may have moved.
       refreshTour()
       requestRender()
@@ -4568,10 +4570,10 @@ export function createDatabaseCityScene(
     setIncidents(markers) {
       currentIncidents = markers
       buildIncidents(markers)
-      // The pins just moved, and a blocked vehicle stops at its pin. Rebuilding the roster here is
+      // The pins just moved, and a rejection-stopped vehicle stops at its pin. Rebuilding the roster here is
       // what keeps the two the same measurement rather than two that happen to agree.
       refreshVehicles()
-      // Wreckage is placed at the deadlock pins, which the rebuild above just recomputed.
+      // Wreckage is placed at the rejection pins, which the rebuild above just recomputed.
       refreshDisasters()
       // A pin that was not there a moment ago is what the tour cuts away for.
       refreshTour()
@@ -4746,7 +4748,7 @@ export function createDatabaseCityScene(
 }
 
 
-/** Where a cross-database reference leaves the map: straight out through the nearest city edge. */
+/** Where an off-page route endpoint leaves the map: straight out through the nearest city edge. */
 function rampPoint(plan: CityPlan, from: CityLot): { x: number; z: number } {
   const { bounds } = plan
   const ramp = ARTERIAL_WIDTH * 1.5

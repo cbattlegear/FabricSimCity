@@ -5,7 +5,7 @@ import { searchAddressBook, type AddressEntry, type AddressKind } from './addres
 /**
  * The city's address book: one searchable list of everywhere you can go.
  *
- * Query families, tables and infrastructure facilities are three different kinds of thing, but they
+ * Operation families, items and infrastructure facilities are three different kinds of thing, but they
  * are all destinations on the same map, so they share one search box. Splitting them into three
  * lists would mean knowing which list a thing lives in before you could find it. They stay grouped
  * under headings so the kinds remain legible, and each entry shows its address, which is the whole
@@ -42,7 +42,7 @@ export function AddressBook({
   /*
    * Closed by default, and whichever rail region you open instead takes the room it gives up.
    *
-   * This directory is the retained view -- the families, tables and facilities the collector has
+   * This directory is the retained view -- the families, items and facilities the collector has
    * accumulated -- and the feed above it is what is happening right now. Only one of those two
    * changes while you watch it, so the rail defaults to the one that does. Measured at 1115x800 the
    * feed sat on its 162px floor in every state with the directory open, showing two rows of a log
@@ -80,8 +80,8 @@ export function AddressBook({
           <SearchField
             value={term}
             onChange={onTermChange}
-            label="Search queries, tables and infrastructure"
-            placeholder="Search queries, tables, infrastructure"
+            label="Search operation families, items and infrastructure"
+            placeholder="Search operation families, items, infrastructure"
           />
         </div>
 
@@ -89,7 +89,7 @@ export function AddressBook({
           {total === 0 ? (
             <p className="address-empty">
               {entries.length === 0
-                ? 'Nothing has been loaded for this database yet.'
+                ? 'Nothing has been loaded for this capacity yet.'
                 : `Nothing in this city matches “${term}”.`}
             </p>
           ) : (

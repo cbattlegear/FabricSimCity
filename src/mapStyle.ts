@@ -86,8 +86,8 @@ export const MAP_ROAD = {
 /**
  * Ground cover for every land-use class the terrain planner emits, in both drawings.
  *
- * None of this is measured. A block's land use is seeded from the database id, exactly like every
- * other piece of scenery, and says nothing whatsoever about the database. It exists because ~47% of
+ * None of this is measured. A block's land use is seeded from the capacity id, exactly like every
+ * other piece of scenery, and says nothing whatsoever about the capacity. It exists because ~47% of
  * blocks are deliberately empty, and blank white voids are the largest and least useful surface on
  * the map. The legend says so in as many words.
  */

@@ -2,9 +2,9 @@
  * Deterministic pseudo-randomness for city layout.
  *
  * "Randomly placed" and "stable" have to hold at the same time: a city should look like a city
- * rather than a spreadsheet, but a table must be on the same lot every time anyone opens the same
- * database, on any machine, in any browser, forever. So nothing here touches `Math.random()`.
- * Every draw comes from a small integer generator seeded from the database's own id, which makes
+ * rather than a spreadsheet, but an item must be on the same lot every time anyone opens the same
+ * capacity, on any machine, in any browser, forever. So nothing here touches `Math.random()`.
+ * Every draw comes from a small integer generator seeded from the capacity's own id, which makes
  * the scatter a pure function of identity.
  */
 

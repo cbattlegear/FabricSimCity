@@ -55,7 +55,7 @@ export interface Streamline {
    *
    * Carried because road hierarchy is assigned from it later: the long streamlines through the
    * middle of the map become the arterials. It is a position on the map and says nothing whatever
-   * about the database.
+   * about the capacity.
    */
   readonly centrality: number
 }

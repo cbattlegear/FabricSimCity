@@ -4,14 +4,14 @@ import { dashSpans, offsetPolyline, type DashPattern } from './cityRoads'
 /**
  * Turning a centreline into a drawn road.
  *
- * This is the one piece of geometry both map surfaces have to agree on. A road on the database city
- * and a road on the server atlas are the same object seen from two altitudes, and the thing that
- * makes either of them read as a road rather than as a line on a diagram is the pair of ribbons: a
- * wide casing underneath, a narrower fill on top. Drawn as a plain line — which is what the atlas did
- * — a road has no edge, no hierarchy and no figure against the paper, and the drawing stops being a
- * map.
+ * This is the one piece of geometry both map surfaces have to agree on. A road on the capacity city
+ * and a road on the capacity atlas are the same route geometry seen from two altitudes, and the
+ * thing that makes either of them read as a road rather than as a line on a diagram is the pair of
+ * ribbons: a wide casing underneath, a narrower fill on top. Drawn as a plain line — which is what
+ * the atlas did — a road has no edge, no hierarchy and no figure against the paper, and the drawing
+ * stops being a map.
  *
- * It lived inside the database city's scene until the atlas needed it. Nothing about it was ever
+ * It lived inside the capacity city's scene until the atlas needed it. Nothing about it was ever
  * specific to a city; it is a polyline, a width, and an optional dash.
  */
 

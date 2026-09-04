@@ -32,9 +32,9 @@ import { stableHash } from './atlasLayout'
  * structurally, London or Tokyo. Ring roads and radial arterials are not special-cased anywhere in
  * this codebase; they fall out of the field.
  *
- * Everything here is decoration. The field is seeded from the database id and nothing measured is
+ * Everything here is decoration. The field is seeded from the capacity id and nothing measured is
  * ever consulted, so the shape of a city is a pure function of its identity — but it is not, and
- * must never be read as, a statement about the database.
+ * must never be read as, a statement about the capacity.
  */
 
 /**
@@ -243,7 +243,7 @@ const FALLOFF_REACH_SQUARED = Math.log(1 / FALLOFF_EPSILON)
  * Sampling is the innermost loop of the whole generator: the tracer asks for a direction at every
  * step of every street, hundreds of thousands of times, and a large city carries a couple of hundred
  * district elements. Scanning them all per sample makes tracing cost districts × steps, which grows
- * with the *square* of the city — the exact shape of cost that made a 6000-table instance stutter.
+ * with the *square* of the city — the exact shape of cost that made a 6000-item capacity stutter.
  *
  * So each element is stamped into every cell of a uniform grid its reach touches, and a sample reads
  * back one cell. The stamping is in element order, so a cell's list is a subsequence of the full
@@ -459,7 +459,7 @@ const DISTRICTS_MIN = 7
  * to defeat the whole scheme: the point of scaling with area is to hold a district's *size* constant,
  * so a clamp that bites makes every district larger, and a district large enough is a city-wide
  * element again — which is precisely the bullseye the design goes to such lengths to avoid. A
- * six-thousand-table city wants about 126 districts, and a clamp of 40 gave it a nautilus wound
+ * six-thousand-item city wants about 126 districts, and a clamp of 40 gave it a nautilus wound
  * through the middle of the map.
  */
 const DISTRICTS_MAX = 260

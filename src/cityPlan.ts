@@ -37,11 +37,11 @@ import type { CapacityCityItem, CapacityCityWorkspace } from './capacityCityCont
  * generator seeded with the capacity's own id, so the same capacity produces byte-identical
  * placement on every load, in every browser, on every machine. Scatter is a look, not a lottery.
  *
- * Placement derives only from that seed and from the backend's stable layout ordinals
- * (`layout.neighborhoodOrdinal` / `layout.itemOrdinal`), never from the order rows happen to
- * arrive in. This preserves the architectural rule that city layout is deterministic and
- * independent of source row order, and it keeps a building on the same lot when a later bounded page
- * is appended.
+ * Placement derives only from that seed, from the backend's stable layout ordinals
+ * (`layout.neighborhoodOrdinal` / `layout.itemOrdinal`), and from deterministic item-id order inside a
+ * workspace — never from the order rows happen to arrive in. This preserves the architectural rule
+ * that city layout is deterministic and independent of source row order. Fabric item ids do not encode
+ * creation order, so the block-assignment comment below calls out the stability limit that leaves.
  *
  * Only building footprint and height carry a quantity claim, and neither is derived here: both come
  * from `capacityCity.ts` (`itemFootprint` from OneLake bytes, `itemHeight` from CU-seconds), which
@@ -57,7 +57,7 @@ import type { CapacityCityItem, CapacityCityWorkspace } from './capacityCityCont
  * nothing rather than a gap. `capacityCity.ts` settles that distinction; this file only consumes it.
  */
 
-/** Style family for a building. Selected from exact reserved page counts; never a quantity claim itself. */
+/** Style family for a building. Selected from exact OneLake byte thresholds; never a quantity claim itself. */
 export type BuildingArchetype =
   | 'house'
   | 'rowhouse'
@@ -74,7 +74,7 @@ export type BuildingArchetype =
  * These are the six classes {@link classifyRoads} derives from the street network's own shape: a
  * `motorway` is the edge the most through-routes lean on, a `service` road the least. The class
  * steers routing (a car prefers the faster road) and the carriageway a street is drawn with, and
- * nothing else — two roads carrying identical query traffic look identical whatever their class.
+ * nothing else — two roads carrying identical operation traffic look identical whatever their class.
  */
 export type StreetClass = RoadClass
 
@@ -148,7 +148,7 @@ export interface CityLot {
   /** Height from CU-seconds (`capacityCity.itemHeight`), or null when consumption is unknown. */
   readonly height: number | null
   readonly archetype: BuildingArchetype
-  /** Stable per-object seed for decorative variation only. */
+  /** Stable per-item seed for decorative variation only. */
   readonly seed: number
 }
 
@@ -201,7 +201,7 @@ export interface CityPlan {
    * Landform, water and land use.
    *
    * Entirely decorative and documented as such in `cityTerrain`. It is carried on the plan because
-   * every consumer that draws the ground needs it, not because it says anything about the database.
+   * every consumer that draws the ground needs it, not because it says anything about the capacity.
    */
   readonly terrain: CityTerrain
   /**
@@ -209,7 +209,7 @@ export interface CityPlan {
    *
    * Facilities are scattered across the grid rather than gathered into one civic quarter, because a
    * single infrastructure block turns into a corner of the map you look at once. Spread out, they
-   * become landmarks you navigate by — and a route to a table genuinely passes them.
+   * become landmarks you navigate by — and a route to an item genuinely passes them.
    */
   readonly facilities: ReadonlyMap<FacilityKind, FacilitySite>
   /**
@@ -232,10 +232,10 @@ export interface CityPlan {
   /**
    * The street graph the router and blocks were built from, and the road class of every edge.
    *
-   * Carried on the plan so query traffic can be *assigned* to the network — loaded route by route so
+   * Carried on the plan so operation traffic can be *assigned* to the network — loaded route by route so
    * congested streets push later journeys onto parallel ways — without rebuilding the graph the plan
    * already holds. Both are seed-derived scenery: assignment reads them to place ribbons and never
-   * writes back, so the same database always draws the same streets and the same road classes.
+   * writes back, so the same capacity always draws the same streets and the same road classes.
    */
   readonly graph: PlanarGraph
   readonly roadProperties: ReadonlyMap<number, RoadProperties>
@@ -289,7 +289,7 @@ export const CELLS_PER_BLOCK = BLOCK_COLS * BLOCK_ROWS
  * centre-line spacing was 2.2 cells an ordinary street at 15 was about a fifth of the gap between two
  * of them. {@link SEPARATION_PER_CELL} is now 1.5, so holding 15 would have handed a third of the
  * ground back to tarmac — and, because a block is dropped when it cannot stand its building clear of
- * the widest carriageway that fronts it, would have thinned the supply of blocks below one per table.
+ * the widest carriageway that fronts it, would have thinned the supply of blocks below one per item.
  * Ten and fifteen keep the old road-to-block proportion at the new spacing.
  */
 export const STREET_WIDTH = 10
@@ -334,7 +334,7 @@ export const ARCHETYPE_THRESHOLD_BYTES = {
  * At 2.2 the drawing was mostly ground. A traced face comes out at roughly 1.6 separations across
  * rather than one — the tracer only guarantees streamlines are *at least* a separation apart — and
  * {@link EDGE_SEPARATION_SCALE} widened everything outside the centre again. Measured over a
- * 120-object city the median block was 144 units across against a mean building of 15, so a building
+ * 120-item city the median block was 144 units across against a mean building of 15, so a building
  * covered **0.86% of its own block** and the city read as huts scattered on open moor.
  *
  * 1.5 is the tightest value that keeps the capacity filter's guarantee arithmetic rather than
@@ -355,7 +355,7 @@ const BLOCK_SETBACK = 5
  * The narrowest square a block must inscribe to survive planning, above the widest building.
  *
  * A block that cannot hold the widest footprint is dropped rather than kept and overhung, so a
- * building never spills into the carriageway around it. Floored so a database of only tiny tables
+ * building never spills into the carriageway around it. Floored so a capacity of only tiny items
  * still gets blocks with room to stand a building clear of its kerb.
  *
  * Capacity is measured on the *buildable* ring, which is already pulled {@link BLOCK_SETBACK} in off
@@ -374,53 +374,53 @@ const BLOCK_CAPACITY_HEADROOM = ARTERIAL_WIDTH - 2 * BLOCK_SETBACK
 const BLOCK_CAPACITY_FLOOR = 12
 
 /**
- * City radius per root object, in separations.
+ * City radius per root item, in separations.
  *
  * A disc of streets yields blocks in proportion to its area, so radius grows with the square root of
- * the object count and the block count grows about linearly with it — the role the grid side played.
+ * the item count and the block count grows about linearly with it — the role the grid side played.
  *
  * The constant is the number of blocks each building gets to choose from, and it has to be comfortably
- * above one. Below one there is not enough ground in the city for its own tables: the surplus
+ * above one. Below one there is not enough ground in the city for its own items: the surplus
  * buildings are put on a block another building already holds, and because a lot is placed at its
- * block's centroid they are drawn at exactly the same point, one hidden inside the other. A table you
- * cannot see is a table whose evidence is lost.
+ * block's centroid they are drawn at exactly the same point, one hidden inside the other. An item you
+ * cannot see is an item whose evidence is lost.
  *
  * Measured rather than estimated, because the estimate was wrong. A traced block was assumed to cost
  * about 1.34 separations squared, which put this at two blocks per building. Counting the blocks that
  * actually survive — after the water, the civic facilities and every face too small to hold the widest
  * building are taken out — gives **0.63 blocks per building at 1.0**, so more than a third of every
  * city was stacked invisibly. 1.75 is the value that estimate was originally reduced *from*, and it
- * measures at about 1.9 blocks per building: enough ground for every table, with roughly a third of
- * the city left open for the parks, yards and vacant parcels the map draws — and for the tables the
- * database has not created yet.
+ * measures at about 1.9 blocks per building: enough ground for every item, with roughly a third of
+ * the city left open for the parks, yards and vacant parcels the map draws — and for the items the
+ * capacity has not gained yet.
  */
 const RADIUS_PER_ROOT_OBJECT = 1.75
 
 /**
- * Smallest city radius, in separations, so a handful of tables still gets a walkable town.
+ * Smallest city radius, in separations, so a handful of items still gets a walkable town.
  *
- * This has to sit above what the per-object term would give a small database, because the blocks a
- * disc yields fall off with its area while the buildings that must stand on them do not: a nine-table
- * city that loses a third of its ground has fewer blocks left than tables, and two buildings end up
- * sharing a block. Nine separations keeps every city up to about seventy-five objects at least as
- * roomy as it was when the per-object term was larger.
+ * This has to sit above what the per-item term would give a small capacity, because the blocks a
+ * disc yields fall off with its area while the buildings that must stand on them do not: a nine-item
+ * city that loses a third of its ground has fewer blocks left than items, and two buildings end up
+ * sharing a block. Nine separations keeps every city up to about seventy-five items at least as
+ * roomy as it was when the per-item term was larger.
  */
 const RADIUS_FLOOR_STEPS = 9
 
 /**
- * How much a database has to grow before its city is rebuilt.
+ * How much a capacity has to grow before its city is rebuilt.
  *
- * The street network is traced from the database's shape, so any quantity that feeds it makes the
- * whole city a function of that quantity: at 1.0 the radius moved on every single added table, and
- * past the point where the floor above stops winning, adding one table retraced every street and
+ * The street network is traced from the capacity's shape, so any quantity that feeds it makes the
+ * whole city a function of that quantity: at 1.0 the radius moved on every single added item, and
+ * past the point where the floor above stops winning, adding one item retraced every street and
  * moved every building (#47). A city you have to relearn on every deployment is not a map.
  *
- * So the city is not sized from the database, it is sized from the next rung of a ladder above it,
- * and it only rebuilds when the database climbs a rung. A quarter more room per rung is small enough
- * that the city is never wildly bigger than the database in it, and large enough that a database has
- * to grow by a quarter -- not by one table -- before the ground moves.
+ * So the city is not sized from the exact capacity, it is sized from the next rung of a ladder above
+ * it, and it only rebuilds when the capacity climbs a rung. A quarter more room per rung is small
+ * enough that the city is never wildly bigger than the capacity in it, and large enough that a
+ * capacity has to grow by a quarter -- not by one item -- before the ground moves.
  *
- * This is the whole trade. Growth cannot be both continuous and stable: either every table redraws
+ * This is the whole trade. Growth cannot be both continuous and stable: either every item redraws
  * the map a little, or the map holds still and redraws rarely. A map has to hold still.
  */
 const GROWTH_RATIO = 1.25
@@ -428,7 +428,7 @@ const GROWTH_RATIO = 1.25
 /**
  * The rung every city starts on, matched to {@link RADIUS_FLOOR_STEPS}.
  *
- * The radius floor holds every city below about twenty objects at one size, so the ladder starts
+ * The radius floor holds every city below about twenty items at one size, so the ladder starts
  * exactly where the floor stops winning. Below this the city was already stable and the ladder would
  * only make it coarser for nothing.
  */
@@ -437,27 +437,27 @@ const GROWTH_FLOOR_OBJECTS = 20
 /**
  * The rung a *neighbourhood* starts on.
  *
- * Far lower than the city's, because a schema's share of the ground is relative and quantising
- * destroys exactly that. A floor of eight would hand a one-table schema and an eight-table schema
- * identical territory, which reads as a map that has stopped telling the truth about which schema is
- * the large one — worse than the churn it prevents. Three is low enough that schemas stay ranked by
- * size from the smallest database upward, and still spares a schema of one or two tables from having
- * its borders redrawn the moment it gains another.
+ * Far lower than the city's, because a workspace's share of the ground is relative and quantising
+ * destroys exactly that. A floor of eight would hand a one-item workspace and an eight-item workspace
+ * identical territory, which reads as a map that has stopped telling the truth about which workspace
+ * is the large one — worse than the churn it prevents. Three is low enough that workspaces stay
+ * ranked by size from the smallest capacity upward, and still spares a workspace of one or two items
+ * from having its borders redrawn the moment it gains another.
  */
 const GROWTH_FLOOR_SCHEMA = 3
 
 /**
- * How much a *schema* has to grow before its neighbourhood is widened.
+ * How much a *workspace* has to grow before its neighbourhood is widened.
  *
  * Coarser than the city's ladder, because a neighbourhood is the one thing the city ladder cannot
- * hold still on its own: widening one schema's territory hands it blocks that were vacant, and the
+ * hold still on its own: widening one workspace's territory hands it blocks that were vacant, and the
  * buildings already inside it choose their ground from the blocks the neighbourhood holds. So a
- * schema crossing a rung shuffles that schema — never the city, and never another schema, now that
- * quotas no longer divide a fixed pool between them.
+ * workspace crossing a rung shuffles that workspace — never the city, and never another workspace,
+ * now that quotas no longer divide a fixed pool between them.
  *
- * At half again per rung, and with half again more blocks than tables in each neighbourhood, a schema
- * runs out of vacant plots at about the same time it earns more ground. That is the point: the
- * territory is widened when the schema genuinely needs it rather than on a fixed cadence.
+ * At half again per rung, and with half again more blocks than items in each neighbourhood, a
+ * workspace runs out of vacant plots at about the same time it earns more ground. That is the point:
+ * the territory is widened when the workspace genuinely needs it rather than on a fixed cadence.
  */
 const SCHEMA_GROWTH_RATIO = 1.5
 
@@ -465,9 +465,10 @@ const SCHEMA_GROWTH_RATIO = 1.5
  * How coarsely the largest building's footprint is read, in world units.
  *
  * The block spacing and the minimum block size are both derived from the widest building, so reading
- * that width exactly makes the entire street network a function of the largest table's page count --
- * and tables gain pages constantly. Rounding up to a step of this size means the city holds still
- * unless its largest table grows by roughly forty times, which is a genuinely different database.
+ * that width exactly makes the entire street network a function of the largest item's OneLake byte
+ * footprint -- and items gain storage constantly. Rounding up to a step of this size means the city
+ * holds still unless its largest item crosses several footprint doublings, which is a genuinely
+ * different capacity.
  *
  * Only ever rounded *up*: a block must still hold the widest building it is asked to hold.
  */
@@ -477,7 +478,7 @@ const FOOTPRINT_STEP = 4
  * The next rung at or above `count`.
  *
  * Walked rather than solved with a logarithm, because `Math.log` lands a hair either side of an
- * exact rung and would put a database sitting precisely on one onto the rung above -- so the city
+ * exact rung and would put a capacity sitting precisely on one onto the rung above -- so the city
  * would depend on floating-point noise. The `+ 1` floor keeps the ladder strictly increasing at
  * small counts where a quarter of the value rounds to nothing.
  */
@@ -491,10 +492,10 @@ export function plannedCount(count: number, floor: number, ratio: number = GROWT
 /**
  * The widest building the city is planned around, rounded up to {@link FOOTPRINT_STEP}.
  *
- * Read from the loaded objects, because no page states the widest object in the database. Rounding
- * absorbs both a table gaining pages and most of the difference between one page and the next; a
- * later page carrying a far larger table than anything seen so far can still step the city up a
- * rung, which is the honest limit of planning from a bounded page.
+ * Read from the loaded items, because no page states the widest item in the capacity. Rounding
+ * absorbs both an item gaining storage and most of the difference between one page and the next; a
+ * later page carrying a far larger item than anything seen so far can still step the city up a rung,
+ * which is the honest limit of planning from a bounded page.
  */
 function plannedFootprint(objects: readonly CapacityCityItem[]): number {
   return Math.max(
@@ -520,14 +521,14 @@ const EDGE_SEPARATION_SCALE = 1.35
 /** Shortest streamline kept, in separations: anything shorter is tracing noise, not a street. */
 const MIN_STREAMLINE_STEPS = 1.45
 
-/** Ceiling on streamlines traced, so a very large database still plans in bounded time. */
+/** Ceiling on streamlines traced, so a very large capacity still plans in bounded time. */
 const MAX_STREAMLINES = 900
 
 /**
  * Graph welding, snapping and stub tolerances, as fractions of the local separation.
  *
  * The snap radius is how far a dangling streamline end may reach to join the network. A tight reach
- * left whole clusters of streets stranded as separate islands, and a route between two tables that
+ * left whole clusters of streets stranded as separate islands, and a route between two items that
  * happened to land on different islands then silently failed; a radius wider than the separation lets
  * a stray end find the nearest way instead. The stub minimum is the shortest cul-de-sac worth keeping:
  * below it a stub is a streamline that petered out in open ground rather than a street anyone drives,
@@ -545,10 +546,10 @@ const STUB_FRACTION = 0.6
  * plan an organic street pattern. The protected length and block area are in separations, so the
  * breaker leaves the arterials and the large blocks alone whatever the city's scale.
  *
- * The block-area ceiling is generous because a city sized to hold all its tables is a wide disc of
+ * The block-area ceiling is generous because a city sized to hold all its items is a wide disc of
  * streets, and its interior blocks are correspondingly large. A tighter ceiling protected those
  * interior crossings from the breaker, so the four-way share climbed back toward a grid's as the
- * database grew; at twelve squared-separations the breaker reaches them and the junction mix holds
+ * capacity grew; at twelve squared-separations the breaker reaches them and the junction mix holds
  * steady at roughly a quarter crossroads whatever the city's size.
  */
 const CROSSROAD_TARGET_SHARE = 0.24
@@ -562,7 +563,7 @@ const CROSSING_MAX_BLOCK_AREA_STEPS = 12
  *
  * Decoration, keyed on the decorative road class rather than on anything a street carries: `tertiary`
  * is the ordinary {@link STREET_WIDTH} street, a `motorway` the widest and a `service` road the
- * narrowest. Two roads with the same class are drawn identically whatever their query traffic, which
+ * narrowest. Two roads with the same class are drawn identically whatever their operation traffic, which
  * lives in the separate traffic ribbon.
  */
 const CARRIAGEWAY_WIDTH: Readonly<Record<RoadClass, number>> = {
@@ -626,18 +627,18 @@ export function planCity(
   /*
    * How many buildings the city has to have room for.
    *
-   * Read from the database's own total, never from what has loaded. This is the one number the
+   * Read from the capacity's own total, never from what has loaded. This is the one number the
    * street network is sized from, so it has to be the same on every page or the streets retrace
    * themselves under a city that is already on screen — and every building moves with them.
    *
    * Slot indices deliberately do not get a vote. A slot is a global ordinal handed out by the
-   * collector, and the connected collector numbers objects across the whole database rather than
-   * within a schema, so adding a schema's offset to one produces indices far past the object count
+   * collector, and the connected collector numbers items across the whole capacity rather than
+   * within a workspace, so adding a workspace's offset to one produces indices far past the item count
    * — and different ones on every page. Letting those size the city is what made a second page
    * redraw it. Nothing needs them to: nothing in the plan reads a collector ordinal any more.
    *
-   * Then rounded up to the next rung of the growth ladder, so the city is sized from a database of
-   * roughly this shape rather than from this exact database. That is what lets a table be added
+   * Then rounded up to the next rung of the growth ladder, so the city is sized from a capacity of
+   * roughly this shape rather than from this exact capacity. That is what lets an item be added
    * without the streets being retraced under the buildings already standing on them.
    */
   const capacity = plannedCount(
@@ -649,13 +650,13 @@ export function planCity(
    * The street network is settled before anything is placed on it.
    *
    * The field, its streamlines, the graph they weave and the blocks that graph cuts depend only on
-   * the seed and two scalars read from the database's shape: how wide a block must be to hold the
-   * largest building, and how far the city has to reach to hold them all. Nothing about which objects
+   * the seed and two scalars read from the capacity's shape: how wide a block must be to hold the
+   * largest building, and how far the city has to reach to hold them all. Nothing about which items
    * have loaded touches them, which is what keeps an appended page from redrawing the streets under a
    * city that is already on screen.
    *
    * Because that is true, it is also worth not doing twice. A city is replanned every time a page of
-   * objects arrives — up to eighty times while a large database loads — and tracing the network is by
+   * items arrives — up to eighty times while a large capacity loads — and tracing the network is by
    * far the most expensive thing here. Keyed on exactly the inputs it reads, the groundwork is traced
    * on the first page and reused by every page after it, so the stability the ladder promises is what
    * makes the loading fast rather than something paid for with time.
@@ -697,7 +698,7 @@ export function planCity(
   placeBuildings(ordered, territories, neighbourhoodPool, lots, occupied)
 
   // Districts describe territory as block references, the shape `describeDistricts` and every chrome
-  // consumer already read, so the schema-to-ground mapping survives the move off the lattice.
+  // consumer already read, so the workspace-to-ground mapping survives the move off the lattice.
   const territoryRefs = new Map<string, BlockRef[]>()
   for (const [workspaceId, claimed] of territories) {
     territoryRefs.set(workspaceId, claimed.map(block => ({ col: block.id, row: 0 })))
@@ -733,11 +734,11 @@ export function planCity(
 }
 
 /**
- * Everything about a city that the database's *contents* cannot change: the land, the streets, the
+ * Everything about a city that the capacity's *loaded items* cannot change: the land, the streets, the
  * blocks they cut and the neighbourhood each block belongs to.
  *
  * Held separately from the plan because it is both the expensive half and the stable half. Which
- * objects have loaded decides only which of these blocks has a building on it.
+ * items have loaded decides only which of these blocks has a building on it.
  */
 interface CityGroundwork {
   readonly landform: Landform
@@ -758,8 +759,8 @@ interface CityGroundwork {
 /**
  * How many traced networks to keep.
  *
- * One would serve a single database loading its pages, which is the case that matters. A few more
- * costs little and covers moving between databases in the atlas and back, where retracing a city the
+ * One would serve a single capacity loading its pages, which is the case that matters. A few more
+ * costs little and covers moving between capacities in the atlas and back, where retracing a city the
  * user has already seen is the most visible stall there is.
  */
 const GROUNDWORK_CACHE_LIMIT = 4
@@ -854,7 +855,7 @@ function traceGroundwork(
 
   // Tracing can leave a pocket of streets with no way in, where one district's grain turns hard
   // against its neighbour's and the seam gap outruns the snap radius. The pocket draws -- its streets
-  // and blocks are all there -- but a query ribbon that has to reach into it silently fails to route.
+  // and blocks are all there -- but an operation ribbon that has to reach into it silently fails to route.
   // connectComponents joins the pieces with the few shortest link roads that close the gaps. It runs
   // after the faces are taken, because a link may cross an edge and a face walk needs planarity, and
   // before anything routes, because the router and the traffic assignment need one navigable city. It
@@ -963,31 +964,35 @@ function streetId(edgeId: number): string {
 }
 
 /**
- * Stands every loaded object on a block: its own schema's ground where it has some, the city-wide
- * fallback where a schema was walled in before it claimed any.
+ * Stands every loaded item on a block: its own workspace's ground where it has some, the city-wide
+ * fallback where a workspace was walled in before it claimed any.
  *
- * Two orders meet here, and both are append-only, which is the whole of the stability guarantee.
+ * Two deterministic orders meet here. One is a real stability guarantee; the other is only the order
+ * the current code can derive from the evidence Fabric gives it.
  *
- * Tables arrive in **catalogue order** — by the object id SQL Server issues increasing, compared as a
- * number rather than as text, so a table created later sorts after every table already there. Blocks
- * are offered in the order their neighbourhood **claimed** them, which region growth produces outward
- * from the neighbourhood's seed. Each arrival takes the first block still vacant.
+ * Items are sorted by their Fabric item id, with digit runs compared numerically rather than as text.
+ * In SQLSimCity this was catalogue order: SQL Server object ids increased as objects were created, so
+ * a later table sorted after every table already there. Fabric item ids are GUIDs, and GUIDs state no
+ * creation order. The sort here is therefore deterministic item-id order, not a promise that a newly
+ * created Fabric item sorts last. Blocks are offered in the order their neighbourhood **claimed**
+ * them, which region growth produces outward from the neighbourhood's seed. Each item takes the first
+ * block still vacant.
  *
- * So a building's block depends only on the tables that arrived before it — never on how many blocks
- * the neighbourhood has, nor on how large its neighbours are. A new table can only take ground no
- * earlier table wanted, and widening a neighbourhood only appends blocks past everything already
- * spoken for. The old rule ranked tables by footprint and blocks by capacity, which had exactly the
- * opposite property: a new large table sorted to the front and renumbered every building behind it
- * (#47, #50).
+ * So a building's block depends only on the items whose ids sort before it — never on how many blocks
+ * the neighbourhood has, nor on how large its neighbours are. Widening a neighbourhood only appends
+ * blocks past everything already spoken for, but a new Fabric item whose GUID sorts earlier can still
+ * move later buildings. The old SQLSimCity rule ranked tables by footprint and blocks by capacity,
+ * which had exactly the opposite property: a new large table sorted to the front and renumbered every
+ * building behind it (#47, #50).
  *
- * Matching a big table to a roomy block is given up to get this, and costs nothing that was load
+ * Matching a big item to a roomy block is given up to get this, and costs nothing that was load
  * bearing: planning already drops every block too small to hold the widest building in the city, so
  * no building can overhang its kerb wherever it stands. What is gained instead is a city that reads
- * as one: claim order runs outward from each neighbourhood's centre, so the oldest tables hold the
- * old town and each new one takes a plot further out, the way a town actually grows.
+ * as one: claim order runs outward from each neighbourhood's centre, so the first items in the
+ * current deterministic order hold the old town and later ones take plots further out.
  *
- * Dropping a table is the one case that still moves buildings: its block falls vacant and the next
- * table along takes it. Only tables *after* the dropped one can move, never the ones before.
+ * Dropping an item is one case that still moves buildings: its block falls vacant and the next item
+ * along takes it. Only items *after* the dropped one in this order can move, never the ones before.
  */
 function placeBuildings(
   ordered: readonly CapacityCityItem[],
@@ -996,23 +1001,23 @@ function placeBuildings(
   lots: Map<string, CityLot>,
   occupied: Set<number>,
 ): void {
-  const bySchema = new Map<string, CapacityCityItem[]>()
+  const byWorkspace = new Map<string, CapacityCityItem[]>()
   for (const object of ordered) {
-    const list = bySchema.get(object.workspaceId)
+    const list = byWorkspace.get(object.workspaceId)
     if (list) list.push(object)
-    else bySchema.set(object.workspaceId, [object])
+    else byWorkspace.set(object.workspaceId, [object])
   }
 
-  for (const [workspaceId, members] of bySchema) {
+  for (const [workspaceId, members] of byWorkspace) {
     const claimed = territories.get(workspaceId) ?? []
     const ground = claimed.length > 0 ? claimed : fallback
     if (ground.length === 0) continue
     const arrivals = [...members].sort((left, right) =>
-      compareCreationOrder(left.itemId, right.itemId),
+      compareItemIdOrder(left.itemId, right.itemId),
     )
 
     arrivals.forEach((object, index) => {
-      // A neighbourhood with fewer blocks than tables cannot give every building its own ground.
+      // A neighbourhood with fewer blocks than items cannot give every building its own ground.
       // Doubling up keeps the building on the map, which matters more than it standing alone —
       // planning sizes the city so this does not arise, but a building is never dropped.
       const block = index < ground.length ? ground[index] : ground[index % ground.length]
@@ -1082,7 +1087,7 @@ export function streetPath(plan: CityPlan, fromId: string, toId: string): string
 /**
  * World-space polyline that visits every waypoint in order, following streets the whole way.
  *
- * Used by shared wait lanes, which must thread through each object a multi-object query family names
+ * Used by shared wait lanes, which must thread through each item a multi-item operation family names
  * before running out to its facility: one continuous path, drawn once, so the family's whole wait
  * total is never duplicated across the buildings it touches. Consecutive duplicate points are
  * dropped where one leg ends exactly where the next begins, so the joins are seamless.
@@ -1182,13 +1187,13 @@ export interface BlockRef {
 }
 
 /**
- * Stable object order: neighbourhood, then object ordinal, then catalogue order. Never row arrival
- * order.
+ * Stable item order: neighbourhood, then item ordinal, then deterministic item-id order. Never row
+ * arrival order.
  *
- * The last tiebreak compares object ids as {@link compareCreationOrder} does, numerically rather than
- * as text, for the same reason placement does: it only fires when two objects report the same
- * ordinal, and when it fires it should fall back on which table came first, not on which id happens
- * to start with a smaller digit.
+ * The last tiebreak compares item ids as {@link compareItemIdOrder} does, with digit runs ordered by
+ * numeric value rather than by character. It only fires when two items report the same ordinal. Fabric
+ * GUIDs do not encode creation order, so this is a deterministic fallback and not a claim that the
+ * earlier-created item comes first.
  */
 function orderObjects(objects: readonly CapacityCityItem[]): CapacityCityItem[] {
   return [...objects].sort(
@@ -1196,7 +1201,7 @@ function orderObjects(objects: readonly CapacityCityItem[]): CapacityCityItem[] 
       left.layout.neighborhoodOrdinal - right.layout.neighborhoodOrdinal ||
       compareOrdinal(left.workspaceId, right.workspaceId) ||
       left.layout.itemOrdinal - right.layout.itemOrdinal ||
-      compareCreationOrder(left.itemId, right.itemId),
+      compareItemIdOrder(left.itemId, right.itemId),
   )
 }
 
@@ -1206,7 +1211,7 @@ function parseCount(value: string | number | null | undefined): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null
 }
 
-/** How many objects a schema holds in total, and where it sits in neighbourhood order. */
+/** How many items a workspace holds in total, and where it sits in neighbourhood order. */
 interface SchemaSize {
   readonly workspaceId: string
   readonly ordinal: number
@@ -1214,16 +1219,16 @@ interface SchemaSize {
 }
 
 /**
- * Every schema's full object count, in neighbourhood order.
+ * Every workspace's full item count, in neighbourhood order.
  *
- * Taken from the page's complete schema list when there is one, because that count is the same on
+ * Taken from the page's complete workspace list when there is one, because that count is the same on
  * every page and is therefore what a neighbourhood can be sized from without moving as pages load.
- * A schema the list did not mention, or one whose count is short of what actually arrived, is
- * widened to fit rather than allowed to overlap the next schema.
+ * A workspace the list did not mention, or one whose count is short of what actually arrived, is
+ * widened to fit rather than allowed to overlap the next workspace.
  *
- * Widened by *counting what arrived*, never by reading an object's collector ordinal as though it
- * were a position within its schema. The connected collector numbers objects across the whole
- * database, so that reading turned the five-hundredth object into a schema of five hundred and one
+ * Widened by *counting what arrived*, never by reading an item's collector ordinal as though it
+ * were a position within its workspace. The connected collector numbers items across the whole
+ * capacity, so that reading turned the five-hundredth item into a workspace of five hundred and one
  * and handed its neighbourhood a fifth of the city (#49).
  */
 function schemaSizes(
@@ -1261,14 +1266,14 @@ function schemaSizes(
 }
 
 /**
- * Ground a neighbourhood claims per object it holds.
+ * Ground a neighbourhood claims per item it holds.
  *
  * Above 1 so a neighbourhood has gaps in it — front gardens, corner parks, the odd empty plot, and
- * the ground the next table to be created will stand on — which is what stops a schema reading as a
+ * the ground the next item to be created will stand on — which is what stops a workspace reading as a
  * solid slab of buildings. Below {@link RADIUS_PER_ROOT_OBJECT}, which is the airiness of the city as
  * a whole, because the difference between the two is the open country that separates one
- * neighbourhood from the next. That separation is the whole point: a schema you can see the edge of
- * is a schema you can navigate by.
+ * neighbourhood from the next. That separation is the whole point: a workspace you can see the edge of
+ * is a workspace you can navigate by.
  */
 const NEIGHBORHOOD_SLACK = 1.5
 
@@ -1287,10 +1292,10 @@ const NEIGHBORHOOD_WOBBLE = 1.7
  *
  * Lives here, three-free, because two very different renderers have to agree on it: the 3D scene
  * bakes it into building materials and ground washes, and the sidebar paints the same swatch beside
- * the schema name. A second copy of this formula would be a colour legend that quietly lies.
+ * the workspace name. A second copy of this formula would be a colour legend that quietly lies.
  *
- * Hues step by the golden angle, so consecutive schemas land far apart on the wheel and the tenth
- * schema is still distinguishable from the first. That also makes the sequence ordinal-only: it is a
+ * Hues step by the golden angle, so consecutive workspaces land far apart on the wheel and the tenth
+ * workspace is still distinguishable from the first. That also makes the sequence ordinal-only: it is a
  * set of names, not a scale, and no hue is higher, hotter or busier than another.
  */
 export function neighborhoodHue(ordinal: number): number {
@@ -1303,30 +1308,30 @@ export function neighborhoodSwatch(ordinal: number): string {
 }
 
 /**
- * Divides the buildable blocks into one contiguous territory per schema.
+ * Divides the buildable blocks into one contiguous territory per workspace.
  *
- * This is the answer to "where does a table stand". Blocks used to be handed out from a single
- * city-wide shuffle, which put a schema's tables everywhere and nowhere: the map had no districts you
- * could point at, so the only way to see that two tables were related was to read both their labels.
+ * This is the answer to "where does an item stand". Blocks used to be handed out from a single
+ * city-wide shuffle, which put a workspace's items everywhere and nowhere: the map had no districts
+ * you could point at, so the only way to see that two items were related was to read both their labels.
  *
- * Each schema is given a seed block, spread as far from the other seeds as the city allows, and the
- * territories then grow outward in rounds, each schema in turn claiming the nearest unclaimed block to
+ * Each workspace is given a seed block, spread as far from the other seeds as the city allows, and the
+ * territories then grow outward in rounds, each workspace in turn claiming the nearest unclaimed block to
  * the ground it already holds. Growing towards its own region keeps a territory one connected place —
- * the hard requirement that a schema's tables sit together on the map — and because "nearest" is
+ * the hard requirement that a workspace's items sit together on the map — and because "nearest" is
  * measured in world space rather than over the block adjacency graph, a region can still step across a
  * bridge in the street network. That matters: an organic network is full of dead-end lanes and
  * three-way forks, so the faces either side of them touch only at a point and the dual graph they
  * form is not one connected mesh but a handful of islands. Growth constrained to dual neighbours would
- * strand a schema on whichever island its seed fell on and pile every one of its tables onto those
+ * strand a workspace on whichever island its seed fell on and pile every one of its items onto those
  * few blocks; growth by proximity flows over the gaps and fills the district it was meant to.
  *
- * A schema still growing after its neighbours have met their quota keeps taking ground, so a schema
- * with ten times the tables gets roughly ten times the territory, and the borders land wherever two
- * regions grow into each other. Only when every block in the city is claimed does a schema stop short,
- * and then its objects share out the blocks it did claim.
+ * A workspace still growing after its neighbours have met their quota keeps taking ground, so a
+ * workspace with ten times the items gets roughly ten times the territory, and the borders land
+ * wherever two regions grow into each other. Only when every block in the city is claimed does a
+ * workspace stop short, and then its items share out the blocks it did claim.
  *
- * Crucially the partition is a function of the seed, the block field and the *full* schema counts,
- * never of which objects have loaded. Appending a page fills a neighbourhood in; it never redraws one.
+ * Crucially the partition is a function of the seed, the block field and the *full* workspace counts,
+ * never of which items have loaded. Appending a page fills a neighbourhood in; it never redraws one.
  */
 function planNeighborhoods(
   pool: readonly CityBlock[],
@@ -1348,8 +1353,8 @@ function planNeighborhoods(
   const quotas = neighborhoodQuotas(schemas, pool.length)
   const seeds = spreadSeeds(pool, schemas.length, seed)
 
-  // Each schema keeps, for every still-unclaimed block, the distance from that block to the nearest
-  // block the schema already owns, in separations. Growing to the block with the smallest such
+  // Each workspace keeps, for every still-unclaimed block, the distance from that block to the nearest
+  // block the workspace already owns, in separations. Growing to the block with the smallest such
   // distance is region growth by proximity, and holding the distances rather than recomputing them
   // keeps the whole partition to a handful of passes over the pool.
   const claimedBy = new Set<number>()
@@ -1373,8 +1378,8 @@ function planNeighborhoods(
     if (block && !claimedBy.has(block.id)) claim(index, block)
   })
 
-  // Rounds rather than one schema at a time: growing a schema to its full quota before the next one
-  // starts would let the first schema reach clear across the map and hem the other seeds in.
+  // Rounds rather than one workspace at a time: growing a workspace to its full quota before the next
+  // one starts would let the first workspace reach clear across the map and hem the other seeds in.
   let growing = true
   while (growing) {
     growing = false
@@ -1393,17 +1398,17 @@ function planNeighborhoods(
 /**
  * How many blocks each neighbourhood may claim.
  *
- * Sized from the schema's own rung of the growth ladder rather than its exact object count, for the
- * same reason the city is: a border that moves whenever one table is added takes every building near
- * it along. A neighbourhood therefore claims ground for a schema of roughly its size, which leaves
- * it visibly empty plots to grow into — that is what a new table moves onto.
+ * Sized from the workspace's own rung of the growth ladder rather than its exact item count, for the
+ * same reason the city is: a border that moves whenever one item is added takes every building near it
+ * along. A neighbourhood therefore claims ground for a workspace of roughly its size, which leaves it
+ * visibly empty plots to grow into — that is what a new item moves onto.
  *
- * Deliberately *not* scaled to fit the ground available. Dividing a fixed pool between the schemas
- * would make every schema's quota a function of every other schema's size, so one schema gaining a
- * table would narrow all its neighbours — the coupling that redrew a city on a single `CREATE TABLE`.
- * Each schema instead asks for what it needs on its own, and the region growth that honours these
- * quotas simply stops when the ground runs out: schemas claim in interleaved rounds, so a starved
- * city still shares its blocks out rather than letting the first schema take everything.
+ * Deliberately *not* scaled to fit the ground available. Dividing a fixed pool between the workspaces
+ * would make every workspace's quota a function of every other workspace's size, so one workspace
+ * gaining an item would narrow all its neighbours — the coupling that redrew a city on a single new
+ * item. Each workspace instead asks for what it needs on its own, and the region growth that honours
+ * these quotas simply stops when the ground runs out: workspaces claim in interleaved rounds, so a
+ * starved city still shares its blocks out rather than letting the first workspace take everything.
  */
 function neighborhoodQuotas(schemas: readonly SchemaSize[], available: number): number[] {
   if (schemas.length === 0) return []
@@ -1419,7 +1424,7 @@ function neighborhoodQuotas(schemas: readonly SchemaSize[], available: number): 
 }
 
 /**
- * Picks one starting block per schema, each as far as possible from the ones already picked.
+ * Picks one starting block per workspace, each as far as possible from the ones already picked.
  *
  * Farthest-point sampling rather than random blocks: two seeds that land next to each other produce
  * two neighbourhoods that spend the whole growth fighting over the same ground and end up interleaved,
@@ -1452,16 +1457,16 @@ function spreadSeeds(pool: readonly CityBlock[], count: number, seed: string): C
     seeds.push(best)
   }
 
-  // More schemas than blocks is degenerate but must not throw; the extras share a seed and fall back
+  // More workspaces than blocks is degenerate but must not throw; the extras share a seed and fall back
   // to the city-wide pool when they find no ground of their own.
   while (seeds.length < count) seeds.push(pool[seeds.length % pool.length])
   return seeds
 }
 
 /**
- * The unclaimed block nearest the region a schema already holds, with its seeded handicap added.
+ * The unclaimed block nearest the region a workspace already holds, with its seeded handicap added.
  *
- * `nearest` only ever holds unclaimed blocks — a block is dropped from every schema's map the moment
+ * `nearest` only ever holds unclaimed blocks — a block is dropped from every workspace's map the moment
  * it is claimed — so this is just the minimum of each candidate's distance plus its wobble. The wobble
  * ragged-edges the border by a block or two; ties fall to the lowest block id so the partition never
  * depends on Map iteration order.
@@ -1513,7 +1518,7 @@ function placeFacilities(pool: readonly CityBlock[], minSpacing: number, numeric
  *
  * Starts at the first block and repeatedly takes whichever free block is furthest from everything
  * already taken, ties broken by block id. The spacing rule is relaxed rather than enforced — a tiny
- * database still gets a laid-out city, just a tighter one — and the result is still entirely
+ * capacity still gets a laid-out city, just a tighter one — and the result is still entirely
  * determined by the block field, so it never varies between loads.
  */
 function spreadFacilities(blocks: readonly CityBlock[]): CityBlock[] {
@@ -1569,10 +1574,10 @@ function facilitySites(blocks: readonly CityBlock[], cell: number): Map<Facility
 }
 
 /**
- * Describes each schema's neighbourhood: the ground it claimed and the buildings standing on it.
+ * Describes each workspace's neighbourhood: the ground it claimed and the buildings standing on it.
  *
  * The box is the territory rather than the bounding box of whatever has loaded, so framing "show me
- * this schema" holds still as pages arrive and always frames the same place. Only schemas with a
+ * this workspace" holds still as pages arrive and always frames the same place. Only workspaces with a
  * building on the map get a district, because a district is what the map labels and there is nothing
  * to point at otherwise.
  */
@@ -1631,7 +1636,7 @@ function describeDistricts(
         centerX: (box.minX + box.maxX) / 2,
         centerZ: (box.minZ + box.maxZ) / 2,
         // The name goes over the middle of the claimed ground, not the middle of the box: an L-shaped
-        // territory's box centre can easily be a block the schema does not own. The mean of the
+        // territory's box centre can easily be a block the workspace does not own. The mean of the
         // claimed blocks has the same flaw for a crescent — its middle is the bay — so the label is
         // then pulled to the owned block nearest that mean, which is on the neighbourhood by
         // construction whatever shape it grew into.
@@ -1667,11 +1672,11 @@ function average(values: readonly number[]): number {
 }
 
 /**
- * A single city-wide lot size, set by the widest building the database asks for.
+ * A single city-wide lot size, set by the widest building the capacity asks for.
  *
  * This is the scale the whole city is derived from: the streamline separation is a multiple of it, so
  * even the tightest block still clears the largest footprint. The logarithmic footprint mapping bounds
- * the spread, so one very large table cannot make the whole city sparse.
+ * the spread, so one very large item cannot make the whole city sparse.
  */
 function chooseCell(widest: number): number {
   return Math.max(MIN_CELL, Math.ceil(widest + LOT_MARGIN))
@@ -1758,24 +1763,22 @@ function compareOrdinal(left: string, right: string): number {
 }
 
 /**
- * Catalogue order for two object ids: the order SQL Server created the objects in, as closely as an
- * id can state it.
+ * Deterministic natural order for two Fabric item ids.
  *
- * Not a string comparison, which is the trap. An object id carries its `sys.objects.object_id`
- * unpadded — `sales/object/9`, `sales/object/1234567` — and compared as text the shorter number wins
- * on its first digit, so object 9 sorts *after* object 1234567. Placement hands out blocks in this
- * order and relies on a newly created table sorting last; under a plain string compare a new table
- * would land in the middle instead and push every building after it along, which is the whole bug
- * this order exists to fix (#47, #50).
+ * Not plain string comparison, which is still a trap for synthetic and fixture ids. An id may carry an
+ * unpadded run — `workspace/item/9`, `workspace/item/1234567` — and compared as text the first digit
+ * decides it, so item 9 sorts *after* item 1234567. Placement hands out blocks in this order; a plain
+ * string compare would make those fixture ids land in the middle and push every building after them
+ * along, which is the SQLSimCity bug this order originally existed to fix (#47, #50).
  *
  * So runs of digits are compared as numbers and everything else as text. Runs are compared by length
  * before value, which orders them numerically without parsing an id of any length into a number.
  *
- * This is catalogue order, not a timeline: SQL Server allocates object ids increasing, but it can
- * reuse the id of a dropped object, so two tables' relative order is a fact about the catalogue
- * rather than a claim about when they were created.
+ * This is not catalogue order for Fabric. Real Fabric item ids are GUIDs, and a GUID does not state
+ * creation order. For those ids this is only a stable total order, not evidence that one item existed
+ * before another.
  */
-function compareCreationOrder(left: string, right: string): number {
+function compareItemIdOrder(left: string, right: string): number {
   let leftAt = 0
   let rightAt = 0
   while (leftAt < left.length && rightAt < right.length) {
@@ -1789,7 +1792,7 @@ function compareCreationOrder(left: string, right: string): number {
       continue
     }
 
-    // Leading zeros carry no value, so `object/007` and `object/7` compare equal here and fall
+    // Leading zeros carry no value, so `item/007` and `item/7` compare equal here and fall
     // through to the length tiebreak below rather than ordering by how they were written.
     let leftStart = leftAt
     let rightStart = rightAt

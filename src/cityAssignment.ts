@@ -1,9 +1,9 @@
 /**
- * Loading the street network with the workload the database actually ran.
+ * Loading the street network with the workload the capacity actually ran.
  *
  * Every other module here builds a city from a seed. This one is the point where measurement meets
- * it: a query family is a journey repeated `executionCount` times between the tables it touches, and
- * those tables are buildings at known addresses. So the workload is a genuine origin–destination
+ * it: an operation family is a journey repeated `operationCount` times between the items it touches,
+ * and those items are buildings at known addresses. So the workload is a genuine origin–destination
  * matrix, and the streets can be loaded with it the way a transport model loads a real network.
  *
  * Why bother, when a single shortest path per family would draw a line just the same? Because a city
@@ -17,18 +17,18 @@
  *
  * ## What is evidence here and what is not
  *
- * The demand is measured. `executionCount` and the object ids a family touched come from Query Store
+ * The demand is measured. `operationCount` and the item ids a family touched come from Capacity Metrics
  * and are used verbatim — nothing is scaled, smoothed or invented, and a family with no executions
  * generates no trips.
  *
- * The *path* is not evidence and never was. SQL Server has no streets; the route drawn between two
+ * The *path* is not evidence and never was. Fabric capacities have no streets; the route drawn between two
  * buildings has always been a cartographic convenience, and this module only makes it a better one.
  * Congestion, capacity and travel time are all properties of the invented network, so they can never
- * be mistaken for a measurement of the database. The legend says so.
+ * be mistaken for a measurement of the capacity. The legend says so.
  *
  * Street geometry and road class stay purely seed-derived and are *not* touched by the assignment.
  * That is deliberate: a city whose roads changed width every time the workload shifted would be a
- * different city on every refresh, and the promise that the same database always draws the same map
+ * different city on every refresh, and the promise that the same capacity always draws the same map
  * would be gone. Traffic moves over the city; it does not rebuild it.
  */
 
@@ -38,7 +38,7 @@ import { RoadRouter } from './cityRouting'
 
 /** One journey repeated `trips` times, between two junctions of the street network. */
 export interface TravelDemand {
-  /** Caller's identifier for the journey — a query family id — echoed back on the assigned trip. */
+  /** Caller's identifier for the journey — an operation family id — echoed back on the assigned trip. */
   readonly key: string
   readonly fromNodeId: number
   readonly toNodeId: number
@@ -84,9 +84,9 @@ export interface AssignmentOptions {
    *
    * Arbitrary, like every other absolute in the network — only the ratio between this and the
    * workload's trip counts matters, and the module normalises the workload before using it, so a
-   * database running a million queries an hour congests its streets exactly as much as one running a
-   * thousand. What would be dishonest is the reverse: letting raw execution counts decide how red
-   * the map looks, so that a busy server appeared permanently gridlocked and a quiet one empty.
+   * capacity running a million operations an hour congests its streets exactly as much as one running
+   * a thousand. What would be dishonest is the reverse: letting raw operation counts decide how red
+   * the map looks, so that a busy capacity appeared permanently gridlocked and a quiet one empty.
    */
   readonly capacityPerLane?: number
   /**
@@ -175,7 +175,7 @@ export function assignTraffic(
   /*
    * Trips are normalised to a unit total before they are loaded. Capacity is in arbitrary units and
    * the workload is not, so without this the amount of congestion on the map would be decided by how
-   * busy the server happens to be — which is a real measurement, but not one about the streets, and
+   * busy the capacity happens to be — which is a real measurement, but not one about the streets, and
    * showing it as gridlock would be inventing a meaning it does not have.
    */
   let totalTrips = 0
@@ -264,13 +264,13 @@ export function assignTraffic(
 }
 
 /**
- * Turn a query family into the journeys it implies.
+ * Turn an operation family into the journeys it implies.
  *
- * A family that touches three tables is not three journeys from a depot — it is a tour, and the
- * traffic it puts on the streets is the traffic of going between those tables. Consecutive pairs
- * along the tour are used rather than every pair, because a family touching twelve tables would
+ * A family that touches three items is not three journeys from a depot — it is a tour, and the
+ * traffic it puts on the streets is the traffic of going between those items. Consecutive pairs
+ * along the tour are used rather than every pair, because a family touching twelve items would
  * otherwise generate sixty-six journeys and swamp a family touching two, purely from the shape of
- * the query rather than from how often it ran.
+ * the operation rather than from how often it ran.
  *
  * The tour is walked in the order the caller supplied the addresses. Callers should sort that order
  * however the map already groups buildings — by neighbourhood, say — so the tour reads as one trip

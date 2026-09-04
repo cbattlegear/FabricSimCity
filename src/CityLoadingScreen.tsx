@@ -4,14 +4,14 @@ import { CITY_LOADING_SAYINGS, loadingProgress, sayingReel } from './cityLoading
 /**
  * The screen the city is built behind.
  *
- * Laying out a large database is genuinely slow — a four thousand table city traces tens of
+ * Laying out a large capacity is genuinely slow — a four thousand item city traces tens of
  * thousands of streets before it can draw one building — and the honest answer to slow work is to
  * say what is happening rather than to hold a blank stage. So this borrows the shape of the loading
  * screen every city builder has used since 1993: a bar, a count, and a line of deadpan nonsense
  * about work nobody is doing.
  *
  * The division of labour matters more here than it looks. The bar and the count are **measured** —
- * objects actually fetched, against the total the API reported — and the sayings are **invented**,
+ * items actually fetched, against the total the API reported — and the sayings are **invented**,
  * and the screen says which is which. That is the same boundary the map itself draws between a
  * building's footprint and the colour of its roof, applied to the one screen that has the least to
  * report and therefore the most room to bluff.
@@ -34,9 +34,9 @@ export function CityLoadingScreen({
   title: string
   /** A truthful sentence about the current stage. Changes rarely, so it is safe to announce. */
   status: string
-  /** Objects fetched so far, or `null` before the first page lands. */
+  /** Items fetched so far, or `null` before the first page lands. */
   loaded: number | null
-  /** Objects the database reports in total, or `null` while that is still unknown. */
+  /** Items the capacity reports in total, or `null` while that is still unknown. */
   total: number | null
   sayings?: readonly string[]
   random?: () => number
@@ -54,7 +54,7 @@ export function CityLoadingScreen({
   const percent = progress === null ? null : Math.round(progress * 100)
   const counted =
     loaded !== null && total !== null && total > 0
-      ? `${loaded.toLocaleString()} of ${total.toLocaleString()} objects surveyed`
+      ? `${loaded.toLocaleString()} of ${total.toLocaleString()} items surveyed`
       : null
 
   return (

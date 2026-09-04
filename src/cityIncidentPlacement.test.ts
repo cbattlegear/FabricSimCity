@@ -172,13 +172,13 @@ describe('placeIncident', () => {
   })
 
   /**
-   * The weaker rungs have to disclaim. Rung two chose its road by captured executions rather than by
-   * what is blocking, and rung three is not on a road at all -- if the popup does not say so, a
-   * reader takes both for the measured placement rung one makes.
+   * The weaker rungs have to disclaim. Rung two chose its road by captured operations rather than by
+   * what was actually throttled, and rung three is not on a road at all -- if the popup does not say
+   * so, a reader takes both for the measured placement rung one makes.
    */
-  it('says out loud when the pin is not on the road the block is on', () => {
+  it('says out loud when the pin is not on the road the overload is on', () => {
     expect(placeIncident('a', [], frontage, [road({ routeId: 'r:ab' })])?.rationale)
-      .toMatch(/not by what is blocking/i)
+      .toMatch(/not by what was throttled/i)
     expect(placeIncident('z', [], frontage, [road({ routeId: 'r:ab' })])?.rationale)
       .toMatch(/no road is being claimed/i)
   })

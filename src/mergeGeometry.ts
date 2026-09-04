@@ -1,14 +1,14 @@
 import * as THREE from 'three'
 
 /**
- * Minimal position/normal/uv geometry merge, shared by the database city and the server atlas.
+ * Minimal position/normal/uv geometry merge, shared by the capacity city and the capacity atlas.
  *
  * three's own `BufferGeometryUtils` is an examples module. Both scenes build every geometry they
  * merge themselves -- always `BoxGeometry`/`ConeGeometry`/`CylinderGeometry` with the same attribute
  * set -- so a merge that handles exactly that keeps the bundle dependent only on the core package.
  *
  * Merging matters for more than bundle size. A city drawn as one mesh is one draw call and one
- * raycast target, which is what makes a hundred database cities in the atlas affordable at all.
+ * raycast target, which is what makes a hundred capacity cities in the atlas affordable at all.
  */
 export function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const nonIndexed = parts.map(part => (part.index ? part.toNonIndexed() : part.clone()))

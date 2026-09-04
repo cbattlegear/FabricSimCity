@@ -22,7 +22,7 @@ import { MapTray, useNarrowViewport, type TrayItem } from './MapTray'
 
 /**
  * The selected-route highlight is retired on Fabric — its SQL builder parsed showplan XML to infer a
- * path between objects, and Capacity Metrics attributes each operation to an item directly, so there
+ * path between items, and Capacity Metrics attributes each operation to an item directly, so there
  * is no lineage path to reconstruct. The scene keeps the drawing plumbing behind this minimal shape
  * (mirrored from `CapacityCityScene.ts`) so a future Fabric lineage-route source can feed it.
  */
@@ -39,10 +39,10 @@ type Props = {
    */
   cityPlan: CityPlan
   /**
-   * The database this city is of, used only as the opening caption of a guided tour.
+   * The capacity this city is of, used only as the opening caption of a guided tour.
    *
    * Optional because a tour is optional: a viewport rendered without it still tours, and the
-   * establishing shot simply says "this database" rather than naming it.
+   * establishing shot simply leaves the capacity unnamed rather than inventing one.
    */
   cityName?: string
   /** Flat basemap or oblique 3D city. Both draw the same plan and the same measurements. */
@@ -59,9 +59,9 @@ type Props = {
   onSelectRoad: (routeId: string | null) => void
   /** One-line description per road id, shown when a road is hovered. */
   roadLabels: ReadonlyMap<string, string>
-  /** Rendered into the top-left HUD slot: the object and plan finder. */
+  /** Rendered into the top-left HUD slot: the item and operation finder. */
   finder?: ReactNode
-  /** Rendered into the right HUD slot: object detail or turn-by-turn directions. */
+  /** Rendered into the right HUD slot: item detail or turn-by-turn directions. */
   panel?: ReactNode
   liveStatus?: ReactNode
   /**
@@ -74,15 +74,14 @@ type Props = {
   feedState?: LiveFeedConnectionState
   /** Live blocking pins projected from the snapshot. Drawn in both view modes. */
   incidents?: IncidentProjection
-  /** Objects whose statistics are stale enough to weather their building facades. */
+  /** Items whose telemetry evidence is stale enough to weather their building facades. */
   staleStatsObjectIds?: readonly string[]
   /**
-   * Objects the workload is burning through — a large missing index the optimiser asked for, on a
-   * plan that actually runs. Drawn as a roof fire.
+   * Items whose work was refused by a measured rejection count. Drawn as a roof fire.
    */
   fireObjectIds?: readonly string[]
   /**
-   * Objects a plan is spilling or scanning around, which the city draws as a burst water main at
+   * Items carrying source-reported degrading warnings, which the city draws as a burst water main at
    * the kerb rather than on the building, because the damage is to the street the traffic uses.
    */
   waterMainObjectIds?: readonly string[]
@@ -98,10 +97,10 @@ type Props = {
   openIncidentId?: string | null
   onOpenIncident?: (id: string | null) => void
   /**
-   * A request to centre the camera on one object before its popup opens.
+   * A request to centre the camera on one item before its popup opens.
    *
    * A marker behind the camera projects to nothing, so a sidebar entry that only set the id would
-   * open a popup nobody sees. The nonce is what makes asking twice for the same object work.
+   * open a popup nobody sees. The nonce is what makes asking twice for the same item work.
    */
   incidentFocus?: { itemId: string; nonce: number } | null
 }
@@ -159,7 +158,7 @@ const LAYER_LABELS: ReadonlyArray<readonly [keyof CityLayerToggles, string, stri
   [
     'labels',
     'Labels',
-    'Neighbourhood names are grown as you zoom out so they stay readable; where two would be written over each other, the smaller neighbourhood’s name is dropped. Building and facility names appear as you zoom in — largest tables first — rather than being drawn too small to read.',
+    'Neighbourhood names are grown as you zoom out so they stay readable; where two would be written over each other, the smaller neighbourhood’s name is dropped. Building and facility names appear as you zoom in — largest items first — rather than being drawn too small to read.',
   ],
 ]
 
@@ -285,7 +284,7 @@ export function CapacityCityViewport({
   useEffect(() => sceneRef.current?.setIncidents(incidents?.markers ?? []), [incidents])
   useEffect(() => sceneRef.current?.setTour(touring, cityName), [touring, cityName])
 
-  // Opening a pin from the sidebar centres its object first, because a marker outside the frustum
+  // Opening a pin from the sidebar centres its item first, because a marker outside the frustum
   // projects to nothing and would open a popup the reader never sees.
   useEffect(() => {
     if (incidentFocus) sceneRef.current?.focusObject(incidentFocus.itemId)
@@ -456,7 +455,7 @@ export function CapacityCityViewport({
   )
 
   const trayItems: TrayItem[] = [
-    // Search leads on a phone: it is the fastest way to reach an object when the map is small.
+    // Search leads on a phone: it is the fastest way to reach an item when the map is small.
     ...(narrow && finder ? [{ id: 'find', label: 'Find', glyph: '⌕', content: finder }] : []),
     {
       id: 'layers',
@@ -496,9 +495,9 @@ export function CapacityCityViewport({
     return (
       <div className="city-viewport is-unavailable">
         <div className="viewport-fallback" role="status">
-          <strong>Database city viewport unavailable</strong>
+          <strong>Capacity city viewport unavailable</strong>
           <span>
-            WebGL could not start. The complete object, route, and evidence tables remain available
+            WebGL could not start. The complete item, route, and evidence tables remain available
             below and carry exactly the same facts as the map.
           </span>
         </div>
@@ -513,7 +512,7 @@ export function CapacityCityViewport({
         className="city-canvas"
         tabIndex={0}
         role="application"
-        aria-label="Database city map. Drag to orbit, right-drag to pan, scroll to zoom."
+        aria-label="Capacity city map. Drag to orbit, right-drag to pan, scroll to zoom."
         aria-describedby="city-map-help"
         onKeyDown={onKeyDown}
       />

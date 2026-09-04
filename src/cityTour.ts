@@ -1,11 +1,11 @@
 /**
  * The guided tour: the city driving itself, for a screen nobody is holding.
  *
- * A database city is built to be flown around, and the whole of it is only ever seen by someone who
+ * A capacity city is built to be flown around, and the whole of it is only ever seen by someone who
  * knows to go looking. This module plans an itinerary out of what the page already measured — the
- * buildings carrying the most attributed CPU, the streets graded slowest, the pins where something
+ * buildings carrying the most attributed CU, the streets graded slowest, the pins where something
  * is blocked right now — and walks a camera through it indefinitely, so a map left up on a wall
- * reports the instance instead of sitting on one establishing shot forever.
+ * reports the capacity instead of sitting on one establishing shot forever.
  *
  * Everything here is arithmetic over plain records: no THREE, no canvas, no clock. The scene owns
  * the camera and the frame loop and asks this module two questions — "where should the tour go" and
@@ -15,8 +15,8 @@
  * Two rules the captions live under, because a tour is narration and narration is where a map is
  * most tempted to editorialise:
  *
- * - **A caption states the measurement that earned the stop, never a verdict.** "Largest by reserved
- *   pages" is a fact about this page's own ordering. "Problem table" is a diagnosis nothing here is
+ * - **A caption states the measurement that earned the stop, never a verdict.** "Largest by OneLake
+ *   storage" is a fact about this page's own ordering. "Problem item" is a diagnosis nothing here is
  *   entitled to make.
  * - **An absence is captioned as an absence.** A street with no captured wait evidence says so
  *   rather than being described as free-flowing, which is a different claim and one the data does
@@ -126,7 +126,7 @@ const BUCKET_LIMITS = { incident: 4, landmark: 6, street: 5, neighbourhood: 3 } 
 const ROTATION: readonly TourStopKind[] = ['incident', 'landmark', 'street', 'landmark', 'neighbourhood', 'street']
 
 export interface TourFacts {
-  /** The database's own name, for the establishing shot's caption. */
+  /** The capacity's own name, for the establishing shot's caption. */
   readonly cityName: string
   readonly bounds: {
     readonly minX: number
@@ -141,7 +141,7 @@ export interface TourFacts {
   /** Lot size in world units, which sets how tight a single-building shot can reasonably get. */
   readonly cell: number
   readonly objects: readonly CapacityCityItem[]
-  /** Where each object's building stands, from the plan the view already computed. */
+  /** Where each item's building stands, from the plan the view already computed. */
   readonly lots: ReadonlyMap<string, TourPoint>
   readonly roads: readonly RoadTraffic[]
   /**
@@ -340,10 +340,10 @@ export function stepTour(state: TourState, stops: readonly TourStop[], deltaMs: 
 /**
  * Where to carry on from after a replan.
  *
- * The itinerary is rebuilt whenever the page loads more objects or the live feed moves, which on a
- * busy instance is every few seconds. Restarting at stop zero each time would pin the tour on the
+ * The itinerary is rebuilt whenever the page loads more items or the live feed moves, which on a
+ * busy capacity is every few seconds. Restarting at stop zero each time would pin the tour on the
  * establishing shot forever and it would never reach a building at all, so the current stop is
- * followed by **id** into the new list. An id that has gone — a block that cleared, an object that
+ * followed by **id** into the new list. An id that has gone — a block that cleared, an item that
  * was never on this page — falls back to the same ordinal, which keeps the tour roughly where it
  * was rather than throwing it back to the start.
  */
@@ -370,7 +370,7 @@ export function resumeIndex(
  * arriving after it had cleared.
  *
  * Only incidents qualify. A landmark that entered the itinerary because a later page raised its
- * measured CPU is not news; it is the same city, better counted.
+ * measured CU is not news; it is the same city, better counted.
  */
 export function breakingStopIndex(previous: readonly TourStop[], next: readonly TourStop[]): number {
   const known = new Set(previous.filter(stop => stop.kind === 'incident').map(stop => stop.id))
@@ -479,14 +479,14 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
     polar: DEFAULT_POLAR,
     ...timing(4600, 7200),
     caption: facts.cityName,
-    detail: `${formatCount(facts.objects.length)} objects drawn · ${formatCount(facts.roads.length)} streets graded`,
+    detail: `${formatCount(facts.objects.length)} items drawn · ${formatCount(facts.roads.length)} streets graded`,
   }
 
   /*
    * Landmarks, earned two different ways and captioned accordingly.
    *
-   * Ranking by one measure alone would tour one kind of building: attributed CPU on its own skips
-   * every large table no ranked query happened to name, and reserved pages on its own skips the
+   * Ranking by one measure alone would tour one kind of building: attributed CU on its own skips
+   * every large storage item, and OneLake storage on its own skips the
    * small hot one that is the more interesting building of the two. Both lists are taken and the
    * caption says which list the visit came from, so "why am I looking at this" is answered on
    * screen rather than in this comment.
@@ -649,8 +649,8 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
    *
    * A district's extent lives behind the block warp and resolving it needs the plan's own geometry,
    * which this module deliberately does not take. The centroid and bounding box of the buildings
-   * actually standing in a schema is a weaker claim about the district's shape and an exactly
-   * correct one about where its objects are — which is all a camera needs.
+   * actually standing in a workspace is a weaker claim about the district's shape and an exactly
+   * correct one about where its items are — which is all a camera needs.
    */
   const schemas = new Map<string, { name: string; points: TourPoint[] }>()
   for (const object of withLot) {
@@ -690,7 +690,7 @@ export function planCityTour(facts: TourFacts, options: TourOptions = {}): reado
         polar: DEFAULT_POLAR,
         ...timing(4400, 7000),
         caption: entry.name,
-        detail: `${formatCount(entry.points.length)} objects drawn in this neighbourhood`,
+        detail: `${formatCount(entry.points.length)} items drawn in this neighbourhood`,
       },
     })
   }

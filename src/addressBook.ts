@@ -22,7 +22,7 @@ export type AddressKind = 'query' | 'item' | 'facility'
 export interface AddressEntry {
   readonly id: string
   readonly kind: AddressKind
-  /** Stable target used by the map: item id, facility kind, or query family id. */
+  /** Stable target used by the map: item id, facility kind, or operation family id. */
   readonly targetId: string
   readonly name: string
   /** One-line measured summary. Never a verdict, always a quantity or an explicit unavailability. */
@@ -109,7 +109,7 @@ function itemEntry(item: CapacityCityItem, plan: CityPlan): AddressEntry {
 }
 
 /**
- * The address-book id for a query family.
+ * The address-book id for an operation family.
  *
  * Shared rather than inlined because two call sites have to agree on it exactly and neither can
  * see the other: `queryEntry` below mints the id for the list, and `showFamilyOnMap` in
@@ -213,11 +213,11 @@ export function buildAddressBook(
  * Filters the book by a free-text term and groups what survives.
  *
  * Matching is a simple case-insensitive substring over each entry's own haystack — every token in
- * the term must appear somewhere, so "orders cpu" narrows rather than widens. Empty groups are
+ * the term must appear somewhere, so "warehouse cu" narrows rather than widens. Empty groups are
  * dropped so a search never shows a heading with nothing under it.
  *
  * The entries arrive already ordered from `buildAddressBook`, and `filter` preserves relative order,
- * so nothing is sorted here. Measured over a 4,200-object city the sort was 93% of this function's
+ * so nothing is sorted here. Measured over a 4,200-item city the sort was 93% of this function's
  * cost — and this whole function was 1.4 ms of a 635 ms keystroke, so removing it is a tidiness win
  * and not a fix for anything a user can feel. What that keystroke actually costs is re-rendering
  * the 4,018 entries this returns; see `tools/measure-browser`.

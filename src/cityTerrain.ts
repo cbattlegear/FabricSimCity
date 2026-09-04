@@ -4,17 +4,17 @@ import type { CityBlockField } from './cityBlocks'
 import type { Point } from './cityStreamlines'
 
 /**
- * Landform and land use for one database city.
+ * Landform and land use for one capacity city.
  *
  * **Evidence boundary — read this first.** Nothing in this file is measured, and nothing in it may
  * ever become measured. The river, the hills, the parks, the woodland, the plazas and the
- * neighbourhood characters are *scenery*: deterministic decoration derived from the database's own
+ * neighbourhood characters are *scenery*: deterministic decoration derived from the capacity's own
  * id, exactly like the block shapes in `cityPlan`. They exist because a map with nothing but
  * buildings reads as a spreadsheet, and a map you cannot navigate by is a map nobody reads.
  *
  * The rule that keeps that honest is simple and absolute: **scenery is never derived from a
- * measurement.** A park does not mean a table is small. A river does not mean a schema is cold. A
- * commercial neighbourhood does not mean anything about the objects standing in it. Because the
+ * measurement.** A park does not mean an item is small. A river does not mean a workspace is cold. A
+ * commercial neighbourhood does not mean anything about the items standing in it. Because the
  * inputs are only the seed and the seeded block geometry, no measurement *can* leak into the scenery,
  * and no reader can back one out of it. The legend says so in as many words.
  *
@@ -33,8 +33,9 @@ export type { Point }
 /**
  * What occupies a block.
  *
- * `built` and `facility` are placed by `cityPlan` from real objects. Everything else is an empty
- * block — genuinely empty, meaning no object is there — dressed as something worth looking at.
+ * `built` and `facility` are placed by `cityPlan` from real items and facilities. Everything else is
+ * an empty block — genuinely empty, meaning nothing measured is there — dressed as something worth
+ * looking at.
  */
 export type LandUse =
   | 'built'
@@ -48,7 +49,7 @@ export type LandUse =
   | 'parking'
   | 'yard'
 
-/** Every land use that is scenery rather than a placed object. */
+/** Every land use that is scenery rather than a placed item or facility. */
 export const SCENERY_USES: readonly LandUse[] = [
   'water',
   'park',
@@ -61,11 +62,11 @@ export const SCENERY_USES: readonly LandUse[] = [
 ]
 
 /**
- * Styling family for a schema's neighbourhood.
+ * Styling family for a workspace's neighbourhood.
  *
- * Drawn from the schema id's hash and nothing else. It tints facades and picks which street furniture
+ * Drawn from the workspace id's hash and nothing else. It tints facades and picks which street furniture
  * appears, the way a real basemap distinguishes a retail high street from a warehouse district. It is
- * not a claim about the schema.
+ * not a claim about the workspace.
  */
 export type DistrictCharacter = 'residential' | 'commercial' | 'industrial' | 'civic'
 
@@ -104,7 +105,7 @@ export interface CityTerrain {
   readonly blocks: ReadonlyMap<string, TerrainBlock>
   /** Smoothed river centreline, or empty when the city was too small to route one. */
   readonly river: readonly RiverNode[]
-  /** Schema id to the neighbourhood character its buildings are dressed in. */
+  /** Workspace id to the neighbourhood character its buildings are dressed in. */
   readonly characters: ReadonlyMap<string, DistrictCharacter>
   /** Coefficients for {@link reliefAt}; stored rather than closed over so terrain stays comparable. */
   readonly relief: ReliefField
@@ -198,10 +199,10 @@ export function blockKey(id: number): string {
  *
  * Runs before the streets, because the street generator is told to keep out of the water. Pure in its
  * input: the same {@link LandformInput} always produces an identical landform, which is part of what
- * lets the same database render byte-identically anywhere.
+ * lets the same capacity render byte-identically anywhere.
  */
 export function planLandform(input: LandformInput): Landform {
-  // A generator of its own, seeded from the database id with a distinct salt. Landform must not
+  // A generator of its own, seeded from the capacity id with a distinct salt. Landform must not
   // consume from the placement stream, or adding a river would move every building in the city.
   const rng = mulberry32(stableHash(`${input.seed}::terrain`))
   const relief = buildRelief(rng)
@@ -469,7 +470,7 @@ function clamp(value: number, min: number, max: number): number {
  * Dresses every block.
  *
  * Occupied blocks keep what the plan put there. Empty blocks — and there are a lot of them, since the
- * city deliberately holds more blocks than objects so the neighbourhoods have room to breathe — get a
+ * city deliberately holds more blocks than placed items so the neighbourhoods have room to breathe — get a
  * land use chosen from where they sit: drowned or bankside near the river, wooded and hilly out at the
  * edges, paved and civic near the centre, and ordinary green everywhere else.
  */
@@ -588,10 +589,10 @@ function sceneryFor(
 }
 
 /**
- * Gives every schema a neighbourhood character.
+ * Gives every workspace a neighbourhood character.
  *
- * Hashed from the schema id alone, so it is stable, decorative, and carries no claim about the
- * schema. Two schemas with identical contents can and will look different, which is the tell that
+ * Hashed from the workspace id alone, so it is stable, decorative, and carries no claim about the
+ * workspace. Two workspaces with identical contents can and will look different, which is the tell that
  * this is styling rather than evidence.
  */
 function assignCharacters(districtIds: readonly string[]): Map<string, DistrictCharacter> {

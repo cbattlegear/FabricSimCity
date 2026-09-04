@@ -430,7 +430,7 @@ describe('planCityTour', () => {
     const itinerary = planCityTour(facts())
     expect(itinerary).toHaveLength(1)
     expect(itinerary[0].kind).toBe('skyline')
-    expect(itinerary[0].detail).toContain('0 objects drawn')
+    expect(itinerary[0].detail).toContain('0 items drawn')
   })
 
   /*
@@ -556,7 +556,7 @@ describe('planCityTour', () => {
   it('gathers neighbourhoods from the buildings that actually stand in them', () => {
     const itinerary = planCityTour(busyCity())
     const neighbourhood = itinerary.find(entry => entry.kind === 'neighbourhood')
-    expect(neighbourhood?.detail).toContain('2 objects drawn')
+    expect(neighbourhood?.detail).toContain('2 items drawn')
     expect(['Sales', 'People', 'Production']).toContain(neighbourhood?.caption)
   })
 
