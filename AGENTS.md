@@ -432,6 +432,50 @@ set `RAYFIN_WORKSPACE_ID`, `RAYFIN_TENANT_ID`, and either `RAYFIN_TOKEN` or
 `RAYFIN_CLIENT_ID`/`RAYFIN_CLIENT_SECRET`. Without those values the job logs notices and skips
 `rayfin up`; do not claim a deploy is verified until it has run against a tenant.
 
+### A conflicted pull request silently switches CI off
+
+If `gh pr checks` reports "no checks reported" and the Actions API returns **zero runs** for a
+pushed commit, the first suspicion should not be the runner. GitHub cannot compute a merge ref for a
+conflicted pull request, so it never queues a `pull_request` workflow at all. The symptom is
+identical to Actions being disabled on the repository, and no error appears anywhere.
+
+Diagnose in this order, because each step rules out a whole class of cause:
+
+```powershell
+gh api repos/:owner/:repo/actions/permissions          # is Actions on at all?
+gh run list --limit 5                                  # do runs exist for other SHAs?
+gh pr view <n> --json mergeable,mergeStateStatus        # CONFLICTING / DIRTY is the answer
+```
+
+`main` moving under a long-lived branch is what causes this, and the longer the branch runs the more
+likely it is. Merge `main` early and often rather than at the end — a branch that is silently
+untested is worse than one that is visibly red.
+
+### Resolving a merge where one side deleted a whole stack
+
+Do not eyeball ninety conflicted paths. Most of them are not conflicts in any interesting sense —
+they are files this branch deleted on purpose and `main` went on editing. Partition them first:
+
+```powershell
+git diff --name-only --diff-filter=U | ForEach-Object {
+  git cat-file -e "HEAD:$_" 2>$null
+  if ($LASTEXITCODE -ne 0) { git rm -q --force -- $_ }   # we deleted it; main's edits are moot
+}
+git diff --name-only --diff-filter=U                     # what is left is the real review
+```
+
+Then check the half of the merge that reports no conflict at all. Files `main` *added* merge
+cleanly by definition, even when they import modules this branch deleted — `tsc` and the test suite
+will not notice, because nothing imports them either. Review every addition on its own merits:
+
+```powershell
+git diff --cached --name-only --diff-filter=A
+```
+
+The same applies to CSS and to markup attributes added for tooling that no longer exists. A rule
+whose selector matches nothing this branch renders is dead weight, and a guard written for that rule
+is a guard that can never fail. Take the upstream change only when it still has a referent here.
+
 ## Scratch files
 
 One-off probe pages and ad-hoc measurement scaffolding do not get committed. Delete them and
