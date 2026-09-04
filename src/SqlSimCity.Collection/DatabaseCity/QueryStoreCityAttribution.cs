@@ -31,6 +31,7 @@ public sealed record CityAttributionResult(
     IReadOnlyDictionary<string, DatabaseCityAttributedExposureV1> ExposureByObjectId,
     EvidenceV1 Evidence)
 {
+    /// <summary>The exact namespace attested by all returned family summaries, never a catalog alias.</summary>
     public string? QueryStoreDatabaseId { get; init; }
 }
 
