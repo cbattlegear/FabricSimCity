@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Numerics;
+using System.Xml;
 using SqlSimCity.Collection.Probes;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
@@ -29,7 +30,11 @@ public sealed record CityAttributionResult(
     DatabaseCityWorkloadAggregateV1 OtherWorkload,
     IReadOnlyList<DatabaseCityRouteV1> Routes,
     IReadOnlyDictionary<string, DatabaseCityAttributedExposureV1> ExposureByObjectId,
-    EvidenceV1 Evidence);
+    EvidenceV1 Evidence)
+{
+    /// <summary>The exact namespace attested by all returned family summaries, never a catalog alias.</summary>
+    public string? QueryStoreDatabaseId { get; init; }
+}
 
 /// <summary>
 /// Joins Query Store query families to the catalog objects of a bounded database-city page by
@@ -141,13 +146,15 @@ public sealed class QueryStoreCityAttribution(
     /// addressed by: that id matches no published Query Store index set, which would silently
     /// unattribute every object on the page.
     /// </param>
+    /// <param name="trafficWindowEnd">The catalog walk's pinned end, shared by every continuation page.</param>
     public async Task<CityAttributionResult> AttributeAsync(
         string databaseName,
         DatabaseCityMetric metric,
         IReadOnlyList<CityAttributionObject> pageObjects,
         IReadOnlyDictionary<string, string> databaseIdsByName,
         int topFamilyCount,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DateTimeOffset? trafficWindowEnd = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
         ArgumentNullException.ThrowIfNull(pageObjects);
@@ -182,24 +189,33 @@ public sealed class QueryStoreCityAttribution(
         var exposureEligible = new List<DatabaseCityQueryEvidence>(page.Items.Count);
         var routes = new RouteAccumulator(pageEvidence);
         var planBudget = MaxPlansPerPage;
+        var windowEnd = trafficWindowEnd ?? _clock.GetUtcNow();
 
         foreach (var summary in page.Items)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var resolved = await AttributeFamilyAsync(
-                summary, index, routes, planBudget, cancellationToken).ConfigureAwait(false);
+                summary, index, routes, planBudget, windowEnd, cancellationToken).ConfigureAwait(false);
             planBudget -= resolved.PlansHydrated;
             families.Add(resolved.Family);
             if (resolved.ExposureEligible)
                 exposureEligible.Add(resolved.Family);
         }
 
+        var queryStoreDatabaseId = page.Items[0].DatabaseId;
         return new CityAttributionResult(
             families,
             OtherWorkload(page, families.Count, pageEvidence),
             routes.Build(),
             BuildExposure(families, exposureEligible, index, pageEvidence),
-            pageEvidence);
+            pageEvidence)
+        {
+            QueryStoreDatabaseId = !string.IsNullOrWhiteSpace(queryStoreDatabaseId) &&
+                StringComparer.OrdinalIgnoreCase.Equals(queryStoreDatabaseId, databaseName) &&
+                page.Items.All(summary => StringComparer.Ordinal.Equals(summary.DatabaseId, queryStoreDatabaseId))
+                    ? queryStoreDatabaseId
+                    : null,
+        };
     }
 
     private async Task<ResolvedFamily> AttributeFamilyAsync(
@@ -207,6 +223,7 @@ public sealed class QueryStoreCityAttribution(
         PageObjectIndex index,
         RouteAccumulator routes,
         int planBudget,
+        DateTimeOffset trafficWindowEnd,
         CancellationToken cancellationToken)
     {
         QueryFamilyDetailV1? detail = null;
@@ -241,12 +258,14 @@ public sealed class QueryStoreCityAttribution(
         var hydrated = 0;
         var skipped = 0;
         var unreadable = 0;
+        var normalizationFailures = 0;
 
         foreach (var plan in detail.Plans.OrderBy(item => item.PlanId, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (hydrated >= MaxPlansPerFamily || hydrated >= planBudget) { skipped++; continue; }
             NormalizedShowplanV1? showplan;
+            hydrated++;
             try
             {
                 showplan = await queryStore.GetPlanAsync(plan.PlanId, cancellationToken).ConfigureAwait(false);
@@ -260,8 +279,13 @@ public sealed class QueryStoreCityAttribution(
                 unreadable++;
                 continue;
             }
+            catch (XmlException)
+            {
+                unreadable++;
+                normalizationFailures++;
+                continue;
+            }
 
-            hydrated++;
             if (showplan is null) { unreadable++; continue; }
 
             var planLocal = new SortedSet<string>(StringComparer.Ordinal);
@@ -291,15 +315,21 @@ public sealed class QueryStoreCityAttribution(
             local.UnionWith(planLocal);
             crossDatabase.UnionWith(planRemote);
             routes.AddPlan(planLocal, planRemote);
-            costs.AddPlan(PlanCostAttribution.Split(showplan), index, plan.RuntimeCounted);
+            costs.AddPlan(plan.PlanId, PlanCostAttribution.Split(showplan), index, plan.RuntimeCounted);
             volumes.AddPlan(PlanDataVolume.Split(showplan), index);
         }
 
         var objectIds = local.Concat(crossDatabase).ToArray();
         var namedElsewhere = offPage.Count + crossDatabase.Count + unresolved.Count;
+        var incomplete = unreadable > 0 || skipped > 0;
         var confidence = Confidence(local, namedElsewhere, index);
+        if (incomplete && confidence == QueryAttributionConfidence.Confirmed)
+            confidence = QueryAttributionConfidence.Probable;
         var rationale = Rationale(
-            local, offPage, crossDatabase, unresolved, namedElsewhere, index, hydrated, skipped, unreadable);
+            local, offPage, crossDatabase, unresolved, namedElsewhere, index,
+            hydrated - unreadable, skipped, unreadable);
+        if (normalizationFailures > 0)
+            rationale += $" {normalizationFailures} compiled plan(s) failed bounded XML normalization.";
         return new ResolvedFamily(
             new DatabaseCityQueryEvidence(
                 counters.FamilyId,
@@ -314,14 +344,17 @@ public sealed class QueryStoreCityAttribution(
                 rationale)
             {
                 WaitMillisecondsByCategory = waits,
-                WaitAttribution = costs.Build(counters.TotalWaitMilliseconds),
+                WaitAttribution = incomplete
+                    ? new DatabaseCityWaitAttributionV1([], counters.TotalWaitMilliseconds, hydrated - unreadable,
+                        "Plan coverage is incomplete; measured waits remain unassigned rather than being transferred to readable plans.")
+                    : costs.Build(counters.TotalWaitMilliseconds),
                 PlanDataVolume = volumes.Build(),
-                RecentActivity = RecentActivity(detail),
+                RecentActivity = RecentActivity(detail, costs, trafficWindowEnd),
             },
             hydrated,
             // Totals belong to one building only when the plans named that building and nothing
             // else at all: not another page, not another database, not something unresolvable.
-            ExposureEligible: local.Count == 1 && namedElsewhere == 0);
+            ExposureEligible: local.Count == 1 && namedElsewhere == 0 && !incomplete);
     }
 
     /// <summary>
@@ -343,20 +376,22 @@ public sealed class QueryStoreCityAttribution(
     /// starts to lie.
     /// </para>
     /// </summary>
-    private DatabaseCityRecentActivityV1 RecentActivity(QueryFamilyDetailV1 detail)
+    private DatabaseCityRecentActivityV1 RecentActivity(
+        QueryFamilyDetailV1 detail, PlanCostAccumulator costs, DateTimeOffset end)
     {
-        var end = _clock.GetUtcNow();
         var start = end - _trafficWindow;
         var minutes = (int)Math.Round(_trafficWindow.TotalMinutes, MidpointRounding.AwayFromZero);
 
         var executions = BigInteger.Zero;
         var duration = BigInteger.Zero;
         var waits = BigInteger.Zero;
-        var covered = 0;
-        foreach (var bucket in detail.Runtime)
+        var recent = detail.Runtime.Where(bucket => bucket.IntervalEnd > start && bucket.IntervalStart < end).ToArray();
+        var covered = recent.Length;
+        var waitsKnown = covered > 0 && recent.All(bucket => bucket.WaitMilliseconds.Count > 0 &&
+            bucket.WaitMilliseconds.Values.All(value =>
+                BigInteger.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out _)));
+        foreach (var bucket in recent)
         {
-            if (bucket.IntervalEnd < start || bucket.IntervalStart > end) continue;
-            covered++;
             executions += Parse(bucket.ExecutionCount);
             duration += Parse(bucket.TotalDurationMicroseconds);
             foreach (var milliseconds in bucket.WaitMilliseconds.Values)
@@ -369,7 +404,10 @@ public sealed class QueryStoreCityAttribution(
             : $"Summed from {covered} retained Query Store interval(s) overlapping the last " +
               $"{minutes} minutes. Intervals are not divided at the window edge, so a wider " +
               "interval contributes everything it measured rather than a pro-rated share.";
+        if (covered > 0 && !waitsKnown)
+            rationale += " Wait capture is incomplete in these intervals; the recorded subtotal is not complete recent wait evidence.";
 
+        var waitTotal = waits.ToString(CultureInfo.InvariantCulture);
         return new DatabaseCityRecentActivityV1(
             minutes,
             start,
@@ -377,8 +415,12 @@ public sealed class QueryStoreCityAttribution(
             covered > 0,
             executions.ToString(CultureInfo.InvariantCulture),
             duration.ToString(CultureInfo.InvariantCulture),
-            waits.ToString(CultureInfo.InvariantCulture),
-            rationale);
+            waitTotal,
+            rationale)
+        {
+            WaitAttribution = waitsKnown ? costs.BuildRecent(recent, waitTotal) : null,
+            WaitMillisecondsByCategory = waitsKnown ? WaitCategories(recent, waitTotal) : null,
+        };
     }
 
     /// <summary>
@@ -413,10 +455,13 @@ public sealed class QueryStoreCityAttribution(
     /// </summary>
     private static ReadOnlyDictionary<string, string> WaitCategories(
         QueryFamilyDetailV1 detail,
-        string totalWaitMilliseconds)
+        string totalWaitMilliseconds) => WaitCategories(detail.Runtime, totalWaitMilliseconds);
+
+    private static ReadOnlyDictionary<string, string> WaitCategories(
+        IReadOnlyList<RuntimeBucketV1> runtime, string totalWaitMilliseconds)
     {
         var totals = new SortedDictionary<string, BigInteger>(StringComparer.Ordinal);
-        foreach (var bucket in detail.Runtime)
+        foreach (var bucket in runtime)
         {
             foreach (var (category, milliseconds) in bucket.WaitMilliseconds)
             {
@@ -671,7 +716,7 @@ public sealed class QueryStoreCityAttribution(
     {
         private readonly List<PlanShares> _plans = [];
 
-        public void AddPlan(PlanCostSplit split, PageObjectIndex index, bool runtimeCounted)
+        public void AddPlan(string planId, PlanCostSplit split, PageObjectIndex index, bool runtimeCounted)
         {
             if (!split.HasCost) return;
 
@@ -687,7 +732,54 @@ public sealed class QueryStoreCityAttribution(
             }
 
             _plans.Add(new PlanShares(
-                runtimeCounted, shares, elsewhere, split.UnattributedCost / split.TotalCost));
+                planId, runtimeCounted, shares, elsewhere, split.UnattributedCost / split.TotalCost));
+        }
+
+        public DatabaseCityWaitAttributionV1 BuildRecent(
+            IReadOnlyList<RuntimeBucketV1> runtime, string totalWaitMilliseconds)
+        {
+            var plans = _plans.Where(plan => plan.RuntimeCounted).ToDictionary(plan => plan.PlanId, StringComparer.Ordinal);
+            var totalWait = BigInteger.Parse(totalWaitMilliseconds, CultureInfo.InvariantCulture);
+            var weightTotal = totalWait > 0 ? totalWait : runtime.Aggregate(BigInteger.Zero,
+                (sum, bucket) => sum + Parse(bucket.ExecutionCount));
+            var amounts = new SortedDictionary<string, BigInteger>(StringComparer.Ordinal);
+            var weightedShares = new Dictionary<string, BigInteger>(StringComparer.Ordinal);
+            var unassigned = BigInteger.Zero;
+            var plansRead = 0;
+            foreach (var group in runtime.GroupBy(bucket => bucket.PlanId, StringComparer.Ordinal))
+            {
+                var wait = group.SelectMany(bucket => bucket.WaitMilliseconds.Values)
+                    .Aggregate(BigInteger.Zero, (sum, value) => sum + BigInteger.Parse(value, CultureInfo.InvariantCulture));
+                if (!plans.TryGetValue(group.Key, out var plan))
+                {
+                    unassigned += wait;
+                    continue;
+                }
+                plansRead++;
+                var split = WaitApportionment.Apportion(
+                    plan.Shares.Select(pair => new ObjectCostShare(pair.Key, pair.Value)).ToArray(),
+                    wait.ToString(CultureInfo.InvariantCulture), 1, "Recent per-plan wait allocation.");
+                unassigned += BigInteger.Parse(split.UnattributedWaitMilliseconds, CultureInfo.InvariantCulture);
+                var weight = totalWait > 0 ? wait : group.Aggregate(BigInteger.Zero,
+                    (sum, bucket) => sum + Parse(bucket.ExecutionCount));
+                foreach (var item in split.Objects)
+                {
+                    amounts[item.ObjectId] = amounts.GetValueOrDefault(item.ObjectId) +
+                        BigInteger.Parse(item.WaitMilliseconds, CultureInfo.InvariantCulture);
+                    var units = (BigInteger)decimal.Round(plan.Shares[item.ObjectId] * WaitApportionment.ShareScale);
+                    weightedShares[item.ObjectId] = weightedShares.GetValueOrDefault(item.ObjectId) + units * weight;
+                }
+            }
+            var objects = amounts.Select(pair => new DatabaseCityObjectWaitShareV1(
+                pair.Key,
+                weightTotal > 0 ? decimal.Round(
+                    (decimal)(weightedShares[pair.Key] / weightTotal) / WaitApportionment.ShareScale,
+                    WaitApportionment.ShareDigits) : 0m,
+                pair.Value.ToString(CultureInfo.InvariantCulture))).ToArray();
+            return new(objects, unassigned.ToString(CultureInfo.InvariantCulture), plansRead,
+                "Each plan's measured waits in the recent window are apportioned only by that plan's compiled cost estimates. " +
+                "Unreadable, uncosted, uncounted, and off-page plans or objects leave their waits unassigned; " +
+                "readable plans never absorb another plan's waits. This is modelled placement, not measured object wait time.");
         }
 
         public DatabaseCityWaitAttributionV1 Build(string totalWaitMilliseconds)
@@ -758,6 +850,7 @@ public sealed class QueryStoreCityAttribution(
             count == 1 ? "1 compiled plan" : $"{count.ToString(CultureInfo.InvariantCulture)} compiled plans";
 
         private sealed record PlanShares(
+            string PlanId,
             bool RuntimeCounted,
             SortedDictionary<string, decimal> Shares,
             decimal Elsewhere,

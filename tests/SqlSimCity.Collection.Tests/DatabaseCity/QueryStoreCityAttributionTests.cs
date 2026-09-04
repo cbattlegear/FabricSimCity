@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Xml;
 using SqlSimCity.Collection.DatabaseCity;
+using SqlSimCity.Collection.QueryStore;
 using SqlSimCity.Contracts.V1;
 using SqlSimCity.Domain;
 
@@ -33,6 +35,67 @@ public sealed class QueryStoreCityAttributionTests
             databaseIdsByName ?? new Dictionary<string, string> { ["sales"] = DatabaseId },
             topFamilyCount: 12,
             CancellationToken.None);
+
+    [Fact]
+    public async Task PublishedDatabaseNamespaceUsesExactFamilyIdentityRatherThanCatalogAlias()
+    {
+        var store = new FakeQueryStore { ExpectedDatabaseName = "Sales" };
+        store.AddFamily("first", "1", "1", [Plan("first-plan", Reference(table: "Customer"))],
+            databaseId: "sAlEs");
+        store.AddFamily("second", "1", "1", [Plan("second-plan", Reference(table: "OrderHeader"))],
+            databaseId: "sAlEs");
+
+        var result = await new QueryStoreCityAttribution(store).AttributeAsync(
+            "Sales", DatabaseCityMetric.Cpu, PageObjects, new Dictionary<string, string>(), 12, default);
+
+        Assert.Equal(2, result.Families.Count);
+        Assert.Equal("sAlEs", result.QueryStoreDatabaseId);
+        Assert.Equal("Sales", store.RequestedDatabaseId);
+    }
+
+    [Theory]
+    [InlineData("Sales")]
+    [InlineData("inventory")]
+    public async Task PublishedDatabaseNamespaceIsUnknownWhenFamilyIdentitiesDisagree(string secondDatabaseId)
+    {
+        var store = new FakeQueryStore();
+        store.AddFamily("first", "1", "1", [Plan("first-plan", Reference(table: "Customer"))],
+            databaseId: "sales");
+        store.AddFamily("second", "1", "1", [Plan("second-plan", Reference(table: "OrderHeader"))],
+            databaseId: secondDatabaseId);
+
+        var result = await AttributeAsync(store);
+
+        Assert.Equal(2, result.Families.Count);
+        Assert.Null(result.QueryStoreDatabaseId);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("inventory")]
+    public async Task PublishedDatabaseNamespaceCannotAttestBlankOrUnrelatedFamilyIdentities(string databaseId)
+    {
+        var store = new FakeQueryStore();
+        store.AddFamily("first", "1", "1", [Plan("plan", Reference(table: "Customer"))],
+            databaseId: databaseId);
+
+        var result = await AttributeAsync(store);
+
+        Assert.Single(result.Families);
+        Assert.Null(result.QueryStoreDatabaseId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublishedDatabaseNamespaceIsUnknownWithoutReadableFamilySummaries(bool failed)
+    {
+        var result = await AttributeAsync(new FakeQueryStore { ThrowOnQueries = failed });
+
+        Assert.Empty(result.Families);
+        Assert.Null(result.QueryStoreDatabaseId);
+    }
 
     [Fact]
     public async Task SingleObjectPlanIsConfirmedAndCarriesTheFamilyTotalsUndivided()
@@ -375,6 +438,68 @@ public sealed class QueryStoreCityAttributionTests
 
         Assert.Empty(family.ObjectIds);
         Assert.Equal(QueryAttributionConfidence.Unknown, family.Confidence);
+    }
+
+    [Fact]
+    public async Task FailedPlanAttemptsStillConsumeBothHydrationBudgets()
+    {
+        var store = new FakeQueryStore
+        {
+            ReadPlanOverride = (_, _) => throw new XmlException("malformed"),
+        };
+        for (var family = 0; family < 30; family++)
+            store.AddFamily($"family-{family}", "1", "1",
+                Enumerable.Range(0, 12).Select(plan => Plan($"{family}:{plan}", Reference(table: "Customer"))).ToArray());
+
+        var result = await new QueryStoreCityAttribution(store).AttributeAsync(
+            FakeQueryStore.DatabaseName, DatabaseCityMetric.Cpu, PageObjects,
+            new Dictionary<string, string>(), 250, default);
+
+        Assert.Equal(QueryStoreCityAttribution.MaxPlansPerPage, store.PlansRequested);
+        Assert.Equal(30, result.Families.Count);
+        Assert.All(result.Families, family => Assert.Empty(family.ObjectIds));
+        Assert.Contains("4 further", result.Families[0].Rationale, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MalformedOrOversizedPlanDoesNotEraseReadableGeometryOrClaimItsWaits(bool oversized)
+    {
+        var parser = new SecureShowplanParser(new ShowplanParserLimits(MaximumXmlCharacters: 500));
+        var bad = oversized ? $"<ShowPlanXML>{new string('x', 501)}</ShowPlanXML>" : "<broken>";
+        const string good = """
+            <ShowPlanXML><RelOp NodeId="0" LogicalOp="Scan" PhysicalOp="Index Scan" EstimateCPU="1">
+            <Object Schema="dbo" Table="Customer"/></RelOp></ShowPlanXML>
+            """;
+        var store = new FakeQueryStore
+        {
+            ReadPlanOverride = async (id, token) => await parser.ParseAsync(id, id == "bad" ? bad : good, token),
+        };
+        store.AddFamily("mixed", "100", "2",
+            [Plan("bad"), Plan("good")], waitMilliseconds: "19");
+        store.AddFamily("healthy", "20", "1", [Plan("healthy")]);
+
+        var result = await AttributeAsync(store);
+
+        var mixed = result.Families.Single(family => family.FamilyId == "mixed");
+        Assert.Equal(CustomerId, Assert.Single(mixed.ObjectIds));
+        Assert.Equal(QueryAttributionConfidence.Probable, mixed.Confidence);
+        Assert.Equal("19", mixed.WaitAttribution!.UnattributedWaitMilliseconds);
+        Assert.Empty(mixed.WaitAttribution.Objects);
+        Assert.Contains("failed bounded XML normalization", mixed.Rationale, StringComparison.Ordinal);
+        Assert.Equal("20", result.ExposureByObjectId[CustomerId].TotalCpuMicroseconds);
+        Assert.Equal("100", result.ExposureByObjectId[CustomerId].Shared!.TotalCpuMicroseconds);
+        // The parser and direct-plan error boundary are intentionally not weakened.
+        await Assert.ThrowsAsync<XmlException>(() => parser.ParseAsync("bad", bad));
+    }
+
+    [Fact]
+    public async Task UnexpectedPlanExceptionsAreNotSwallowed()
+    {
+        var store = new FakeQueryStore { ReadPlanOverride = (_, _) => throw new InvalidOperationException("bug") };
+        store.AddFamily("family", "1", "1", [Plan("bad")]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AttributeAsync(store));
     }
 
     [Fact]
