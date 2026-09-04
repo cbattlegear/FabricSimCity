@@ -110,6 +110,154 @@ public sealed class QueryStoreReliabilityTests : IDisposable
         Assert.All(after.Families, family => AssertEvidence(family.Family.Evidence, Now, DataStatus.Available));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task WaitIdentitySurvivesRestartWithoutRecollectingHistoricalIntervals(bool hourly, bool legacy)
+    {
+        var retention = new QueryStoreRetentionOptions(Detail: TimeSpan.FromHours(hourly ? 1 : 24));
+        QueryStorePublishedSnapshot before;
+        using (var store = await OpenStoreAsync())
+        {
+            var repository = new ProtectedQueryStoreRepository(store);
+            var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker(),
+                retention: retention);
+            await StageWaitHistoryAsync(sink, "epoch:1", false, true);
+            await StageWaitHistoryAsync(sink, "epoch:2", true, true);
+            before = (await repository.ReadPublishedSnapshotAsync())!;
+            Assert.Equal(2, before.Families.Count);
+            Assert.All(before.Families, family =>
+            {
+                Assert.Equal("252", family.Family.TotalWaitMilliseconds);
+                Assert.Equal(hourly ? 24 : 36, family.Runtime.Count);
+                Assert.All(family.Runtime, bucket => Assert.Equal(3, bucket.WaitMilliseconds.Count));
+            });
+            if (legacy)
+                await repository.PublishSnapshotAsync(before with { DatabaseObservations = null });
+        }
+
+        using (var store = await OpenStoreAsync())
+        {
+            var repository = new ProtectedQueryStoreRepository(store);
+            var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker(),
+                retention: retention);
+            // No old runtime or wait facts are supplied. Begin still prunes restored wait keys.
+            await StageWaitHistoryAsync(sink, "epoch:2", false, false);
+            var after = (await repository.ReadPublishedSnapshotAsync())!;
+            Assert.Equal(WaitSignature(before), WaitSignature(after));
+
+            // Replaying recent facts with real catalog category IDs replaces, not adds to,
+            // the category-name identity restored from the published contract.
+            await StageWaitHistoryAsync(sink, "epoch:2", false, true, recentOnly: true);
+            Assert.Equal(WaitSignature(before), WaitSignature((await repository.ReadPublishedSnapshotAsync())!));
+        }
+    }
+
+    [Fact]
+    public async Task ArchivedDetailedIntervalsRollUpTogetherAfterRestart()
+    {
+        using (var store = await OpenStoreAsync())
+        {
+            var repository = new ProtectedQueryStoreRepository(store);
+            var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker());
+            await StageWaitHistoryAsync(sink, "epoch:1", false, true);
+            await StageWaitHistoryAsync(sink, "epoch:2", true, true);
+        }
+        using (var store = await OpenStoreAsync())
+        {
+            var repository = new ProtectedQueryStoreRepository(store);
+            var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker(),
+                retention: new QueryStoreRetentionOptions(Detail: TimeSpan.FromHours(1)));
+            await StageWaitHistoryAsync(sink, "epoch:2", false, false);
+            var snapshot = (await repository.ReadPublishedSnapshotAsync())!;
+            Assert.All(snapshot.Families, family =>
+            {
+                Assert.Equal("252", family.Family.TotalWaitMilliseconds);
+                Assert.Equal(24, family.Runtime.Count);
+                Assert.All(family.Runtime.Where(bucket => bucket.IntervalId.StartsWith("hour:", StringComparison.Ordinal)),
+                    bucket =>
+                    {
+                        Assert.Equal("2", bucket.ExecutionCount);
+                        Assert.Equal("2", bucket.WaitMilliseconds["CPU"]);
+                        Assert.Equal("4", bucket.WaitMilliseconds["Lock"]);
+                        Assert.Equal("8", bucket.WaitMilliseconds["Buffer IO"]);
+                    });
+            });
+        }
+    }
+
+    [Fact]
+    public async Task MalformedRestoredWaitTotalsFailExplicitly()
+    {
+        using var store = await OpenStoreAsync();
+        var repository = new ProtectedQueryStoreRepository(store);
+        var sink = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker());
+        await StageWaitHistoryAsync(sink, "epoch:1", false, true);
+        var snapshot = (await repository.ReadPublishedSnapshotAsync())!;
+        var family = Assert.Single(snapshot.Families);
+        await repository.PublishSnapshotAsync(snapshot with
+        {
+            Families = [family with
+            {
+                Runtime = [family.Runtime[0] with { WaitMilliseconds = new Dictionary<string, string> { ["CPU"] = "invalid" } }],
+            }],
+        });
+        var restarted = new ProtectedQueryStoreHistorySink(repository, new QueryStoreCollectionStatusTracker());
+        await Assert.ThrowsAsync<FormatException>(() =>
+            restarted.PublishAsync(new(false, Now, Now, []), default));
+    }
+
+    private static string[] WaitSignature(QueryStorePublishedSnapshot snapshot) =>
+        snapshot.Families.SelectMany(family => family.Runtime.Select(bucket =>
+            $"{family.Family.FamilyId}|{bucket.EpochId}|{bucket.PlanId}|{bucket.IntervalId}|" +
+            $"{bucket.IntervalStart:O}|{bucket.IntervalEnd:O}|{bucket.ExecutionType}|{bucket.ReplicaGroupId}|" +
+            $"{bucket.ExecutionCount}|{string.Join(",", bucket.WaitMilliseconds.OrderBy(pair => pair.Key)
+                .Select(pair => $"{pair.Key}={pair.Value}"))}"))
+            .Order(StringComparer.Ordinal).ToArray();
+
+    private static async Task StageWaitHistoryAsync(
+        ProtectedQueryStoreHistorySink sink, string epoch, bool reset, bool supplyFacts, bool recentOnly = false)
+    {
+        var state = new QueryStoreDatabaseState(
+            "db", QueryStoreCollectionState.ReadWrite, epoch, Now.AddHours(-12), Now,
+            "available", 16, 160, true, false, true, false);
+        await sink.BeginDatabaseCycleAsync(state, epoch, reset, default);
+        if (supplyFacts)
+        {
+            await sink.StageFactsAsync("db", new(QueryStoreFactKind.Identity,
+                [new QueryIdentityFact("q", "text", "ctx", "hash", Now, false, true, null, null, null, null)],
+                null, false), default);
+            foreach (var plan in new[] { "42", "43" })
+            {
+                await sink.StageFactsAsync("db", new(QueryStoreFactKind.Plan,
+                    [new QueryPlanFact(plan, "q", "hash", QueryPlanType.Compiled, null, false, null,
+                        BigInteger.Zero, null, "16", "160", Now)], null, false), default);
+                foreach (var type in Enum.GetValues<QueryStoreExecutionType>())
+                foreach (var replica in new[] { "primary", "replica:2" })
+                foreach (var minute in recentOnly ? new[] { -10 } : new[] { -240, -230, -10 })
+                {
+                    var id = $"interval:{minute}";
+                    var rows = QueryStoreRuntimeAggregator.Aggregate([new(
+                        plan, id, Now.AddMinutes(minute), Now.AddMinutes(minute + 5),
+                        type, replica, BigInteger.One, 1, 1, 1)]);
+                    await sink.StageRuntimeBucketsAsync("db", rows, false, default);
+                    await sink.StageFactsAsync("db", new(QueryStoreFactKind.Wait,
+                    [
+                        new QueryWaitFact(plan, id, type, replica, 1, "CPU", 1),
+                        new QueryWaitFact(plan, id, type, replica, 3, "Lock", 2),
+                        new QueryWaitFact(plan, id, type, replica, 6, "Buffer IO", 4),
+                    ], null, false), default);
+                }
+            }
+        }
+        await sink.CommitDatabaseCycleAsync(state,
+            new("db", epoch, epoch, Now, new Dictionary<QueryStoreFactKind, string?>()), default);
+        await sink.PublishAsync(new(false, Now, Now,
+            [new("db", QueryStoreCollectionState.ReadWrite, 1, 1, reset, "available", null)], ["db"]), default);
+    }
+
     private static void AssertEvidence(QueryStoreEvidenceV1 evidence, DateTimeOffset? observed, DataStatus status)
     {
         Assert.Equal(observed, evidence.ObservedAt);
