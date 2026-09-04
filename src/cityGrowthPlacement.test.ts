@@ -5,7 +5,7 @@ import {
   movedBuildings,
   objectIdFor,
   planOf,
-} from '../cityGrowth.testkit'
+} from './cityGrowth.testkit'
 
 /*
  * The building half of the growth guarantee: whether a table added to the database moves any

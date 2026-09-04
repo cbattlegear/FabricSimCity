@@ -9,7 +9,7 @@ import {
   objectIdFor,
   planOf,
   streetSignature,
-} from '../cityGrowth.testkit'
+} from './cityGrowth.testkit'
 
 /*
  * The street half of the growth guarantee: what the network does when the database changes under it.
@@ -80,18 +80,16 @@ describe('adding a table to the database', () => {
   })
 })
 
-describe('a table growing', () => {
-  /** The same database, with one table holding more pages than it did before. */
-  function grownBy(count: number, index: number, pages: string): CityPlan {
+describe('an item growing', () => {
+  /** The same capacity, with one item holding more OneLake bytes and CU than it did before. */
+  function grownBy(count: number, index: number, bytes: string): CityPlan {
     const { objects, options } = cityOf(count)
     const grown = objects.map(item =>
       item.itemId === objectIdFor(index)
         ? {
             ...item,
-            storageBytes: pages,
-            cuSecondsRaw: pages,
-            reservedBytes: String(BigInt(pages) * 8192n),
-            usedBytes: String(BigInt(pages) * 8192n),
+            storage: { ...item.storage, bytes },
+            cuConsumed: { ...item.cuConsumed, cuSeconds: bytes },
           }
         : item,
     )
@@ -99,10 +97,12 @@ describe('a table growing', () => {
   }
 
   /*
-   * The everyday case, and the one that would be worst if it churned: tables gain pages constantly,
-   * so a city that retraces when its largest table grows is a city that is never the same twice.
+   * The everyday case, and the one that would be worst if it churned: items gain bytes and CU
+   * constantly, so a city that retraces when its largest item grows is a city that is never the same
+   * twice. The grown size stays inside the item's footprint rung, so the widest building — and the
+   * street network sized from it — does not move.
    */
-  it('does not retrace the city when a table gains pages', () => {
+  it('does not retrace the city when an item gains bytes', () => {
     const before = planOf(120)
     const after = grownBy(120, 7, '90000')
     expect(streetSignature(after)).toBe(streetSignature(before))

@@ -5,8 +5,6 @@ import {
   CELLS_PER_BLOCK,
   STREET_WIDTH,
   buildingArchetype,
-  buildingFootprint,
-  buildingHeight,
   nearestIntersectionId,
   planCity,
   streetPath,
@@ -16,51 +14,58 @@ import {
   type CityPlanOptions,
   type StreetClass,
 } from './cityPlan'
-import { FACILITY_ORDER } from '../cityInfrastructure'
-import { distanceToStreetNetwork } from '../cityPlan.testkit'
-import type { CapacityCityItem, CapacityCityWorkspace } from '../capacityCityContracts'
-import type { Evidence } from '../fabricContracts'
+import { itemFootprint, itemHeight } from './capacityCity'
+import { itemArchetype } from './itemKind'
+import { FACILITY_ORDER } from './cityInfrastructure'
+import { distanceToStreetNetwork } from './cityPlan.testkit'
+import type { CapacityCityItem, CapacityCityWorkspace, FabricItemKind } from './capacityCityContracts'
+import type { Evidence } from './fabricContracts'
 
 const evidence: Evidence = {
-  source: 'CatalogSnapshot',
+  source: 'SemanticModel',
   status: 'Available',
   observedAt: null,
   freshUntil: null,
-  reason: 'test',
 }
 
+/**
+ * One city building. The two size arguments are OneLake bytes and CU-seconds — the measurements the
+ * capacity keystone (`capacityCity.ts`) turns into footprint and height — so a null in either is a
+ * missing measurement and, for a storage-bearing kind, draws the building as a vacant parcel.
+ */
 function object(
   itemId: string,
   workspaceId: string,
   neighborhoodOrdinal: number,
   itemOrdinal: number,
-  reservedPages: string | null = '4096',
-  usedPages: string | null = '2048',
+  storageBytes: string | null = '4096',
+  cuSeconds: string | null = '2048',
+  kind: FabricItemKind = 'Lakehouse',
 ): CapacityCityItem {
   return {
     itemId,
     workspaceId,
     workspaceName: workspaceId.replace('schema:', ''),
     name: itemId,
-    kind: 'Table',
-    storageBytes: reservedPages,
-    cuSecondsRaw: usedPages,
-    reservedBytes: reservedPages === null ? null : String(BigInt(reservedPages) * 8192n),
-    usedBytes: usedPages === null ? null : String(BigInt(usedPages) * 8192n),
-    sizeStatus: reservedPages === null ? 'Unknown' : 'Known',
-    sizeReason: null,
-    layout: { neighborhoodOrdinal, itemOrdinal, x: 0, z: 0 },
-    indexes: [],
-    directActivity: { totalOperations: '1', resetEpochToken: null, evidence },
-    attributedExposure: {
-      executionCount: null,
-      totalCpuMicroseconds: null,
-      totalDurationMicroseconds: null,
-      totalLogicalReads8KiBPages: null,
-      confidence: 'Unknown',
-      rationale: 'test',
-      evidence,
+    kind,
+    archetype: itemArchetype(kind),
+    storage: { bytes: storageBytes, status: storageBytes === null ? 'Unknown' : 'Known', evidence },
+    cuConsumed: { cuSeconds, status: cuSeconds === null ? 'Unknown' : 'Known', evidence },
+    durationSeconds: null,
+    operations: {
+      total: '1',
+      successful: null,
+      rejected: null,
+      failed: null,
+      invalid: null,
+      cancelled: null,
     },
+    distinctUsers: null,
+    throttlingMinutes: null,
+    performanceDeltaPercent: null,
+    layout: { neighborhoodOrdinal, itemOrdinal },
+    sizeStatus: storageBytes === null ? 'Unknown' : 'Known',
+    evidence,
   }
 }
 
@@ -76,7 +81,7 @@ function sampleCity(): CapacityCityItem[] {
   return objects
 }
 
-/** The schema list and totals every page of {@link sampleCity} would carry. */
+/** The workspace list and totals every page of {@link sampleCity} would carry. */
 function sampleSchemas(): CapacityCityWorkspace[] {
   return [
     { workspaceId: 'schema:dbo', name: 'dbo', neighborhoodOrdinal: 0, itemCount: '11', evidence },
@@ -86,7 +91,7 @@ function sampleSchemas(): CapacityCityWorkspace[] {
 }
 
 function options(overrides: Partial<CityPlanOptions> = {}): CityPlanOptions {
-  return { seed: 'db:sales', totalItems: '17', schemas: sampleSchemas(), ...overrides }
+  return { seed: 'db:sales', totalItems: '17', workspaces: sampleSchemas(), ...overrides }
 }
 
 /** Turns a world position back into the block grid coordinates the plan placed it on. */
@@ -135,50 +140,42 @@ function blockCentre(plan: CityPlan, block: { col: number; row: number }): { x: 
   return plan.warp.blockCenter(block.col, block.row)
 }
 
-describe('buildingFootprint / buildingHeight', () => {
-  it('maps exact page counts logarithmically and monotonically', () => {
-    expect(buildingFootprint('0')).toBeCloseTo(6, 6)
-    expect(buildingFootprint('1')).toBeCloseTo(6.75, 6)
-    expect(buildingHeight('0')).toBeCloseTo(0, 6)
-    expect(buildingHeight('1')).toBeCloseTo(4.8, 6)
-
-    let previousFootprint = -1
-    let previousHeight = -1
-    for (const pages of ['0', '1', '8', '128', '2048', '65536', '1048576', '17179869184']) {
-      const footprint = buildingFootprint(pages)!
-      const height = buildingHeight(pages)!
-      expect(footprint).toBeGreaterThan(previousFootprint)
-      expect(height).toBeGreaterThan(previousHeight)
-      previousFootprint = footprint
-      previousHeight = height
-    }
+describe('lot massing comes from the capacity keystone', () => {
+  it('carries itemFootprint and itemHeight onto the lot, so a building shares the atlas scale', () => {
+    // A city building is sized by exactly the same functions the atlas capacity is, one level down.
+    // Forking a footprint or height formula here would put an item and its capacity on two scales.
+    const item = object('object:dbo:1', 'schema:dbo', 0, 0, '1048576', '2048')
+    const lot = planCity([item], options()).lots.get('object:dbo:1')!
+    expect(lot.footprint).toBe(itemFootprint(item))
+    expect(lot.height).toBe(itemHeight(item))
   })
 
-  it('adds a fixed amount per doubling', () => {
-    expect(buildingFootprint('1023')! - buildingFootprint('511')!).toBeCloseTo(0.75, 6)
-    expect(buildingHeight('1023')! - buildingHeight('511')!).toBeCloseTo(4.8, 6)
+  it('fences a storage item whose bytes are missing rather than drawing it at a guessed size', () => {
+    // A Lakehouse that reported no bytes is missing evidence, not an empty item: null footprint, and
+    // a vacant parcel that claims no size.
+    const item = object('object:dbo:1', 'schema:dbo', 0, 0, null, '2048')
+    const lot = planCity([item], options()).lots.get('object:dbo:1')!
+    expect(lot.footprint).toBeNull()
+    expect(lot.archetype).toBe('vacant')
   })
 
-  it('returns null for unknown size rather than inventing a value', () => {
-    expect(buildingFootprint(null)).toBeNull()
-    expect(buildingHeight(null)).toBeNull()
-    expect(buildingFootprint('not-a-number')).toBeNull()
-  })
-
-  it('handles page counts beyond Number.MAX_SAFE_INTEGER without throwing', () => {
-    expect(buildingHeight('99999999999999999999999')).toBeGreaterThan(0)
+  it('fences a lot whose consumption is unknown, never claiming a height of zero', () => {
+    const item = object('object:dbo:1', 'schema:dbo', 0, 0, '1048576', null)
+    const lot = planCity([item], options()).lots.get('object:dbo:1')!
+    expect(lot.height).toBeNull()
+    expect(lot.archetype).toBe('vacant')
   })
 })
 
 describe('buildingArchetype', () => {
-  it('selects a style family from exact reserved pages', () => {
+  it('selects a style family from exact OneLake bytes', () => {
     expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '1', '1'))).toBe('house')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '127', '1'))).toBe('house')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '128', '1'))).toBe('rowhouse')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '2047', '1'))).toBe('rowhouse')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '2048', '1'))).toBe('midrise')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '32768', '1'))).toBe('tower')
-    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '524288', '1'))).toBe('skyscraper')
+    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '1048575', '1'))).toBe('house')
+    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '1048576', '1'))).toBe('rowhouse')
+    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '16777215', '1'))).toBe('rowhouse')
+    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '16777216', '1'))).toBe('midrise')
+    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '268435456', '1'))).toBe('tower')
+    expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '4294967296', '1'))).toBe('skyscraper')
   })
 
   it('renders unknown size as a vacant parcel that makes no quantity claim', () => {
@@ -186,9 +183,11 @@ describe('buildingArchetype', () => {
     expect(buildingArchetype(object('a', 'schema:dbo', 0, 0, '4096', null))).toBe('vacant')
   })
 
-  it('gives indexed views their own civic style', () => {
-    const view = { ...object('a', 'schema:dbo', 0, 0, '4096', '2048'), kind: 'IndexedView' as const }
-    expect(buildingArchetype(view)).toBe('civic')
+  it('stands a compute-only item on a measured minimum lot rather than fencing it', () => {
+    // A Notebook holds no OneLake bytes by nature, so null storage is a complete measurement. With
+    // known consumption it is a built house, not the wireframe a storage kind with null bytes gets.
+    const notebook = object('a', 'schema:dbo', 0, 0, null, '2048', 'Notebook')
+    expect(buildingArchetype(notebook)).toBe('house')
   })
 })
 
@@ -289,8 +288,8 @@ describe('planCity placement', () => {
       }))
     }
 
-    const partial = planCity(firstPage, { ...largeOptions(), schemas: countsFor(firstPage) })
-    const complete = planCity(all, { ...largeOptions(), schemas: countsFor(all.slice(50)) })
+    const partial = planCity(firstPage, { ...largeOptions(), workspaces: countsFor(firstPage) })
+    const complete = planCity(all, { ...largeOptions(), workspaces: countsFor(all.slice(50)) })
 
     expect(complete.streets.map(street => street.id))
       .toEqual(partial.streets.map(street => street.id))
@@ -762,7 +761,7 @@ function largeOptions(seed = 'db:sales'): CityPlanOptions {
   return {
     seed,
     totalItems: '220',
-    schemas: [0, 1, 2].map(ordinal => ({
+    workspaces: [0, 1, 2].map(ordinal => ({
       workspaceId: `schema:s${ordinal}`,
       name: `s${ordinal}`,
       neighborhoodOrdinal: ordinal,

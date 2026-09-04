@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildingColor, mapBuildingColor, mixColor, neighborhoodTint, tintPreservingLuma } from '../cityBuildings'
+import { buildingColor, mapBuildingColor, mixColor, neighborhoodTint, tintPreservingLuma } from './cityBuildings'
 import { neighborhoodHue, neighborhoodSwatch } from './cityPlan'
 
 /** Channel-wise distance between two packed sRGB colours. */

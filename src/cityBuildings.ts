@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { neighborhoodHue, type BuildingArchetype, type CityLot } from './cityPlan'
-import type { DistrictCharacter } from '../cityTerrain'
-import { mergeAndDispose } from '../mergeGeometry'
+import type { DistrictCharacter } from './cityTerrain'
+import { mergeAndDispose } from './mergeGeometry'
 
 /**
  * Procedural building geometry, one merged {@link THREE.BufferGeometry} per building.

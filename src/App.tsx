@@ -25,7 +25,7 @@ import {
   useKioskMode,
   type MapViewMode,
 } from './MapShell'
-import type { AtlasSnapshot, CapacityAtlasItem } from './fabricContracts'
+import type { AtlasSnapshot, CapacityAtlasItem, Evidence } from './fabricContracts'
 import './App.css'
 
 const AtlasViewport = lazy(() => import('./AtlasViewport').then((m) => ({ default: m.AtlasViewport })))
@@ -120,6 +120,20 @@ function AtlasLevel({
   const selected = capacities.find((capacity) => capacity.capacityId === selectedId) ?? null
   const hovered = capacities.find((capacity) => capacity.capacityId === hoveredId) ?? null
   const sourceState = collectorDisplayState(snapshot?.collection ?? null, refreshError !== null)
+  const sourceStateTitle =
+    refreshError ?? (snapshot?.collection?.isStale ? 'Last read is past its freshness window.' : undefined)
+  const sidebarSubtitle = snapshot ? (
+    <span
+      className={`atlas-subtitle${sourceState.degraded ? ' is-degraded' : ''}`}
+      title={sourceStateTitle}
+    >
+      <span className="atlas-subtitle-dot" aria-hidden="true" />
+      <span>{capacities.length} capacities</span>
+      <span>{sourceState.state}</span>
+    </span>
+  ) : (
+    'Loading…'
+  )
 
   const matches = useMemo(() => {
     const needle = term.trim().toLocaleLowerCase()
@@ -151,11 +165,7 @@ function AtlasLevel({
           </div>
         }
         title={snapshot?.tenant.displayName ?? 'Tenant atlas'}
-        subtitle={
-          snapshot
-            ? `${capacities.length} capacities · ${sourceState.state}`
-            : 'Loading…'
-        }
+        subtitle={sidebarSubtitle}
       />
       <div className="sidebar-search">
         <SearchField
@@ -176,30 +186,38 @@ function AtlasLevel({
 
       <div className="sidebar-scroll">
         <ul className="address-list">
-          {matches.map((capacity) => (
-            <li key={capacity.capacityId}>
-              <button
-                type="button"
-                className={`address-entry ${capacity.capacityId === selectedId ? 'is-selected' : ''}`}
-                aria-label={accessibleCapacityLabel(capacity)}
-                aria-pressed={capacity.capacityId === selectedId}
-                onClick={() => onSelect(capacity.capacityId)}
-                onMouseEnter={() => onHover(capacity.capacityId)}
-                onMouseLeave={() => onHover(null)}
-              >
-                <span className="address-icon" aria-hidden="true">
-                  ▦
-                </span>
-                <span className="address-text">
-                  <strong>{capacity.displayName}</strong>
-                  <span>
-                    {capacity.sku ?? 'Unknown SKU'} · {formatCu(capacity.cuConsumed)}
+          {matches.map((capacity) => {
+            const selectedCapacity = capacity.capacityId === selectedId
+            return (
+              <li key={capacity.capacityId}>
+                <button
+                  type="button"
+                  className={capacityEntryClass(capacity, selectedCapacity)}
+                  aria-label={accessibleCapacityLabel(capacity)}
+                  aria-pressed={selectedCapacity}
+                  aria-current={selectedCapacity ? 'true' : undefined}
+                  onClick={() => onSelect(capacity.capacityId)}
+                  onMouseEnter={() => onHover(capacity.capacityId)}
+                  onMouseLeave={() => onHover(null)}
+                >
+                  <span className="address-icon" aria-hidden="true">
+                    ▦
                   </span>
-                  <small>{stateBadge(capacity)}</small>
-                </span>
-              </button>
-            </li>
-          ))}
+                  <span className="address-text">
+                    <strong>{capacity.displayName}</strong>
+                    <span className="address-facts">
+                      <span>{capacity.sku ?? 'Unknown SKU'}</span>
+                      <span>{formatCu(capacity.cuConsumed)}</span>
+                      {capacity.meanUtilizationPercent !== null && (
+                        <span>{formatPercent(capacity.meanUtilizationPercent)} mean</span>
+                      )}
+                    </span>
+                    <CapacityBadges capacity={capacity} />
+                  </span>
+                </button>
+              </li>
+            )
+          })}
           {snapshot && matches.length === 0 && (
             <li className="address-empty">No capacity matches “{term}”.</li>
           )}
@@ -223,6 +241,13 @@ function AtlasLevel({
                 measured
               </li>
               <li>
+                <span className="legend-swatch is-value-unknown" aria-hidden="true" /> Dashed value —
+                not measured
+              </li>
+              <li>
+                <span className="legend-swatch is-stale" aria-hidden="true" /> Dim — stale
+              </li>
+              <li>
                 <span className="legend-swatch is-brownout" aria-hidden="true" /> Amber — throttled
               </li>
               <li>
@@ -239,7 +264,9 @@ function AtlasLevel({
               <dt>Source</dt>
               <dd>{splitPascal(source.kind)}</dd>
               <dt>State</dt>
-              <dd>{sourceState.state}</dd>
+              <dd>
+                <SourceStatePill state={sourceState.state} degraded={sourceState.degraded} title={sourceStateTitle} />
+              </dd>
               {snapshot?.collection && (
                 <>
                   <dt>Last read</dt>
@@ -247,7 +274,12 @@ function AtlasLevel({
                 </>
               )}
               <dt>Per-item CU</dt>
-              <dd>{source.capabilities.perItemBreakdown ? 'Yes' : 'No'}</dd>
+              <dd>
+                <SourceCapability
+                  enabled={source.capabilities.perItemBreakdown}
+                  title="Per-item CU breakdown"
+                />
+              </dd>
               <dt>Retention</dt>
               <dd>{source.capabilities.retentionDays} days</dd>
             </dl>
@@ -261,7 +293,11 @@ function AtlasLevel({
     <MapShell sidebar={sidebar} kiosk={kiosk}>
       {snapshot && (
         <ChunkErrorBoundary label="atlas">
-          <LazySurface label="atlas" fallback={<ShellFallback label="Loading atlas…" />}>
+          <LazySurface
+            label="atlas"
+            dimmed={sourceState.degraded}
+            fallback={<ShellFallback label="Loading atlas…" />}
+          >
             <AtlasViewport
               snapshot={snapshot}
               selectedId={selectedId}
@@ -284,7 +320,7 @@ function AtlasLevel({
       )}
       {!error && refreshError && (
         <FloatingCard tone="warning" title="Refresh failed">
-          <span>Showing the last good read.</span>
+          <span className="stale-badge" title={refreshError}>last good read</span>
         </FloatingCard>
       )}
       {hovered && !error && (
@@ -292,18 +328,130 @@ function AtlasLevel({
           <span>
             {hovered.sku ?? 'Unknown SKU'} · {formatCu(hovered.cuConsumed)}
           </span>
+          <CapacityBadges capacity={hovered} compact />
         </FloatingCard>
       )}
     </MapShell>
   )
 }
 
-/** The shortest true description of a capacity's state, for a list row. */
-function stateBadge(capacity: CapacityAtlasItem): string {
-  if (!isReporting(capacity)) return splitPascal(capacity.stateReason)
-  if (isRejecting(capacity)) return `rejecting · ${splitPascal(capacity.throttle.stage)}`
-  if (capacity.throttle.stage !== 'None') return splitPascal(capacity.throttle.stage)
-  return formatPercent(capacity.meanUtilizationPercent) + ' mean'
+function capacityEntryClass(capacity: CapacityAtlasItem, selected: boolean): string {
+  const classes = ['address-entry']
+  if (selected) classes.push('is-selected')
+  if (!isReporting(capacity)) classes.push('is-unmeasured')
+  else if (isRejecting(capacity)) classes.push('is-rejecting')
+  else if (capacity.throttle.stage !== 'None') classes.push('is-throttled')
+  if (hasStaleEvidence(capacity)) classes.push('is-stale')
+  return classes.join(' ')
+}
+
+function CapacityBadges({ capacity, compact = false }: { capacity: CapacityAtlasItem; compact?: boolean }) {
+  const badges: Array<{ label: string; tone: string; title: string }> = []
+
+  if (!isReporting(capacity)) {
+    badges.push({
+      label: 'unmeasured',
+      tone: 'unknown',
+      title: `${splitPascal(capacity.stateReason)} · CU telemetry unavailable`,
+    })
+  } else if (isRejecting(capacity)) {
+    badges.push({
+      label: 'rejecting',
+      tone: 'rejecting',
+      title: `${splitPascal(capacity.throttle.stage)} · ${splitPascal(capacity.stateReason)}`,
+    })
+  } else if (capacity.throttle.stage !== 'None') {
+    badges.push({
+      label: 'delay',
+      tone: 'throttled',
+      title: splitPascal(capacity.throttle.stage),
+    })
+  }
+
+  if (capacity.throttle.surgeProtectionActive) {
+    badges.push({
+      label: 'surge',
+      tone: 'throttled',
+      title: splitPascal(capacity.stateReason),
+    })
+  }
+
+  if (hasStaleEvidence(capacity)) {
+    badges.push({ label: 'stale', tone: 'stale', title: 'Measurement is stale' })
+  }
+
+  if (badges.length === 0) return null
+
+  return (
+    <span className={`capacity-badges${compact ? ' is-compact' : ''}`}>
+      {badges.map((badge) => (
+        <span key={`${badge.tone}:${badge.label}`} className={`capacity-badge is-${badge.tone}`} title={badge.title}>
+          {badge.label}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function hasStaleEvidence(capacity: CapacityAtlasItem): boolean {
+  return [capacity.cuConsumed.evidence, capacity.storage.evidence, capacity.throttle.evidence].some(
+    (evidence) => evidence.status === 'Stale',
+  )
+}
+
+type MeasurementTone = 'known' | 'unknown' | 'stale'
+
+function evidenceTone(evidence: Evidence): MeasurementTone {
+  if (evidence.status === 'Stale') return 'stale'
+  return evidence.status === 'Available' ? 'known' : 'unknown'
+}
+
+function nullableTone(value: unknown, evidence?: Evidence): MeasurementTone {
+  if (value === null || value === undefined) return 'unknown'
+  return evidence ? evidenceTone(evidence) : 'known'
+}
+
+function DetailValue({
+  value,
+  title,
+  tone = 'known',
+}: {
+  value: string | number
+  title?: string
+  tone?: MeasurementTone
+}) {
+  const className = `measurement-value${tone === 'known' ? '' : ` is-${tone}`}`
+  const ariaLabel = title ? `${value}; ${title}` : undefined
+  return (
+    <span className={className} title={title} aria-label={ariaLabel}>
+      {value}
+    </span>
+  )
+}
+
+function SourceStatePill({
+  state,
+  degraded,
+  title,
+}: {
+  state: string
+  degraded: boolean
+  title?: string
+}) {
+  return (
+    <span className={`source-state-pill${degraded ? ' is-degraded' : ''}`} title={title}>
+      <span aria-hidden="true" />
+      {state}
+    </span>
+  )
+}
+
+function SourceCapability({ enabled, title }: { enabled: boolean; title: string }) {
+  return (
+    <span className={`source-capability${enabled ? '' : ' is-missing'}`} title={title}>
+      {enabled ? '✓' : '—'}
+    </span>
+  )
 }
 
 function DetailPanel({ capacity }: { capacity: CapacityAtlasItem }) {
@@ -319,37 +467,121 @@ function DetailPanel({ capacity }: { capacity: CapacityAtlasItem }) {
 
       <dl className="detail-grid">
         <dt>SKU</dt>
-        <dd title={`${capacity.capacityUnits ?? '?'} CU`}>{capacity.sku ?? 'Unknown'}</dd>
+        <dd>
+          <DetailValue
+            value={capacity.sku ?? 'Unknown'}
+            title={`${capacity.capacityUnits ?? '?'} CU`}
+            tone={nullableTone(capacity.capacityUnits)}
+          />
+        </dd>
         <dt>Region</dt>
-        <dd>{capacity.region ?? 'Unknown'}</dd>
+        <dd>
+          <DetailValue
+            value={capacity.region ?? 'Unknown'}
+            title={capacity.region === null ? 'Region not reported' : undefined}
+            tone={nullableTone(capacity.region)}
+          />
+        </dd>
         <dt>Workspaces</dt>
-        <dd>{capacity.workspaceCount ?? '—'}</dd>
+        <dd>
+          <DetailValue
+            value={capacity.workspaceCount ?? '—'}
+            title={capacity.workspaceCount === null ? 'Workspace count not measured' : undefined}
+            tone={nullableTone(capacity.workspaceCount)}
+          />
+        </dd>
         <dt>Items</dt>
-        <dd>{capacity.itemCount ?? '—'}</dd>
+        <dd>
+          <DetailValue
+            value={capacity.itemCount ?? '—'}
+            title={capacity.itemCount === null ? 'Item count not measured' : undefined}
+            tone={nullableTone(capacity.itemCount)}
+          />
+        </dd>
         <dt>CU consumed</dt>
-        <dd title={evidenceText(capacity.cuConsumed.evidence)}>{formatCu(capacity.cuConsumed)}</dd>
+        <dd>
+          <DetailValue
+            value={formatCu(capacity.cuConsumed)}
+            title={evidenceText(capacity.cuConsumed.evidence)}
+            tone={evidenceTone(capacity.cuConsumed.evidence)}
+          />
+        </dd>
         <dt>Storage</dt>
-        <dd title={evidenceText(capacity.storage.evidence)}>{formatBytes(capacity.storage)}</dd>
+        <dd>
+          <DetailValue
+            value={formatBytes(capacity.storage)}
+            title={evidenceText(capacity.storage.evidence)}
+            tone={evidenceTone(capacity.storage.evidence)}
+          />
+        </dd>
         <dt>Mean</dt>
-        <dd>{formatPercent(capacity.meanUtilizationPercent)}</dd>
+        <dd>
+          <DetailValue
+            value={formatPercent(capacity.meanUtilizationPercent)}
+            title={evidenceText(capacity.cuConsumed.evidence)}
+            tone={nullableTone(capacity.meanUtilizationPercent, capacity.cuConsumed.evidence)}
+          />
+        </dd>
         <dt>Peak</dt>
-        <dd>{formatPercent(capacity.peakUtilizationPercent)}</dd>
+        <dd>
+          <DetailValue
+            value={formatPercent(capacity.peakUtilizationPercent)}
+            title={evidenceText(capacity.cuConsumed.evidence)}
+            tone={nullableTone(capacity.peakUtilizationPercent, capacity.cuConsumed.evidence)}
+          />
+        </dd>
       </dl>
 
       <h3 className="detail-subhead">Throttling</h3>
       <dl className="detail-grid">
         <dt>Stage</dt>
-        <dd>{splitPascal(throttle.stage)}</dd>
+        <dd>
+          <DetailValue
+            value={isReporting(capacity) ? splitPascal(throttle.stage) : 'unmeasured'}
+            title={isReporting(capacity) ? evidenceText(throttle.evidence) : splitPascal(capacity.stateReason)}
+            tone={isReporting(capacity) ? evidenceTone(throttle.evidence) : 'unknown'}
+          />
+        </dd>
         <dt>Delay (10 min)</dt>
-        <dd>{formatPercent(throttle.interactiveDelayPercent, 0)}</dd>
+        <dd>
+          <DetailValue
+            value={formatPercent(throttle.interactiveDelayPercent, 0)}
+            title={evidenceText(throttle.evidence)}
+            tone={nullableTone(throttle.interactiveDelayPercent, throttle.evidence)}
+          />
+        </dd>
         <dt>Rejection (60 min)</dt>
-        <dd>{formatPercent(throttle.interactiveRejectionPercent, 0)}</dd>
+        <dd>
+          <DetailValue
+            value={formatPercent(throttle.interactiveRejectionPercent, 0)}
+            title={evidenceText(throttle.evidence)}
+            tone={nullableTone(throttle.interactiveRejectionPercent, throttle.evidence)}
+          />
+        </dd>
         <dt>Background (24 h)</dt>
-        <dd>{formatPercent(throttle.backgroundRejectionPercent, 0)}</dd>
+        <dd>
+          <DetailValue
+            value={formatPercent(throttle.backgroundRejectionPercent, 0)}
+            title={evidenceText(throttle.evidence)}
+            tone={nullableTone(throttle.backgroundRejectionPercent, throttle.evidence)}
+          />
+        </dd>
         <dt>Carry-forward</dt>
-        <dd>{formatPercent(throttle.cumulativeCarryOverPercent, 0)}</dd>
+        <dd>
+          <DetailValue
+            value={formatPercent(throttle.cumulativeCarryOverPercent, 0)}
+            title={evidenceText(throttle.evidence)}
+            tone={nullableTone(throttle.cumulativeCarryOverPercent, throttle.evidence)}
+          />
+        </dd>
         <dt>Burndown</dt>
-        <dd>{formatMinutes(throttle.expectedBurndownMinutes)}</dd>
+        <dd>
+          <DetailValue
+            value={formatMinutes(throttle.expectedBurndownMinutes)}
+            title={evidenceText(throttle.evidence)}
+            tone={nullableTone(throttle.expectedBurndownMinutes, throttle.evidence)}
+          />
+        </dd>
       </dl>
     </section>
   )
@@ -370,16 +602,18 @@ function ShellFallback({ label }: { label: string }) {
 
 function LazySurface({
   label,
+  dimmed = false,
   fallback,
   children,
 }: {
   label: string
+  dimmed?: boolean
   fallback: ReactNode
   children: ReactNode
 }) {
   return (
     <Suspense fallback={fallback}>
-      <div className="lazy-surface" data-surface={label}>
+      <div className={`lazy-surface${dimmed ? ' is-dimmed' : ''}`} data-surface={label}>
         {children}
       </div>
     </Suspense>

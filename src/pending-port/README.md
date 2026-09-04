@@ -1,6 +1,6 @@
 # Pending port
 
-27 modules and 30 test files from SQLSimCity that the Fabric port has not reached yet. They are
+22 modules and 23 test files from SQLSimCity that the Fabric port has not reached yet. They are
 excluded from `tsconfig.json` and from `vitest.config.ts` — deliberately in agreement, so a module
 here is neither type-checked nor run, and nothing in the shipped app imports one.
 
@@ -40,22 +40,55 @@ guard mutation-checked against the broken state):
   `workspaces` (summing counts, null-preserving) and each family's `itemIds` across pages. The
   wait-attribution and per-object confidence machinery is gone, because the new `OperationFamily`
   carries no such fields.
+- `cityPlan.ts` — the neighbourhood/lot planner. Splits the city by **Fabric workspace** (grouping,
+  neighbourhood territories and districts are all keyed on `workspaceId`; the `CityPlanOptions.schemas`
+  option is renamed `workspaces` to match `CapacityCityPage.workspaces`, and `CityDistrict.kind` is
+  now `'workspace' | 'civic'`). A building's footprint and height are no longer derived here: `placeLot`
+  reads `itemFootprint`/`itemHeight` from `capacityCity.ts` verbatim, so an item and its capacity raise
+  a skyline on one scale, and a missing measurement flows straight onto the lot as `null` and draws
+  `vacant`. `buildingArchetype` is the *visual* style (`house`…`skyscraper`), size-driven from OneLake
+  bytes, and returns `vacant` exactly when `itemMassing` is vacant — a compute-only kind with null bytes
+  is a built `house`, not a wireframe. The SQL-era page-count helpers (`buildingFootprint`,
+  `buildingHeight`, `pageCount`, `ARCHETYPE_THRESHOLD_PAGES`) and the `IndexedView`→`civic` mapping were
+  deleted; no item is `civic` on Fabric, so that member is retained in the union for the geometry kit
+  but no longer produced.
+- `cityBuildings.ts` — the procedural building geometry and palette. Purely presentational: it consumes
+  a `CityLot` and a `BuildingArchetype` and needed no logic change, only its import paths. Guarded by
+  `cityBuildings.test.ts` (colour/tint). Its weathering guard, `cityWeathering.test.ts`, stays
+  quarantined because it slices `CapacityCityScene.ts` as source text — it rejoins when the scene ports.
+- `cityPlan.testkit.ts` and the `cityGrowth*` family (`cityGrowth.testkit.ts` +
+  `cityGrowthLots/Placement/Retrace/Streets.test.ts`) — moved with their subject. The four-files-over-one-testkit
+  layout is preserved intact (`cityGrowthRetrace.test.ts` is left alone on the critical path); do not merge them.
 
-**Still quarantined** (too large / too interconnected to port safely without `cityPlan`):
+**Still quarantined** (too large / too interconnected to port safely without the scene):
 
 | Module | What it needs |
 |---|---|
-| `cityBuildings.ts` | Visual archetype (`house`/`tower`/…) and geometry per building. Consumes a `CityLot` from `cityPlan`, so it cannot move until `cityPlan` does. (`itemKind.ts` already assigns the *semantic* `ItemArchetype`; the visual one is size-driven and lives in `cityPlan`.) |
-| `cityPlan.ts` | Workspaces as neighbourhoods (82 KB). Currently splits on schema and builds lots from reserved/used pages — a substantial rewrite onto `CapacityCityItem`/`itemMassing`. This is the blocker for everything below it. |
-| `CapacityCityScene.ts` | Mostly domain-agnostic (221 KB) — it consumes a `CityPlan`. Blocked on `cityPlan` rather than on itself. **Read `AGENTS.md` on shadow invalidation before touching its loops.** |
-| `CapacityCityView.tsx`, `CapacityCityViewport.tsx`, `AddressPanel.tsx`, `addressBook.ts` | Follow the contracts; no independent decision. Blocked on the scene/plan. |
+| `CapacityCityScene.ts` | Mostly domain-agnostic (221 KB) — it consumes a `CityPlan`, which now exists. Unblocked. **Read `AGENTS.md` on shadow invalidation before touching its loops**, and check the `shadowInvalidation.test.ts` / `cityVehicle*` slice anchors. |
+| `CapacityCityView.tsx`, `CapacityCityViewport.tsx`, `AddressPanel.tsx`, `addressBook.ts` | Follow the contracts; no independent decision. Blocked on the scene. Note: `CapacityCityView.tsx` passes the plan `workspaces` option (was `schemas`). |
+| `cityWeathering.test.ts` | A cityBuildings weathering guard that also slices `CapacityCityScene.ts` via `import.meta.url`; moves to `src/` with the scene. |
+
 
 ### `power-grid` — the civic infrastructure
+
+**Ported out so far** (moved to `src/`, rewritten against the Fabric contracts, tested, and guard
+mutation-checked against the broken state):
+
+- `cityThrottleAttribution.ts` — wait-category attribution is now throttle-stage attribution. It
+  places measured `OperationFamily.throttlingSeconds` only when the family operation class, rejected
+  count and capacity throttle gauges identify one honest power-grid gate. Missing throttling seconds
+  and missing gauges stay unmeasured/unattributed rather than becoming zero-load lanes.
+- `powerGrid.ts` — the canonical power-grid roster: Power Plant, Smoothing Reservoir,
+  Carry-forward Yard, Delay Gate, Interactive Rejection Gate, Background Rejection Gate and Surge
+  Substation. Each facility exposes its stable identity, driving measurement and derived
+  healthy/loaded/brownout/blackout state; a missing driving measurement yields
+  `MeasurementStatus.Unknown` plus a null state for wireframe rendering.
+
+**Still quarantined** (blocked on `cityPlan` geometry):
 
 | Module | What it needs |
 |---|---|
 | `cityFacilityTraffic.ts` | Wait-category facilities become the power/reservoir/carry-forward/gate set. The lane routing survives; only the facility roster changes. |
-| `cityThrottleAttribution.ts` | Already renamed from `cityWaitAttribution.ts`. Needs throttle stages in place of wait categories. |
 
 ### `operation-traffic` — roads and vehicles
 
@@ -83,11 +116,12 @@ guard mutation-checked against the broken state):
 
 ### Test kits
 
-`cityGrowth.testkit.ts` and `cityPlan.testkit.ts` build synthetic plans. They follow their subjects.
-
-**Do not merge the `cityGrowth` spec files when porting them.** They are four files over one testkit
-because `cityGrowthRetrace.test.ts` alone was 17.7s of a 44s run, and Vitest schedules a *file* onto
-a worker. Merging them re-serialises the suite and roughly doubles it. `AGENTS.md` covers this.
+`cityGrowth.testkit.ts` and `cityPlan.testkit.ts` built synthetic plans and have been ported out to
+`src/` with their subject `cityPlan.ts`. The `cityGrowth` family is still **four spec files over one
+testkit** — it stayed that way through the port and must stay that way: `cityGrowthRetrace.test.ts`
+alone runs ~24s, and Vitest schedules a *file* onto a worker, so merging them re-serialises the suite
+and roughly doubles it. Add growth tests to one of the other three; leave the retrace file alone.
+`AGENTS.md` covers this.
 
 ## Porting one out
 

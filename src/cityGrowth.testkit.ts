@@ -22,15 +22,14 @@
  * own file's cost off the critical path.
  */
 import { planCity, type CityPlan, type CityPlanOptions } from './cityPlan'
-import type { CapacityCityItem, CapacityCityWorkspace } from '../capacityCityContracts'
-import type { Evidence } from '../fabricContracts'
+import type { CapacityCityItem, CapacityCityWorkspace } from './capacityCityContracts'
+import type { Evidence } from './fabricContracts'
 
 const evidence: Evidence = {
-  source: 'CatalogSnapshot',
+  source: 'SemanticModel',
   status: 'Available',
   observedAt: null,
   freshUntil: null,
-  reason: 'test',
 }
 
 const SCHEMA_COUNT = 3
@@ -56,23 +55,22 @@ function schemaIdFor(index: number): string {
 }
 
 /**
- * Reserved pages for the object at `index`, spread over four orders of magnitude.
+ * OneLake bytes for the item at `index`, spread over four orders of magnitude.
  *
- * Sizes have to vary, because the old placement matched objects to blocks by footprint rank and a
- * city of identically sized tables would hide exactly the churn being measured. Deliberately not
- * monotonic in the index, so a table added at the end is an ordinary-sized table rather than always
- * the largest or the smallest.
+ * Sizes have to vary, because a city of identically sized items would hide exactly the churn being
+ * measured. Deliberately not monotonic in the index, so an item added at the end is an ordinary-sized
+ * item rather than always the largest or the smallest. Kept well inside a single footprint rung so a
+ * new item, or one that grows, does not resize the city — the property the growth specs defend.
  */
-function reservedPagesFor(index: number): string {
+function storageBytesFor(index: number): string {
   return String(8 + ((index * 2654435761) % 40_000))
 }
 
 /**
- * The id the connected collector builds for an object: `{databaseId}/object/{sys.objects.object_id}`,
- * with the id written out unpadded exactly as that collector writes it.
+ * The id the collector builds for an item, written out unpadded exactly as the collector writes it.
  *
  * Unpadded on purpose. Placement hands out ground in catalogue order and relies on a newly created
- * table sorting after every table already there; compared as text an unpadded id breaks that, because
+ * item sorting after every item already there; compared as text an unpadded id breaks that, because
  * `object/9` sorts after `object/1234567`. Padding these in the test would hide the one property the
  * specs exist to prove. The base of 3 puts the run across both the 9-to-10 and 99-to-100
  * boundaries, where a text comparison and a numeric one disagree.
@@ -83,38 +81,36 @@ export function objectIdFor(index: number): string {
 
 function object(index: number): CapacityCityItem {
   const workspaceId = schemaIdFor(index)
-  const reserved = reservedPagesFor(index)
-  const used = String(Math.floor(Number(reserved) * 0.8))
+  const bytes = storageBytesFor(index)
+  const cuSeconds = String(Math.floor(Number(bytes) * 0.8))
   return {
     itemId: objectIdFor(index),
     workspaceId,
     workspaceName: workspaceId.replace('schema:', ''),
     name: `t${index}`,
-    kind: 'Table',
-    storageBytes: reserved,
-    cuSecondsRaw: used,
-    reservedBytes: String(BigInt(reserved) * 8192n),
-    usedBytes: String(BigInt(used) * 8192n),
-    sizeStatus: 'Known',
-    sizeReason: null,
+    kind: 'Lakehouse',
+    archetype: 'Storage',
+    storage: { bytes, status: 'Known', evidence },
+    cuConsumed: { cuSeconds, status: 'Known', evidence },
+    durationSeconds: null,
+    operations: {
+      total: '1',
+      successful: null,
+      rejected: null,
+      failed: null,
+      invalid: null,
+      cancelled: null,
+    },
+    distinctUsers: null,
+    throttlingMinutes: null,
+    performanceDeltaPercent: null,
     layout: {
       neighborhoodOrdinal: index % SCHEMA_COUNT,
-      // The connected collector numbers objects across the whole database in object-id order.
+      // The collector numbers items across the whole capacity in item-id order.
       itemOrdinal: index,
-      x: 0,
-      z: 0,
     },
-    indexes: [],
-    directActivity: { totalOperations: '1', resetEpochToken: null, evidence },
-    attributedExposure: {
-      executionCount: null,
-      totalCpuMicroseconds: null,
-      totalDurationMicroseconds: null,
-      totalLogicalReads8KiBPages: null,
-      confidence: 'Unknown',
-      rationale: 'test',
-      evidence,
-    },
+    sizeStatus: 'Known',
+    evidence,
   }
 }
 
@@ -132,7 +128,7 @@ function schemasFor(objects: readonly CapacityCityItem[]): CapacityCityWorkspace
     }))
 }
 
-/** The city a database of `count` objects reports, exactly as a completed page walk would carry it. */
+/** The city a capacity of `count` items reports, exactly as a completed page walk would carry it. */
 export function cityOf(count: number): { objects: CapacityCityItem[]; options: CityPlanOptions } {
   const objects = Array.from({ length: count }, (_, index) => object(index))
   return {
@@ -140,7 +136,7 @@ export function cityOf(count: number): { objects: CapacityCityItem[]; options: C
     options: {
       seed: 'db:growth',
       totalItems: String(count),
-      schemas: schemasFor(objects),
+      workspaces: schemasFor(objects),
     },
   }
 }

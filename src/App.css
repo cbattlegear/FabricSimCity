@@ -508,7 +508,6 @@
 .sidebar-title { display: flex; align-items: flex-start; gap: 10px; }
 .sidebar-title h1 { margin: 0; font-size: 1.12rem; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .sidebar-title p { margin: 3px 0 0; color: #8fa5b7; font-size: 0.73rem; }
-
 .sidebar-back {
   flex: none;
   width: 28px;
@@ -1353,6 +1352,7 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   cursor: pointer;
 }
 .address-entry:hover { background: #101c27; }
+.address-entry.is-selected,
 .address-entry[aria-current='true'] { border-color: #33705f; background: #0f2029; }
 .address-icon {
   width: 30px;
@@ -1397,6 +1397,97 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.address-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  color: #c5d6e3;
+  font-size: .72rem;
+}
+.address-facts > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.capacity-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+.capacity-badges.is-compact {
+  display: inline-flex;
+  margin: 6px 0 0;
+  vertical-align: middle;
+}
+.capacity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 16px;
+  padding: 1px 5px;
+  border: 1px solid #33475a;
+  border-radius: 4px;
+  background: #101923;
+  color: #a8bac9;
+  font: .58rem/1.25 ui-monospace, Consolas, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.capacity-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.capacity-badge.is-unknown {
+  border-style: dashed;
+  border-color: #7f93a8;
+  background: transparent;
+  color: #c6d0da;
+}
+.capacity-badge.is-unknown::before {
+  border: 1px dashed currentColor;
+  border-radius: 1px;
+  background: transparent;
+}
+.capacity-badge.is-throttled {
+  border-color: #8a6232;
+  background: #2a1d0f;
+  color: #e6b463;
+}
+.capacity-badge.is-rejecting {
+  border-color: #8f4438;
+  background: #2a1412;
+  color: #dd6f5e;
+}
+.capacity-badge.is-stale {
+  border-color: #4b5968;
+  background: #121a23;
+  color: #8fa0ae;
+}
+.capacity-badge.is-stale::before {
+  opacity: .55;
+}
+.address-entry.is-unmeasured {
+  background:
+    linear-gradient(90deg, rgba(127, 147, 168, .08), transparent 44%),
+    transparent;
+}
+.address-entry.is-unmeasured .address-icon {
+  border: 1px dashed #7f93a8;
+  background: transparent;
+  color: #c6d0da;
+}
+.address-entry.is-unmeasured .address-facts > span:nth-child(2) {
+  padding-inline: 4px;
+  border: 1px dashed #52677a;
+  border-radius: 4px;
+  color: #c6d0da;
+}
+.address-entry.is-throttled .address-icon { box-shadow: inset 0 0 0 2px #d99a3a; color: #e6b463; }
+.address-entry.is-rejecting .address-icon { box-shadow: inset 0 0 0 2px #c8503f; color: #dd6f5e; }
+.address-entry.is-stale .address-text { opacity: .68; }
 .address-empty { padding: 22px 16px; color: #8fa5b7; font-size: .78rem; line-height: 1.5; }
 .address-count { padding: 4px 16px 10px; color: #6f8698; font-size: .68rem; }
 
@@ -2140,6 +2231,10 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
  */
 .lazy-surface { position: absolute; inset: 0; }
 .lazy-surface > * { width: 100%; height: 100%; }
+.lazy-surface.is-dimmed {
+  opacity: .68;
+  filter: saturate(.72) brightness(.86);
+}
 
 .shell-fallback {
   position: absolute;
@@ -2148,6 +2243,25 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   place-items: center;
   color: #7f93a8;
   font-size: 0.82rem;
+}
+
+.atlas-subtitle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.atlas-subtitle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #72f4c4;
+  box-shadow: 0 2px 10px rgba(114, 244, 196, 0.35);
+}
+.atlas-subtitle.is-degraded .atlas-subtitle-dot {
+  background: #ffc96b;
+  box-shadow: 0 2px 10px rgba(255, 201, 107, 0.35);
 }
 
 /*
@@ -2194,6 +2308,39 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
   text-align: right;
   overflow-wrap: anywhere;
 }
+.measurement-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: 100%;
+}
+.measurement-value.is-unknown {
+  padding: 0 5px;
+  border: 1px dashed #5f7386;
+  border-radius: 4px;
+  background: #0a1118;
+  color: #aab8c6;
+}
+.measurement-value.is-unknown::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border: 1px dashed currentColor;
+}
+.measurement-value.is-stale {
+  opacity: .62;
+}
+.measurement-value.is-stale::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .55;
+}
 
 .detail-subhead {
   margin: 14px 0 6px;
@@ -2223,8 +2370,43 @@ form.hud-field button { justify-self: start; padding: 5px 12px; color: #08131a; 
 .legend-swatch.is-plot { width: 15px; height: 8px; border-radius: 1px; background: #4a7fb5; }
 .legend-swatch.is-tower { width: 7px; height: 15px; border-radius: 1px; background: #6fd3ae; }
 .legend-swatch.is-wireframe { background: none; border-style: dashed; border-color: #7f93a8; }
+.legend-swatch.is-value-unknown { background: #0a1118; border-style: dashed; border-color: #5f7386; }
+.legend-swatch.is-stale { background: #526170; opacity: .55; }
 .legend-swatch.is-brownout { background: #d99a3a; border-color: #e6b463; }
 .legend-swatch.is-blackout { background: #c8503f; border-color: #dd6f5e; }
+.source-state-pill,
+.source-capability,
+.stale-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 1px solid #315547;
+  border-radius: 999px;
+  background: #0f201a;
+  color: #9fd8c8;
+  font: .62rem/1.45 ui-monospace, Consolas, monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.source-state-pill > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.source-state-pill.is-degraded,
+.stale-badge {
+  border-color: #765b33;
+  background: #241d12;
+  color: #efc16e;
+}
+.source-capability.is-missing {
+  border-style: dashed;
+  border-color: #5f7386;
+  background: transparent;
+  color: #93a5b6;
+}
 
 /* --------------------------------------------------------------------- sign-in surface */
 

@@ -1,7 +1,9 @@
-import { stableHash } from '../atlasLayout'
-import { makeBlockWarp, type CityWarp } from '../cityBlockWarp'
-import { buildBlocks, type CityBlock, type CityBlockField } from '../cityBlocks'
-import { planField } from '../cityField'
+import { stableHash } from './atlasLayout'
+import { itemFootprint, itemHeight, itemMassing } from './capacityCity'
+import { parseExactBytes } from './capacityAtlas'
+import { makeBlockWarp, type CityWarp } from './cityBlockWarp'
+import { buildBlocks, type CityBlock, type CityBlockField } from './cityBlocks'
+import { planField } from './cityField'
 import {
   breakCrossings,
   buildPlanarGraph,
@@ -9,11 +11,11 @@ import {
   extractFaces,
   type GraphNode,
   type PlanarGraph,
-} from '../cityGraph'
-import { FACILITY_LABELS, FACILITY_ORDER, type FacilityKind, type FacilitySite } from '../cityInfrastructure'
-import { classifyRoads, RoadRouter, type RoadClass, type RoadProperties } from '../cityRouting'
-import { mulberry32, seededShuffle } from '../citySeed'
-import { traceStreamlines, type Point } from '../cityStreamlines'
+} from './cityGraph'
+import { FACILITY_LABELS, FACILITY_ORDER, type FacilityKind, type FacilitySite } from './cityInfrastructure'
+import { classifyRoads, RoadRouter, type RoadClass, type RoadProperties } from './cityRouting'
+import { mulberry32, seededShuffle } from './citySeed'
+import { traceStreamlines, type Point } from './cityStreamlines'
 import {
   planLandform,
   planTerrain,
@@ -23,27 +25,36 @@ import {
   type CityTerrain,
   type Landform,
   type RiverNode,
-} from '../cityTerrain'
-import type { CapacityCityItem, CapacityCityWorkspace } from '../capacityCityContracts'
+} from './cityTerrain'
+import type { CapacityCityItem, CapacityCityWorkspace } from './capacityCityContracts'
 
 /**
- * Deterministic town plan for one database city.
+ * Deterministic town plan for one capacity city.
  *
+ * One capacity is a city, its workspaces are the neighbourhoods, and its items are the buildings.
  * The city is *scattered* — buildings and infrastructure are spread across the whole block grid
  * rather than packed into contiguous rectangles — but it is not random. Every position comes from a
- * generator seeded with the database's own id, so the same database produces byte-identical
+ * generator seeded with the capacity's own id, so the same capacity produces byte-identical
  * placement on every load, in every browser, on every machine. Scatter is a look, not a lottery.
  *
  * Placement derives only from that seed and from the backend's stable layout ordinals
  * (`layout.neighborhoodOrdinal` / `layout.itemOrdinal`), never from the order rows happen to
- * arrive in. This preserves the architectural rule that database-city layout is deterministic and
+ * arrive in. This preserves the architectural rule that city layout is deterministic and
  * independent of source row order, and it keeps a building on the same lot when a later bounded page
  * is appended.
  *
- * Only building footprint and height carry a quantity claim (both documented logarithmic mappings of
- * exact 8-KiB page counts). The archetype selected here changes *style* only -- a house and a
- * skyscraper of identical page counts would occupy identical volume -- so decorative geometry never
- * encodes evidence.
+ * Only building footprint and height carry a quantity claim, and neither is derived here: both come
+ * from `capacityCity.ts` (`itemFootprint` from OneLake bytes, `itemHeight` from CU-seconds), which
+ * imports `cuToHeight` from the atlas verbatim so an item and its capacity raise a skyline on one
+ * scale. The archetype selected here changes *style* only -- a house and a skyscraper of identical
+ * measurements would occupy identical volume -- so decorative geometry never encodes evidence.
+ *
+ * The rule the whole visualization rests on holds: a measurement that is *missing* renders as
+ * wireframe, never as zero. `itemFootprint`/`itemHeight` return `null` for a gap, `placeLot` carries
+ * that null straight onto the lot, and an item with either measurement missing is drawn `vacant`.
+ * The one subtlety the city keeps is that a null footprint is not always missing — a compute-only
+ * kind holds no OneLake bytes by nature, which is a complete measurement of an item that stores
+ * nothing rather than a gap. `capacityCity.ts` settles that distinction; this file only consumes it.
  */
 
 /** Style family for a building. Selected from exact reserved page counts; never a quantity claim itself. */
@@ -132,9 +143,9 @@ export interface CityLot {
   readonly accessZ: number
   readonly frontageStreetId: string
   readonly lotSize: number
-  /** Documented logarithmic mapping of exact reserved 8-KiB pages, or null when size is unknown. */
+  /** Footprint from OneLake bytes (`capacityCity.itemFootprint`), or null when storage is missing. */
   readonly footprint: number | null
-  /** Documented logarithmic mapping of exact used 8-KiB pages, or null when size is unknown. */
+  /** Height from CU-seconds (`capacityCity.itemHeight`), or null when consumption is unknown. */
   readonly height: number | null
   readonly archetype: BuildingArchetype
   /** Stable per-object seed for decorative variation only. */
@@ -145,13 +156,13 @@ export interface CityDistrict {
   readonly districtId: string
   readonly name: string
   readonly neighborhoodOrdinal: number
-  readonly kind: 'schema' | 'civic'
+  readonly kind: 'workspace' | 'civic'
   readonly itemCount: number
   /**
-   * The blocks this schema's neighbourhood claims, whether or not a loaded object stands on one.
+   * The blocks this workspace's neighbourhood claims, whether or not a loaded item stands on one.
    *
-   * Claimed from the schema's full object count, so the shape of a neighbourhood is settled before
-   * its tables arrive and does not shift underneath them as pages load.
+   * Claimed from the workspace's full item count, so the shape of a neighbourhood is settled before
+   * its items arrive and does not shift underneath them as pages load.
    */
   readonly blocks: readonly BlockRef[]
   readonly minX: number
@@ -233,25 +244,25 @@ export interface CityPlan {
 /** Options that make a plan reproducible and stable as bounded pages arrive. */
 export interface CityPlanOptions {
   /**
-   * Seed source for the scatter. The database id, so a database's layout is the same everywhere.
-   * Two databases with identical shapes still get different cities, which is the point.
+   * Seed source for the scatter. The capacity id, so a capacity's layout is the same everywhere.
+   * Two capacities with identical shapes still get different cities, which is the point.
    */
   readonly seed?: string
   /**
-   * Total object count for the whole database, from `page.totalItems`.
+   * Total item count for the whole capacity, from `page.totalItems`.
    *
    * The grid is sized from this rather than from the loaded count, which is what stops the city
    * from being re-planned — and every building from moving — the moment a second page arrives.
    */
   readonly totalItems?: string | number | null
   /**
-   * All schemas in the database with their full object counts, from `page.schemas`.
+   * All workspaces in the capacity with their full item counts, from `page.workspaces`.
    *
-   * Every page carries the complete schema list, so these counts give each object a global slot
+   * Every page carries the complete workspace list, so these counts give each item a global slot
    * index that does not depend on which page it arrived on. Without them the slot index is derived
-   * from the loaded objects alone, which is only stable once everything is loaded.
+   * from the loaded items alone, which is only stable once everything is loaded.
    */
-  readonly schemas?: readonly CapacityCityWorkspace[]
+  readonly workspaces?: readonly CapacityCityWorkspace[]
 }
 
 /**
@@ -299,16 +310,16 @@ export const ARTERIAL_WIDTH = 15
 export const LOT_MARGIN = 10
 export const MIN_CELL = 20
 
-/** Footprint and height used for an object whose page counts are unavailable. Nonquantitative by design. */
+/** Footprint and height used for an item whose measurements are unavailable. Nonquantitative by design. */
 export const UNKNOWN_FOOTPRINT = 11
 export const UNKNOWN_HEIGHT = 8
 
-/** Reserved-page thresholds that select a building's style family. Exact page counts, never rounded. */
-export const ARCHETYPE_THRESHOLD_PAGES = {
-  house: 128n, // < 1 MiB
-  rowhouse: 2048n, // < 16 MiB
-  midrise: 32768n, // < 256 MiB
-  tower: 524288n, // < 4 GiB
+/** OneLake byte thresholds that select a building's style family. Exact byte counts, never rounded. */
+export const ARCHETYPE_THRESHOLD_BYTES = {
+  house: 1n << 20n, // < 1 MiB
+  rowhouse: 1n << 24n, // < 16 MiB
+  midrise: 1n << 28n, // < 256 MiB
+  tower: 1n << 32n, // < 4 GiB
 } as const
 
 /**
@@ -583,40 +594,21 @@ const FACILITY_SEPARATION_STEPS = 2.5
 const FACILITY_PLACEMENT_ATTEMPTS = 32
 
 /**
- * Building footprint in world units from exact reserved 8-KiB pages.
- * `6 + log2(1 + pages) * 0.75` -- a doubling of reserved pages widens the building by 0.75 units.
+ * Style family for one item, from its OneLake footprint. Purely visual — a house and a skyscraper of
+ * equal bytes occupy identical volume, so the archetype never encodes a quantity the massing does not.
+ *
+ * `vacant` is returned exactly when {@link itemMassing} is vacant, so the style agrees with the
+ * geometry: an item with a missing footprint or unknown consumption fences rather than claiming a
+ * shape. A built item with no measurable bytes — a compute-only kind, which stores nothing by nature
+ * rather than by omission — is the smallest style, a `house`, not a wireframe.
  */
-export function buildingFootprint(storageBytes: string | null): number | null {
-  const pages = pageCount(storageBytes)
-  if (pages === null) return null
-  return 6 + Math.log2(1 + pages) * 0.75
-}
-
-/**
- * Building height in world units from exact used 8-KiB pages.
- * `log2(1 + pages) * 4.8` -- zero used pages is zero height, and every doubling adds 4.8 units.
- * Deliberately unclamped so the mapping stays strictly monotonic in the measured value.
- */
-export function buildingHeight(cuSecondsRaw: string | null): number | null {
-  const pages = pageCount(cuSecondsRaw)
-  if (pages === null) return null
-  return Math.log2(1 + pages) * 4.8
-}
-
-/** Style family for one object. Unknown size is always `vacant`, which makes no quantity claim. */
-export function buildingArchetype(object: CapacityCityItem): BuildingArchetype {
-  if (object.storageBytes === null || object.cuSecondsRaw === null) return 'vacant'
-  if (object.kind === 'IndexedView') return 'civic'
-  let pages: bigint
-  try {
-    pages = BigInt(object.storageBytes)
-  } catch {
-    return 'vacant'
-  }
-  if (pages < ARCHETYPE_THRESHOLD_PAGES.house) return 'house'
-  if (pages < ARCHETYPE_THRESHOLD_PAGES.rowhouse) return 'rowhouse'
-  if (pages < ARCHETYPE_THRESHOLD_PAGES.midrise) return 'midrise'
-  if (pages < ARCHETYPE_THRESHOLD_PAGES.tower) return 'tower'
+export function buildingArchetype(item: CapacityCityItem): BuildingArchetype {
+  if (itemMassing(item).kind === 'vacant') return 'vacant'
+  const bytes = parseExactBytes(item.storage)
+  if (bytes === null || bytes < ARCHETYPE_THRESHOLD_BYTES.house) return 'house'
+  if (bytes < ARCHETYPE_THRESHOLD_BYTES.rowhouse) return 'rowhouse'
+  if (bytes < ARCHETYPE_THRESHOLD_BYTES.midrise) return 'midrise'
+  if (bytes < ARCHETYPE_THRESHOLD_BYTES.tower) return 'tower'
   return 'skyscraper'
 }
 
@@ -624,13 +616,13 @@ export function planCity(
   objects: readonly CapacityCityItem[],
   options: CityPlanOptions = {},
 ): CityPlan {
-  const seed = options.seed ?? 'sqlsimcity'
+  const seed = options.seed ?? 'fabricsimcity'
   const numericSeed = stableHash(seed)
   const widest = plannedFootprint(objects)
   const cell = chooseCell(widest)
 
   const ordered = orderObjects(objects)
-  const sizes = schemaSizes(ordered, options.schemas)
+  const sizes = schemaSizes(ordered, options.workspaces)
   /*
    * How many buildings the city has to have room for.
    *
@@ -1031,11 +1023,11 @@ function placeBuildings(
 }
 
 
-/** The widest building the database asks for, so a block can be required to hold it. */
+/** The widest building the capacity asks for, so a block can be required to hold it. */
 function widestFootprint(objects: readonly CapacityCityItem[]): number {
   let widest = UNKNOWN_FOOTPRINT
   for (const object of objects) {
-    const footprint = buildingFootprint(object.storageBytes) ?? UNKNOWN_FOOTPRINT
+    const footprint = itemFootprint(object) ?? UNKNOWN_FOOTPRINT
     if (footprint > widest) widest = footprint
   }
   return widest
@@ -1632,7 +1624,7 @@ function describeDistricts(
         districtId,
         name: group.name,
         neighborhoodOrdinal: group.ordinal,
-        kind: 'schema' as const,
+        kind: 'workspace' as const,
         itemCount: group.lots.length,
         blocks,
         ...box,
@@ -1707,8 +1699,8 @@ function placeLot(object: CapacityCityItem, block: CityBlock): CityLot {
     accessZ: block.frontage.z,
     frontageStreetId: streetId(block.frontageEdgeId),
     lotSize: block.capacity,
-    footprint: buildingFootprint(object.storageBytes),
-    height: buildingHeight(object.cuSecondsRaw),
+    footprint: itemFootprint(object),
+    height: itemHeight(object),
     archetype: buildingArchetype(object),
     seed: stableHash(object.itemId),
   }
@@ -1759,17 +1751,6 @@ export function dedupePoints(points: Array<{ x: number; z: number }>): Array<{ x
     result.push(point)
   }
   return result
-}
-
-function pageCount(value: string | null): number | null {
-  if (value === null) return null
-  let parsed: bigint
-  try {
-    parsed = BigInt(value)
-  } catch {
-    return null
-  }
-  return parsed < 0n ? 0 : Number(parsed)
 }
 
 function compareOrdinal(left: string, right: string): number {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GROWTH_SIZES, PLAN_TIMEOUT_MS, objectIdFor, planOf } from '../cityGrowth.testkit'
+import { GROWTH_SIZES, PLAN_TIMEOUT_MS, objectIdFor, planOf } from './cityGrowth.testkit'
 
 /*
  * The ground half of the growth guarantee: the added table gets a lot, and no two buildings end up

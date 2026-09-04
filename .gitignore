@@ -23,3 +23,12 @@ rayfin/.lockfile.json
 # Local cache written by the impeccable design-review tooling. It records
 # per-file hook state for this checkout only and carries no project meaning.
 .impeccable/
+
+# Screenshots and traces produced by tools/measure-browser. The workbench itself
+# is committed on purpose -- it is how a layout change gets verified, and the
+# conventions require re-running it rather than trusting a stale number. Its
+# output is evidence for one measurement and belongs in the pull request body as
+# numbers, not in the tree as binaries.
+tools/measure-browser/*.png
+tools/measure-browser/*.zip
+tools/measure-browser/trace/

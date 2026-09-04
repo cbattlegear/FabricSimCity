@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planOf, streetSignature } from '../cityGrowth.testkit'
+import { planOf, streetSignature } from './cityGrowth.testkit'
 
 /*
  * How often the street network is redrawn across a long stretch of growth. See
