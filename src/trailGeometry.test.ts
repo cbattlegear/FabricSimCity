@@ -63,8 +63,8 @@ describe('the ordering stays derived, so the stack cannot outgrow it again', () 
   it('takes the top of the stack from the lane count rather than restating it', () => {
     const decl = code(source)
     expect(decl).toMatch(/export const ROAD_TOP_Y\s*=\s*ROAD_Y\s*\+\s*MAX_LANE\s*\*\s*ROAD_LANE_STEP/)
-    expect(decl).toMatch(/export const TRAIL_Y\s*=\s*ROAD_TOP_Y\s*[+\-]/)
-    expect(decl).toMatch(/export const VEHICLE_Y\s*=\s*TRAIL_Y\s*[+\-]/)
+    expect(decl).toMatch(/export const TRAIL_Y\s*=\s*ROAD_TOP_Y\s*[+-]/)
+    expect(decl).toMatch(/export const VEHICLE_Y\s*=\s*TRAIL_Y\s*[+-]/)
   })
 
   /*
