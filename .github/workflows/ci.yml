@@ -43,6 +43,11 @@ jobs:
       - name: Test
         run: npm test
 
+      # `npm run lint` existed and was failing on `main` with two `no-useless-escape` errors,
+      # because nothing ever ran it. A script that is not in CI is a script that rots.
+      - name: Lint
+        run: npm run lint
+
       # `tsc -b`, not `tsc --noEmit`. The latter reports TS6305 against `src/services/*` because
       # the Rayfin project references have not been built, and the build is what reads the
       # `*.test.ts` files -- a test constructing a contract value with a string literal outside
