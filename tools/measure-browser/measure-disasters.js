@@ -28,7 +28,7 @@ import { VIEWPORTS, launch, cityUrl, openCity, instrument, close } from './lib/c
 import { decodePng, components } from './lib/pixels.js'
 
 /*
- * The hues the disaster materials are built from, in `DatabaseCityScene.ts`.
+ * The hues the disaster materials are built from, in `CapacityCityScene.ts`.
  *
  * Matched by Manhattan distance rather than exact equality, and the tolerance is not slack. Scene
  * fog shifts even an opaque `MeshBasicMaterial` with `toneMapped = false`: the wreck is authored as
@@ -48,10 +48,9 @@ const near = target => (r, g, b) =>
 
 function parseArgs(argv) {
   const args = {
-    origin: 'http://127.0.0.1:5080',
-    database: 'primary/database/SimCitySmall',
+    origin: 'http://localhost:5173',
+    capacity: '640ca760-1bcf-6e89-3960-0168d3014041',
     viewport: 'rail',
-    mode: 'city',
     settle: 95,
     samples: 8,
     every: 5,
@@ -65,9 +64,8 @@ function parseArgs(argv) {
     const value = argv[index + 1]
     switch (flag) {
       case '--origin': args.origin = value; index += 1; break
-      case '--database': args.database = value; index += 1; break
+      case '--capacity': args.capacity = value; index += 1; break
       case '--viewport': args.viewport = value; index += 1; break
-      case '--mode': args.mode = value; index += 1; break
       case '--settle': args.settle = Number(value); index += 1; break
       case '--samples': args.samples = Number(value); index += 1; break
       case '--every': args.every = Number(value); index += 1; break
@@ -78,12 +76,12 @@ function parseArgs(argv) {
       case '--help':
         console.log(`Usage: node measure-disasters.js [options]
 
-  --origin <url>       Where the app is served. Default http://127.0.0.1:5080
-  --database <id>      City to open. Default primary/database/SimCitySmall
+  --origin <url>       Where the Vite app is served. Default http://localhost:5173
+  --capacity <id>      Capacity city to open. Default Fabrikam Dev fixture
   --viewport rail|sheet   Which side of the 860px breakpoint. Default rail
   --settle <seconds>   How long to wait for the disaster survey. Default 95.
-                       The survey reads up to 40 top-ranked families' compiled
-                       plans; on a busy Query Store it is a minute or more.
+                       The fixture-backed city is quick, but the delay keeps this
+                       comparable with runs against a future live Fabric source.
   --samples <n>        How many samples to take. Default 8
   --every <seconds>    Gap between samples. Default 5
   --json <path>        Write the full report
@@ -93,10 +91,8 @@ function parseArgs(argv) {
                        machines, which rasterises in software.
 
 Note: disasters are drawn only where there is evidence for them. If the sidebar
-reports no fires or burst mains, the city is healthy or -- far more likely on a
-busy instance -- the families carrying that evidence rank outside the top 40 the
-survey reads. Clearing Query Store and re-running a seed workload is what makes
-them the dominant families again.`)
+reports no fires or burst mains, the fixture is healthy or the families carrying
+that evidence are not present in the loaded operation samples.`)
         process.exit(0)
         break
       default: break
@@ -138,8 +134,8 @@ async function run() {
   await page.setViewportSize({ width: viewport.width, height: viewport.height })
   await instrument(page)
 
-  const load = await openCity(page, cityUrl(args.origin, args.database, args.mode))
-  console.log(`loaded ${load.objectCount} objects on ${load.renderer ?? 'unknown renderer'}`)
+  const load = await openCity(page, cityUrl(args.origin, args.capacity))
+  console.log(`loaded ${load.itemCount ?? load.objectCount} items on ${load.renderer ?? 'unknown renderer'}`)
 
   console.log(`waiting ${args.settle}s for the disaster survey to settle...`)
   await page.waitForTimeout(args.settle * 1000)
@@ -148,7 +144,7 @@ async function run() {
   const lines = await page.evaluate(() =>
     document.body.innerText
       .split('\n')
-      .filter(line => /building fire|burst main|water main|car crash|stale|top-ranked query famil/i.test(line))
+      .filter(line => /building fire|burst main|water main|car crash|stale|operation famil/i.test(line))
       .slice(0, 10))
   console.log('what the sidebar says is wrong with the city:')
   for (const line of lines) console.log(`  | ${line}`)

@@ -2,8 +2,8 @@
  * The in-page probe. Installed with `addInitScript`, so it is in place before any
  * application script runs and before the WebGL context exists.
  *
- * Everything here is measured from outside the application. Nothing in `web/src` knows
- * this exists, and nothing in `web/src` is changed to make it work — a measurement that
+ * Everything here is measured from outside the application. Nothing in `src` knows
+ * this exists, and nothing in `src` is changed to make it work — a measurement that
  * needed a hook in the code it measures would be measuring the hook as well, and would
  * stop being available on the build that actually ships.
  */

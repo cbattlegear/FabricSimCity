@@ -6,9 +6,9 @@
  * costs while orbiting it, how many draw calls that frame submits and how many of them are
  * the shadow pass, and what one keystroke in the address book costs.
  *
- * Nothing here runs in CI, and nothing in `web/` knows it exists.
+ * Nothing here runs in CI, and nothing in `src/` knows it exists.
  *
- *   node measure.js --database "primary/database/SimCityLoad"
+ *   node measure.js --capacity "005cdd71-3dbd-4484-0060-17041100c991"
  *   node measure.js --viewport sheet --json out.json
  */
 
@@ -23,18 +23,17 @@ import {
   sidebarGeometry,
   walkSidebarRegions,
   openPlaceCard,
-  openRoutedPlan,
-  dismissRoutedPlan,
   openDirectory,
 } from './lib/address.js'
 
+const DEFAULT_CAPACITY = '005cdd71-3dbd-4484-0060-17041100c991'
+
 function parseArgs(argv) {
   const args = {
-    origin: 'http://127.0.0.1:5080',
-    database: 'primary/database/SimCityLoad',
+    origin: 'http://localhost:5173',
+    capacity: DEFAULT_CAPACITY,
     viewport: 'both',
-    mode: 'city',
-    term: 'orders',
+    term: 'warehouse',
     headed: true,
     json: null,
     orbitSeconds: 4,
@@ -52,9 +51,8 @@ function parseArgs(argv) {
     const value = argv[index + 1]
     switch (flag) {
       case '--origin': args.origin = value; index += 1; break
-      case '--database': args.database = value; index += 1; break
+      case '--capacity': args.capacity = value; index += 1; break
       case '--viewport': args.viewport = value; index += 1; break
-      case '--mode': args.mode = value; index += 1; break
       case '--term': args.term = value; index += 1; break
       case '--json': args.json = value; index += 1; break
       case '--label': args.label = value; index += 1; break
@@ -71,8 +69,8 @@ function parseArgs(argv) {
       case '--help':
         console.log(`Usage: node measure.js [options]
 
-  --origin <url>        Where the app is served. Default http://127.0.0.1:5080
-  --database <id>       City to open. Default primary/database/SimCityLoad
+  --origin <url>        Where the Vite app is served. Default http://localhost:5173
+  --capacity <id>       Capacity city to open. Default Contoso Analytics fixture
   --viewport rail|sheet|both   Which side of the 860px breakpoint. Default both
   --size <WxH>          Measure one custom viewport instead, e.g. 1115x800
   --skip-orbit          Skip the orbit and frame-cost passes (layout runs only)
@@ -82,8 +80,7 @@ function parseArgs(argv) {
   --idle-seconds <n>    Length of the idle window. Default 5
   --reduced-motion      Emulate prefers-reduced-motion: reduce. With --vehicles this is
                         the run that must report a stopped loop
-  --mode city|map       Initial view mode. Default city
-  --term <text>         What to type into the address book. Default "orders"
+  --term <text>         What to type into the address book. Default "warehouse"
   --orbit-seconds <n>   Length of the orbit drag. Default 4
   --label <text>        Recorded in the output, e.g. "before" / "after"
   --screenshot <path>   Save the city after orbiting, e.g. to eyeball the shadows
@@ -106,7 +103,7 @@ async function measureViewport(context, viewport, args) {
   /*
    * Emulated before the app loads, not after.
    *
-   * `DatabaseCityScene` reads `prefers-reduced-motion` when it builds and does not start a
+   * `CapacityCityScene` reads `prefers-reduced-motion` when it builds and does not start a
    * vehicle loop at all when it is set. Flipping the media query on an already-built scene
    * would measure a scene that had already decided, and would report the animated path while
    * claiming to report the reduced one.
@@ -141,7 +138,7 @@ async function measureViewport(context, viewport, args) {
   // After the clock, never before: see `instrument()`.
   await instrument(page)
 
-  const url = cityUrl(args.origin, args.database, args.mode)
+  const url = cityUrl(args.origin, args.capacity)
   const load = await openCity(page, url)
 
   const counts = await addressCounts(page)
@@ -168,21 +165,11 @@ async function measureViewport(context, viewport, args) {
    * `resting` is the column as it loads. The accordion then makes every other state a *single* open
    * region -- opening one closes the last, and the city directory shares the same `openRegion` -- so
    * each is measured while it is the open one rather than pretending to a combined state that
-   * stopped existing in #116. `routedPlan` opens a captured plan, which takes the whole rail over and
-   * is the state #120 was found in, and `worstCase` adds a place card on top.
-   *
-   * `routedPlan` runs *before* `openPlaceCard` and is dismissed afterwards, and that ordering is the
-   * whole point of the pass. A place card leaves `showsAddressBook` false, so the plan finder stops
-   * being rendered; run second, `openRoutedPlan` finds no finder, reports "no plan finder in this
-   * view" and re-measures the place card under the routed plan's name. That is what the first run
-   * after this pass was written did -- it reported a clean `routedPlan` for a state it never entered.
+   * stopped existing in the old SQL build. Fabric has no captured-plan route takeover, so the pass
+   * moves directly from the reachable drawer states to a place card competing with the column.
    */
   const { steps: sidebarSteps, regions } = await walkSidebarRegions(page)
   Object.assign(geometry, regions)
-  const routeStep = await openRoutedPlan(page)
-  sidebarSteps.push(routeStep)
-  if (routeStep.ok) geometry.routedPlan = await sidebarGeometry(page)
-  sidebarSteps.push(await dismissRoutedPlan(page))
   const placeCardStep = await openPlaceCard(page)
   sidebarSteps.push(placeCardStep)
   geometry.worstCase = await sidebarGeometry(page)
@@ -305,7 +292,7 @@ function line(label, value) {
 function report(result) {
   const out = []
   out.push(`\n=== ${result.viewport.name} (${result.viewport.width}x${result.viewport.height}) ===`)
-  out.push(line('objects loaded', result.load.objectCount))
+  out.push(line('items loaded', result.load.itemCount ?? result.load.objectCount))
   out.push(line('load to settled', `${(result.load.loadMs / 1000).toFixed(1)} s`))
   out.push(line('GPU', result.load.renderer ?? 'unknown'))
 
@@ -515,8 +502,7 @@ if (args.json) {
   writeFileSync(args.json, JSON.stringify({
     label: args.label,
     origin: args.origin,
-    database: args.database,
-    mode: args.mode,
+    capacity: args.capacity,
     at: new Date().toISOString(),
     results,
   }, null, 2))

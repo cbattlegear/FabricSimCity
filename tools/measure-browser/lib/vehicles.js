@@ -33,7 +33,7 @@ export async function vehicleCensus(page) {
     }
     /*
      * The disclosure is the `.mapping-note` immediately after the ladder, found by position
-     * rather than by a class of its own. Adding a hook to `web/src` for the probe's benefit
+     * rather than by a class of its own. Adding a hook to `src` for the probe's benefit
      * would put a selector in the shipped build that exists only for this file — see the
      * README: nothing in the app is changed to make a measurement work.
      */
@@ -50,7 +50,7 @@ export async function vehicleCensus(page) {
         unknown: swatch('unknown'),
       },
       // The tail of the disclosure carries the counted-but-not-drawn cases, which is the only
-      // place an unmatched query_hash or an over-cap remainder is stated.
+      // place an unmatched operation or an over-cap remainder is stated.
       summary: disclosure ? disclosure.slice(-320) : null,
       canvasPresent: Boolean(document.querySelector('.map-shell canvas')),
     }

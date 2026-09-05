@@ -2,9 +2,10 @@
   color: #e7edf3;
   background: #080c12;
   /*
-   * A deliberate platform stack rather than a named webfont. SQLSimCity is self-hosted and makes no
-   * third-party requests, so a font that has to be fetched from a CDN is not an option; naming one
-   * that is never loaded is worse still, because it silently resolves to whatever comes next.
+   * A deliberate platform stack rather than a named webfont. FabricSimCity runs inside the
+   * customer's own Fabric workspace and makes no third-party requests, so a font that has to be
+   * fetched from a CDN is not an option; naming one that is never loaded is worse still, because
+   * it silently resolves to whatever comes next.
    */
   font-family: "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, -apple-system,
     BlinkMacSystemFont, "Helvetica Neue", sans-serif;

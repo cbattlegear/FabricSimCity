@@ -1,175 +1,113 @@
 # Security policy
 
-## Foundation threat model
+## Scope
 
-The application defaults to deterministic fixture mode, which creates no SQL connection. Operators may explicitly enable connected mode with a validated read-only target profile and file-mounted credentials. Connected collection runs only embedded, manifest-validated static probes; it does not accept SQL text through the API. The application has no login, user account, analytics, or telemetry. Optional protected storage is disabled by default and is not used by atlas collection.
+FabricSimCity is a static React/Vite Fabric App built on Rayfin. It draws Microsoft Fabric capacity
+topology and capacity-metrics telemetry as an atlas and city view inside the customer's own Fabric
+workspace.
 
-The application exposes operational-shaped evidence to every client that can reach it. **There is no authentication or authorization.** Run the default Compose configuration on loopback or another explicitly trusted network only. Do not publish port 8080 on all interfaces or place the service on the public internet.
+The SQLSimCity server threat model no longer applies. This repository no longer has a .NET API,
+SQL Server connection profile, edge connector, protected-record store, observation archive, Query
+Store reader, demo warning banner, or host-binding story to secure.
 
-The browser states that in a banner on every page. An operator who has read it and does not want it in a demo or a screen recording can set `Deployment__AcknowledgeSecurityWarnings=true` (or the unprefixed `SQLSIMCITY_ACKNOWLEDGE_SECURITY_WARNINGS=true`) to hide it. That setting governs the banner and nothing else: no authentication appears, no host binding relaxes, and the startup warnings this process writes to its own log — an inline connection string, or query text and plan XML retained in the clear — are deliberately left at warning level and are never suppressed by it. The log is the durable record precisely because the screen no longer carries the notice. The default is to show the banner, and only an explicit affirmative hides it; a value that is neither affirmative nor negative stops startup rather than being guessed at, so a typo can never quietly suppress a security fact.
+## Verification status
 
-Security headers enforce a same-origin baseline: no permissive CORS, no remote scripts, no `unsafe-eval`, and locked-down object, base, and frame-ancestor policies. SignalR uses same-origin `connect-src 'self'`. Health probes return only generic status and no target identity.
+Be explicit about what is proven. The current React entry point constructs the fixture source
+directly, so the locally exercised app reads only deterministic synthetic evidence and does not
+authenticate to Fabric.
 
-### Connected edge connector
+The Fabric paths are written but unproven here. There is no Fabric tenant available for this branch,
+so Rayfin deployment, Fabric brokered sign-in, the Fabric REST topology function, the semantic-model
+source, the Eventhouse source, and Rayfin row-level-security policies have not been run end-to-end.
+Treat the sections below as the designed posture, not as tenant-verified evidence.
 
-The outward-only connector defaults to fixtures. `SQLSIMCITY_EDGE_SOURCE_MODE=Connected` requires a
-complete platform/TLS/pool/timeout profile and exactly one SQL login, Kerberos, managed identity,
-workload identity, service-principal certificate, or service-principal secret strategy. Passwords,
-client secrets, certificates, certificate passwords, and workload tokens are file references under
-the configured secrets directory; plaintext secret environment variables and credential-chain
-fallback are rejected. Required authentication files are checked before collection starts.
+## Identity and authentication
 
-Connected edge Query Store collection reads normalized facts only and never calls raw query-text or
-Showplan XML lookups. Live probes set `@IncludeSqlText=0`, preventing `sys.dm_exec_sql_text` from
-being invoked, and identity/text fields are cleared defensively before signing. Query Store working
-state uses a bounded process-memory `IProtectedRecordStore`; it is never persisted as plaintext and
-owned buffers are zeroed on replacement and shutdown. Permit outbound traffic only to the configured
-central HTTPS endpoint, SQL endpoint, and the identity/Kerberos endpoints required by the selected
-strategy. The connector exposes no inbound control API.
+FabricSimCity does not implement its own identity provider. The Rayfin app definition enables Rayfin
+auth with Fabric auth, and the production auth service wraps Rayfin's Fabric brokered sign-in. The
+backend function that reads topology asks Rayfin for a Fabric audience token from the current
+function context before calling Fabric REST.
 
-## Data and storage
+There is also a password auth service enabled in `rayfin/rayfin.yml`, and the local-dev auth service
+contains a fixed fixture email and password for a localhost Rayfin backend. That is not a production
+credential path in the React bootstrap code, but it is still configuration that must be reviewed
+before claiming a tenant deployment is hardened.
 
-The `/data` mount hosts an optional protected storage layer. It is **disabled by default**, and atlas collection does not persist snapshots there. Nothing writes to `/data` unless an operator explicitly enables protected storage.
+The SPA does not write its own cookies, `localStorage`, or `sessionStorage` entries. If the Rayfin
+client is initialized, it is initialized with `authStorage: true`, so browser auth-state storage is
+delegated to the Rayfin SDK rather than to application code.
 
-**Protected storage records are written in the clear.** This tool exists to show captured query plans, query text, and workload evidence; encrypting that evidence at rest defeated its own purpose, made the store opaque to the operator who collected it, and protected nothing that filesystem permissions did not already have to protect. Anyone who can read the `/data` volume can read every retained plan and every retained query text — including any literal parameter values a showplan happens to carry. Treat the volume itself as the trust boundary: mount it with restrictive permissions, keep it off shared hosts, and back it up and access-control it like any other data at rest.
+## Authorization and row isolation
 
-Stores created by a version that encrypted payloads cannot be opened by this version. There is no key, so there is nothing to decrypt them with. Such a store fails its canary check at startup with a message naming the fix: stop the app and delete the store directory. Query Store history is a cache that the collector rebuilds from SQL Server, not a system of record, so the cost of starting over is one collection interval.
+The Rayfin data schema defines four entities: cached snapshots, cached snapshot chunks, saved views,
+and user preferences. Each entity is decorated with `@authenticated('*', ownedBySignedInUser)`.
+That policy matches both `claims.sub` and `claims.email` against `ownerSub` and `ownerEmail` on the
+row. There are no `@anonymous` entities in the schema.
 
-### Offline archive trust boundary
+Application writes fill those owner fields before upserting Rayfin data. The intended effect is that
+a signed-in user can read and mutate only their own cached telemetry and view state. This is an
+important design property, but it is not tenant-proven until `rayfin up` has deployed the schema and
+the policy has been exercised against a real Fabric identity.
 
-Observation archives are untrusted input even when copied from another SQLSimCity installation.
-Archive mode resolves one simple filename under an operator-controlled allowed directory and rejects
-traversal, symbolic links/reparse points, directories, unsupported major versions, noncanonical
-manifests, duplicate/undeclared names, unknown required features, corrupt digests, truncation,
-trailing bytes, oversized files/entries/strings/numbers/arrays, excessive JSON depth, non-UTC or
-out-of-range timestamps, and inconsistent indexes before registering any source. The format is
-uncompressed and has no extraction step, so archive-controlled paths, decompression bombs, ratio
-attacks, XXE, executable/plugin content, filesystem writes, and network fetches do not exist in the
-reader. Payload strings reach React only as ordinary text under the existing CSP; they are never
-treated as HTML.
+## Fabric permissions
 
-The archive file must be mounted read-only. Do not place credentials or protected-storage database
-files in the archive directory. Archive mode performs no SQL Server or identity operation and fails
-startup on any integrity or compatibility error rather than publishing a partial state. An archive is
-not encrypted storage or a backup; protect it in transit and at rest according to the evidence it
-contains.
+The intended live model is delegated auth. Repository guidance states that Fabric Apps and the
+capacity-metrics connectors are private preview and delegated-auth only: each user signs in as
+themselves and must already have access to the capacities they view. There is no implemented service
+principal path where FabricSimCity reads capacity telemetry once and republishes it to every user.
 
-### Enabling protected storage
+That means missing Fabric permissions should appear as missing, degraded, or denied telemetry for
+that user, not as an application-wide collector failure. It also means deployment credentials for
+Rayfin are not runtime credentials for reading customer capacity metrics.
 
-Set `ProtectedStorage:Enabled` to `true` and provide one mandatory setting:
+## Data read and storage
 
-- `ProtectedStorage:DataDirectory` — a writable directory for the SQLite database file (the container image sets this to `/data`).
+The proven local path reads fixture data only.
 
-If it is missing when `Enabled` is `true`, the process fails at startup with `SqlSimCity.Storage.ProtectedStorageConfigurationException` rather than starting with a partially configured store. There is no key to configure, mount, rotate, or lose.
+The written Fabric topology function calls `api.fabric.microsoft.com/v1` for capacities, workspaces,
+and workspace items, then returns those values plus per-scope failure records to the browser. It does
+not write data.
 
-### Automatic enablement (connection-string deployments)
+Two live telemetry sources are present behind the `CapacitySource` interface:
 
-Connected Query Store history persists query text and plan XML, so it requires protected storage. Leaving that requirement unmet meant a connection string produced permanently empty query views with no error, so a connection string turns protected storage on itself.
+- the Capacity Metrics semantic-model source builds DAX for capacity summaries, item metrics,
+  operation families, and timepoints. Its own comments mark the access path as unsupported by
+  Microsoft and schema-sensitive.
+- the Eventhouse source builds KQL over an assumed capacity-events table for summaries and
+  timepoints, with optional topology. Its own comments say the table and column names have not been
+  verified against a tenant.
 
-The narrow trigger keeps the explicit path intact. Automatic enablement happens **only** when all of the following hold, and is skipped entirely otherwise:
+When `createCachedCapacitySource` and `RayfinAppStateStore` are wired in, snapshots are serialized to
+JSON, split into text chunks, and persisted in Rayfin-managed data tables. Saved views and user
+preferences are also persisted there. The application code does not add its own encryption,
+retention policy, or tamper-detection layer over that storage, so treat Rayfin-managed data as
+containing tenant topology, capacity telemetry, and view state.
 
-- a connection string (`ConnectionStrings:SqlSimCity` or `SQLSIMCITY_CONNECTION_STRING`) is what drives the connection;
-- `ProtectedStorage:Enabled` is not already `true` — an operator who set it has already made the decision;
-- `QueryStoreHistory:Mode` is not `Disabled`;
-- the mode is neither archive nor edge, both of which forbid connected collection outright.
+## Secrets and deployment
 
-Before committing to the directory, startup creates it and writes and deletes a probe file. This is the whole of what is provisioned; no credential is created, and nothing is left behind.
+The Fabric deployment workflow runs on published releases and manual dispatch. It requires
+`RAYFIN_WORKSPACE_ID`, `RAYFIN_TENANT_ID`, and either `RAYFIN_TOKEN` or the
+`RAYFIN_CLIENT_ID`/`RAYFIN_CLIENT_SECRET` service-principal pair. The workflow reads those values
+from GitHub secrets or variables, logs notices when they are missing, and skips `rayfin up` rather
+than attempting a partial deployment.
 
-#### Operational consequences
+The frontend `VITE_RAYFIN_PUBLISHABLE_KEY` is a publishable client key, not a secret. Do not put
+tenant credentials, Fabric tokens, or connector credentials into Vite environment variables: Vite
+values are compiled into the static bundle.
 
-Enablement is announced at startup with a warning naming the directory and stating plainly that query text and plan XML are retained there in the clear (`ProtectedStorageEnabled`). Where the directory cannot be created or written at all, connected Query Store history disables itself with a warning explaining the cause and the fix (`ProtectedStorageUnavailable`) rather than taking down a deployment that boots today.
+## Residual risks and non-goals
 
-### Backup and recovery
-
-A backup of `/data` is self-sufficient: the records in it are plaintext and need nothing else to read. `tools/backup-data.sh` takes it; there is no key to exclude and no `--key-file` argument.
-
-Because backups are readable by anyone who holds them, protect the backup itself: it contains captured query text and plan XML.
-
-### Fail-closed behavior
-
-Protected storage still refuses to become usable, rather than logging and continuing, on any of the following: a data directory that cannot be created or opened; a record envelope in a format this version cannot read, including one written by a version that encrypted payloads; a canary that holds the wrong value; or a SQLite schema migration failure. A fresh (empty) store creates its own canary on first use; an existing store must open and verify that canary before any other record is read or written. The canary is a plaintext format marker: it proves the store is a SQL SimCity store of a format this build understands, and nothing more.
-
-Note what this no longer claims: a plaintext record has no authentication tag, so tampering with a record's bytes in the database file is not detected. The integrity boundary is the volume's access control.
-
-### Retention
-
-Default retention is 7 days for `Detail`-resolution records and 90 days for `HourlyRollup` records. `PruneExpiredAsync` deletes at most `PruneBatchSize` rows per invocation, so callers repeat it to drain further expired rows; `PruneBatchSize` must be from 1 through 500. Retention pruning only ever deletes expired rows from the record table; it never touches the canary or schema metadata.
-
-`DatabaseFileName` must be a simple filename, not a rooted path or a path containing separators or traversal. To prevent arbitrary memory, payload, and SQLite BLOB allocation by future callers, `MaxRecordKindLength` defaults to 128 characters and is capped at 1,024, while `MaxPayloadBytes` defaults to 1 MiB and is capped at 16 MiB; both must be positive when protected storage is enabled.
-
-### Storage engine and `/data`
-
-Protected storage runs SQLite in WAL (write-ahead log) journal mode, which relies on shared-memory locking between the `-wal` and `-shm` sidecar files it creates next to the main database file. This is safe and performant on a local filesystem-backed volume, which is what this repository's `compose.yaml` uses (a standard Docker named volume). **Do not mount `/data` from a network filesystem (NFS, CIFS/SMB, or similar) unless it is verified to support the POSIX advisory locking SQLite's WAL mode requires** — unsupported locking on a network mount can corrupt the database or silently disable the concurrency guarantees WAL is meant to provide.
-
-### Connected SQL Server collection
-
-Connected Atlas collection uses `SqlSimCity.SqlServer` through an injected connection factory and `SqlSimCity.Collection` through injected probe executors. It collects database identity, exact space usage, bounded Query Store aggregates, and cumulative file I/O. It does not collect live request traffic; connected Query Store history separately retains on-demand query text and plan XML as described above. Deployment must:
-
-- use a least-privilege, read-only SQL Server principal and document every required permission;
-- keep target secrets out of images, source, logs, URLs, and atlas responses;
-- introduce authentication and authorization before non-loopback deployment;
-- write any future retained collected evidence through protected storage rather than a new ad-hoc table;
-- fail closed when authentication, key retrieval, integrity validation, or storage is unavailable, matching protected storage's existing fail-closed behavior;
-- distinguish permission denial, unsupported capability, disconnection, staleness, and unknown data rather than substituting zero;
-- avoid logging query text or other potentially sensitive workload content by default.
-
-Supported host targets are Linux containers on x86-64 and ARM64 using official .NET 10 images. Browser targets are current Chromium, Firefox, and Safari. Connected collection supports SQL Server 2016+, Azure SQL Managed Instance, and explicit known-database lists on Azure SQL Database; target-specific integration remains the operator's responsibility.
-
-## SQL Server connection and authentication
-
-`SqlSimCity.SqlServer` builds and opens `SqlConnection`s from an immutable, validated `ConnectionProfile`. It has no fallback between authentication strategies: a strategy either succeeds on its own terms or the connection attempt fails. Every connection is built through `SqlConnectionStringBuilder` only; a password or Entra token is never concatenated into a connection string or logged. `SafeConnectionSettings` excludes secrets and tokens but contains operationally sensitive target and identity metadata; use it only in authorized UI or protected storage, never indiscriminate logs or public diagnostics.
-
-### Authentication strategies (closed set, no fallback)
-
-- **SQL login** — username plus a `SecretFileReference` (never a plaintext password field). One read-only `SecureString` and its exact `SqlCredential` are cached per stable SQL-login profile configuration and retained for the matching SqlClient pool's lifetime; neither enters a connection string. Call `InvalidateSqlLoginProfileAsync` after rotating a mounted password secret (or restart the process). Invalidation clears that credential's pool before zeroing the old password and defers zeroing until every returned `SqlConnectionOpenResult` is disposed. If the pool clear itself fails, invalidation throws instead of zeroing the password anyway, and the cached credential remains valid and reusable for retry. Without explicit invalidation or restart, a mounted password rotation is not observed.
-- **Linux Kerberos service identity (Integrated Security/SSPI)** — uses the container's own Kerberos identity. There is no interactive/browser user delegation and nothing falls back to SQL login if Kerberos fails. Deployment requires:
-  - a keytab file mounted as a Docker/Compose secret (never baked into an image or committed to source);
-  - `KRB5_CONFIG` pointing at a `krb5.conf` that names the realm and KDC;
-  - `KRB5_KTNAME` pointing at that mounted keytab;
-  - a `MSSQLSvc/<target FQDN>:<port>` service principal name registered for the SQL Server target (for example `MSSQLSvc/sql01.internal.example.com:1433`);
-  - working forward and reverse DNS for the target FQDN, and clock synchronization with the KDC (Kerberos rejects clock skew beyond a small tolerance, commonly five minutes).
-- **Microsoft Entra ID** (`ManagedIdentity`, `WorkloadIdentity`, `ServicePrincipalCertificate`, `ServicePrincipalSecret`) — every strategy maps to exactly one explicit `Azure.Core.TokenCredential` (`ManagedIdentityCredential`, `WorkloadIdentityCredential`, `ClientCertificateCredential`, or `ClientSecretCredential`). **`DefaultAzureCredential` and any other credential chain are never used** — a static test asserts this. There is no interactive/browser sign-in flow.
-
-  `AccessTokenCallback` is itself part of `Microsoft.Data.SqlClient`'s connection pool key (see the [official `AccessTokenCallback` documentation](https://learn.microsoft.com/sql/connect/ado-net/sql/azure-active-directory-authentication#using-accesstokencallback)): a fresh delegate per connection would silently open one physical pool per connection instead of sharing one pool per security context. This library therefore resolves one `TokenCredential` and builds its `AccessTokenCallback` delegate exactly once per stable Entra security context — keyed by profile id, connection string, and every strategy-specific identifier or secret reference (managed-identity client id, tenant/client id, federated token file path, or certificate/secret file reference) — and reuses that exact same delegate instance for every sequential and concurrent open of that profile, mirroring the SQL-login credential cache above. The callback's token scope is derived from `SqlAuthenticationParameters.Resource` at call time (appending `/.default` only if the resource doesn't already carry it), exactly as the official example does, instead of a hardcoded `https://database.windows.net/.default` literal, so sovereign-cloud resources (for example Azure Government or Azure China) resolve to their own resource's scope. Every other `SqlAuthenticationParameters` field is intentionally ignored, since the explicit strategy above already fixes tenant, client, and identity, and honoring a server-supplied override of those would let the server choose the security context instead of the profile. The resulting token never appears in a connection string, log, or exception. Deployment requires outbound HTTPS reachability to:
-  - the Entra token endpoint, `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` (or the equivalent Entra ID endpoint for the deployment's cloud environment);
-  - for `ManagedIdentity` only, the Azure Instance Metadata Service (IMDS) at `http://169.254.169.254/metadata/identity/oauth2/token`, reachable only from within Azure compute — this strategy cannot succeed outside Azure;
-  - for `WorkloadIdentity`, the platform-projected federated token file (normally `AZURE_FEDERATED_TOKEN_FILE`, overridable per profile) must be present and refreshed by the platform; this library re-reads it on every token request and does nothing extra to handle rotation;
-  - for `ServicePrincipalCertificate`/`ServicePrincipalSecret`, the certificate (PKCS#12/PFX) or client secret is read once per cached security context (not once per connection) from a `SecretFileReference`, never held as a plaintext field on the strategy type. `ServicePrincipalCertificate`'s PFX private key is never converted to a `string`; `ServicePrincipalSecret`'s client secret must become a `string` because `ClientSecretCredential`'s constructor only accepts one, so it is not zeroable and is pinned until process exit — prefer the certificate strategy for new deployments. Rotating either requires an explicit `InvalidateEntraProfileAsync` call (or a process restart) before the new certificate or secret takes effect, exactly like SQL-login password rotation. Invalidation clears the associated pool before disposing any certificate this library owns, defers that disposal until every returned `SqlConnectionOpenResult` is disposed, and — like SQL-login invalidation — throws instead of disposing the certificate if the pool clear itself fails, leaving the cached lease valid and reusable for retry. Disposing the factory (`DisposeAsync`) retires every cached SQL-login and Entra lease the same way, collecting any pool-clear failures across all of them into one `AggregateException` rather than swallowing them.
-
-### Secret resolution (`ISecretFileProvider`)
-
-Secret references are simple file names only (no path separators, drive letters, or `.`/`..` segments — rejected at construction, before any file-system access) resolved under one configured directory (default `/run/secrets`, the conventional Docker/Compose secrets mount). Every candidate path is canonicalized and re-checked against that directory as defense in depth. Reads are size-bounded (default 16 KiB) and never log secret content. Both SQL-login passwords and Entra certificate/client-secret material are read exactly once per stable security context, when that context's credential lease is first created, and reused — not re-read per connection — until explicit invalidation or process restart. A missing, unreadable, oversized, or invalid (non-UTF-8, where text is expected) secret fails closed with `SecretResolutionException` — never a partially usable value and never a fallback to another authentication mode, and a failed read is never cached, so the next attempt retries the read.
-
-### Connection strings and inline passwords (a deliberate, documented trade-off)
-
-A connection string may be supplied instead of a field-by-field profile — `ConnectionStrings:SqlSimCity` or `SQLSIMCITY_CONNECTION_STRING` for the API, `SQLSIMCITY_EDGE_SQL_CONNECTION_STRING` for the edge connector. It exists because the hardened path costs roughly fifteen settings plus a mounted file, which is a real barrier to evaluation. It is **not** the recommended production configuration.
-
-What it does *not* weaken: the connection string is parsed into exactly the same immutable, fully validated `ConnectionProfile` every other path produces, and is then discarded. The profile is rebuilt through `SqlConnectionStringBuilder` as always, so any password is delivered as a `SqlCredential` and never concatenated into a connection string, log, or exception. `Encrypt=false` and infinite timeouts are rejected. `ApplicationIntent=ReadOnly` and the `SQLSimCity` application name are still forced. Only SQL login, Kerberos, and managed identity are accepted; workload identity and service principal are refused because a connection string cannot carry a tenant id, and `Active Directory Default` remains banned.
-
-Parse failures deliberately discard SqlClient's own exception — neither its message nor the exception itself as an inner exception — and substitute a fixed, curated message. SqlClient's parse errors are not uniformly value-free: a non-numeric value for a numeric keyword throws `FormatException` naming the offending value, and an unquoted `;` followed by `=` inside a password splits it into fragments that resurface as `Keyword not supported: '<fragment>'`. Since a configuration exception reaches startup logs, relaying either would republish part of a password. A regression test asserts no fragment survives.
-
-What it *does* weaken, and why mounted secret files remain the default:
-
-- An inline password lives in the process environment or configuration for the life of the process. Anything that can read that environment — a sibling process with the right privileges, a container inspection, a crash dump, a CI log that echoes environment variables — can read the password. A mounted secret file is a separate object with its own file permissions.
-- It cannot be rotated. `InvalidateSqlLoginProfileAsync` re-reads the mounted file; there is no equivalent for a value fixed at process start. Rotating an inline password requires a restart.
-- It is served by `InlineSecretProvider`, which resolves exactly one named secret from memory and throws `SecretResolutionException` for every other reference, so it can never quietly stand in for `FileSecretFileProvider` on a path that needs a real mounted certificate or federated token.
-
-Both the API and the edge connector log a warning at startup whenever a connection string is configured, so the trade-off is stated rather than silent. Neither will combine a connection string with any field it already covers — host, port, instance, database, timeouts, pool bounds, encryption, certificate trust, or authentication — rather than letting one silently win. This is a security boundary, not just ergonomics: `ConnectionStrings__SqlSimCity` is a conventional name that some hosting platforms inject automatically, so without the check, one appearing in the environment would silently downgrade a hardened profile — replacing its authentication strategy, its `TrustServerCertificate` setting, and its mounted password file with the connection string's own. The edge connector keeps its blanket prohibition on plaintext secret environment variables (`SQLSIMCITY_EDGE_SQL_PASSWORD` and friends) fully intact.
-
-Two further defaults are deliberately taken from the field path rather than from SqlClient. `Max Pool Size` defaults to 20, not SqlClient's 100, so a convenience string can never open five times the connections against a server it is only meant to observe. And `Server=admin:host` (the dedicated administrator connection), `np:`, and `lpc:` are rejected rather than stripped: the profile is always rebuilt as TCP, so honoring them is impossible, and silently connecting to an ordinary endpoint instead would be a worse answer than refusing.
-
-### `TrustServerCertificate` and encryption policy
-
-Every profile sets an explicit `EncryptionPolicy` — `Mandatory` (TLS required; supported since SQL Server 2019) or `Strict` (TDS 8.0 strict TLS; requires SQL Server 2022+ or Azure SQL) — there is no "optional" encryption. `TrustServerCertificate` is a per-profile opt-in only for `Mandatory`; it is never inherited, defaulted, or applied globally. `Strict` plus `TrustServerCertificate=true` is rejected because SqlClient ignores that trust bypass in Strict mode. Every accepted trust bypass surfaces a `ConnectionWarning.TrustServerCertificateEnabled` on that connection's result.
-
-### Package versions
-
-- `Microsoft.Data.SqlClient` 7.0.2
-- `Azure.Identity` 1.21.0
-- `Azure.Core` 1.62.0
-
-SqlClient 7 removed Entra ID authentication providers from its core package into `Microsoft.Data.SqlClient.Extensions.Azure`; this library does not take that dependency because it authenticates through `SqlConnection.AccessTokenCallback` plus directly constructed `Azure.Identity` credentials, a core-SqlClient mechanism unrelated to the extracted `Authentication=Active Directory ...` connection-string modes.
+- Live Fabric behavior is unverified in this branch. Do not remove that warning until the app has
+  been deployed and exercised against a real tenant.
+- The current React entry point is still fixture-only. The live auth, data-store, and configurable
+  source services exist, but the main app does not call them.
+- FabricSimCity relies on Rayfin, Fabric, and the browser for identity/session security. It does not
+  add an application-specific MFA, session policy, or authorization layer.
+- Persisted Rayfin app data is scoped by the schema policy above, but the app does not implement its
+  own at-rest encryption or retention pruning.
 
 ## Reporting
 
-Report suspected vulnerabilities privately through the repository owner's GitHub security advisory channel. Do not include real credentials, query text, customer names, or production snapshots in a report. Include the affected version, reproduction steps using synthetic data, and expected impact.
+Report suspected vulnerabilities privately through the repository owner's GitHub security advisory
+channel. Do not include real credentials, customer tenant names, Fabric tokens, or production
+telemetry in a report; use synthetic data where possible.

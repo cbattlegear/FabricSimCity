@@ -2,12 +2,11 @@ import { chromium } from 'playwright'
 import { INSTRUMENT_SOURCE } from './instrument.js'
 
 /**
- * Opening a city and getting it into the state the issue is about.
+ * Opening a capacity city and getting it into the state the issue is about.
  *
- * The state that matters is the one the view reaches on its own: entering a database
- * backfills up to AUTO_PAGE_LIMIT (80) pages of CITY_PAGE_SIZE (50) objects with no
- * further input, so a measurement taken before that walk finishes is a measurement of a
- * small city wearing a large one's name.
+ * The state that matters is the one the Fabric view reaches on its own: selecting a
+ * capacity loads one capacity page, builds the city from the items in that page, and then
+ * keeps the sidebar wired to the real controls a reader can use.
  */
 
 /** The two sides of the 860px breakpoint. The sidebar is a rail above it and a sheet at or below. */
@@ -54,43 +53,36 @@ export async function instrument(page) {
   await page.addInitScript(INSTRUMENT_SOURCE)
 }
 
-export function cityUrl(origin, databaseId, mode = 'city') {
-  return `${origin}/?view=city&database=${encodeURIComponent(databaseId)}&mode=${mode}`
+export function cityUrl(origin, capacityId) {
+  return `${origin.replace(/\/$/, '')}/?capacity=${encodeURIComponent(capacityId)}`
 }
 
 /**
- * Loads a city and waits for the automatic page walk to finish.
+ * Loads a capacity city and waits for the Fabric fixture page to finish rendering.
  *
- * `.city-loading` covers both the first load and the single re-layout at the end of the
- * walk, so waiting for it to be detached *twice* is what distinguishes "the first 50
- * objects are on screen" from "the whole database has been laid out".
+ * The city is ready when the viewport, canvas and directory disclosure all exist and the
+ * rendered subtitle has reported a stable item count. The rendered count is deliberate:
+ * it is the same number the reader sees, and the one the address book and scene were built
+ * from.
  */
 export async function openCity(page, url, { timeout = 900000 } = {}) {
   const startedAt = Date.now()
   await page.goto(url, { waitUntil: 'domcontentloaded' })
 
-  // First paint of the city: the initial loading screen has gone.
   await page.locator('.map-sidebar').waitFor({ state: 'visible', timeout })
+  await page.locator('.city-viewport').waitFor({ state: 'visible', timeout })
+  await page.locator('canvas.city-canvas').waitFor({ state: 'visible', timeout })
+  await page.locator('.sidebar-directory > summary').waitFor({ state: 'visible', timeout })
 
-  /*
-   * The backfill is done when the object count in the sidebar subtitle stops moving and
-   * no loading screen is up. Polling the rendered count rather than the network is
-   * deliberate: it is the number the user is shown, and it is the one the address book
-   * and the scene are built from.
-   */
   const settled = await page.waitForFunction(
     () => {
-      const loading = document.querySelector('.city-loading')
-      if (loading) return false
-      const subtitle = document.querySelector('.sidebar-subtitle, .map-sidebar p')
-      const text = document.body.textContent ?? ''
-      const match = text.match(/([\d,]+)\s+objects/)
+      const text = document.querySelector('.sidebar-subtitle')?.textContent ?? document.body.textContent ?? ''
+      const match = text.match(/([\d,]+)\s+items/)
       const count = match ? Number(match[1].replace(/,/g, '')) : 0
       const previous = window.__cityCount ?? -1
       window.__cityCount = count
       const stableFor = count === previous ? (window.__cityStable ?? 0) + 1 : 0
       window.__cityStable = stableFor
-      void subtitle
       // Three consecutive identical readings with no loading screen up.
       return stableFor >= 3 ? count : false
     },
@@ -98,13 +90,13 @@ export async function openCity(page, url, { timeout = 900000 } = {}) {
     { timeout, polling: 500 },
   )
 
-  const objectCount = await settled.jsonValue()
+  const itemCount = await settled.jsonValue()
   const buildings = await page.evaluate(() => {
     const measure = window.__measure
     return { renderer: measure?.rendererName ?? null, contexts: measure?.contexts ?? 0 }
   })
 
-  return { objectCount, loadMs: Date.now() - startedAt, ...buildings }
+  return { itemCount, objectCount: itemCount, loadMs: Date.now() - startedAt, ...buildings }
 }
 
 /** Reads the number the address book was actually built from, straight off the rendered list. */

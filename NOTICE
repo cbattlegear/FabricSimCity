@@ -1,12 +1,15 @@
-SQLSimCity
-Copyright 2026 SQLSimCity contributors
+FabricSimCity
+Copyright 2026 FabricSimCity contributors
 
 Licensed under the Apache License, Version 2.0. See LICENSE.
 
-SQL Server and Microsoft are trademarks of the Microsoft group of companies.
-SimCity is a trademark of Electronic Arts Inc. SQLSimCity is independent and is
-not affiliated with, sponsored by, or endorsed by Microsoft, Electronic Arts,
-Maxis, the SimCity franchise, or PGSimCity.
+Microsoft Fabric, Power BI, Azure, and Microsoft are trademarks of the Microsoft
+group of companies. SimCity is a trademark of Electronic Arts Inc.
+FabricSimCity is independent and is not affiliated with, sponsored by, or
+endorsed by Microsoft, Electronic Arts, Maxis, the SimCity franchise, or
+PGSimCity.
 
-This foundation was implemented independently. It does not port PGSimCity code
-or concepts requiring attribution and includes no SimCity assets.
+FabricSimCity is derived from SQLSimCity by the same contributors under the
+Apache License, Version 2.0. This foundation was implemented independently. It
+does not port PGSimCity code or concepts requiring attribution and includes no
+SimCity assets.

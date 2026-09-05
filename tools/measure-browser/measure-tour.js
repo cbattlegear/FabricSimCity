@@ -6,20 +6,8 @@
  *
  * A separate entry point from `measure.js` rather than another pass inside it, because the two
  * answer different questions and `measure.js` already takes minutes per viewport. This one needs
- * the same rig: see README.md for standing up the SQL Server, publishing the API and serving the
- * release build. A dev-server run measures React in development mode and is not evidence.
- *
- * Getting a source change into that rig takes two steps, and skipping the first fails silently.
- * `SqlSimCity.Api.csproj` *copies* `web/dist` into `wwwroot`; it does not build it. So
- * `dotnet publish` on its own republishes whatever bundle happened to be sitting in `dist`, and a
- * measurement of the code you just edited then reports on the code you edited last time — with no
- * warning, because the run is entirely healthy. Run `npm run build` in `web/` first, and confirm
- * the hashed asset name under `wwwroot/assets` actually changed before believing the result.
- *
- * Never hand-copy `dist/*` over a published `wwwroot` to skip the publish. The static-file content
- * types are lost, every module script is served with an empty MIME type, Chromium refuses them all,
- * and the page renders an empty body — which this harness experiences as a 15-minute hang in
- * `openCity` rather than as an error.
+ * the same fixture-backed Vite app: run `npm run dev` at the repository root and point this probe
+ * at that origin. There is no API process or SQL Server in FabricSimCity.
  */
 
 import { writeFileSync } from 'node:fs'
@@ -28,10 +16,9 @@ import { tourPass } from './lib/tour.js'
 
 function parseArgs(argv) {
   const args = {
-    origin: 'http://127.0.0.1:5080',
-    database: 'primary/database/SimCityLoad',
+    origin: 'http://localhost:5173',
+    capacity: '005cdd71-3dbd-4484-0060-17041100c991',
     viewport: 'both',
-    mode: 'city',
     seconds: 12,
     json: null,
     label: null,
@@ -43,9 +30,8 @@ function parseArgs(argv) {
     const value = argv[index + 1]
     switch (flag) {
       case '--origin': args.origin = value; index += 1; break
-      case '--database': args.database = value; index += 1; break
+      case '--capacity': args.capacity = value; index += 1; break
       case '--viewport': args.viewport = value; index += 1; break
-      case '--mode': args.mode = value; index += 1; break
       case '--seconds': args.seconds = Number(value); index += 1; break
       case '--json': args.json = value; index += 1; break
       case '--label': args.label = value; index += 1; break
@@ -54,8 +40,8 @@ function parseArgs(argv) {
       case '--help':
         console.log(`Usage: node measure-tour.js [options]
 
-  --origin <url>       Where the app is served. Default http://127.0.0.1:5080
-  --database <id>      City to open. Default primary/database/SimCityLoad
+  --origin <url>       Where the Vite app is served. Default http://localhost:5173
+  --capacity <id>      Capacity city to open. Default Contoso Analytics fixture
   --viewport rail|sheet|both   Which side of the 860px breakpoint. Default both
   --seconds <n>        How long to let the tour fly per viewport. Default 12
   --json <path>        Write the full report
@@ -79,9 +65,9 @@ async function runViewport(args, viewport) {
   await page.setViewportSize({ width: viewport.width, height: viewport.height })
   await instrument(page)
 
-  const load = await openCity(page, cityUrl(args.origin, args.database, args.mode))
+  const load = await openCity(page, cityUrl(args.origin, args.capacity))
   console.log(
-    `  loaded ${load.objectCount} objects in ${(load.loadMs / 1000).toFixed(1)}s on ${load.renderer ?? 'unknown renderer'}`,
+    `  loaded ${load.itemCount ?? load.objectCount} items in ${(load.loadMs / 1000).toFixed(1)}s on ${load.renderer ?? 'unknown renderer'}`,
   )
 
   const tour = await tourPass(page, { seconds: args.seconds, control: args.control })

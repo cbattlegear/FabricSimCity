@@ -207,7 +207,7 @@ function AtlasLevel({
             <span className="sidebar-brand-name">FabricSimCity</span>
             <a
               className="sidebar-brand-link"
-              href="https://github.com/cbattlegear/SQLSimCity"
+              href="https://github.com/cbattlegear/FabricSimCity"
               target="_blank"
               rel="noreferrer noopener"
               title="FabricSimCity on GitHub"

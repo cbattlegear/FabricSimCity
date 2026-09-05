@@ -190,7 +190,7 @@ export function loadCityAssets(): Promise<CityAssets | null> {
       .then(([landmarks, scenery]) => ({ landmarks, scenery }))
       .catch((error: unknown) => {
         // Scenery is decoration. Losing it is worth one console line and nothing else.
-        console.warn('[SQLSimCity] asset kits unavailable, drawing procedural shells instead', error)
+        console.warn('[FabricSimCity] asset kits unavailable, drawing procedural shells instead', error)
         return null
       })
   }
@@ -213,7 +213,7 @@ export function loadCityAssets(): Promise<CityAssets | null> {
 export function loadVehicleAssets(): Promise<AssetKit | null> {
   if (!pendingVehicles) {
     pendingVehicles = loadKit(vehiclesUrl).catch((error: unknown) => {
-      console.warn('[SQLSimCity] vehicle kit unavailable, drawing procedural shells instead', error)
+      console.warn('[FabricSimCity] vehicle kit unavailable, drawing procedural shells instead', error)
       return null
     })
   }
