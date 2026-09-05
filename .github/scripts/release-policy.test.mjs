@@ -88,4 +88,35 @@ assert.deepEqual(
   { number: 2, title: "target", labels: ["release:patch"] },
 );
 
+// A commit pushed straight to the branch has no pull request, and therefore nothing to release.
+// This is reported as "no PR", not as an error: it is a legitimate state, and failing here would
+// mark every direct push -- including a repository's first -- as broken.
+assert.equal(selectMergedPrForSha([], "abc"), null);
+assert.equal(
+  selectMergedPrForSha([{ number: 1, title: "never merged", merged_at: null }], "abc"),
+  null,
+);
+
+// Two merged pull requests for one commit stays an error. Their labels could disagree about the
+// bump, and picking one is how a release ships understated.
+assert.throws(
+  () =>
+    selectMergedPrForSha(
+      [
+        { number: 1, title: "a", merged_at: "2026-01-01T00:00:00Z", labels: [] },
+        { number: 2, title: "b", merged_at: "2026-01-02T00:00:00Z", labels: [] },
+      ],
+      "abc",
+    ),
+  /found 2/,
+);
+
+// The skip must beat autoDecision, which refuses an unlabelled pull request. Both arrive with no
+// labels; only the one that actually had a pull request is a mistake.
+assert.deepEqual(planRelease({ mode: "auto", noPr: true, latestTag: "v1.5.0" }), {
+  action: "skip",
+  reason: "No merged pull request for this commit; nothing to read a release label from.",
+});
+assert.throws(() => planRelease({ mode: "auto", labels: [], latestTag: "v1.5.0" }), /missing labels/);
+
 console.log("release-policy tests passed");

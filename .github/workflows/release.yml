@@ -89,6 +89,7 @@ jobs:
           RELEASE_DISPATCH_BUMP: ${{ inputs.bump }}
           RELEASE_LATEST_TAG: ${{ steps.tags.outputs.latest_tag }}
           RELEASE_POINTING_TAGS: ${{ steps.tags.outputs.pointing_tags }}
+          RELEASE_NO_PR: ${{ steps.pr.outputs.no_pr }}
         run: node .github/scripts/release-policy.mjs plan-release
 
       - name: Explain skipped release

@@ -103,12 +103,25 @@ export function planRelease({
   dispatchBump,
   latestTag,
   pointingTags = [],
+  noPr = false,
 }) {
   const tagsAtHead = pointingTags.filter(Boolean);
   if (tagsAtHead.length > 0) {
     return {
       action: "skip",
       reason: `Target commit already has release tag(s): ${tagsAtHead.join(", ")}.`,
+    };
+  }
+
+  /*
+   * Checked before autoDecision, which is what refuses an unlabelled pull request. The two cases
+   * look the same from here -- both arrive with no labels -- but only one is a mistake. A commit
+   * with no pull request has nowhere to carry a label, so it skips.
+   */
+  if (mode === "auto" && noPr) {
+    return {
+      action: "skip",
+      reason: "No merged pull request for this commit; nothing to read a release label from.",
     };
   }
 
@@ -151,9 +164,23 @@ export function selectMergedPrForSha(prs, sha) {
   const exact = prs.filter((pr) => pr.merged_at && pr.merge_commit_sha === sha);
   const candidates = exact.length > 0 ? exact : prs.filter((pr) => pr.merged_at);
 
-  if (candidates.length !== 1) {
+  /*
+   * No merged pull request is a legitimate state, not a misconfiguration: the commit was pushed
+   * straight to the branch. There is no label to read and therefore nothing to release, so the
+   * caller skips. Erroring here instead would put a red X on every direct push -- including the
+   * one that bootstraps a repository -- and a release guard that cries wolf is one people learn
+   * to ignore.
+   *
+   * More than one stays an error. That is genuinely ambiguous: two labels could disagree about
+   * the bump, and guessing which one wins is how a release ships understated.
+   */
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  if (candidates.length > 1) {
     throw new Error(
-      `Expected exactly one merged pull request for ${sha}; found ${candidates.length}.`,
+      `Expected at most one merged pull request for ${sha}; found ${candidates.length}.`,
     );
   }
 
@@ -211,6 +238,7 @@ function runPlanRelease() {
     dispatchBump: process.env.RELEASE_DISPATCH_BUMP,
     latestTag: process.env.RELEASE_LATEST_TAG,
     pointingTags: linesFromEnv("RELEASE_POINTING_TAGS"),
+    noPr: process.env.RELEASE_NO_PR === "true",
   });
 
   console.log(JSON.stringify(plan, null, 2));
@@ -220,8 +248,16 @@ function runPlanRelease() {
 function runSelectPr() {
   const prs = JSON.parse(readFileSync(process.env.RELEASE_PRS_JSON_FILE, "utf8"));
   const selected = selectMergedPrForSha(prs, process.env.RELEASE_HEAD_SHA);
+
+  if (selected === null) {
+    console.log(`No merged pull request for ${process.env.RELEASE_HEAD_SHA}; nothing to release.`);
+    writeOutput({ no_pr: "true", labels_json: "[]" });
+    return;
+  }
+
   console.log(`Selected PR #${selected.number}: ${selected.title}`);
   writeOutput({
+    no_pr: "false",
     pr_number: selected.number,
     pr_title: selected.title,
     labels_json: JSON.stringify(selected.labels),

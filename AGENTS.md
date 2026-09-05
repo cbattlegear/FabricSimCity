@@ -407,6 +407,17 @@ reaching this point in normal use.
 The workflow deliberately declines to cut a second release for an already-tagged commit. Keep that
 safety check: it is why a rerun cannot move or duplicate a release after the fact.
 
+A commit with **no** merged pull request — anything pushed straight to `main`, including the push
+that bootstraps a repository — skips with a notice rather than failing. It has nowhere to carry a
+label, so there is nothing to read and nothing to release. This is deliberately *not* the same as an
+unlabelled pull request, which still errors: that one is a mistake someone can fix, and
+`autoDecision` refuses it precisely so a missing label cannot quietly become a patch. Both arrive at
+`planRelease` with an empty label array, so the `noPr` flag is what tells them apart, and the skip is
+checked before `autoDecision` gets a chance to reject.
+
+**Two or more** merged pull requests for one commit remains an error. Their labels can disagree
+about the bump, and picking one is how a release ships understated.
+
 ### Merge ordering still matters
 
 Auto-release triggers on **CI completing on `main`**, not on the merge. CI no longer cancels
