@@ -1,7 +1,15 @@
 version: 2
 updates:
+  # Every pull request needs exactly one `release:*` label or the `Release label` check fails, and
+  # Dependabot cannot add one itself. The label each ecosystem earns is fixed, so it is set here
+  # rather than left for a human to apply to every bump.
+  #
+  # Workflow actions never reach the shipped image, so they skip. See AGENTS.md.
   - package-ecosystem: github-actions
     directory: /
+    labels:
+      - dependencies
+      - "release:skip"
     schedule:
       interval: weekly
       day: monday
@@ -14,8 +22,13 @@ updates:
 
   # The app moved from `web/` to the repository root when the .NET stack was deleted. The nuget
   # and docker ecosystems went with it.
+  #
+  # This is the shipped bundle, so its bumps are patches.
   - package-ecosystem: npm
     directory: /
+    labels:
+      - dependencies
+      - "release:patch"
     schedule:
       interval: weekly
       day: monday
@@ -29,9 +42,12 @@ updates:
     open-pull-requests-limit: 5
 
   # The measurement workbench pins Playwright and is not part of the shipped app, so it updates
-  # on its own schedule rather than inside the app's group.
+  # on its own schedule rather than inside the app's group -- and skips, for the same reason.
   - package-ecosystem: npm
     directory: /tools/measure-browser
+    labels:
+      - dependencies
+      - "release:skip"
     schedule:
       interval: weekly
       day: monday
