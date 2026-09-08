@@ -443,6 +443,44 @@ set `RAYFIN_WORKSPACE_ID`, `RAYFIN_TENANT_ID`, and either `RAYFIN_TOKEN` or
 `RAYFIN_CLIENT_ID`/`RAYFIN_CLIENT_SECRET`. Without those values the job logs notices and skips
 `rayfin up`; do not claim a deploy is verified until it has run against a tenant.
 
+#### The first `rayfin up` needs a workspace named explicitly
+
+A bare `npx rayfin up` fails on a fresh clone with **`No workspace targeting context`**, and that
+error reads like a missing project scaffold. It is not one. The CLI has already found the project
+and parsed `rayfin.yml` by the time it fails — the two lines above the error say so:
+
+```
+👀 Found Rayfin project root: ...
+📋 Using project name 'fabricsimcity' from rayfin.yml configuration
+```
+
+`rayfin up` records its workspace binding in `rayfin/.deployments.json`, and reuses it on every
+later run. On the *first* run that file does not exist yet, so the workspace has to be supplied —
+`--workspace <display name>`, `--workspace-id <guid>` or `--workspace-uri <portal url>`. The help
+text's "defaults to My Workspace when omitted" describes the resolution of the flag, not a fallback
+for having no binding at all; a Fabric App needs a capacity-backed workspace, which a personal one
+generally is not.
+
+So **the absence of `rayfin/.deployments.json` is the diagnostic**, not evidence of a broken repo.
+It is gitignored (Rayfin's docs list it beside `rayfin/.env`, and it carries the same tenant and
+workspace GUIDs, the `fabricItemId` and the publishable key), so it is per-developer by design and
+never arrives with a clone.
+
+Validate the configuration without a tenant using `--dry-run`, which makes no API calls and prints
+the planned operations. Do not reach for `--gen-config-only`: it does not exist on CLI 1.34.0
+despite appearing in some quick references, and fails with `error: unknown option`.
+
+```powershell
+npx rayfin login status                                   # confirm a session exists first
+npx rayfin up --dry-run --workspace "<name>"              # offline: validates config, no API calls
+npx rayfin up --workspace "<name>"                        # first real run; writes .deployments.json
+npx rayfin up                                             # thereafter
+```
+
+Note that a successful deploy **edits tracked files**: it appends the live hosting URL to
+`allowedRedirectUris` in `rayfin/rayfin.yml` and merges `RAYFIN_PUBLIC_*` into `rayfin/.env`.
+Expect `rayfin.yml` in `git status` afterwards and commit it deliberately.
+
 ### A conflicted pull request silently switches CI off
 
 If `gh pr checks` reports "no checks reported" and the Actions API returns **zero runs** for a
