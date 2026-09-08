@@ -8,7 +8,7 @@
  */
 interface ImportMetaEnv {
   /** Which `CapacitySource` to construct. Unset means fixtures when no backend is configured. */
-  readonly VITE_FABRIC_SOURCE?: 'fixture' | 'semantic-model' | 'eventhouse' | 'topology'
+  readonly VITE_FABRIC_SOURCE?: 'fixture' | 'semantic-model' | 'ingested' | 'eventhouse' | 'topology'
   /** Base URL of the deployed Rayfin backend. Its absence is what selects fixture mode. */
   readonly VITE_RAYFIN_API_URL?: string
   readonly VITE_RAYFIN_PUBLISHABLE_KEY?: string
@@ -31,6 +31,14 @@ interface ImportMetaEnv {
   readonly VITE_FABRIC_TENANT_ID?: string
   /** Display name for the tenant in the atlas. */
   readonly VITE_FABRIC_TENANT_NAME?: string
+  /**
+   * How often the ingest notebook is scheduled, in minutes. Used by
+   * `VITE_FABRIC_SOURCE=ingested` to report how stale the city may be — set it to the notebook's
+   * actual schedule, not to how fresh you would like the data to look.
+   */
+  readonly VITE_FABRIC_INGEST_INTERVAL_MINUTES?: string
+  /** How many days of history the notebook ingests. Reported as the source's retention. */
+  readonly VITE_FABRIC_INGEST_WINDOW_DAYS?: string
 }
 
 interface ImportMeta {

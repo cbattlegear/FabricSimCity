@@ -44,6 +44,8 @@ export default defineConfig({
       VITE_FABRIC_TENANT_NAME: '',
       VITE_FABRIC_METRICS_DATASET_ID: '',
       VITE_FABRIC_METRICS_PROXY_URL: '',
+      VITE_FABRIC_INGEST_INTERVAL_MINUTES: '',
+      VITE_FABRIC_INGEST_WINDOW_DAYS: '',
     },
   },
 })

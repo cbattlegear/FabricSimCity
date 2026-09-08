@@ -133,28 +133,71 @@ the source probes it before asking for numbers and reports `Unsupported` rather 
 has moved again; and the 30-day retention the source declares is an assumption that has not yet been
 checked against a live model.
 
-For the **deployed** app the options are to wait for Fabric to support functions, at which point the
-relay moves server-side, or to land the metrics into the app's own Rayfin SQL database on a schedule
-and read them through `client.data` — which is fully supported today but is a different ingestion
-design rather than a configuration change.
+For the **deployed** app, this is what the ingest notebook below is for. It moves the read off the
+browser entirely, which is the only thing that clears all three walls at once.
+
+### Getting real numbers into the deployed app
+
+A scheduled Fabric notebook runs the same DAX and writes the rows into the app's own SQL database,
+where the deployed app reads them through `client.data`. Nothing new interprets those rows: the
+notebook stores them verbatim and the app replays them into the parser it already has.
+
+```powershell
+npx rayfin up                 # creates the IngestRun / IngestRow tables
+npm run dax:manifest          # only if you changed the DAX
+npm run fabric:notebook       # only if you changed the notebook's Python
+```
+
+Then, in the Fabric portal:
+
+1. Import `fabric/ingest_capacity_metrics.ipynb` as a notebook.
+2. Upload `fabric/dax-queries.generated.json` to that notebook's built-in resources.
+3. Fill in the parameters cell: the metrics dataset and workspace ids, and the SQL server and
+   database from your app's **SQL Database** child item (Settings → Connection strings).
+4. Give the notebook's identity access to the metrics semantic model, and a SQL user on the app's
+   database with `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the two ingest tables.
+5. Schedule it, then point the app at it:
+
+```
+VITE_FABRIC_SOURCE=ingested
+VITE_FABRIC_METRICS_DATASET_ID=<same dataset id>
+VITE_FABRIC_INGEST_INTERVAL_MINUTES=60      # must match the schedule you set
+VITE_FABRIC_INGEST_WINDOW_DAYS=3            # must match INGEST_WINDOW_DAYS
+```
+
+The interval is not decoration. The app reports the model's own lag **plus** this interval as its
+latency, so a city built from an hourly ingest says it may be an hour old rather than claiming to be
+live. Setting it lower than the real schedule makes the app lie about freshness.
+
+> **Everyone signed in to the app can read everything the notebook writes.** The semantic model
+> checks each user's own capacity permissions; a table does not. Only ingest capacities all of your
+> app's users are entitled to see. The app is granted read only — the notebook writes over direct
+> SQL, not the data API, so nothing a user does in the app can forge telemetry.
+
+The notebook is written and unit-tested but **has not been run against a real tenant**. The DAX in
+the manifest is generated from the app's own query builder, so the two cannot drift, but neither has
+executed against a live Capacity Metrics model yet.
 
 ## Where the numbers come from
 
 Topology — capacities, workspaces, items — comes from `api.fabric.microsoft.com/v1`, which is fully
 supported and needs no connector.
 
-CU telemetry does not exist on any REST endpoint. It comes from one of two sources behind a single
+CU telemetry does not exist on any REST endpoint. It comes from one of three sources behind a single
 `CapacitySource` interface:
 
 - **Capacity Metrics semantic model**, over DAX. This is where the real per-item CU breakdown lives.
   Microsoft documents programmatic access to it as unsupported and its schema has already changed
-  once, so the implementation probes both generations.
+  once, so the implementation probes both generations. Reachable from `npm run dev` only.
+- **The same model, ingested** — a scheduled notebook writes its rows into the app's SQL database
+  and the app replays them through the identical parser. This is the only path the deployed app has.
 - **Eventhouse**, over KQL, reading `Microsoft.Fabric.Capacity.Summary` events on their documented
   30-second cadence. Fully supported, but it carries no per-item breakdown, so the city degrades to
   live infrastructure over static buildings — which the evidence model already knows how to draw.
 
 The semantic-model source and its DAX transport are written; see above for what it takes to reach a
-real model. The Eventhouse source is written but has no transport yet.
+real model. The ingest path is written and unit-tested but unrun against a tenant. The Eventhouse
+source is written but has no transport yet.
 
 Refresh is client-side polling: Rayfin has no cron, no timers and no background workers, so there
 is no in-app collector and never will be.

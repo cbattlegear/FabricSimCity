@@ -12,6 +12,8 @@
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
+    "dax:manifest": "node scripts/generate-dax-manifest.ts",
+    "fabric:notebook": "node scripts/generate-ingest-notebook.ts",
     "rayfin:up": "rayfin up",
     "rayfin:status": "rayfin up status"
   },

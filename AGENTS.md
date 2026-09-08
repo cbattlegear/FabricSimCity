@@ -445,11 +445,73 @@ re-serialises them and roughly doubles the suite. Add growth tests to one of the
 the retrace file alone. The cost is `planCity`, not the scaffolding: measured over counts 80..140,
 planning is 16,150ms against 116ms of signature building.
 
-## Validation commands
+## The ingest replays DAX rows; it does not interpret them
 
+The deployed app cannot call the Capacity Metrics semantic model — see the three walls in the README
+— so a scheduled Fabric notebook runs the DAX and writes the rows into the app's own SQL database.
+
+The shape of that is the whole point, and it is easy to "simplify" into a much worse design. The
+notebook stores rows **verbatim** and `ingestedDax.ts` replays them into a `SemanticModelDaxClient`,
+so `createSemanticModelSource` parses them without knowing anything changed. The two obvious
+alternatives were both rejected for the same reason: making the notebook emit finished snapshots
+means porting 41 KB of parsing to Python, and making it emit normalized tables means rebuilding the
+assembly logic on the read side. Both put Capacity Metrics schema knowledge in two languages, and
+that schema has already moved once.
+
+For the same reason the DAX itself is **generated**, not written in Python. `npm run dax:manifest`
+writes `fabric/dax-queries.generated.json` from `buildSemanticModelQueries`, and the notebook only
+ever looks queries up. `daxManifest.test.ts` regenerates it in memory and fails if the committed file
+is stale, because otherwise a stale manifest builds a city from old DAX rather than raising.
+
+Four things about the replay that fail silently if changed:
+
+- **The run is resolved once per client and held.** A notebook finishing mid-render would otherwise
+  serve `cityItems` from one run and `operationFamilies` from the next — a torn city with no error.
+  The held promise is also cleared on rejection, so one transient failure does not brick the page.
+- **The window is not part of the replay key.** `queryWindow(now)` derives `Start`/`End` from the
+  clock on every call, so exact-parameter matching would never hit. The key is `queryName` plus
+  `CapacityId`, and only `timepoints` is filtered by time — via `rowTimestamp`, which the notebook
+  lifts into its own column. Windowing the aggregated queries drops rows the source expects.
+- **`TENANT_WIDE_CAPACITY_ID` is `''`, not null**, so the column stays non-nullable and equality
+  filtering needs no special case.
+- **Latency is the model's lag plus the schedule interval.** Reporting the model's 15 minutes alone
+  would tell the UI the city is fresher than it is, which is the "unmeasured drawn as measured"
+  failure the evidence model exists to prevent. `VITE_FABRIC_INGEST_INTERVAL_MINUTES` must match the
+  real schedule.
+
+**`@authenticated('read')` on `IngestRun`/`IngestRow` means any signed-in app user reads the whole
+tenant's capacity metrics.** That is a real disclosure change from the per-user delegated auth the
+semantic model enforces, and it is deliberate — there is no other way to serve a shared ingest. Write
+is not granted: the notebook writes over direct SQL, so nothing done through the app can forge
+telemetry. Say this out loud in any change that touches those entities.
+
+### The notebook is generated from `.py` files
+
+`fabric/ingest_capacity_metrics.ipynb` is built by `npm run fabric:notebook` from
+`fabric/simcity_ingest.py` (pure logic) and `fabric/ingest_main.py` (Fabric I/O). Edit the `.py`
+files. A `.ipynb` diff is JSON string arrays that nobody reads, and Python inside one is invisible to
+every linter and to the tests.
+
+`simcity_ingest.py` has no Fabric imports on purpose: `ingestNotebook.test.ts` executes it in a real
+Python and asserts on behaviour. Keep it that way. The two functions it exists to protect are the
+ones that had to be written twice, and both fail as **wrong numbers** rather than as an error:
+
+- `bind_dax_parameters` matches whole identifiers. A plain replace of `@Start` also rewrites the
+  front of `@StartOfDay`, and what it leaves is still valid DAX — the query runs and answers for the
+  wrong window.
+- `dax_literal` doubles quotes, which is DAX's own escape, so a capacity id cannot end its literal
+  and carry on as expression text.
+
+Both mirror `src/collect/semanticModelDaxClient.ts` exactly. Change one, change the other, and check
+the executed tests still fail when you revert the fix.
+
+That test skips when no Python is on `PATH` — but it **throws** when `CI` is set, because a skip
+there would quietly remove the only check that the Python half works at all.
+
+## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,083 tests / 66 files
+npx vitest run        # 1,181 tests / 72 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```

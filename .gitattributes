@@ -4,3 +4,9 @@
 
 # Blender-authored scenery kits. Binary, so never line-ending normalised or diffed as text.
 *.glb binary
+
+# Generated Fabric ingest artifacts. The notebook embeds the Python sources as JSON string
+# escapes, where a CRLF survives as a literal \r that autocrlf cannot normalise -- so the drift
+# guard would pass on Windows and fail on Linux. Pin both to LF instead.
+*.py text eol=lf
+*.ipynb text eol=lf

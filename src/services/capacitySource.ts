@@ -2,8 +2,29 @@ import { createFixtureSource } from '../collect/fixtureSource'
 import { createTopologySource } from '../collect/topology'
 import { createSemanticModelSource } from '../collect/semanticModelSource'
 import { createSemanticModelDaxClient } from '../collect/semanticModelDaxClient'
+import { createIngestedCapacitySource, DEFAULT_INGEST_INTERVAL_MINUTES, DEFAULT_INGEST_WINDOW_DAYS } from '../collect/ingestedDax'
+import { createRayfinIngestStore } from '../collect/rayfinIngestStore'
 import { CapacitySourceError, type CapacitySource } from '../collect/source'
 import { isFixtureMode } from './bootstrap'
+import { getRayfinClient } from './rayfinClient'
+
+function tenantIdentity(): { tenantId: string; displayName: string } {
+  return {
+    tenantId:
+      import.meta.env.VITE_FABRIC_TENANT_ID ?? import.meta.env.VITE_FABRIC_WORKSPACE_ID ?? 'unknown',
+    displayName: import.meta.env.VITE_FABRIC_TENANT_NAME ?? 'Fabric tenant',
+  }
+}
+
+function positiveNumber(raw: string | undefined, fallback: number): number {
+  // Empty counts as unset: Vite substitutes '' for a variable declared but not given a value, and
+  // `Number('')` is 0 — which would silently claim the notebook runs continuously.
+  if (raw === undefined || raw.trim() === '') return fallback
+  const parsed = Number(raw)
+  // A typo in an env var must not quietly become NaN latency, which renders as an unknown age
+  // rather than as a misconfiguration anyone would go and fix.
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+}
 
 /**
  * Build the semantic-model source from environment configuration.
@@ -28,11 +49,32 @@ function buildSemanticModelSource(): CapacitySource {
       datasetId,
       baseUrl: import.meta.env.VITE_FABRIC_METRICS_PROXY_URL,
     }),
-    tenant: {
-      tenantId:
-        import.meta.env.VITE_FABRIC_TENANT_ID ?? import.meta.env.VITE_FABRIC_WORKSPACE_ID ?? 'unknown',
-      displayName: import.meta.env.VITE_FABRIC_TENANT_NAME ?? 'Fabric tenant',
-    },
+    tenant: tenantIdentity(),
+  })
+}
+
+/**
+ * Build the source the *deployed* app uses.
+ *
+ * Unlike `semantic-model`, this needs no proxy and no connector: a scheduled Fabric notebook has
+ * already run the DAX and written the rows into the app's own database. See `ingestedDax.ts`.
+ */
+function buildIngestedSource(): CapacitySource {
+  const tenant = tenantIdentity()
+  return createIngestedCapacitySource({
+    store: createRayfinIngestStore(getRayfinClient(), {
+      tenantId: tenant.tenantId,
+      datasetId: import.meta.env.VITE_FABRIC_METRICS_DATASET_ID,
+    }),
+    tenant,
+    intervalMinutes: positiveNumber(
+      import.meta.env.VITE_FABRIC_INGEST_INTERVAL_MINUTES,
+      DEFAULT_INGEST_INTERVAL_MINUTES,
+    ),
+    windowDays: positiveNumber(
+      import.meta.env.VITE_FABRIC_INGEST_WINDOW_DAYS,
+      DEFAULT_INGEST_WINDOW_DAYS,
+    ),
   })
 }
 
@@ -44,6 +86,8 @@ export function createConfiguredCapacitySource(): CapacitySource {
       return createTopologySource()
     case 'semantic-model':
       return buildSemanticModelSource()
+    case 'ingested':
+      return buildIngestedSource()
     case 'eventhouse':
       throw new CapacitySourceError(
         'Eventhouse',
