@@ -7,7 +7,17 @@ export default defineConfig({
   resolve: {
     alias: { '@': resolve(import.meta.dirname, 'src') },
   },
-  esbuild: { target: 'es2022' },
+  /*
+   * es2022, in the Vite 8 spelling. Vitest 5 transforms with **oxc**, and the `esbuild` key this
+   * replaces is still accepted and silently *ignored* — the run logs `oxc options will be used and
+   * esbuild options will be ignored` and carries on, leaving the tests on oxc's default target
+   * rather than the one named here. Under Vitest 3 the old key was honoured and no warning fired,
+   * so the bump is what turned this line into dead config.
+   *
+   * It has to match `vite.config.ts` because decorators are the reason es2022 is pinned at all: a
+   * suite transformed at a different syntax level than the bundle can pass while the build fails.
+   */
+  oxc: { target: 'es2022' },
   test: {
     globals: true,
     environment: 'jsdom',
