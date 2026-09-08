@@ -10,6 +10,8 @@ services:
       enabled: true
     allowedRedirectUris:
       - http://localhost:5173
+      - http://127.0.0.1:5173
+      - https://brisk-crane-d27e30d33e-westus2.webapp.fabricapps.net
   data:
     enabled: true
     dialect: mssql
@@ -18,17 +20,8 @@ services:
     folder: dist
     buildCommand: npm run build:fabric
     indexDocument: index.html
-  # Fabric rejects the whole deployment when this is enabled -- `rayfin up` gets as far as
-  # retrieving the publishable key and then fails the runtime settings sync with
-  # `400 Bad Request ... Invalid settings detected: Functions are not supported yet. Please
-  # disable functions in your settings to try again.` It is a platform gap, not a config error,
-  # so there is nothing to fix locally and no flag that works around it.
-  #
-  # The function itself is kept: `rayfin/functions/src/fabricTopology.ts` still builds, and
-  # `createTopologySource()` in `src/collect/topology.ts` still invokes
-  # `functions.readFabricTopology`. Nothing reaches it today -- `src/App.tsx` constructs
-  # `createFixtureSource()` -- so the deployed app is unaffected and this is one word to reverse
-  # once Fabric supports functions.
   functions:
     enabled: false
     buildCommand: npm run build
+  storage:
+    enabled: false
