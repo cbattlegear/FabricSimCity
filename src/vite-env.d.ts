@@ -16,6 +16,21 @@ interface ImportMetaEnv {
   readonly VITE_FABRIC_WORKSPACE_ID?: string
   readonly VITE_FABRIC_ITEM_ID?: string
   readonly VITE_FABRIC_PORTAL_URL?: string
+  /**
+   * Object id of the Capacity Metrics semantic model, from the metrics app's dataset URL.
+   * Required by `VITE_FABRIC_SOURCE=semantic-model`.
+   */
+  readonly VITE_FABRIC_METRICS_DATASET_ID?: string
+  /**
+   * Same-origin path or origin that forwards to the Power BI REST API. Defaults to `/powerbi`,
+   * which the dev server proxies. There is deliberately no token variable here: a `VITE_`-prefixed
+   * one would be inlined into the bundle and published with the site.
+   */
+  readonly VITE_FABRIC_METRICS_PROXY_URL?: string
+  /** Tenant id reported alongside semantic-model readings. Defaults to the workspace's. */
+  readonly VITE_FABRIC_TENANT_ID?: string
+  /** Display name for the tenant in the atlas. */
+  readonly VITE_FABRIC_TENANT_NAME?: string
 }
 
 interface ImportMeta {

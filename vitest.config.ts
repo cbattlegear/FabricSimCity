@@ -23,5 +23,27 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     exclude: ['node_modules', 'dist'],
+    /*
+     * Neutralize the app's runtime configuration for the whole suite.
+     *
+     * Vitest loads `.env` files through Vite, and a successful `rayfin up` writes a real
+     * `.env.local` containing `VITE_RAYFIN_API_URL`. That variable is what selects fixture mode, so
+     * without this the suite passes on a fresh clone and in CI and then fails on any machine that
+     * has ever deployed — ambient state deciding the result, which is the one thing a suite must
+     * never do. Tests that want a configured backend stub it explicitly with `vi.stubEnv`.
+     */
+    env: {
+      VITE_FABRIC_SOURCE: '',
+      VITE_RAYFIN_API_URL: '',
+      VITE_RAYFIN_PUBLISHABLE_KEY: '',
+      VITE_RAYFIN_FUNCTIONS_URL: '',
+      VITE_FABRIC_WORKSPACE_ID: '',
+      VITE_FABRIC_ITEM_ID: '',
+      VITE_FABRIC_PORTAL_URL: '',
+      VITE_FABRIC_TENANT_ID: '',
+      VITE_FABRIC_TENANT_NAME: '',
+      VITE_FABRIC_METRICS_DATASET_ID: '',
+      VITE_FABRIC_METRICS_PROXY_URL: '',
+    },
   },
 })

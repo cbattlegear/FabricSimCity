@@ -90,7 +90,53 @@ that tracked file to change.
 
 Then set `VITE_RAYFIN_API_URL`, `VITE_RAYFIN_PUBLISHABLE_KEY`, `VITE_FABRIC_WORKSPACE_ID`,
 `VITE_FABRIC_ITEM_ID` and `VITE_FABRIC_PORTAL_URL`. Leaving `VITE_RAYFIN_API_URL` unset is what
-selects fixture mode.
+selects fixture mode. In practice `rayfin env --framework vite` writes all of these into
+`.env.local` for you, and `npm run build:fabric` runs it.
+
+### Pointing at the Capacity Metrics app
+
+Real CU numbers come from the Fabric Capacity Metrics app's semantic model, over DAX. Today that
+works from `npm run dev` and **not** from the deployed app. Three separate things block the
+deployed path, and any one of them is sufficient:
+
+1. Rayfin 1.34.0 ships no semantic-model connector — `discover_packages` returns only the core SDK
+   and the docs server.
+2. Fabric refuses to deploy `functions`, which is the only server-side seam the app has. That is why
+   `services.functions.enabled` is `false`; a deploy with it on fails the whole runtime-settings sync.
+3. The Power BI `executeQueries` REST API sends no CORS headers, so a browser cannot call it
+   directly whatever token it holds. It needs something server-side to relay the call — and Fabric
+   static hosting has nowhere to put one.
+
+The dev server is that relay. It proxies `/powerbi` to `api.powerbi.com` and attaches the token, so
+the token stays in Node and never enters the bundle.
+
+```powershell
+az login --scope https://analysis.windows.net/powerbi/api/.default
+$env:POWERBI_TOKEN = (az account get-access-token `
+  --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
+
+$env:VITE_FABRIC_SOURCE = "semantic-model"
+$env:VITE_FABRIC_METRICS_DATASET_ID = "<semantic model id>"
+npm run dev
+```
+
+To find the dataset id: open the **Microsoft Fabric Capacity Metrics** app in the Fabric portal, go
+to the workspace it installed into, open the semantic model, and take the GUID from the URL
+(`/groups/<workspace>/datasets/<dataset>`). It does not live in your app's own workspace, which is
+why it cannot be inferred from `rayfin env` output and has to be set explicitly.
+
+The token is short-lived — roughly an hour — and re-exporting it means restarting `npm run dev`,
+because the proxy reads it once at startup.
+
+Two things to expect on a first real run. The Capacity Metrics schema has already changed once, so
+the source probes it before asking for numbers and reports `Unsupported` rather than crashing if it
+has moved again; and the 30-day retention the source declares is an assumption that has not yet been
+checked against a live model.
+
+For the **deployed** app the options are to wait for Fabric to support functions, at which point the
+relay moves server-side, or to land the metrics into the app's own Rayfin SQL database on a schedule
+and read them through `client.data` — which is fully supported today but is a different ingestion
+design rather than a configuration change.
 
 ## Where the numbers come from
 
@@ -107,7 +153,8 @@ CU telemetry does not exist on any REST endpoint. It comes from one of two sourc
   30-second cadence. Fully supported, but it carries no per-item breakdown, so the city degrades to
   live infrastructure over static buildings — which the evidence model already knows how to draw.
 
-Neither is written yet. The seam and the fixture implementation are.
+The semantic-model source and its DAX transport are written; see above for what it takes to reach a
+real model. The Eventhouse source is written but has no transport yet.
 
 Refresh is client-side polling: Rayfin has no cron, no timers and no background workers, so there
 is no in-app collector and never will be.

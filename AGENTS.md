@@ -265,8 +265,8 @@ city, not a broken one. Drawing it as a blackout would cry wolf.
 All Fabric access goes through one interface, `src/collect/source.ts`, with three implementations:
 
 ```
-semanticModelSource   DAX via the fabric-semanticmodel connector      [default, not yet written]
-eventhouseSource      KQL via the kusto connector                     [not yet written]
+semanticModelSource   DAX via the Power BI executeQueries API         [written; dev-only transport]
+eventhouseSource      KQL via the kusto connector                     [written; no transport]
 fixtureSource         deterministic synthetic evidence                [the development loop]
 ```
 
@@ -278,6 +278,57 @@ failing.
 no `rayfin dev`; `npm run dev` runs Vite against a *deployed* backend. Without fixtures the city is
 undevelopable without a Fabric tenant. `App.tsx` constructs the source at module scope — that one
 line is the swap point.
+
+### The semantic model is reachable from `npm run dev` and not from the deployed app
+
+Three independent walls, any one of which is enough, so do not go looking for a configuration flag
+that opens this up:
+
+1. Rayfin 1.34.0 ships **no connector package** — `discover_packages` returns only `rayfin-core` and
+   `rayfin-mcp`. The `fabric-semanticmodel` connector this seam was designed against does not exist
+   yet.
+2. **Fabric refuses to deploy `functions`**, the only server-side seam the app has. It rejects the
+   whole runtime-settings sync, not just the functions part — `rayfin up` gets as far as retrieving
+   the publishable key and then fails with `400 Bad Request ... Invalid settings detected: Functions
+   are not supported yet.` It is a platform gap, not a config error, so there is no flag that works
+   around it. The function itself is kept: `rayfin/functions/src/fabricTopology.ts` still builds and
+   `createTopologySource()` still invokes `functions.readFabricTopology`, so this is one word in
+   `rayfin.yml` to reverse once Fabric supports functions.
+3. **`executeQueries` sends no CORS headers.** This one is independent of Rayfin entirely: even
+   holding a valid token, a browser cannot call `api.powerbi.com`. It needs a server-side relay, and
+   Fabric static hosting has nowhere to run one.
+
+So `createSemanticModelDaxClient` posts to a *same-origin* path, defaulting to `/powerbi`, and the
+Vite dev server proxies it. The token is read from `POWERBI_TOKEN` — deliberately **not**
+`VITE_POWERBI_TOKEN`, because only `VITE_`-prefixed variables are inlined into the bundle and that
+naming would publish a live Power BI token to every visitor of the built site.
+
+Two transport details are load-bearing and both fail as *silence* rather than as an error:
+
+- **`executeQueries` has no parameter binding.** The query builder emits `@Start`, `@End` and
+  `@CapacityId`, and the transport rewrites them into DAX literals. Substitution matches whole
+  identifiers, because replacing `@Start` textually also rewrites the front of `@StartOfDay` and
+  leaves behind *valid* DAX — wrong numbers rather than a failure. Strings double their quotes;
+  a capacity id is server-supplied and must not be able to end the literal.
+- **Rows come back with bracketed keys** — `"[CapacityId]"` for a `SELECTCOLUMNS` alias,
+  `"Table[Column]"` for a bare column — while the source parses plain names. Without unwrapping,
+  every lookup misses and a well-formed response yields an empty city.
+
+A 400 from `executeQueries` maps to `Unsupported`, not `Unknown`, because the DAX error this source
+expects to meet is the Capacity Metrics schema having moved again — a documented, recoverable
+condition that the app handles by falling back and saying so.
+
+### A deploy writes `.env.local`, and the suite used to read it
+
+`rayfin env --framework vite` — which `npm run build:fabric` and a successful `rayfin up` both run —
+writes a real `.env.local` containing `VITE_RAYFIN_API_URL`. Vitest loads `.env` files through Vite,
+and that variable is exactly what `isFixtureMode()` keys off, so the suite silently left fixture
+mode and `appState.test.ts` failed.
+
+That is ambient state deciding the result: green on a fresh clone and in CI, red on any machine that
+has ever deployed. `vitest.config.ts` now pins `test.env` to neutralize every variable `rayfin env`
+writes. Add new `VITE_*` variables to that list, and stub with `vi.stubEnv` in tests that want a
+configured backend rather than relying on what happens to be on disk.
 
 ### A negative result must be stamped if it is cached
 
@@ -308,8 +359,10 @@ All verified against `@microsoft/rayfin-*` v1.34.0.
   `rayfin up` reports success.
 - Omitting a permission decorator silently grants full CRUD to any signed-in user.
 - `.execute()` silently returns one page with no signal that more exist. Always `.executePaginated()`.
-- Connectors are **private preview** and delegated-auth only: every user needs their own capacity
-  metrics permissions, and there is no service-principal path where the app reads once for everyone.
+- Connectors do not exist as a package in 1.34.0 — `discover_packages` returns only `rayfin-core`
+  and `rayfin-mcp`. Capacity metrics access is delegated-auth in any case: every user needs their
+  own metrics permissions, and there is no service-principal path where the app reads once for
+  everyone.
 - Static bundle caps at 100 MB compressed.
 
 ### The `es2022` transform target lives in two config files, and the old spelling fails silently
@@ -519,6 +572,15 @@ npx rayfin up                                             # thereafter
 Note that a successful deploy **edits tracked files**: it appends the live hosting URL to
 `allowedRedirectUris` in `rayfin/rayfin.yml` and merges `RAYFIN_PUBLIC_*` into `rayfin/.env`.
 Expect `rayfin.yml` in `git status` afterwards and commit it deliberately.
+
+It does not edit that file in place — it **re-serializes it from the parsed config**, which
+normalizes the shape (a `storage: enabled: false` block appears) and, more importantly, **deletes
+every comment**. A ten-line comment above `functions.enabled: false` explaining that Fabric rejects
+the whole deployment when it is on did not survive the first deploy, and the loss shows up in the
+diff as a plain deletion with nothing to indicate the CLI did it rather than a person.
+
+So do not record *why* a setting has its value in `rayfin.yml`. That reasoning belongs here, where
+the CLI cannot reach it; the file holds values only.
 
 ### A conflicted pull request silently switches CI off
 
