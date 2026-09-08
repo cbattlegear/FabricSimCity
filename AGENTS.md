@@ -312,6 +312,45 @@ All verified against `@microsoft/rayfin-*` v1.34.0.
   metrics permissions, and there is no service-principal path where the app reads once for everyone.
 - Static bundle caps at 100 MB compressed.
 
+### The `es2022` transform target lives in two config files, and the old spelling fails silently
+
+Decorators are why `es2022` is pinned, so the bundle and the suite have to agree: a suite
+transformed at a different syntax level than the bundle can pass while the build fails. That target
+is set in **both** `vite.config.ts` (three places — `build.target`, `oxc.target`,
+`optimizeDeps.rolldownOptions.transform.target`) and `vitest.config.ts` (`oxc.target`), because
+`vitest.config.ts` is standalone and does **not** extend `vite.config.ts`.
+
+The oxc-based toolchain still *accepts* the esbuild-era `esbuild: { target }` key and silently
+ignores it, logging `oxc options will be used and esbuild options will be ignored` before carrying
+on at oxc's default target. So the migration has to be done per file, and missing one leaves dead
+config that reads as correct. It has already been missed once: #4 migrated `vite.config.ts` and left
+`vitest.config.ts` behind, where the key stayed *honoured* under Vitest 3 and only went dead on the
+bump to Vitest 5.
+
+Do not trust a green suite to tell you which key is live — mutate the target to prove it. Set
+`target: 'not-a-target'` and run any single file:
+
+```powershell
+npx vitest run src/atlasSceneFactory.test.ts
+# under `oxc:`      → exit 1, [BUNDLER_INITIALIZE_ERROR] Invalid target 'not-a-target'
+# under `esbuild:`  → exit 0, "Tests 2 passed", warning only
+```
+
+A bump of Vite, Vitest or `@vitejs/plugin-react` is the moment to re-check both files. Keep
+`@vitejs/plugin-react` on v5: v6 replaces the React transform and peers on `oxc-transform-react`,
+`@rolldown/plugin-babel` and `babel-plugin-react-compiler`, none of which are installed, so taking
+it invalidates the decorator support this pin exists to guarantee.
+
+### Keep `@types/node` level with the Node that runs, never ahead
+
+CI and local both run **Node 24** (`node-version: 24` in `ci.yml` and `deploy-fabric.yml`), and
+`@types/node` is pinned to `^24` to match. The direction of any mismatch is what matters. Types
+*behind* the runtime only hide APIs that do exist — stale, but safe. Types *ahead* let TypeScript
+accept APIs that are absent at runtime: green build, green suite, crash in production.
+
+Dependabot cannot see `node-version` and will keep proposing the newest major. Decline it, and move
+the runtime and the types together as one deliberate change when the runtime moves.
+
 ## Fabric telemetry facts
 
 - **No REST endpoint returns CU utilization.** `api.fabric.microsoft.com/v1` gives topology only.
