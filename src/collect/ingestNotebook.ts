@@ -17,7 +17,12 @@ interface NotebookCell {
 function lines(text: string): string[] {
   // Jupyter stores source as an array of lines that each keep their trailing newline, and the last
   // line does not. Round-tripping any other way produces a diff on every regeneration.
-  const trimmed = text.replace(/\n+$/, '')
+  //
+  // CRLF is normalized first because a `\r` inside a cell's source survives as a `\r` *escape*
+  // inside a JSON string, which git's autocrlf cannot see and therefore cannot normalize. Without
+  // this, a notebook generated on Windows and one generated on Linux differ byte-for-byte and the
+  // drift guard fails on CI only.
+  const trimmed = text.replace(/\r\n/g, '\n').replace(/\n+$/, '')
   return trimmed.split('\n').map((line, index, all) => (index === all.length - 1 ? line : `${line}\n`))
 }
 

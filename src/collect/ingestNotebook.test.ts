@@ -9,7 +9,12 @@ import { DEFAULT_INGEST_INTERVAL_MINUTES, DEFAULT_INGEST_WINDOW_DAYS } from './i
 import { NOTEBOOK_PATH, buildIngestNotebook } from './ingestNotebook'
 
 const root = process.cwd()
-const read = (path: string) => readFileSync(resolve(root, path), 'utf8')
+/**
+ * Normalizes CRLF so the byte comparison below is about drift rather than about the checkout.
+ * `.gitattributes` pins these artifacts to LF, but a clone made before that, or with different
+ * `core.autocrlf`, would otherwise fail here for a reason that has nothing to do with the notebook.
+ */
+const read = (path: string) => readFileSync(resolve(root, path), 'utf8').replace(/\r\n/g, '\n')
 
 const logicSource = read('fabric/simcity_ingest.py')
 const mainSource = read('fabric/ingest_main.py')
