@@ -74,8 +74,19 @@ delegated-auth only — every user signs in as themselves and sees only the capa
 have access to. There is no service-principal path where the app reads once for everyone.
 
 ```powershell
-rayfin up
+npx rayfin login
+npx rayfin up --workspace "<your capacity-backed workspace>"
+npx rayfin up status
 ```
+
+The workspace has to be named on the **first** deploy — `rayfin up` records the binding in
+`rayfin/.deployments.json` (gitignored, so it never arrives with a clone) and reuses it afterwards,
+at which point a bare `npx rayfin up` is enough. Without it the CLI stops with
+`No workspace targeting context`. Add `--dry-run` to validate the configuration and print the
+planned operations without making any API calls.
+
+The deploy appends the live hosting URL to `allowedRedirectUris` in `rayfin/rayfin.yml`, so expect
+that tracked file to change.
 
 Then set `VITE_RAYFIN_API_URL`, `VITE_RAYFIN_PUBLISHABLE_KEY`, `VITE_FABRIC_WORKSPACE_ID`,
 `VITE_FABRIC_ITEM_ID` and `VITE_FABRIC_PORTAL_URL`. Leaving `VITE_RAYFIN_API_URL` unset is what

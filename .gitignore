@@ -9,6 +9,13 @@ dist/
 rayfin/.temp/
 rayfin/.lockfile.json
 
+# The deployment registry `rayfin up` writes on its first successful run. It is one developer's
+# binding to one Fabric workspace -- tenant and workspace GUIDs, the `fabricItemId`, the hosting
+# URL and the publishable key -- which is the same reason `.env` is ignored below, and Rayfin's
+# own docs list it as gitignored alongside it. Nothing regenerates it from the tree, so a clone
+# has no deployment until its owner runs `rayfin up --workspace <name>` for themselves.
+rayfin/.deployments.json
+
 # Vite reads these at build time and they carry tenant identifiers and a publishable key.
 .env
 .env.*
