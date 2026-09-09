@@ -20,6 +20,20 @@ const read = (path: string) => readFileSync(resolve(root, path), 'utf8').replace
 const logicSource = read('fabric/simcity_ingest.py')
 const mainSource = read('fabric/ingest_main.py')
 
+// Exercise real pandas when available, and the same datetime-subclass contract on plain-Python CI.
+const missingTimestamp = `
+try:
+    from pandas import NaT
+except ModuleNotFoundError as error:
+    if error.name != "pandas":
+        raise
+    class MissingDatetime(_dt.datetime):
+        def __ne__(self, other): return True
+        def replace(self, **kwargs): return self
+        def astimezone(self, tz=None): raise ValueError("NaTType does not support astimezone")
+    NaT = MissingDatetime(2000, 1, 1)
+`
+
 interface NotebookCell {
   cell_type: string
   source: string[]
@@ -302,7 +316,7 @@ pick_generation(manifest, rows)
   })
 
   it('stages multi-table schema rows, fans out canonical capacity ids and skips unsupported samples', () => {
-    const result = python(`
+    const result = python(`${missingTimestamp}
 exec(${JSON.stringify(mainSource)})
 manifest = json.loads(${JSON.stringify(JSON.stringify(buildDaxManifest()))})
 probe = json.loads(${JSON.stringify(JSON.stringify(exportedMetricsProbe))})
@@ -318,7 +332,8 @@ def evaluate_dax(query):
         return probe
     if '"TotalCuSeconds"' in query:
         calls.append("capacitySummary")
-        return [{"[CapacityId]": "cap-a"}, {"[CapacityId]": "cap-b"}]
+        return [{"[CapacityId]": "cap-a", "[ObservedAt]": NaT},
+                {"[CapacityId]": "cap-b", "[ObservedAt]": _dt.datetime(2026, 9, 9)}]
     if '"OperationName"' in query:
         calls.append("operationFamilies")
     elif '"ItemKind"' in query:
@@ -349,8 +364,10 @@ def resolve_table(cursor, name, columns): return f"[dbo].[{name}]"
 run_ingest(manifest)
 schema = [json.loads(row[7]) for row in connection.rows if row[3] == "schemaProbe"]
 scoped = [row for row in connection.rows if row[3] in ("cityItems", "operationFamilies")]
+observations = [json.loads(row[7])["[ObservedAt]"] for row in connection.rows if row[3] == "capacitySummary"]
 print(json.dumps({"calls": calls, "complete": connection.complete, "closed": connection.closed,
                   "tables": sorted(probe_tables(schema)), "scopes": sorted({row[4] for row in scoped}),
+                  "observations": observations,
                   "replayed": pick_generation(manifest, schema)["name"]}))
 `)
     expect(result.ok, result.stderr).toBe(true)
@@ -358,6 +375,7 @@ print(json.dumps({"calls": calls, "complete": connection.complete, "closed": con
       calls: ['schemaProbe', 'capacitySummary', 'cityItems', 'operationFamilies', 'cityItems', 'operationFamilies'],
       complete: true, closed: true, tables: ['Capacities', 'Items', 'Metrics By Item Operation And Day'],
       scopes: ['cap-a', 'cap-b'], replayed: 'metricsDailyWithDimensions',
+      observations: [null, '2026-09-09T00:00:00Z'],
     })
     expect(result.stdout).toContain('timepoints: unavailable')
   })
@@ -381,6 +399,29 @@ print(row_timestamp({"[Timepoint]": "not a date"}, "Timepoint"))`)
 import datetime
 print(encode_row({"[A]": datetime.datetime(2024, 5, 1, 12, 0, 0), "B": None, "C": 1.5}, "cityItems", 0))`)
     expect(JSON.parse(result.stdout)).toEqual({ '[A]': '2024-05-01T12:00:00Z', B: null, C: 1.5 })
+  })
+
+  it('serializes missing datetime cells as null without inventing a timestamp', () => {
+    const result = python(`${missingTimestamp}
+print(encode_row({
+    "[ObservedAt]": NaT, "CuSeconds": 0, "MissingCu": float("nan"), "Label": "NaT",
+    "Known": _dt.datetime(2026, 9, 9, 11, 30, tzinfo=_dt.timezone(_dt.timedelta(hours=-5))),
+}, "capacitySummary", 1))`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(JSON.parse(result.stdout)).toEqual({
+      '[ObservedAt]': null, CuSeconds: 0, MissingCu: null, Label: 'NaT', Known: '2026-09-09T16:30:00Z',
+    })
+  })
+
+  it('keeps missing SQL timepoints null and normalizes known datetime cells to UTC', () => {
+    const result = python(`${missingTimestamp}
+assert row_timestamp({"[Timepoint]": NaT}, "Timepoint") is None
+known = _dt.datetime(2026, 9, 9, 11, 30, tzinfo=_dt.timezone(_dt.timedelta(hours=-5)))
+print(row_timestamp({"[Timepoint]": known}, "Timepoint").isoformat())
+print(row_timestamp({"[Timepoint]": _dt.datetime(2026, 9, 9, 11, 30)}, "Timepoint").isoformat())
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(result.stdout.split('\n')).toEqual(['2026-09-09T16:30:00+00:00', '2026-09-09T11:30:00+00:00'])
   })
 
   it('refuses a row too wide for the rowJson column instead of truncating it', () => {

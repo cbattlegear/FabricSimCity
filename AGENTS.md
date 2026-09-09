@@ -511,6 +511,12 @@ the executed tests still fail when you revert the fix.
 That test skips when no Python is on `PATH` — but it **throws** when `CI` is set, because a skip
 there would quietly remove the only check that the Python half works at all.
 
+`pandas.NaT` passes `isinstance(value, datetime)` but cannot be timezone-converted. `_utc_datetime`
+checks its non-reflexive equality before conversion and shares that rule between JSON encoding
+and SQL timestamp extraction. Missing timestamps stay null; known timestamps become UTC before
+SQL drops timezone information. The executed regressions use real pandas when available and the
+same datetime-subclass contract on plain-Python CI, without requiring Fabric libraries.
+
 ### A recognized fact table is not a recognized schema
 
 The first live export contained `Metrics By Item Operation And Day`, but its date is `Datetime`,
@@ -540,7 +546,7 @@ schema/reference checks are not DAX execution against a tenant.
 ## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,212 tests / 75 files
+npx vitest run        # 1,214 tests / 75 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```

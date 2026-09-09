@@ -187,11 +187,10 @@ live. Setting it lower than the real schedule makes the app lie about freshness.
 > app's users are entitled to see. The app is granted read only — the notebook writes over direct
 > SQL, not the data API, so nothing a user does in the app can forge telemetry.
 
-The notebook **has not yet completed a successful ingest against a real tenant**. Live runs
-reached metadata discovery and exposed incorrect flattened-table assumptions in the original
-adapter. The `metricsDailyWithDimensions` adapter now targets the exported fact/dimension schema
-described below; its generated DAX still needs a live run. A schema match is not proof of
-live-model compatibility.
+The notebook **has not yet completed a successful ingest against a real tenant**. A live run
+matched `metricsDailyWithDimensions` and read six capacity summary rows, then exposed a missing
+timestamp serialization error, corrected below. This confirms schema detection and the summary
+query, not a completed run of every query or a successful SQL write.
 
 #### Daily metrics with Items and Capacities dimensions
 
@@ -220,6 +219,16 @@ Rebuild/redeploy the matching reader with `npx rayfin up`, keeping ingest settin
 do not put access tokens in either file. No SQL entity change is required. Run the notebook once
 before enabling its schedule, and confirm any schedule still points to the updated notebook with
 the intended parameters.
+
+#### NaTType does not support astimezone
+
+Pandas represents a missing datetime cell as `NaT`. It is a Python datetime subclass, but
+timezone conversion is invalid. The ingest now preserves it as JSON `null` and SQL `NULL`;
+it never substitutes the current time or zero. Known timestamps are normalized to UTC.
+
+Update `fabric/ingest_capacity_metrics.ipynb` (or its Pure logic cell from
+`fabric/simcity_ingest.py`), preserve your parameters, and rerun the cells. This fix does not
+change manifest version 2 or the app/SQL schema, so it needs no app redeployment.
 
 #### ADOMD: no permission to call Discover
 
