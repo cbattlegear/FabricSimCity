@@ -49,10 +49,41 @@ signed-in user's own permissions.
 1. Deploy the app with \`npx rayfin up\` so the \`IngestRun\` and \`IngestRow\` tables exist.
 2. Give this notebook's identity access to the app's SQL database, as a user with
    \`INSERT\`, \`UPDATE\`, \`DELETE\` and \`SELECT\` on those two tables.
-3. Give it read access to the Capacity Metrics semantic model.
+3. Give it Read and Build access to the Capacity Metrics semantic model, plus permission to
+   discover model metadata for the schema probe. Report viewing alone is insufficient.
 4. Fill in the parameters cell below.
 
 Then schedule it at the same interval you set \`VITE_FABRIC_INGEST_INTERVAL_MINUTES\` to.
+Scheduled runs use the identity of the user who created or last updated the schedule.
+
+**Updating an existing notebook:** this notebook requires manifest version **2**. Update both
+the notebook and its Built-in \`dax-queries.generated.json\`, preserving your parameter values,
+then restart the session and run all cells. The SQL entity schema has not changed. Confirm the
+schedule targets this updated notebook. The matching TypeScript reader is included in this
+revision: rebuild/redeploy the app with \`VITE_FABRIC_SOURCE=ingested\` and the matching tenant
+and dataset ids. It reads through Rayfin's built-in GraphQL adapter and adopts the Fabric portal
+session automatically, without a separate login flow.
+
+**Daily metrics with dimensions:** \`metricsDailyWithDimensions\` reads the daily fact plus
+\`Items\` and \`Capacities\`. It supplies CU, durations, operation counts and measured throttling,
+not 30-second utilization or per-item OneLake storage. Those unavailable measurements remain
+unknown. Autoscale-specific facts are not combined. The first partial day is excluded; freshness
+uses the latest daily bucket, not the time this notebook ran.
+
+**If ADOMD reports no permission to call Discover:** check the executing identity's access to
+the model in \`METRICS_WORKSPACE_ID\`, not the notebook or app workspace. After running the
+parameters cell, try \`evaluate_dax('EVALUATE ROW("AccessCheck", 1)')\` separately from the
+ingest. If it also fails, check Read/Build permissions and XMLA access. If it succeeds but the
+schema probe fails, ordinary querying works but metadata discovery does not.
+[Microsoft documents model-admin permissions for INFO metadata queries](https://learn.microsoft.com/dax/info-functions-dax).
+Use an authorized model administrator for that operation; do not grant tenant-wide admin or
+change SQL permissions to work around it.
+
+**If no known schema generation matches:** the error distinguishes an absent table from missing
+required columns. The notebook saves the complete table/column map to
+\`builtin/capacity-metrics-schema.json\`; download it from Resources > Built-in to diagnose the
+adapter mismatch. It contains names only, not metric values or credentials. Ingest stops before
+any SQL write. Do not rename model tables or skip validation to force a match.
 
 **Everyone signed in to the app can read everything this writes.** The semantic model checks each
 user's own capacity permissions; a table does not. Ingest only capacities your app's users are

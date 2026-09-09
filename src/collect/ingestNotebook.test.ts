@@ -4,9 +4,10 @@ import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { DAX_MANIFEST_VERSION } from './daxManifest'
+import { DAX_MANIFEST_VERSION, buildDaxManifest } from './daxManifest'
 import { DEFAULT_INGEST_INTERVAL_MINUTES, DEFAULT_INGEST_WINDOW_DAYS } from './ingestedDax'
 import { NOTEBOOK_PATH, buildIngestNotebook } from './ingestNotebook'
+import { exportedMetricsProbe } from './metricsDailySchema.testkit'
 
 const root = process.cwd()
 /**
@@ -81,7 +82,8 @@ describe('the notebook constants', () => {
 function python(snippet: string): { ok: boolean; stdout: string; stderr: string } {
   const program = `${logicSource}\n\n${snippet}\n`
   for (const executable of ['python3', 'python']) {
-    const result = spawnSync(executable, ['-c', program], { encoding: 'utf8' })
+    // The generated manifest plus notebook exceed Windows' command-line length limit.
+    const result = spawnSync(executable, ['-'], { input: program, encoding: 'utf8' })
     if (result.error) continue
     // Windows Python emits CRLF; normalizing here keeps the assertions about content rather than
     // about which machine ran them.
@@ -167,7 +169,7 @@ print(pick_generation(manifest, rows)["name"])`)
     expect(result.stdout).toBe('new')
   })
 
-  it('falls back to the bare INFO.COLUMNS names when the aliases are absent', () => {
+  it('falls back to the bare INFO.VIEW.COLUMNS names when the aliases are absent', () => {
     const result = python(`
 manifest = {"generations": [{"name": "new", "table": "New", "requiredColumns": ["A"]}]}
 print(pick_generation(manifest, [{"Table": "New", "Name": "A"}])["name"])`)
@@ -182,6 +184,80 @@ pick_generation(manifest, [{"TableName": "Other", "ColumnName": "A"}])`)
     expect(result.stderr).toContain('no known schema generation')
   })
 
+  it('distinguishes absent tables from missing columns beyond the table-name preview', () => {
+    const result = python(`
+manifest = {"generations": [
+    {"name": "old", "table": "OldMetrics", "requiredColumns": ["CapacityId"]},
+    {"name": "new", "table": "ZMetrics", "requiredColumns": ["CapacityId", "Timepoint", "CuSeconds"]},
+]}
+rows = [{"TableName": f"Table{i:02}", "ColumnName": "A"} for i in range(12)]
+rows.append({"TableName": "ZMetrics", "ColumnName": "CapacityId"})
+pick_generation(manifest, rows)`)
+    expect(result.ok).toBe(false)
+    expect(result.stderr).toContain('OldMetrics: table absent')
+    expect(result.stderr).toContain('ZMetrics: missing columns CuSeconds, Timepoint')
+    expect(result.stderr).toContain('13 tables (first 10)')
+  })
+
+  it('exports the full schema on mismatch without querying telemetry or touching SQL', () => {
+    const result = python(`
+exec(${JSON.stringify(mainSource)})
+import json
+import os
+import tempfile
+from pathlib import Path
+
+METRICS_DATASET_ID = "dataset"
+SQL_SERVER = "server"
+SQL_DATABASE = "database"
+TENANT_ID = "tenant"
+manifest = {"version": DAX_MANIFEST_VERSION, "generations": [
+    {"name": "known", "table": "KnownMetrics", "requiredColumns": ["CapacityId"],
+     "queries": {"schemaProbe": "probe"}}
+]}
+rows = [{"[TableName]": f"Table{i:02}", "[ColumnName]": "Id", "MetricValue": 123}
+        for i in range(12)]
+rows.extend([
+    {"[TableName]": "ZMetrics", "[ColumnName]": "Workload"},
+    {"[TableName]": "ZMetrics", "[ColumnName]": "Cost"},
+    {"[TableName]": "ZMetrics", "[ColumnName]": "Cost"},
+])
+calls = []
+def evaluate_dax(query):
+    calls.append(query)
+    if query != "probe":
+        raise AssertionError("Mismatch must not query telemetry")
+    return rows
+def connect_sql():
+    raise AssertionError("Mismatch must not touch SQL")
+
+previous = os.getcwd()
+with tempfile.TemporaryDirectory() as directory:
+    try:
+        os.chdir(directory)
+        try:
+            run_ingest(manifest)
+            raise AssertionError("Mismatch must not complete")
+        except IngestError as error:
+            message = str(error)
+        report = json.loads(Path("builtin/capacity-metrics-schema.json").read_text(encoding="utf-8"))
+        print(json.dumps({"report": report, "message": message, "calls": calls}))
+    finally:
+        os.chdir(previous)
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    const output = JSON.parse(result.stdout.split('\n').at(-1)!)
+    expect(output.calls).toEqual(['probe'])
+    expect(output.message).toContain('capacity-metrics-schema.json')
+    expect(output.message).toContain('Resources > Built-in')
+    expect(output.report).toEqual({
+      ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => [
+        `Table${String(index).padStart(2, '0')}`, ['Id'],
+      ])),
+      ZMetrics: ['Cost', 'Workload'],
+    })
+  })
+
   it('normalizes bracketed keys the same way the TypeScript reader does', () => {
     const result = python(
       `print(normalize_row_key("[CapacityId]"), normalize_row_key("T[C]"), normalize_row_key("a[b]c"))`,
@@ -194,6 +270,96 @@ pick_generation(manifest, [{"TableName": "Other", "ColumnName": "A"}])`)
 rows = [{"TableName": "Keep", "ColumnName": "A"}, {"TableName": "Drop", "ColumnName": "B"}]
 print(len(probe_rows_for_table(rows, "Keep")))`)
     expect(result.stdout).toBe('1')
+  })
+
+  it('selects the exported multi-table schema and retains its dimensions for replay', () => {
+    const result = python(`
+import json
+manifest = json.loads(${JSON.stringify(JSON.stringify(buildDaxManifest()))})
+rows = json.loads(${JSON.stringify(JSON.stringify(exportedMetricsProbe))})
+generation = pick_generation(manifest, rows)
+kept = probe_rows_for_generation(rows + [{"TableName": "Unrelated", "ColumnName": "X"}], generation)
+print(json.dumps({"name": generation["name"], "tables": sorted(probe_tables(kept)),
+                  "replayed": pick_generation(manifest, kept)["name"]}))
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(JSON.parse(result.stdout)).toEqual({
+      name: 'metricsDailyWithDimensions',
+      tables: ['Capacities', 'Items', 'Metrics By Item Operation And Day'],
+      replayed: 'metricsDailyWithDimensions',
+    })
+  })
+
+  it('refuses the real fact table without the required item dimension', () => {
+    const result = python(`
+import json
+manifest = json.loads(${JSON.stringify(JSON.stringify(buildDaxManifest()))})
+rows = json.loads(${JSON.stringify(JSON.stringify(exportedMetricsProbe.filter((row) => row.TableName !== 'Items')))})
+pick_generation(manifest, rows)
+`)
+    expect(result.ok).toBe(false)
+    expect(result.stderr).toContain('Items: table absent')
+  })
+
+  it('stages multi-table schema rows, fans out canonical capacity ids and skips unsupported samples', () => {
+    const result = python(`
+exec(${JSON.stringify(mainSource)})
+manifest = json.loads(${JSON.stringify(JSON.stringify(buildDaxManifest()))})
+probe = json.loads(${JSON.stringify(JSON.stringify(exportedMetricsProbe))})
+generation = pick_generation(manifest, probe)
+METRICS_DATASET_ID = "dataset"
+SQL_SERVER = "server"
+SQL_DATABASE = "database"
+TENANT_ID = "tenant"
+calls = []
+def evaluate_dax(query):
+    if query == generation["queries"]["schemaProbe"]:
+        calls.append("schemaProbe")
+        return probe
+    if '"TotalCuSeconds"' in query:
+        calls.append("capacitySummary")
+        return [{"[CapacityId]": "cap-a"}, {"[CapacityId]": "cap-b"}]
+    if '"OperationName"' in query:
+        calls.append("operationFamilies")
+    elif '"ItemKind"' in query:
+        calls.append("cityItems")
+    else:
+        raise AssertionError("Unsupported query must not be executed")
+    assert "@" not in query, query
+    assert '"cap-a"' in query or '"cap-b"' in query, query
+    return [{"[ItemId]": "item", "[CuSeconds]": 5}]
+
+class FakeSql:
+    def __init__(self):
+        self.rows = []
+        self.complete = False
+        self.closed = False
+    def cursor(self): return self
+    def execute(self, sql, *args):
+        if "status = 'Complete'" in sql:
+            assert args[1] == len(self.rows)
+            self.complete = True
+    def executemany(self, sql, rows): self.rows.extend(rows)
+    def commit(self): pass
+    def fetchall(self): return []
+    def close(self): self.closed = True
+connection = FakeSql()
+def connect_sql(): return connection
+def resolve_table(cursor, name, columns): return f"[dbo].[{name}]"
+run_ingest(manifest)
+schema = [json.loads(row[7]) for row in connection.rows if row[3] == "schemaProbe"]
+scoped = [row for row in connection.rows if row[3] in ("cityItems", "operationFamilies")]
+print(json.dumps({"calls": calls, "complete": connection.complete, "closed": connection.closed,
+                  "tables": sorted(probe_tables(schema)), "scopes": sorted({row[4] for row in scoped}),
+                  "replayed": pick_generation(manifest, schema)["name"]}))
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(JSON.parse(result.stdout.split('\n').at(-1)!)).toEqual({
+      calls: ['schemaProbe', 'capacitySummary', 'cityItems', 'operationFamilies', 'cityItems', 'operationFamilies'],
+      complete: true, closed: true, tables: ['Capacities', 'Items', 'Metrics By Item Operation And Day'],
+      scopes: ['cap-a', 'cap-b'], replayed: 'metricsDailyWithDimensions',
+    })
+    expect(result.stdout).toContain('timepoints: unavailable')
   })
 
   it('collects distinct capacity ids in first-seen order', () => {

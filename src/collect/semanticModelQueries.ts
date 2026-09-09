@@ -6,6 +6,8 @@
  * change, and so the source can probe the schema before it asks for numbers.
  */
 
+import { buildMetricsDailyQueries, METRICS_DAILY_REQUIRED_TABLES, METRICS_DAILY_TABLE } from './metricsDailyQueries.ts'
+
 export type SemanticModelQueryName =
   | 'schemaProbe'
   | 'capacitySummary'
@@ -13,7 +15,10 @@ export type SemanticModelQueryName =
   | 'operationFamilies'
   | 'timepoints'
 
-export type SemanticModelSchemaGenerationName = 'metricsByItemOperationAndDay' | 'metricsByItemandOperationandDay'
+export type SemanticModelSchemaGenerationName =
+  | 'metricsByItemOperationAndDay'
+  | 'metricsByItemandOperationandDay'
+  | 'metricsDailyWithDimensions'
 
 export interface SemanticModelColumnMap {
   capacityId: string
@@ -61,6 +66,10 @@ export interface SemanticModelSchemaGeneration {
   metricsByItemOperationAndDayTable: string
   columns: SemanticModelColumnMap
   requiredColumns: readonly (keyof SemanticModelColumnMap)[]
+  requiredTables?: Readonly<Record<string, readonly string[]>>
+  /** Output aliases may differ from physical fact columns in a multi-table query. */
+  outputColumns?: { capacityId: string; timestamp: string }
+  unavailableQueries?: readonly SemanticModelQueryName[]
 }
 
 const LEGACY_COLUMNS: SemanticModelColumnMap = Object.freeze({
@@ -168,11 +177,41 @@ export const SEMANTIC_MODEL_SCHEMA_GENERATIONS: readonly SemanticModelSchemaGene
     columns: CURRENT_COLUMNS,
     requiredColumns: REQUIRED_COLUMNS,
   }),
+  Object.freeze({
+    name: 'metricsDailyWithDimensions',
+    metricsByItemOperationAndDayTable: METRICS_DAILY_TABLE,
+    columns: Object.freeze({
+      ...LEGACY_COLUMNS,
+      observedAt: 'Datetime',
+      operationName: 'Operation name',
+    }),
+    requiredColumns: ['capacityId', 'workspaceId', 'itemId', 'operationName', 'observedAt', 'cuSeconds'] as const,
+    requiredTables: METRICS_DAILY_REQUIRED_TABLES,
+    outputColumns: { capacityId: 'CapacityId', timestamp: 'Timepoint' },
+    unavailableQueries: ['timepoints'] as const,
+  }),
 ])
+
+export function requiredSchemaTables(
+  generation: SemanticModelSchemaGeneration,
+): Readonly<Record<string, readonly string[]>> {
+  return generation.requiredTables ?? {
+    [generation.metricsByItemOperationAndDayTable]: generation.requiredColumns.map((key) => generation.columns[key]),
+  }
+}
+
+export function matchesSemanticModelSchema(
+  generation: SemanticModelSchemaGeneration,
+  tables: ReadonlyMap<string, ReadonlySet<string>>,
+): boolean {
+  return Object.entries(requiredSchemaTables(generation)).every(([table, required]) =>
+    required.every((column) => tables.get(table)?.has(column)),
+  )
+}
 
 export const SEMANTIC_MODEL_SCHEMA_ASSUMPTIONS = Object.freeze({
   schemaProbe:
-    'INFO.COLUMNS() is available to the transport and returns table/column names for the Capacity Metrics model.',
+    'INFO.VIEW.COLUMNS() is available to the transport and the caller has permission to discover model metadata.',
   generations: SEMANTIC_MODEL_SCHEMA_GENERATIONS,
   parameters:
     'The transport binds @Start, @End and @CapacityId values, or rewrites them safely before sending DAX.',
@@ -190,6 +229,9 @@ export function buildSemanticModelQueries(
   generation: SemanticModelSchemaGeneration,
   availableColumns: ReadonlySet<string>,
 ): SemanticModelQueries {
+  if (generation.name === 'metricsDailyWithDimensions') {
+    return buildMetricsDailyQueries(SEMANTIC_MODEL_SCHEMA_PROBE_QUERY)
+  }
   const table = tableRef(generation.metricsByItemOperationAndDayTable)
 
   return {
@@ -203,7 +245,7 @@ export function buildSemanticModelQueries(
 
 export const SEMANTIC_MODEL_SCHEMA_PROBE_QUERY = `EVALUATE
 SELECTCOLUMNS(
-  INFO.COLUMNS(),
+  INFO.VIEW.COLUMNS(),
   "TableName", [Table],
   "ColumnName", [Name]
 )`
@@ -226,11 +268,12 @@ function capacitySummaryQuery(
   return withWindowFilter(table, columns, `EVALUATE
 SUMMARIZECOLUMNS(
 ${indent(groups.join(',\n'), 2)},
+  __Window,
   "__TotalCuSeconds", SUM(${columnRef(table, columns.cuSeconds)}),
   "__StorageBytes", ${optionalSum(table, columns.storageBytes, availableColumns)},
   "__ObservedAt", MAX(${columnRef(table, columns.observedAt)}),
-  "__MeanUtilizationPercent", AVERAGE(${columnRef(table, columns.interactiveBillablePercent)}),
-  "__PeakUtilizationPercent", MAX(${columnRef(table, columns.interactiveBillablePercent)}),
+  "__MeanUtilizationPercent", ${availableColumns.has(columns.interactiveBillablePercent) ? `AVERAGE(${columnRef(table, columns.interactiveBillablePercent)})` : 'BLANK()'},
+  "__PeakUtilizationPercent", ${optionalMax(table, columns.interactiveBillablePercent, availableColumns)},
   "__WorkspaceCount", DISTINCTCOUNT(${columnRef(table, columns.workspaceId)}),
   "__ItemCount", DISTINCTCOUNT(${columnRef(table, columns.itemId)}),
   "__InteractiveDelayPercent", ${optionalMax(table, columns.interactiveDelayPercent, availableColumns)},
@@ -260,6 +303,7 @@ function cityItemsQuery(
   return withCapacityAndWindowFilter(table, columns, `EVALUATE
 SUMMARIZECOLUMNS(
 ${indent(groups.join(',\n'), 2)},
+  __Window,
   "__CuSeconds", SUM(${columnRef(table, columns.cuSeconds)}),
   "__StorageBytes", ${optionalSum(table, columns.storageBytes, availableColumns)},
   "__DurationSeconds", ${optionalSum(table, columns.durationSeconds, availableColumns)},
@@ -293,6 +337,7 @@ function operationFamiliesQuery(
   return withCapacityAndWindowFilter(table, columns, `EVALUATE
 SUMMARIZECOLUMNS(
 ${indent(groups.join(',\n'), 2)},
+  __Window,
   "__CuSeconds", SUM(${columnRef(table, columns.cuSeconds)}),
   "__DurationSeconds", ${optionalSum(table, columns.durationSeconds, availableColumns)},
   "__OperationCount", ${optionalSum(table, columns.operationCount, availableColumns)},
@@ -322,6 +367,7 @@ function timepointsQuery(
   return withCapacityAndWindowFilter(table, columns, `EVALUATE
 SUMMARIZECOLUMNS(
 ${indent(groups.join(',\n'), 2)},
+  __Window,
   "__InteractiveBillablePercent", ${optionalMax(table, columns.interactiveBillablePercent, availableColumns)},
   "__BackgroundBillablePercent", ${optionalMax(table, columns.backgroundBillablePercent, availableColumns)},
   "__InteractiveNonBillablePercent", ${optionalMax(table, columns.interactiveNonBillablePercent, availableColumns)},
@@ -338,7 +384,7 @@ ORDER BY ${columnRef(table, columns.observedAt)}`)
 function withWindowFilter(table: string, columns: SemanticModelColumnMap, body: string): string {
   return `DEFINE
   VAR __Window = FILTER(${table}, ${columnRef(table, columns.observedAt)} >= @Start && ${columnRef(table, columns.observedAt)} < @End)
-${body.replaceAll(table, '__Window')}`
+${body}`
 }
 
 function withCapacityAndWindowFilter(table: string, columns: SemanticModelColumnMap, body: string): string {
@@ -349,7 +395,7 @@ function withCapacityAndWindowFilter(table: string, columns: SemanticModelColumn
     ${columnRef(table, columns.observedAt)} >= @Start &&
     ${columnRef(table, columns.observedAt)} < @End
   )
-${body.replaceAll(table, '__Window')}`
+${body}`
 }
 
 function optionalGroup(table: string, column: string, availableColumns: ReadonlySet<string>): string | null {

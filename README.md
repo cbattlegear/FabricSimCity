@@ -139,8 +139,19 @@ browser entirely, which is the only thing that clears all three walls at once.
 ### Getting real numbers into the deployed app
 
 A scheduled Fabric notebook runs the same DAX and writes the rows into the app's own SQL database,
-where the deployed app reads them through `client.data`. Nothing new interprets those rows: the
+where the configured ingest source reads them through `client.data`. Nothing new interprets those rows: the
 notebook stores them verbatim and the app replays them into the parser it already has.
+
+The app uses Rayfin's built-in typed GraphQL adapter (`client.data.IngestRun` and
+`client.data.IngestRow`), including cursor pagination. In Fabric, startup adopts the portal
+session through the SDK's `initEmbeddedAuth` before reading protected data. There is no custom
+login page, popup, token handling or handwritten GraphQL. Open the app through the Fabric portal;
+a standalone page without an existing session reports that requirement rather than using fixtures.
+
+Each atlas refresh creates a new ingest reader, pins one completed run, and publishes that reader
+with its atlas so the city uses the same run. Failed reads keep the last good data visible.
+Without a configured backend (or with `VITE_FABRIC_SOURCE=fixture`), development still uses fixtures
+without authentication. The dev-only `semantic-model` source continues using the Vite DAX proxy.
 
 ```powershell
 npx rayfin up                 # creates the IngestRun / IngestRow tables
@@ -154,12 +165,14 @@ Then, in the Fabric portal:
 2. Upload `fabric/dax-queries.generated.json` to that notebook's built-in resources.
 3. Fill in the parameters cell: the metrics dataset and workspace ids, and the SQL server and
    database from your app's **SQL Database** child item (Settings → Connection strings).
-4. Give the notebook's identity access to the metrics semantic model, and a SQL user on the app's
-   database with `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the two ingest tables.
+4. Give the notebook's identity **Read and Build** access to the metrics semantic model, plus
+   permission to discover model metadata for the schema probe. Separately, give it a SQL user on
+   the app's database with `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the two ingest tables.
 5. Schedule it, then point the app at it:
 
 ```
 VITE_FABRIC_SOURCE=ingested
+VITE_FABRIC_TENANT_ID=<same TENANT_ID as the notebook>
 VITE_FABRIC_METRICS_DATASET_ID=<same dataset id>
 VITE_FABRIC_INGEST_INTERVAL_MINUTES=60      # must match the schedule you set
 VITE_FABRIC_INGEST_WINDOW_DAYS=3            # must match INGEST_WINDOW_DAYS
@@ -174,9 +187,97 @@ live. Setting it lower than the real schedule makes the app lie about freshness.
 > app's users are entitled to see. The app is granted read only — the notebook writes over direct
 > SQL, not the data API, so nothing a user does in the app can forge telemetry.
 
-The notebook is written and unit-tested but **has not been run against a real tenant**. The DAX in
-the manifest is generated from the app's own query builder, so the two cannot drift, but neither has
-executed against a live Capacity Metrics model yet.
+The notebook **has not yet completed a successful ingest against a real tenant**. Live runs
+reached metadata discovery and exposed incorrect flattened-table assumptions in the original
+adapter. The `metricsDailyWithDimensions` adapter now targets the exported fact/dimension schema
+described below; its generated DAX still needs a live run. A schema match is not proof of
+live-model compatibility.
+
+#### Daily metrics with Items and Capacities dimensions
+
+This generation reads `Metrics By Item Operation And Day` using `Datetime` and `Operation name`,
+then resolves metadata from `Items` and `Capacities`. It aggregates CU-seconds, durations, operation
+counts and measured throttling; `Throttling (min)` is converted to the reader's seconds contract.
+Item lookups use capacity, workspace and item ids together, without multiplying fact rows by
+dimension rows. Ambiguous dimension labels remain unknown.
+
+These are **daily aggregates, not live utilization samples**. A rolling window excludes the
+partial first day and reports the next midnight as its start. Observation time is the latest
+daily bucket, not notebook execution time. Per-item OneLake storage, distinct users, operation
+classification and 30-second utilization/throttle gauges remain unavailable rather than inferred.
+Workspace storage and item memory are not substituted for item OneLake bytes, nor are daily
+totals divided into synthetic timepoints. Storage-bearing buildings can therefore remain wireframe
+even when CU totals are known. Autoscale-specific fact tables are not combined into these totals.
+
+**Updating an existing installation:** this generation uses manifest version **2**. Save your
+notebook parameter values, reimport the updated `fabric/ingest_capacity_metrics.ipynb`, restore
+those values, and replace its Built-in `dax-queries.generated.json` with the matching file from
+this revision. Restart the notebook session and run all cells. Updating only the manifest is not
+enough: the notebook must retain the dimension schema rows and skip unsupported queries.
+
+Rebuild/redeploy the matching reader with `npx rayfin up`, keeping ingest settings in the root
+`.env.production.local`. Rayfin generates the API and Fabric handoff settings in `.env.local`;
+do not put access tokens in either file. No SQL entity change is required. Run the notebook once
+before enabling its schedule, and confirm any schedule still points to the updated notebook with
+the intended parameters.
+
+#### ADOMD: no permission to call Discover
+
+This is semantic-model access, not SQL access. Verify that `METRICS_WORKSPACE_ID` and
+`METRICS_DATASET_ID` identify the metrics model, and check permissions for the identity named
+in the exception. Viewing the Capacity Metrics report does not imply
+[Build permission for XMLA queries](https://learn.microsoft.com/power-bi/connect-data/service-datasets-permissions).
+Scheduled notebooks run as the user who created or last updated the schedule.
+
+After running the notebook's parameters cell, run this separately from the ingest:
+
+```python
+evaluate_dax('EVALUATE ROW("AccessCheck", 1)')
+```
+
+If that fails too, check Read/Build permissions and XMLA access with the model owner. If it
+succeeds but the schema probe fails, ordinary querying works while metadata discovery is denied.
+[Microsoft documents model-admin permissions for INFO metadata queries](https://learn.microsoft.com/dax/info-functions-dax);
+use an identity authorized for that operation rather than granting tenant-wide admin or changing
+SQL permissions.
+
+The probe uses `INFO.VIEW.COLUMNS()` because it exposes `[Table]` and `[Name]`. The original
+manifest incorrectly selected those fields from `INFO.COLUMNS()`, which exposes `[TableID]` and
+`[ExplicitName]` instead. Replace the notebook's built-in `dax-queries.generated.json` with the
+regenerated file when updating. That corrects the query, **not** the caller's permissions.
+
+#### No known schema generation
+
+This means metadata discovery succeeded, but no supported generation has all its required
+fact and dimension columns.
+The table-name preview shows only the first ten alphabetically; it is not the complete schema.
+The error identifies each expected table as absent or lists its missing columns.
+
+The notebook also writes `builtin/capacity-metrics-schema.json` with **all** discovered table
+and column names. Download it from Resources > Built-in to diagnose the mapping. It contains
+no metric values or credentials. Matching still fails before any SQL write; a previous
+completed ingest remains intact.
+
+For an already-imported notebook without this diagnostic, run the following after the
+parameters cell, then download the same file:
+
+```python
+schema = probe_tables(
+    evaluate_dax(MANIFEST["generations"][0]["queries"]["schemaProbe"])
+)
+Path("builtin/capacity-metrics-schema.json").write_text(
+    json.dumps(
+        {table: sorted(columns) for table, columns in sorted(schema.items())},
+        indent=2,
+    ),
+    encoding="utf-8",
+)
+```
+
+The manifest cell already imports `json` and `Path`. Review the exported metadata before
+sharing it. Do not rename model tables, force a generation, or remove required-column
+checks: those would turn a visible incompatibility into incorrect telemetry. The adapter's
+queries must be corrected against the actual model schema instead.
 
 ## Where the numbers come from
 
@@ -188,7 +289,8 @@ CU telemetry does not exist on any REST endpoint. It comes from one of three sou
 
 - **Capacity Metrics semantic model**, over DAX. This is where the real per-item CU breakdown lives.
   Microsoft documents programmatic access to it as unsupported and its schema has already changed
-  once, so the implementation probes both generations. Reachable from `npm run dev` only.
+  once, so the implementation probes supported table/column shapes, including the exported
+  daily fact plus dimensions. Reachable from `npm run dev` only.
 - **The same model, ingested** — a scheduled notebook writes its rows into the app's SQL database
   and the app replays them through the identical parser. This is the only path the deployed app has.
 - **Eventhouse**, over KQL, reading `Microsoft.Fabric.Capacity.Summary` events on their documented
@@ -196,7 +298,7 @@ CU telemetry does not exist on any REST endpoint. It comes from one of three sou
   live infrastructure over static buildings — which the evidence model already knows how to draw.
 
 The semantic-model source and its DAX transport are written; see above for what it takes to reach a
-real model. The ingest path is written and unit-tested but unrun against a tenant. The Eventhouse
+real model. The ingest path has reached live schema discovery but not a successful ingest. The Eventhouse
 source is written but has no transport yet.
 
 Refresh is client-side polling: Rayfin has no cron, no timers and no background workers, so there

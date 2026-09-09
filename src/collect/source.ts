@@ -26,6 +26,9 @@ export type CapacitySourceKind = 'SemanticModel' | 'Eventhouse' | 'Fixture'
  * city then draws its buildings from topology alone and says so, instead of rendering every item
  * at zero CU — which is the same "unmeasured drawn as measured" failure the evidence model exists
  * to prevent.
+ *
+ * Semantic-model sources refine timepoint support during their initial schema probe. Read
+ * capabilities again after the initial atlas/city read, before starting capability-specific feeds.
  */
 export interface CapacitySourceCapabilities {
   /** Per-item CU and storage. False means buildings cannot be massed from telemetry. */

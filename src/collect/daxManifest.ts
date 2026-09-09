@@ -10,7 +10,9 @@
 import {
   SEMANTIC_MODEL_SCHEMA_GENERATIONS,
   buildSemanticModelQueries,
+  requiredSchemaTables,
   type SemanticModelQueries,
+  type SemanticModelQueryName,
   type SemanticModelSchemaGenerationName,
   // Explicit extension so `scripts/generate-dax-manifest.ts` runs under plain Node type stripping,
   // which does no extensionless resolution. `allowImportingTsExtensions` is on, and Vite resolves
@@ -26,13 +28,16 @@ export const DAX_MANIFEST_PATH = 'fabric/dax-queries.generated.json'
  * The notebook checks it, so an old notebook against a new manifest says what is wrong instead of
  * reading a field that has moved and silently ingesting nothing.
  */
-export const DAX_MANIFEST_VERSION = 1
+export const DAX_MANIFEST_VERSION = 2
 
 export interface DaxManifestGeneration {
   name: SemanticModelSchemaGenerationName
   table: string
   /** Column names whose presence selects this generation. */
   requiredColumns: readonly string[]
+  /** All physical tables referenced by this generation, retained in replayed schema rows. */
+  requiredTables: Readonly<Record<string, readonly string[]>>
+  unavailableQueries: readonly SemanticModelQueryName[]
   /**
    * The column holding a row's own timepoint.
    *
@@ -57,12 +62,14 @@ export function buildDaxManifest(): DaxManifest {
       name: generation.name,
       table: generation.metricsByItemOperationAndDayTable,
       requiredColumns: generation.requiredColumns.map((key) => generation.columns[key]),
-      timestampColumn: generation.columns.observedAt,
-      capacityIdColumn: generation.columns.capacityId,
+      requiredTables: requiredSchemaTables(generation),
+      unavailableQueries: generation.unavailableQueries ?? [],
+      timestampColumn: generation.outputColumns?.timestamp ?? generation.columns.observedAt,
+      capacityIdColumn: generation.outputColumns?.capacityId ?? generation.columns.capacityId,
       // Built against the generation's full column map. `buildSemanticModelQueries` drops optional
       // columns a tenant is missing, but precomputing every subset is combinatorial, so a model
-      // missing an optional column fails that one query and the notebook records which. The app
-      // then degrades the same way it already does for a query it could not run.
+      // missing an optional column fails that query and therefore the run. Multi-table generations
+      // explicitly require every column their generated queries reference.
       queries: buildSemanticModelQueries(generation, new Set(Object.values(generation.columns))),
     })),
   }
