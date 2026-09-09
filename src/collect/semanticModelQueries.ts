@@ -219,6 +219,8 @@ export const SEMANTIC_MODEL_SCHEMA_ASSUMPTIONS = Object.freeze({
 
 export interface SemanticModelQueries {
   schemaProbe: string
+  /** Imported routing metadata, executed before capacity-scoped DirectQuery summaries when present. */
+  capacityInventory?: string
   capacitySummary: string
   cityItems: string
   operationFamilies: string

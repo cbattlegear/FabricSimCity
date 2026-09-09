@@ -269,13 +269,37 @@ export function createSemanticModelSource(options: SemanticModelSourceOptions): 
     const now = clock()
     const window = queryWindow(now)
     const detected = await schema(signal)
-    const rows = await execute<CapacitySummaryRow>(
+    const inventory = await execute<CapacitySummaryRow>(
       detected,
       'capacitySummary',
-      detected.queries.capacitySummary,
+      detected.queries.capacityInventory ?? detected.queries.capacitySummary,
       { Start: window.start, End: window.end },
       signal,
     )
+    const rows: CapacitySummaryRow[] = []
+    if (detected.queries.capacityInventory) {
+      for (const entry of inventory) {
+        const capacityId = requiredString(rowValue(entry, 'CapacityId'), 'CapacityId')
+        const region = stringOrNull(rowValue(entry, 'Region'))
+        const parameters: Record<string, SemanticModelDaxParameter> = {
+          CapacityId: capacityId, Start: window.start, End: window.end,
+        }
+        // Older SQL snapshots need no routing. Live transports reject an unbound @RegionName.
+        if (region !== null) parameters.RegionName = region
+        const scoped = await execute<CapacitySummaryRow>(
+          detected, 'capacitySummary', detected.queries.capacitySummary,
+          parameters, signal,
+        )
+        if (scoped.length !== 1 || rowValue(scoped[0], 'CapacityId') !== capacityId) {
+          throw new CapacitySourceError(
+            'SemanticModel', 'Unsupported', `Capacity summary did not return exactly capacity ${capacityId}.`,
+          )
+        }
+        rows.push(scoped[0])
+      }
+    } else {
+      rows.push(...inventory)
+    }
 
     return rows
       .map((row) => parseCapacity(row, detected.generation, window))
@@ -321,18 +345,21 @@ export function createSemanticModelSource(options: SemanticModelSourceOptions): 
         start: capacity?.windowStart ?? queryWindow(now).start,
         end: capacity?.windowEnd ?? queryWindow(now).end,
       }
+      const context: Readonly<Record<string, SemanticModelDaxParameter>> = detected.queries.capacityInventory && capacity?.region
+        ? { RegionName: capacity.region }
+        : {}
       const rows = await execute<CityItemRow>(
         detected,
         'cityItems',
         detected.queries.cityItems,
-        { CapacityId: request.capacityId, Start: window.start, End: window.end },
+        { ...context, CapacityId: request.capacityId, Start: window.start, End: window.end },
         request.signal,
       )
       const familyRows = await execute<OperationFamilyRow>(
         detected,
         'operationFamilies',
         detected.queries.operationFamilies,
-        { CapacityId: request.capacityId, Start: window.start, End: window.end },
+        { ...context, CapacityId: request.capacityId, Start: window.start, End: window.end },
         request.signal,
       )
       const allItems = rows

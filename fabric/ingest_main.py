@@ -25,6 +25,7 @@ if "bind_dax_parameters" not in globals():  # pragma: no cover - notebook path
         bind_dax_parameters,
         capacity_ids,
         encode_row,
+        normalize_row,
         pick_generation,
         probe_rows_for_generation,
         probe_tables,
@@ -32,7 +33,7 @@ if "bind_dax_parameters" not in globals():  # pragma: no cover - notebook path
     )
 
 # Must equal DAX_MANIFEST_VERSION in `src/collect/daxManifest.ts`. Pinned by `ingestNotebook.test.ts`.
-DAX_MANIFEST_VERSION = 2
+DAX_MANIFEST_VERSION = 3
 
 # PARAMETERS -------------------------------------------------------------------------------------
 # Tag this cell "Parameters" in the Fabric notebook so a schedule or pipeline can override them.
@@ -248,18 +249,31 @@ def run_ingest(manifest: dict) -> str:
     queries = generation["queries"]
     window = {"Start": _iso(window_start), "End": _iso(window_end)}
 
-    summary_rows = evaluate_dax(bind_dax_parameters(queries["capacitySummary"], window))
-    ids = capacity_ids(summary_rows, generation["capacityIdColumn"])
+    inventory_query = queries.get("capacityInventory", queries["capacitySummary"])
+    inventory_rows = evaluate_dax(bind_dax_parameters(inventory_query, window))
+    ids = capacity_ids(inventory_rows, generation["capacityIdColumn"])
     if not ids:
         # A run with no capacities would be marked Complete and render as an empty atlas, which is
         # indistinguishable from a tenant that genuinely has none. Far more likely is that the
         # notebook identity cannot see the metrics model, so say so instead of publishing nothing.
         raise IngestError(
-            f"The capacity summary returned {len(summary_rows)} row(s) but no capacity ids in "
+            f"The capacity inventory returned {len(inventory_rows)} row(s) but no capacity ids in "
             f"column '{generation['capacityIdColumn']}'. Check that this notebook's identity can "
             "read the Capacity Metrics semantic model."
         )
-    print(f"{len(summary_rows)} capacity rows covering {len(ids)} capacities.")
+    print(f"{len(inventory_rows)} inventory rows covering {len(ids)} capacities.")
+    summary_rows = [] if "capacityInventory" in queries else inventory_rows
+    contexts = {}
+    if "capacityInventory" in queries:
+        for raw in inventory_rows:
+            row = normalize_row(raw)
+            capacity_id = row.get(generation["capacityIdColumn"])
+            region = row.get("Region")
+            if not isinstance(capacity_id, str) or not capacity_id or not isinstance(region, str) or not region:
+                raise IngestError("Capacity inventory must include a capacity id and its routing Region.")
+            if capacity_id in contexts and contexts[capacity_id] != region:
+                raise IngestError(f"Capacity {capacity_id} has ambiguous routing regions.")
+            contexts[capacity_id] = region
 
     pending: list[tuple] = []
 
@@ -280,10 +294,16 @@ def run_ingest(manifest: dict) -> str:
             )
 
     stage("schemaProbe", "", probe_rows_for_generation(probe, generation))
-    stage("capacitySummary", "", summary_rows)
 
     for capacity_id in ids:
         scoped = {"CapacityId": capacity_id, **window}
+        if "capacityInventory" in queries:
+            scoped["RegionName"] = contexts[capacity_id]
+            rows = evaluate_dax(bind_dax_parameters(queries["capacitySummary"], scoped))
+            if len(rows) != 1 or normalize_row(rows[0]).get(generation["capacityIdColumn"]) != capacity_id:
+                raise IngestError(f"Capacity summary did not return exactly capacity {capacity_id}.")
+            summary_rows.extend(rows)
+            print(f"  {capacity_id} capacitySummary: {len(rows)} row ({scoped['RegionName']})")
         for query_name in ("cityItems", "operationFamilies", "timepoints"):
             if query_name in generation.get("unavailableQueries", []):
                 print(f"  {capacity_id} {query_name}: unavailable in this schema; no samples inferred")
@@ -292,7 +312,9 @@ def run_ingest(manifest: dict) -> str:
             stage(query_name, capacity_id, rows)
             print(f"  {capacity_id} {query_name}: {len(rows)} rows")
 
+    stage("capacitySummary", "", summary_rows)
     connection = connect_sql()
+    run_table = None
     try:
         cursor = connection.cursor()
         run_table = resolve_table(
@@ -353,7 +375,8 @@ def run_ingest(manifest: dict) -> str:
 
         prune_old_runs(cursor, connection, run_table, row_table)
     except Exception as error:
-        _mark_failed(connection, run_id, error)
+        if run_table is not None:
+            _mark_failed(connection, run_table, run_id, error)
         raise
     finally:
         connection.close()
@@ -361,19 +384,12 @@ def run_ingest(manifest: dict) -> str:
     return run_id
 
 
-def _mark_failed(connection, run_id: str, error: Exception) -> None:
+def _mark_failed(connection, run_table: str, run_id: str, error: Exception) -> None:
     """Record why a run stopped, so the app can say so instead of only showing stale data."""
     try:
         cursor = connection.cursor()
         cursor.execute(
-            "SELECT TABLE_SCHEMA + '.' + TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
-            "WHERE TABLE_TYPE = 'BASE TABLE' AND LOWER(TABLE_NAME) = 'ingestrun'"
-        )
-        found = cursor.fetchone()
-        if not found:
-            return
-        cursor.execute(
-            f"UPDATE {found[0]} SET status = 'Failed', completedAt = ?, failureMessage = ? WHERE id = ?",
+            f"UPDATE {run_table} SET status = 'Failed', completedAt = ?, failureMessage = ? WHERE id = ?",
             _now(),
             str(error)[:1024],
             run_id,

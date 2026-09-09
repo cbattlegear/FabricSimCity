@@ -6,15 +6,43 @@ import {
   type SemanticModelQueryName,
 } from './semanticModelQueries'
 import {
-  createSemanticModelSource, type SemanticModelDaxClient, type SemanticModelRow,
+  createSemanticModelSource, type SemanticModelDaxClient, type SemanticModelDaxRequest, type SemanticModelRow,
 } from './semanticModelSource'
 import { createIngestedCapacitySource, type IngestStore } from './ingestedDax'
+import { bindDaxParameters } from './semanticModelDaxClient'
 
 const tables = new Map(Object.entries(exportedMetricsSchema).map(([name, columns]) => [name, new Set(columns)]))
 const generation = SEMANTIC_MODEL_SCHEMA_GENERATIONS.find((entry) => entry.name === 'metricsDailyWithDimensions')!
 const queries = buildSemanticModelQueries(generation, tables.get(generation.metricsByItemOperationAndDayTable)!)
 
 describe('the exported daily Capacity Metrics schema', () => {
+  it('binds the capacity list and region at the DirectQuery source, not just as row filters', () => {
+    for (const query of [queries.capacitySummary, queries.cityItems, queries.operationFamilies]) {
+      expect(query).toContain("MPARAMETER 'CapacitiesList' = { @CapacityId }")
+      expect(query).toContain("MPARAMETER 'RegionName' = @RegionName")
+      expect(query.match(/\bDEFINE\b/g)).toHaveLength(1)
+    }
+  })
+
+  it('discovers capacity routing from imported metadata without querying unbound facts', () => {
+    expect(queries.capacityInventory).toContain("'Capacities'[Region without default]")
+    expect(queries.capacityInventory).not.toContain("'Metrics By Item Operation And Day'")
+    expect(queries.capacityInventory).not.toContain('MPARAMETER')
+    expect(queries.capacityInventory).not.toContain('@')
+  })
+
+  it('does not interpret a DirectQuery empty-table SUM of zero as measured usage', () => {
+    expect(queries.capacitySummary).toContain("IF(COUNTROWS('Metrics By Item Operation And Day') > 0,")
+    expect(queries.capacitySummary).toContain("SUM('Metrics By Item Operation And Day'[CU (s)]), BLANK())")
+  })
+
+  it('returns explicit UTC observations rather than transport-dependent naive datetimes', () => {
+    for (const query of [queries.capacitySummary, queries.cityItems, queries.operationFamilies]) {
+      expect(query).toContain('IF(ISBLANK(__Timestamp), BLANK(),')
+      expect(query).toContain('FORMAT(__Timestamp, "hh:nn:ss", "en-US") & "Z"')
+    }
+  })
+
   it('matches the real fact plus dimensions rather than either assumed flat shape', () => {
     expect(SEMANTIC_MODEL_SCHEMA_GENERATIONS.filter((entry) => matchesSemanticModelSchema(entry, tables))
       .map((entry) => entry.name)).toEqual(['metricsDailyWithDimensions'])
@@ -106,7 +134,7 @@ const samples: Record<SemanticModelQueryName, SemanticModelRow[]> = {
     WindowEnd: '2026-09-09T15:00:00Z', StorageBytes: null, MeanUtilizationPercent: null,
     PeakUtilizationPercent: null,
   }, {
-    CapacityId: 'paused', CapacityName: 'Paused', Sku: 'F2', CapacityState: 'Suspended',
+    CapacityId: 'paused', CapacityName: 'Paused', Sku: 'F2', Region: 'eastus', CapacityState: 'Suspended',
     TotalCuSeconds: null, ObservedAt: null,
   }],
   cityItems: [{
@@ -124,11 +152,50 @@ const samples: Record<SemanticModelQueryName, SemanticModelRow[]> = {
 }
 
 describe('daily metrics through the existing parser and SQL replay', () => {
+  it('rejects absent routing metadata instead of sending an unbound query', async () => {
+    const client: SemanticModelDaxClient = {
+      async execute<T extends SemanticModelRow>(request: SemanticModelDaxRequest) {
+        bindDaxParameters(request.query, request.parameters)
+        if (request.queryName === 'schemaProbe') return samples.schemaProbe as T[]
+        expect(request.query).toBe(queries.capacityInventory)
+        const inventory: SemanticModelRow[] = [{ CapacityId: 'cap' }]
+        return inventory as T[]
+      },
+    }
+    const source = createSemanticModelSource({ client, tenant: { tenantId: 'tenant', displayName: 'Tenant' } })
+    await expect(source.readAtlas()).rejects.toThrow('@RegionName')
+  })
+
+  it('rejects a summary for the wrong capacity rather than relabeling its measurements', async () => {
+    const client: SemanticModelDaxClient = {
+      async execute<T extends SemanticModelRow>(request: SemanticModelDaxRequest) {
+        if (request.queryName === 'schemaProbe') return samples.schemaProbe as T[]
+        const rows: SemanticModelRow[] = request.query === queries.capacityInventory
+          ? [{ CapacityId: 'cap', Region: 'West US' }]
+          : [{ CapacityId: 'another-capacity', Region: 'West US', TotalCuSeconds: 100 }]
+        return rows as T[]
+      },
+    }
+    const source = createSemanticModelSource({ client, tenant: { tenantId: 'tenant', displayName: 'Tenant' } })
+    await expect(source.readAtlas()).rejects.toThrow('did not return exactly capacity cap')
+  })
+
   function sources() {
     const calls: SemanticModelQueryName[] = []
     const client: SemanticModelDaxClient = {
-      async execute<T extends SemanticModelRow>(request: { queryName: SemanticModelQueryName }) {
+      async execute<T extends SemanticModelRow>(request: SemanticModelDaxRequest) {
         calls.push(request.queryName)
+        if (request.query === queries.capacityInventory) {
+          return samples.capacitySummary.map<SemanticModelRow>(({ CapacityId, CapacityName, Sku, Region, CapacityState }) =>
+            ({ CapacityId, CapacityName, Sku, Region, CapacityState })) as T[]
+        }
+        if (request.queryName === 'capacitySummary') {
+          expect(request.parameters.RegionName).toBe(request.parameters.CapacityId === 'cap' ? 'westus' : 'eastus')
+          return samples.capacitySummary.filter((row) => row.CapacityId === request.parameters.CapacityId) as T[]
+        }
+        if (request.queryName === 'cityItems' || request.queryName === 'operationFamilies') {
+          expect(request.parameters.RegionName).toBe('westus')
+        }
         return samples[request.queryName] as T[]
       },
     }

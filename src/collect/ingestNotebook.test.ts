@@ -192,6 +192,39 @@ resolve_table(Catalog({("dbo", "Users"): ["id"]}), "IngestRun", ["id"])
     expect(result.stderr).toContain('dbo.Users')
   })
 
+  it('marks failures using the already-resolved plural table', () => {
+    const result = python(`
+exec(${JSON.stringify(mainSource)})
+class Connection:
+    def cursor(self): return self
+    def execute(self, sql, *args):
+        assert sql.startswith("UPDATE [app].[IngestRuns] SET status = 'Failed'"), sql
+        assert args[1:] == ("write failed", "run-id"), args
+    def commit(self): print("failure recorded")
+_mark_failed(Connection(), "[app].[IngestRuns]", "run-id", ValueError("write failed"))
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(result.stdout).toBe('failure recorded')
+  })
+
+  it('refuses missing routing metadata before any fact query or SQL write', () => {
+    const result = python(`
+exec(${JSON.stringify(mainSource)})
+manifest = json.loads(${JSON.stringify(JSON.stringify(buildDaxManifest()))})
+probe = json.loads(${JSON.stringify(JSON.stringify(exportedMetricsProbe))})
+generation = pick_generation(manifest, probe)
+METRICS_DATASET_ID = SQL_SERVER = SQL_DATABASE = TENANT_ID = "test"
+def evaluate_dax(query):
+    if query == generation["queries"]["schemaProbe"]: return probe
+    assert query == generation["queries"]["capacityInventory"], "An unbound fact query was executed"
+    return [{"[CapacityId]": "cap-a", "[Region]": None}]
+def connect_sql(): raise AssertionError("SQL must not be opened")
+run_ingest(manifest)
+`)
+    expect(result.ok).toBe(false)
+    expect(result.stderr).toContain('routing Region')
+  })
+
   it('substitutes whole parameter names only', () => {
     // The trap: a plain replace of `@Start` also rewrites the front of `@StartOfDay`, and what it
     // leaves behind is still valid DAX. The query runs, and the answer is quietly for the wrong
@@ -401,17 +434,24 @@ def evaluate_dax(query):
     if query == generation["queries"]["schemaProbe"]:
         calls.append("schemaProbe")
         return probe
+    if query == generation["queries"]["capacityInventory"]:
+        calls.append("capacityInventory")
+        return [{"[CapacityId]": "cap-a", "[Region]": "West US"},
+                {"[CapacityId]": "cap-b", "[Region]": "West US 2"}]
+    assert "MPARAMETER 'CapacitiesList'" in query, query
+    assert "MPARAMETER 'RegionName'" in query, query
+    assert "@" not in query, query
+    capacity = "cap-a" if '"cap-a"' in query else "cap-b"
+    assert ('"West US"' if capacity == "cap-a" else '"West US 2"') in query, query
     if '"TotalCuSeconds"' in query:
         calls.append("capacitySummary")
-        return [{"[CapacityId]": "cap-a", "[ObservedAt]": NaT},
-                {"[CapacityId]": "cap-b", "[ObservedAt]": _dt.datetime(2026, 9, 9)}]
+        return [{"[CapacityId]": capacity, "[ObservedAt]": NaT if capacity == "cap-a" else _dt.datetime(2026, 9, 9)}]
     if '"OperationName"' in query:
         calls.append("operationFamilies")
     elif '"ItemKind"' in query:
         calls.append("cityItems")
     else:
         raise AssertionError("Unsupported query must not be executed")
-    assert "@" not in query, query
     assert '"cap-a"' in query or '"cap-b"' in query, query
     return [{"[ItemId]": "item", "[CuSeconds]": 5}]
 
@@ -454,7 +494,8 @@ print(json.dumps({"calls": calls, "complete": connection.complete, "closed": con
 `)
     expect(result.ok, result.stderr).toBe(true)
     expect(JSON.parse(result.stdout.split('\n').at(-1)!)).toEqual({
-      calls: ['schemaProbe', 'capacitySummary', 'cityItems', 'operationFamilies', 'cityItems', 'operationFamilies'],
+      calls: ['schemaProbe', 'capacityInventory', 'capacitySummary', 'cityItems', 'operationFamilies',
+        'capacitySummary', 'cityItems', 'operationFamilies'],
       complete: true, closed: true, tables: ['Capacities', 'Items', 'Metrics By Item Operation And Day'],
       scopes: ['cap-a', 'cap-b'], replayed: 'metricsDailyWithDimensions',
       observations: [null, '2026-09-09T00:00:00Z'],

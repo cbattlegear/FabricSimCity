@@ -8,18 +8,30 @@ export const METRICS_DAILY_REQUIRED_TABLES: Readonly<Record<string, readonly str
     'Duration (s)', 'Operations', 'Successful operations', 'Rejected operations',
     'Failed operations', 'Invalid operations', 'Cancelled operations', 'Throttling (min)',
   ],
-  Capacities: ['Capacity Id', 'Capacity name', 'SKU', 'Region', 'State'],
+  Capacities: ['Capacity Id', 'Capacity name', 'SKU', 'Region without default', 'State'],
   Items: ['Capacity Id', 'Workspace Id', 'Item Id', 'Item name', 'Item kind', 'Workspace name'],
 })
 
 const FACT = `'${METRICS_DAILY_TABLE}'`
 const fact = (column: string) => `${FACT}[${column}]`
 
-function windowDefinition(scoped: boolean): string {
+const CAPACITY_GROUP = `SUMMARIZE('Capacities', 'Capacities'[Capacity Id], 'Capacities'[Capacity name],
+    'Capacities'[SKU], 'Capacities'[Region without default], 'Capacities'[State])`
+const CAPACITY_FIELDS = `"CapacityId", 'Capacities'[Capacity Id],
+  "CapacityName", 'Capacities'[Capacity name],
+  "Sku", 'Capacities'[SKU],
+  "Region", 'Capacities'[Region without default],
+  "CapacityState", 'Capacities'[State]`
+
+function windowDefinition(): string {
+  // DirectQuery needs source routing as well as DAX filters; an unbound source returns no facts.
   return `DEFINE
+  MPARAMETER 'CapacitiesList' = { @CapacityId }
+  MPARAMETER 'RegionName' = @RegionName
   VAR __Window = FILTER(
     ${FACT},
-    ${scoped ? `${fact('Capacity Id')} = @CapacityId &&\n    ` : ''}${fact('Datetime')} >= @Start &&
+    ${fact('Capacity Id')} = @CapacityId &&
+    ${fact('Datetime')} >= @Start &&
     ${fact('Datetime')} < @End
   )`
 }
@@ -27,7 +39,14 @@ function windowDefinition(scoped: boolean): string {
 function capacityMetric(expression: string): string {
   // Explicitly filter the fact key: the metadata export does not describe relationships.
   return `VAR __Capacity = 'Capacities'[Capacity Id]
-    RETURN CALCULATE(${expression}, __Window, ${fact('Capacity Id')} = __Capacity)`
+    RETURN CALCULATE(IF(COUNTROWS(${FACT}) > 0, ${expression}, BLANK()),
+      __Window, ${fact('Capacity Id')} = __Capacity)`
+}
+
+function utcTimestamp(expression: string): string {
+  return `VAR __Timestamp = ${expression}
+    RETURN IF(ISBLANK(__Timestamp), BLANK(),
+      FORMAT(__Timestamp, "yyyy-mm-dd", "en-US") & "T" & FORMAT(__Timestamp, "hh:nn:ss", "en-US") & "Z")`
 }
 
 function itemLookup(column: string): string {
@@ -60,7 +79,8 @@ function itemsQuery(operations: boolean): string {
   }
   const fields = [
     ...Object.entries(keys).map(([alias, column]) => `"${alias}", ${fact(column)}`),
-    ...Object.keys(TOTALS).map((alias) => `"${alias}", [__${alias}]`),
+    ...Object.keys(TOTALS).map((alias) =>
+      `"${alias}", ${alias === 'ObservedAt' ? utcTimestamp('[__ObservedAt]') : `[__${alias}]`}`),
     '"DistinctUsers", BLANK()',
     ...(operations
       ? ['"OperationClass", BLANK()', '"BillingType", BLANK()']
@@ -72,7 +92,7 @@ function itemsQuery(operations: boolean): string {
           '"PerformanceDeltaPercent", BLANK()',
         ]),
   ]
-  return `${windowDefinition(true)}
+  return `${windowDefinition()}
   VAR __Totals = SUMMARIZECOLUMNS(
     ${Object.values(keys).map(fact).join(',\n    ')},
     __Window,
@@ -89,18 +109,19 @@ ORDER BY [WorkspaceId], [ItemId]${operations ? ', [OperationName]' : ''}`
 export function buildMetricsDailyQueries(schemaProbe: string): SemanticModelQueries {
   return {
     schemaProbe,
-    capacitySummary: `${windowDefinition(false)}
+    capacityInventory: `EVALUATE
+SELECTCOLUMNS(
+  ${CAPACITY_GROUP},
+  ${CAPACITY_FIELDS}
+)
+ORDER BY [CapacityId]`,
+    capacitySummary: `${windowDefinition()}
 EVALUATE
 SELECTCOLUMNS(
-  SUMMARIZE('Capacities', 'Capacities'[Capacity Id], 'Capacities'[Capacity name],
-    'Capacities'[SKU], 'Capacities'[Region], 'Capacities'[State]),
-  "CapacityId", 'Capacities'[Capacity Id],
-  "CapacityName", 'Capacities'[Capacity name],
-  "Sku", 'Capacities'[SKU],
-  "Region", 'Capacities'[Region],
-  "CapacityState", 'Capacities'[State],
+  FILTER(${CAPACITY_GROUP}, 'Capacities'[Capacity Id] = @CapacityId),
+  ${CAPACITY_FIELDS},
   "TotalCuSeconds", ${capacityMetric(`SUM(${fact('CU (s)')})`)},
-  "ObservedAt", ${capacityMetric(`MAX(${fact('Datetime')})`)},
+  "ObservedAt", ${capacityMetric(utcTimestamp(`MAX(${fact('Datetime')})`))},
   "WorkspaceCount", ${capacityMetric(`DISTINCTCOUNT(${fact('Workspace Id')})`)},
   "ItemCount", ${capacityMetric(`DISTINCTCOUNT(${fact('Item Id')})`)},
   "WindowStart", FORMAT(CEILING(@Start, 1), "yyyy-mm-dd", "en-US") & "T00:00:00Z",

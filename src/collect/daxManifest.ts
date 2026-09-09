@@ -28,7 +28,7 @@ export const DAX_MANIFEST_PATH = 'fabric/dax-queries.generated.json'
  * The notebook checks it, so an old notebook against a new manifest says what is wrong instead of
  * reading a field that has moved and silently ingesting nothing.
  */
-export const DAX_MANIFEST_VERSION = 2
+export const DAX_MANIFEST_VERSION = 3
 
 export interface DaxManifestGeneration {
   name: SemanticModelSchemaGenerationName

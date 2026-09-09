@@ -527,7 +527,7 @@ not replace it with a fake returning the expected name: that stub hid the deploy
 The first live export contained `Metrics By Item Operation And Day`, but its date is `Datetime`,
 its operation is `Operation name`, and labels live in `Items` and `Capacities`. The original
 flattened-column assumptions rejected it. `metricsDailyWithDimensions` requires all three tables,
-and manifest v2 carries those requirements to Python. Keep every required table's probe rows in
+and the manifest carries those requirements to Python. Keep every required table's probe rows in
 the ingest: keeping just the fact makes a successful notebook run unreadable by the app.
 
 The UI uses `client.data.IngestRun`/`IngestRow` through the configured source, after adopting the
@@ -548,10 +548,34 @@ window strings also matter: `CEILING` returns a serial number, which the reader 
 a timestamp. `metricsDailyQueries.test.ts` and executed notebook tests pin these seams; local
 schema/reference checks are not DAX execution against a tenant.
 
+### DirectQuery row filters are not source parameters
+
+Live access exposed the second half of that schema: capacities and items are imported, but facts
+are DirectQuery. Without `MPARAMETER 'CapacitiesList' = { @CapacityId }` and
+`MPARAMETER 'RegionName' = @RegionName`, an unfiltered count returns zero. A `TREATAS` capacity
+filter does not substitute for those source parameters. `Region` can be the display label `Default`;
+only `Region without default` is a routing value. Do not infer a home region.
+
+Manifest v3 adds an imported `capacityInventory` query. Both the notebook and live TypeScript source
+discover routing first, then execute summaries/items/operations per capacity. The notebook still
+stores the concatenated, verbatim summaries under tenant-wide `capacitySummary`, keeping existing
+SQL readers compatible. Replay serves scoped summaries by filtering that one pinned snapshot,
+caches it once per client, and clears a rejected promise for retries. Do not add the requested
+region or clock-derived window to that replay key.
+
+Even `SUM` can return zero for an empty DirectQuery fact table. The summary checks for actual rows
+before claiming measured CU. Observation aliases are explicit UTC strings: executeQueries otherwise
+returns zone-less datetimes that `Date.parse` interprets in the browser's local timezone.
+
+All six capacities were queried read-only through the actual notebook orchestration on 2026-09-09:
+679 item rows and 2,458 operation-family rows, with SQL writes captured in memory and every row
+passed through the real replay/parser. This proves model queries and staging, not a completed
+write to a real SQL database.
+
 ## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,222 tests / 75 files
+npx vitest run        # 1,232 tests / 75 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```

@@ -151,6 +151,7 @@ export interface IngestedDaxClientOptions {
  */
 export function createIngestedDaxClient(options: IngestedDaxClientOptions): SemanticModelDaxClient {
   let runPromise: Promise<IngestRunRecord> | null = null
+  let summariesPromise: Promise<readonly SemanticModelRow[]> | null = null
 
   async function resolveRun(signal?: AbortSignal): Promise<IngestRunRecord> {
     if (!runPromise) {
@@ -180,6 +181,24 @@ export function createIngestedDaxClient(options: IngestedDaxClientOptions): Sema
     ): Promise<readonly T[]> {
       request.signal?.throwIfAborted()
       const run = await resolveRun(request.signal)
+      if (request.queryName === 'capacitySummary') {
+        // The notebook concatenates scoped DAX summaries verbatim into one tenant-wide snapshot.
+        // Reuse it for inventory and scoped reads, including runs written by older notebooks.
+        if (!summariesPromise) {
+          summariesPromise = options.store.readRows({
+            runId: run.id, queryName: 'capacitySummary', capacityId: TENANT_WIDE_CAPACITY_ID,
+            signal: request.signal,
+          }).then((records) => records.map(parseIngestedRow)).catch((error) => {
+            summariesPromise = null
+            throw error
+          })
+        }
+        const rows = await summariesPromise
+        request.signal?.throwIfAborted()
+        const capacityId = request.parameters.CapacityId
+        return rows.filter((row) => typeof capacityId !== 'string' ||
+          (row.CapacityId ?? row['Capacity Id']) === capacityId) as readonly T[]
+      }
       const records = await options.store.readRows({
         runId: run.id,
         queryName: request.queryName,
