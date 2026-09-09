@@ -163,7 +163,10 @@ describe('daily metrics through the existing parser and SQL replay', () => {
       },
     }
     const source = createSemanticModelSource({ client, tenant: { tenantId: 'tenant', displayName: 'Tenant' } })
-    await expect(source.readAtlas()).rejects.toThrow('@RegionName')
+    await expect(source.readAtlas()).rejects.toMatchObject({
+      failure: 'Unknown',
+      message: 'DAX query references @RegionName but no such parameter was supplied.',
+    })
   })
 
   it('rejects a summary for the wrong capacity rather than relabeling its measurements', async () => {
