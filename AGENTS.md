@@ -194,6 +194,13 @@ more than one column.
 
 ## The city scene renders on demand, and the shadow map is not automatic
 
+The viewport owns a renderer for the lifetime of its canvas, not for the identity of its callbacks.
+`CapacityCityView` supplies fresh closures on refresh and sidebar interaction. Putting those in the
+scene-creation effect's dependencies destroys the populated scene, while unchanged data effects
+do not rerun to populate its replacement. Delegate through current callback refs instead of either
+recreating the renderer or capturing stale handlers. `CapacityCityViewport.test.tsx` exercises this
+lifecycle; `tools/measure-browser/measure-refresh.js` measures real refreshes at both breakpoints.
+
 This applies to `src/pending-port/CapacityCityScene.ts`, which is quarantined but not rewritten.
 The rules below survive the port and are the reason the file was kept rather than deleted.
 
@@ -582,7 +589,7 @@ write to a real SQL database.
 ## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,232 tests / 75 files
+npx vitest run        # 1,235 tests / 76 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```
