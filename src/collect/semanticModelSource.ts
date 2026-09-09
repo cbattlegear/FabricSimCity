@@ -29,6 +29,7 @@ import type {
 } from '../capacityCityContracts'
 import {
   buildSemanticModelQueries,
+  matchesSemanticModelSchema,
   SEMANTIC_MODEL_SCHEMA_GENERATIONS,
   SEMANTIC_MODEL_SCHEMA_PROBE_QUERY,
   type SemanticModelQueries,
@@ -201,6 +202,7 @@ interface ParsedCityItem {
 export function createSemanticModelSource(options: SemanticModelSourceOptions): CapacitySource {
   const clock = options.now ?? (() => new Date())
   let schemaPromise: Promise<DetectedSemanticModelSchema> | null = null
+  let detectedCapabilities = SEMANTIC_MODEL_CAPABILITIES
 
   async function execute<T extends SemanticModelRow>(
     schema: DetectedSemanticModelSchema | null,
@@ -241,7 +243,11 @@ export function createSemanticModelSource(options: SemanticModelSourceOptions): 
     for (const generation of SEMANTIC_MODEL_SCHEMA_GENERATIONS) {
       const columns = tables.get(generation.metricsByItemOperationAndDayTable)
       if (!columns) continue
-      if (generation.requiredColumns.every((key) => columns.has(generation.columns[key]))) {
+      if (matchesSemanticModelSchema(generation, tables)) {
+        detectedCapabilities = Object.freeze({
+          ...SEMANTIC_MODEL_CAPABILITIES,
+          timepoints: !generation.unavailableQueries?.includes('timepoints'),
+        })
         return { generation, columns, queries: buildSemanticModelQueries(generation, columns) }
       }
     }
@@ -249,7 +255,7 @@ export function createSemanticModelSource(options: SemanticModelSourceOptions): 
     throw new CapacitySourceError(
       'SemanticModel',
       'Unsupported',
-      'Capacity Metrics semantic model schema did not match either supported generation.',
+      'Capacity Metrics semantic model schema did not match a supported generation.',
     )
   }
 
@@ -280,7 +286,7 @@ export function createSemanticModelSource(options: SemanticModelSourceOptions): 
 
   return {
     kind: 'SemanticModel',
-    capabilities: SEMANTIC_MODEL_CAPABILITIES,
+    get capabilities() { return detectedCapabilities },
 
     async readAtlas(signal?: AbortSignal): Promise<AtlasSnapshot> {
       const started = Date.now()
@@ -372,7 +378,9 @@ export function createSemanticModelSource(options: SemanticModelSourceOptions): 
     },
 
     async readTimepoints(request: TimepointRequest): Promise<CapacityTimepoint[]> {
+      request.signal?.throwIfAborted()
       const detected = await schema(request.signal)
+      if (detected.generation.unavailableQueries?.includes('timepoints')) return []
       const rows = await execute<SemanticModelRow>(
         detected,
         'timepoints',

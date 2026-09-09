@@ -11,8 +11,10 @@ interpretation: it stores rows exactly as the model returned them. See `src/coll
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import struct
 import uuid
+from pathlib import Path
 
 # In the notebook these come from the logic cell above, which has already run; outside it they come
 # from the file that cell is generated from. Written this way so both the notebook and the tests
@@ -24,12 +26,13 @@ if "bind_dax_parameters" not in globals():  # pragma: no cover - notebook path
         capacity_ids,
         encode_row,
         pick_generation,
-        probe_rows_for_table,
+        probe_rows_for_generation,
+        probe_tables,
         row_timestamp,
     )
 
 # Must equal DAX_MANIFEST_VERSION in `src/collect/daxManifest.ts`. Pinned by `ingestNotebook.test.ts`.
-DAX_MANIFEST_VERSION = 1
+DAX_MANIFEST_VERSION = 2
 
 # PARAMETERS -------------------------------------------------------------------------------------
 # Tag this cell "Parameters" in the Fabric notebook so a schedule or pipeline can override them.
@@ -216,7 +219,20 @@ def run_ingest(manifest: dict) -> str:
 
     print(f"Probing the semantic model ({METRICS_DATASET_ID}) ...")
     probe = evaluate_dax(manifest["generations"][0]["queries"]["schemaProbe"])
-    generation = pick_generation(manifest, probe)
+    try:
+        generation = pick_generation(manifest, probe)
+    except IngestError as error:
+        # Export names only, not raw probe fields or telemetry, and still stop before any SQL write.
+        tables = probe_tables(probe)
+        report = {table: sorted(columns) for table, columns in sorted(tables.items())}
+        report_path = Path("builtin/capacity-metrics-schema.json")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        raise IngestError(
+            f"{error} Full table/column schema saved to {report_path}. "
+            "Download capacity-metrics-schema.json from notebook Resources > Built-in "
+            "to update the adapter; do not rename model tables or skip the schema check."
+        ) from error
     print(f"Matched schema generation {generation['name']}.")
 
     queries = generation["queries"]
@@ -253,12 +269,15 @@ def run_ingest(manifest: dict) -> str:
                 )
             )
 
-    stage("schemaProbe", "", probe_rows_for_table(probe, generation["table"]))
+    stage("schemaProbe", "", probe_rows_for_generation(probe, generation))
     stage("capacitySummary", "", summary_rows)
 
     for capacity_id in ids:
         scoped = {"CapacityId": capacity_id, **window}
         for query_name in ("cityItems", "operationFamilies", "timepoints"):
+            if query_name in generation.get("unavailableQueries", []):
+                print(f"  {capacity_id} {query_name}: unavailable in this schema; no samples inferred")
+                continue
             rows = evaluate_dax(bind_dax_parameters(queries[query_name], scoped))
             stage(query_name, capacity_id, rows)
             print(f"  {capacity_id} {query_name}: {len(rows)} rows")

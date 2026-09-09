@@ -5,7 +5,7 @@ import { createSemanticModelDaxClient } from '../collect/semanticModelDaxClient'
 import { createIngestedCapacitySource, DEFAULT_INGEST_INTERVAL_MINUTES, DEFAULT_INGEST_WINDOW_DAYS } from '../collect/ingestedDax'
 import { createRayfinIngestStore } from '../collect/rayfinIngestStore'
 import { CapacitySourceError, type CapacitySource } from '../collect/source'
-import { isFixtureMode } from './bootstrap'
+import { bootstrapAuth, isFixtureMode } from './bootstrap'
 import { getRayfinClient } from './rayfinClient'
 
 function tenantIdentity(): { tenantId: string; displayName: string } {
@@ -97,4 +97,41 @@ export function createConfiguredCapacitySource(): CapacitySource {
     default:
       return createTopologySource()
   }
+}
+
+let authService: ReturnType<typeof bootstrapAuth> | null = null
+let sessionReady: Promise<void> | null = null
+let stableSource: CapacitySource | null = null
+
+/**
+ * Adopt Fabric's session before querying client.data, without a login page or popup.
+ * Each ingest refresh gets its own source so SQL replay can pin the newest completed run.
+ */
+export async function loadConfiguredCapacitySource(): Promise<CapacitySource> {
+  const configured = import.meta.env.VITE_FABRIC_SOURCE
+  if (isFixtureMode() || configured === 'semantic-model' || configured === 'eventhouse') {
+    return stableSource ??= createConfiguredCapacitySource()
+  }
+
+  if (!sessionReady) {
+    authService ??= bootstrapAuth()
+    const auth = authService
+    sessionReady = auth.initEmbeddedAuth()
+      .then(async (embedded) => {
+        if (!(embedded ?? await auth.getCurrentUser())) {
+          throw new CapacitySourceError(
+            'SemanticModel',
+            'Unauthenticated',
+            'Open this app inside the Fabric portal to use its built-in session, then reload.',
+          )
+        }
+      })
+      .catch((error) => {
+        sessionReady = null
+        throw error
+      })
+  }
+  await sessionReady
+  if (configured === 'ingested') return createConfiguredCapacitySource()
+  return stableSource ??= createConfiguredCapacitySource()
 }

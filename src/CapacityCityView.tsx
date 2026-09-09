@@ -135,11 +135,9 @@ export function CapacityCityView({
     setSelectedRoadId(null)
     setOpenIncidentId(null)
     setChosenRegion(null)
-    setFeed(emptyTimepointFeed(source.capabilities))
-  }, [capacityId, source])
+  }, [capacityId])
 
-  // Read the city page (and refresh it on the source's declared cadence). The whole app runs on
-  // fixtures here, but the seam is the real CapacitySource so a live source drops straight in.
+  // Refresh source data without closing the selection when a new ingest replaces the old one.
   useEffect(() => {
     let cancelled = false
     const load = async () => {

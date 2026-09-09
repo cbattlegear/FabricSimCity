@@ -13,7 +13,8 @@ import {
   splitPascal,
 } from './capacityAtlas'
 import { ChunkErrorBoundary } from './ChunkErrorBoundary'
-import { createFixtureSource } from './collect/fixtureSource'
+import type { CapacitySource } from './collect/source'
+import { loadConfiguredCapacitySource } from './services/capacitySource'
 import {
   FloatingCard,
   KioskToggle,
@@ -55,11 +56,10 @@ function writeCityParam(capacityId: string | null): void {
  */
 const REFRESH_INTERVAL_MS = 30_000
 
-/** The one source the app reads. Swapped for the semantic-model or Eventhouse source once live. */
-const source = createFixtureSource()
-
 export default function App() {
-  const [snapshot, setSnapshot] = useState<AtlasSnapshot | null>(null)
+  const [loaded, setLoaded] = useState<{ source: CapacitySource; snapshot: AtlasSnapshot } | null>(null)
+  const source = loaded?.source ?? null
+  const snapshot = loaded?.snapshot ?? null
   const [error, setError] = useState<string | null>(null)
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -68,28 +68,39 @@ export default function App() {
   const [cityId, setCityId] = useState<string | null>(() => readCityParam())
   const { kiosk, toggleKiosk } = useKioskMode()
 
-  const load = useCallback(async (initial: boolean) => {
-    try {
-      const next = await source.readAtlas()
-      setSnapshot(next)
-      setRefreshError(null)
-      setError(null)
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause)
-      /*
-       * A failed *refresh* keeps the city on screen and dims it; a failed *first* load has nothing
-       * to keep. Collapsing the two would blank a working city on one transient error.
-       */
-      if (initial) setError(message)
-      else setRefreshError(message)
+  useEffect(() => {
+    const controller = new AbortController()
+    let loading = false
+    let hasSnapshot = false
+    async function load() {
+      if (loading) return
+      loading = true
+      try {
+        const nextSource = await loadConfiguredCapacitySource()
+        controller.signal.throwIfAborted()
+        const next = await nextSource.readAtlas(controller.signal)
+        if (controller.signal.aborted) return
+        // Publish the source and its snapshot together; the city must use the same pinned ingest.
+        setLoaded({ source: nextSource, snapshot: next })
+        hasSnapshot = true
+        setRefreshError(null)
+        setError(null)
+      } catch (cause) {
+        if (controller.signal.aborted) return
+        const message = cause instanceof Error ? cause.message : String(cause)
+        if (hasSnapshot) setRefreshError(message)
+        else setError(message)
+      } finally {
+        loading = false
+      }
+    }
+    void load()
+    const handle = window.setInterval(() => void load(), REFRESH_INTERVAL_MS)
+    return () => {
+      controller.abort()
+      window.clearInterval(handle)
     }
   }, [])
-
-  useEffect(() => {
-    void load(true)
-    const handle = window.setInterval(() => void load(false), REFRESH_INTERVAL_MS)
-    return () => window.clearInterval(handle)
-  }, [load])
 
   const openCity = useCallback((capacityId: string) => {
     setCityId(capacityId)
@@ -105,7 +116,7 @@ export default function App() {
     ? snapshot?.capacities.find((capacity) => capacity.capacityId === cityId) ?? null
     : null
 
-  if (cityId && cityCapacity) {
+  if (cityId && cityCapacity && source) {
     return (
       <ChunkErrorBoundary label="city">
         <Suspense fallback={<ShellFallback label="Loading city…" />}>
@@ -125,6 +136,7 @@ export default function App() {
 
   return (
     <AtlasLevel
+      source={source}
       snapshot={snapshot}
       error={error}
       refreshError={refreshError}
@@ -142,6 +154,7 @@ export default function App() {
 }
 
 function AtlasLevel({
+  source,
   snapshot,
   error,
   refreshError,
@@ -155,6 +168,7 @@ function AtlasLevel({
   onHover,
   onOpenCity,
 }: {
+  source: CapacitySource | null
   snapshot: AtlasSnapshot | null
   error: string | null
   refreshError: string | null
@@ -315,7 +329,7 @@ function AtlasLevel({
           <div className="sidebar-drawer-body">
             <dl className="detail-grid">
               <dt>Source</dt>
-              <dd>{splitPascal(source.kind)}</dd>
+              <dd>{source ? splitPascal(source.kind) : 'Not connected'}</dd>
               <dt>State</dt>
               <dd>
                 <SourceStatePill state={sourceState.state} degraded={sourceState.degraded} title={sourceStateTitle} />
@@ -329,12 +343,12 @@ function AtlasLevel({
               <dt>Per-item CU</dt>
               <dd>
                 <SourceCapability
-                  enabled={source.capabilities.perItemBreakdown}
+                  enabled={source?.capabilities.perItemBreakdown ?? false}
                   title="Per-item CU breakdown"
                 />
               </dd>
               <dt>Retention</dt>
-              <dd>{source.capabilities.retentionDays} days</dd>
+              <dd>{source ? `${source.capabilities.retentionDays} days` : 'Unknown'}</dd>
             </dl>
           </div>
         </details>

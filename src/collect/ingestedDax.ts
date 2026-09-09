@@ -246,7 +246,12 @@ export function createIngestedCapacitySource(options: IngestedCapacitySourceOpti
   return {
     ...inner,
     kind: inner.kind,
-    capabilities: ingestedCapabilities(intervalMinutes, windowDays),
+    get capabilities() {
+      return {
+        ...ingestedCapabilities(intervalMinutes, windowDays),
+        timepoints: inner.capabilities.timepoints,
+      }
+    },
     readAtlas: (signal) => inner.readAtlas(signal),
     readCitySummaries: (signal) => inner.readCitySummaries(signal),
     readCityPage: (request) => inner.readCityPage(request),

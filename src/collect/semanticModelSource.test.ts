@@ -146,7 +146,10 @@ describe('semantic model DAX source capabilities and query assumptions', () => {
       new Set(Object.values(currentGeneration.columns)),
     )
 
-    expect(queries.schemaProbe).toContain('INFO.COLUMNS()')
+    // INFO.COLUMNS exposes TableID/ExplicitName, not the friendly fields selected here.
+    expect(queries.schemaProbe).toContain('INFO.VIEW.COLUMNS()')
+    expect(queries.schemaProbe).toContain('"TableName", [Table]')
+    expect(queries.schemaProbe).toContain('"ColumnName", [Name]')
     expect(queries.cityItems).toContain('MetricsByItemandOperationandDay')
     expect(queries.cityItems).toContain('CuSeconds')
     expect(queries.operationFamilies).toContain('OperationName')

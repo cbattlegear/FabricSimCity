@@ -121,7 +121,7 @@ def probe_tables(rows: Iterable[Mapping[str, Any]]) -> dict[str, set[str]]:
     """Turn schema-probe rows into a table name -> column names map.
 
     Mirrors `schemaTables` in `semanticModelSource.ts`, including its fallback from the
-    `TableName`/`ColumnName` aliases to the bare `Table`/`Name` columns of `INFO.COLUMNS()`.
+    `TableName`/`ColumnName` aliases to the bare `Table`/`Name` columns of `INFO.VIEW.COLUMNS()`.
     """
     tables: dict[str, set[str]] = {}
     for raw in rows:
@@ -145,26 +145,38 @@ def pick_generation(
     reads as a model with every value missing rather than as an error.
     """
     tables = probe_tables(probe_rows)
+    mismatches: list[str] = []
     for generation in manifest["generations"]:
-        columns = tables.get(generation["table"])
-        if columns is None:
-            continue
-        if all(required in columns for required in generation["requiredColumns"]):
+        required_tables = generation.get(
+            "requiredTables", {generation["table"]: generation["requiredColumns"]}
+        )
+        missing_tables: list[str] = []
+        for table, required in required_tables.items():
+            columns = tables.get(table)
+            if columns is None:
+                missing_tables.append(f"{table}: table absent")
+            else:
+                missing = sorted(set(required) - columns)
+                if missing:
+                    missing_tables.append(f"{table}: missing columns {', '.join(missing)}")
+        if not missing_tables:
             return generation
+        mismatches.append(f"{generation['name']} ({'; '.join(missing_tables)})")
 
     seen = ", ".join(sorted(tables)[:10]) or "no tables at all"
+    preview = " (first 10)" if len(tables) > 10 else ""
     raise IngestError(
         "Capacity Metrics semantic model matched no known schema generation. "
-        f"The probe returned {seen}."
+        f"Expected schemas: {'; '.join(mismatches)}. "
+        f"The probe returned {len(tables)} tables{preview}: {seen}."
     )
 
 
 def probe_rows_for_table(rows: Iterable[Mapping[str, Any]], table: str) -> list[dict[str, Any]]:
     """Keep only the probe rows describing the table the app will look up.
 
-    `INFO.COLUMNS()` describes the entire model, which is thousands of rows the app never reads —
-    its `schemaTables` map is only ever indexed by the chosen generation's table. Storing the rest
-    would multiply the size of every ingest for nothing.
+    `INFO.VIEW.COLUMNS()` describes the entire model. The generation helper calls this for each
+    required fact or dimension table so unrelated tables do not multiply the size of every ingest.
     """
     kept: list[dict[str, Any]] = []
     for raw in rows:
@@ -173,6 +185,14 @@ def probe_rows_for_table(rows: Iterable[Mapping[str, Any]], table: str) -> list[
         if name == table:
             kept.append(row)
     return kept
+
+
+def probe_rows_for_generation(
+    rows: Sequence[Mapping[str, Any]], generation: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Keep dimensions as well as the fact table so the reader can detect the same schema."""
+    tables = generation.get("requiredTables", {generation["table"]: generation["requiredColumns"]})
+    return [row for table in tables for row in probe_rows_for_table(rows, table)]
 
 
 def capacity_ids(rows: Iterable[Mapping[str, Any]], capacity_id_column: str) -> list[str]:

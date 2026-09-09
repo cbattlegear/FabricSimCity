@@ -276,8 +276,8 @@ failing.
 
 **Fixture mode is the primary development loop, not a fallback.** Rayfin has no local backend and
 no `rayfin dev`; `npm run dev` runs Vite against a *deployed* backend. Without fixtures the city is
-undevelopable without a Fabric tenant. `App.tsx` constructs the source at module scope — that one
-line is the swap point.
+undevelopable without a Fabric tenant. `App.tsx` loads the configured source through
+`loadConfiguredCapacitySource()`; fixtures and the dev DAX proxy bypass Rayfin session startup.
 
 ### The semantic model is reachable from `npm run dev` and not from the deployed app
 
@@ -468,6 +468,9 @@ Four things about the replay that fail silently if changed:
 - **The run is resolved once per client and held.** A notebook finishing mid-render would otherwise
   serve `cityItems` from one run and `operationFamilies` from the next — a torn city with no error.
   The held promise is also cleared on rejection, so one transient failure does not brick the page.
+  Each atlas refresh creates a fresh ingest source and publishes it together with its snapshot.
+  Holding one source for the tab's lifetime would otherwise pin the first run forever. City
+  selections reset on capacity changes, not on refreshed source identity.
 - **The window is not part of the replay key.** `queryWindow(now)` derives `Start`/`End` from the
   clock on every call, so exact-parameter matching would never hit. The key is `queryName` plus
   `CapacityId`, and only `timepoints` is filtered by time — via `rowTimestamp`, which the notebook
@@ -508,10 +511,36 @@ the executed tests still fail when you revert the fix.
 That test skips when no Python is on `PATH` — but it **throws** when `CI` is set, because a skip
 there would quietly remove the only check that the Python half works at all.
 
+### A recognized fact table is not a recognized schema
+
+The first live export contained `Metrics By Item Operation And Day`, but its date is `Datetime`,
+its operation is `Operation name`, and labels live in `Items` and `Capacities`. The original
+flattened-column assumptions rejected it. `metricsDailyWithDimensions` requires all three tables,
+and manifest v2 carries those requirements to Python. Keep every required table's probe rows in
+the ingest: keeping just the fact makes a successful notebook run unreadable by the app.
+
+The UI uses `client.data.IngestRun`/`IngestRow` through the configured source, after adopting the
+portal session with Rayfin's built-in `initEmbeddedAuth`. Share that initialization across
+StrictMode mounts and refreshes; never open a popup at startup, build a separate login route,
+or fall back to synthetic data when authentication fails. The SDK handles API authentication.
+Validate config before constructing the client singleton so a failed startup can be retried.
+
+The notebook skips `unavailableQueries`; the source refines its timepoint capability after the
+initial schema probe and replay forwards it. Daily totals cannot stand in for 30-second samples.
+`Throttling (min)` is multiplied by 60 in DAX because the reader takes seconds. Dimension lookups
+use capacity/workspace/item keys without joining metadata into fact totals. Workspace storage,
+item memory and summed daily users are not evidence for per-item bytes or distinct users.
+
+Keep DAX model references physical: `SUM(__Window[Column])` is invalid even when `__Window` is
+a valid table variable. Pass the variable as a `SUMMARIZECOLUMNS` filter instead. Explicit ISO
+window strings also matter: `CEILING` returns a serial number, which the reader cannot parse as
+a timestamp. `metricsDailyQueries.test.ts` and executed notebook tests pin these seams; local
+schema/reference checks are not DAX execution against a tenant.
+
 ## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,181 tests / 72 files
+npx vitest run        # 1,212 tests / 75 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```
