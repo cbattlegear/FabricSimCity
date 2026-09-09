@@ -128,17 +128,21 @@ def _newest_odbc_driver(pyodbc) -> str:
 def resolve_table(cursor, entity_name: str, required_columns: list[str]) -> str:
     """Find the table Rayfin generated for an entity, and check it has the columns expected.
 
-    The name is not assumed. `rayfin up` owns this schema, so if it ever pluralizes or reschemas an
-    entity, the failure should name the tables it did find rather than surface as a generic invalid
-    object name from the middle of a batch insert.
+    Rayfin pluralizes these entity names. Keep singular tables compatible, but never choose the
+    first match when multiple schemas or naming generations coexist.
     """
+    names = {
+        "IngestRun": ("IngestRun", "IngestRuns"),
+        "IngestRow": ("IngestRow", "IngestRows"),
+    }.get(entity_name, (entity_name,))
+    placeholders = ", ".join("LOWER(?)" for _ in names)
     cursor.execute(
-        """
+        f"""
         SELECT TABLE_SCHEMA, TABLE_NAME
         FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE' AND LOWER(TABLE_NAME) = LOWER(?)
+        WHERE TABLE_TYPE = 'BASE TABLE' AND LOWER(TABLE_NAME) IN ({placeholders})
         """,
-        entity_name,
+        *names,
     )
     matches = cursor.fetchall()
     if not matches:
@@ -152,8 +156,14 @@ def resolve_table(cursor, entity_name: str, required_columns: list[str]) -> str:
             f"The database currently has: {found}."
         )
 
+    if len(matches) != 1:
+        found = ", ".join(f"{schema}.{table}" for schema, table in matches)
+        raise RuntimeError(
+            f"Multiple tables match entity {entity_name}: {found}. "
+            "Resolve the ambiguity before ingesting; no table was selected."
+        )
     schema_name, table_name = matches[0]
-    qualified = f"[{schema_name}].[{table_name}]"
+    qualified = ".".join("[" + name.replace("]", "]]") + "]" for name in (schema_name, table_name))
 
     cursor.execute(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "

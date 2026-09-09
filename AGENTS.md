@@ -517,6 +517,11 @@ and SQL timestamp extraction. Missing timestamps stay null; known timestamps bec
 SQL drops timezone information. The executed regressions use real pandas when available and the
 same datetime-subclass contract on plain-Python CI, without requiring Fabric libraries.
 
+Rayfin's physical tables are `IngestRuns` and `IngestRows`, not the singular entity names. The
+notebook resolver accepts both forms, checks columns, and rejects ambiguous schemas/names rather
+than taking the first result. Its orchestration test must exercise that resolver against a catalog,
+not replace it with a fake returning the expected name: that stub hid the deployed-name failure.
+
 ### A recognized fact table is not a recognized schema
 
 The first live export contained `Metrics By Item Operation And Day`, but its date is `Datetime`,
@@ -546,7 +551,7 @@ schema/reference checks are not DAX execution against a tenant.
 ## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,214 tests / 75 files
+npx vitest run        # 1,222 tests / 75 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```

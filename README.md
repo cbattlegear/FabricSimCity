@@ -190,7 +190,10 @@ live. Setting it lower than the real schedule makes the app lie about freshness.
 The notebook **has not yet completed a successful ingest against a real tenant**. A live run
 matched `metricsDailyWithDimensions` and read six capacity summary rows, then exposed a missing
 timestamp serialization error, corrected below. This confirms schema detection and the summary
-query, not a completed run of every query or a successful SQL write.
+query, not measured usage: the summary also returns capacity metadata when there are no matching
+fact rows. A later run reached SQL with empty per-capacity results and exposed the plural table-name
+lookup error below. The empty fact results still need live-model diagnosis; they are not proof of
+idle capacities or a completed SQL ingest.
 
 #### Daily metrics with Items and Capacities dimensions
 
@@ -219,6 +222,32 @@ Rebuild/redeploy the matching reader with `npx rayfin up`, keeping ingest settin
 do not put access tokens in either file. No SQL entity change is required. Run the notebook once
 before enabling its schedule, and confirm any schedule still points to the updated notebook with
 the intended parameters.
+
+#### No table for entity IngestRun, despite dbo.IngestRuns existing
+
+Rayfin creates `IngestRuns` and `IngestRows`. Earlier notebooks looked only for the singular entity
+names, so this error was a notebook bug, not a missing deployment. Update the notebook; do not
+rename those tables or redeploy the app to fix this error. The resolver now accepts either naming
+form, validates the required columns, and refuses to choose arbitrarily if multiple tables match.
+
+#### Diagnosing empty queries directly
+
+An operator can authorize read-only diagnostics from a local machine with Azure CLI:
+
+```powershell
+az login --scope https://analysis.windows.net/powerbi/api/.default --allow-no-subscriptions
+```
+
+Use the same account and tenant that can read the Capacity Metrics semantic model. The
+[Execute Queries API](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/execute-queries)
+requires model **Read + Build** permissions and the tenant's **Dataset Execute Queries REST API**
+setting. Keep tokens in the local credential cache/process memory, never in chat or committed files.
+This is an operator diagnostic path, not a replacement for the app's built-in Fabric sign-in.
+
+Compare the fact table's visible row count and earliest/latest `Datetime` against the notebook's
+requested UTC window, then compare capacity keys before changing any filters. Six capacity metadata
+rows do not establish that six capacities have usage in the fact query. Do not substitute older data
+or widen the window silently to make a city appear populated.
 
 #### NaTType does not support astimezone
 

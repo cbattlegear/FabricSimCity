@@ -34,6 +34,24 @@ except ModuleNotFoundError as error:
     NaT = MissingDatetime(2000, 1, 1)
 `
 
+const sqlCatalog = `
+exec(${JSON.stringify(mainSource)})
+class Catalog:
+    def __init__(self, tables):
+        self.tables = tables
+        self.results = []
+    def execute(self, sql, *args):
+        if "INFORMATION_SCHEMA.TABLES" in sql:
+            self.results = ([(schema, table) for schema, table in self.tables
+                             if table.lower() in {str(arg).lower() for arg in args}] if args else
+                            [(schema + "." + table,) for schema, table in self.tables])
+        elif "INFORMATION_SCHEMA.COLUMNS" in sql:
+            self.results = [(name,) for name in self.tables[tuple(args)]]
+        else:
+            raise AssertionError(sql)
+    def fetchall(self): return self.results
+`
+
 interface NotebookCell {
   cell_type: string
   source: string[]
@@ -121,6 +139,59 @@ if (!hasPython && process.env.CI) {
 }
 
 describe.skipIf(!hasPython)('the notebook logic, executed', () => {
+  it.each(['IngestRun', 'IngestRow'])('resolves the deployed plural table for %s', (entity) => {
+    const result = python(`${sqlCatalog}
+print(resolve_table(Catalog({("dbo", "${entity}s"): ["ID", "tenantId"]}), "${entity}", ["id", "tenantId"]))
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(result.stdout).toBe(`[dbo].[${entity}s]`)
+  })
+
+  it('retains singular-name support without assuming the dbo schema', () => {
+    const result = python(`${sqlCatalog}
+print(resolve_table(Catalog({("app", "IngestRun"): ["id"]}), "IngestRun", ["id"]))
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(result.stdout).toBe('[app].[IngestRun]')
+  })
+
+  it.each([
+    [['dbo', 'IngestRun'], ['dbo', 'IngestRuns']],
+    [['dbo', 'IngestRun'], ['archive', 'IngestRun']],
+  ])('refuses ambiguous ingest tables rather than writing to the first match: %j', (...tables) => {
+    const result = python(`${sqlCatalog}
+tables = json.loads(${JSON.stringify(JSON.stringify(tables))})
+resolve_table(Catalog({tuple(table): ["id"] for table in tables}), "IngestRun", ["id"])
+`)
+    expect(result.ok).toBe(false)
+    expect(result.stderr).toContain('Multiple tables match entity IngestRun')
+  })
+
+  it('still validates required columns on a plural table', () => {
+    const result = python(`${sqlCatalog}
+resolve_table(Catalog({("dbo", "IngestRows"): ["id"]}), "IngestRow", ["id", "rowJson"])
+`)
+    expect(result.ok).toBe(false)
+    expect(result.stderr).toContain('[dbo].[IngestRows] is missing rowJson')
+  })
+
+  it('quotes schema identifiers discovered in the SQL catalog', () => {
+    const result = python(`${sqlCatalog}
+print(resolve_table(Catalog({("app]data", "IngestRun"): ["id"]}), "IngestRun", ["id"]))
+`)
+    expect(result.ok, result.stderr).toBe(true)
+    expect(result.stdout).toBe('[app]]data].[IngestRun]')
+  })
+
+  it('lists the actual catalog when no ingest table exists', () => {
+    const result = python(`${sqlCatalog}
+resolve_table(Catalog({("dbo", "Users"): ["id"]}), "IngestRun", ["id"])
+`)
+    expect(result.ok).toBe(false)
+    expect(result.stderr).toContain('No table for entity IngestRun')
+    expect(result.stderr).toContain('dbo.Users')
+  })
+
   it('substitutes whole parameter names only', () => {
     // The trap: a plain replace of `@Start` also rewrites the front of `@StartOfDay`, and what it
     // leaves behind is still valid DAX. The query runs, and the answer is quietly for the wrong
@@ -317,7 +388,7 @@ pick_generation(manifest, rows)
 
   it('stages multi-table schema rows, fans out canonical capacity ids and skips unsupported samples', () => {
     const result = python(`${missingTimestamp}
-exec(${JSON.stringify(mainSource)})
+${sqlCatalog}
 manifest = json.loads(${JSON.stringify(JSON.stringify(buildDaxManifest()))})
 probe = json.loads(${JSON.stringify(JSON.stringify(exportedMetricsProbe))})
 generation = pick_generation(manifest, probe)
@@ -344,23 +415,34 @@ def evaluate_dax(query):
     assert '"cap-a"' in query or '"cap-b"' in query, query
     return [{"[ItemId]": "item", "[CuSeconds]": 5}]
 
-class FakeSql:
+class FakeSql(Catalog):
     def __init__(self):
+        super().__init__({
+            ("dbo", "IngestRuns"): ["id", "tenantId", "datasetId", "schemaGeneration", "status",
+                                   "startedAt", "completedAt", "windowStart", "windowEnd",
+                                   "rowCount", "failureMessage"],
+            ("dbo", "IngestRows"): ["id", "runId", "tenantId", "queryName", "capacityId",
+                                   "rowIndex", "rowTimestamp", "rowJson"],
+        })
         self.rows = []
         self.complete = False
         self.closed = False
     def cursor(self): return self
     def execute(self, sql, *args):
+        if "INFORMATION_SCHEMA." in sql:
+            return super().execute(sql, *args)
+        self.results = []
+        assert "[dbo].[IngestRuns]" in sql or "[dbo].[IngestRows]" in sql, sql
         if "status = 'Complete'" in sql:
             assert args[1] == len(self.rows)
             self.complete = True
-    def executemany(self, sql, rows): self.rows.extend(rows)
+    def executemany(self, sql, rows):
+        assert sql.startswith("INSERT INTO [dbo].[IngestRows]"), sql
+        self.rows.extend(rows)
     def commit(self): pass
-    def fetchall(self): return []
     def close(self): self.closed = True
 connection = FakeSql()
 def connect_sql(): return connection
-def resolve_table(cursor, name, columns): return f"[dbo].[{name}]"
 run_ingest(manifest)
 schema = [json.loads(row[7]) for row in connection.rows if row[3] == "schemaProbe"]
 scoped = [row for row in connection.rows if row[3] in ("cityItems", "operationFamilies")]
