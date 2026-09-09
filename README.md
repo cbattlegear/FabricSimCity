@@ -187,11 +187,11 @@ live. Setting it lower than the real schedule makes the app lie about freshness.
 > app's users are entitled to see. The app is granted read only — the notebook writes over direct
 > SQL, not the data API, so nothing a user does in the app can forge telemetry.
 
-The notebook **has not yet completed a successful ingest against a real tenant**. Live runs
-reached metadata discovery and exposed incorrect flattened-table assumptions in the original
-adapter. The `metricsDailyWithDimensions` adapter now targets the exported fact/dimension schema
-described below; its generated DAX still needs a live run. A schema match is not proof of
-live-model compatibility.
+Live read-only execution of the notebook's queries on 2026-09-09 retrieved **679 items and 2,458
+operation families**, with measured consumption in two of six capacities. The complete orchestration
+staged 3,192 records using an in-memory SQL substitute, and all items and operation families passed
+through the app's actual replay/parser. **Persistence to the tenant's SQL database
+has not yet been verified**; that diagnostic did not write to or modify the model or database.
 
 #### Daily metrics with Items and Capacities dimensions
 
@@ -201,25 +201,75 @@ counts and measured throttling; `Throttling (min)` is converted to the reader's 
 Item lookups use capacity, workspace and item ids together, without multiplying fact rows by
 dimension rows. Ambiguous dimension labels remain unknown.
 
+The facts are **DirectQuery**, unlike the imported capacity/item metadata. Every fact query must
+declare `MPARAMETER 'CapacitiesList' = { @CapacityId }` and
+`MPARAMETER 'RegionName' = @RegionName`; ordinary DAX row filters do not activate the source.
+The notebook first discovers capacities from imported metadata, then queries each capacity in its
+own region. Routing uses `Capacities[Region without default]`, never the display label `Default`.
+This follows the capacity-list convention in
+[Microsoft's FUAM extraction](https://github.com/microsoft/fabric-toolbox/blob/10c63977677fb8b22d359bbdfb98f9bb82f7550b/monitoring/fabric-unified-admin-monitoring/src/03_Transfer_CapacityMetricData_ItemOperation_Unit.Notebook/notebook-content.ipynb).
+The model can return a `SUM` of zero for an empty fact table, so summaries also require actual fact
+rows before treating consumption as measured.
+
 These are **daily aggregates, not live utilization samples**. A rolling window excludes the
 partial first day and reports the next midnight as its start. Observation time is the latest
-daily bucket, not notebook execution time. Per-item OneLake storage, distinct users, operation
+daily bucket, not notebook execution time, and is emitted as explicit UTC text. Per-item OneLake
+storage, distinct users, operation
 classification and 30-second utilization/throttle gauges remain unavailable rather than inferred.
 Workspace storage and item memory are not substituted for item OneLake bytes, nor are daily
 totals divided into synthetic timepoints. Storage-bearing buildings can therefore remain wireframe
 even when CU totals are known. Autoscale-specific fact tables are not combined into these totals.
 
-**Updating an existing installation:** this generation uses manifest version **2**. Save your
+**Updating an existing installation:** this generation uses manifest version **3**. Save your
 notebook parameter values, reimport the updated `fabric/ingest_capacity_metrics.ipynb`, restore
 those values, and replace its Built-in `dax-queries.generated.json` with the matching file from
 this revision. Restart the notebook session and run all cells. Updating only the manifest is not
-enough: the notebook must retain the dimension schema rows and skip unsupported queries.
+enough: the notebook must discover routing, bind source parameters, retain the dimension schema
+rows and skip unsupported queries. A v2 notebook/manifest pair does not bind the DirectQuery source.
 
-Rebuild/redeploy the matching reader with `npx rayfin up`, keeping ingest settings in the root
+The stored SQL row format remains compatible with the previous ingested reader, so this notebook
+update needs no app redeployment or SQL migration. Deploy app updates with `npx rayfin up`, keeping
+ingest settings in the root
 `.env.production.local`. Rayfin generates the API and Fabric handoff settings in `.env.local`;
 do not put access tokens in either file. No SQL entity change is required. Run the notebook once
 before enabling its schedule, and confirm any schedule still points to the updated notebook with
 the intended parameters.
+
+#### No table for entity IngestRun, despite dbo.IngestRuns existing
+
+Rayfin creates `IngestRuns` and `IngestRows`. Earlier notebooks looked only for the singular entity
+names, so this error was a notebook bug, not a missing deployment. Update the notebook; do not
+rename those tables or redeploy the app to fix this error. The resolver now accepts either naming
+form, validates the required columns, and refuses to choose arbitrarily if multiple tables match.
+
+#### Diagnosing empty queries directly
+
+An operator can authorize read-only diagnostics from a local machine with Azure CLI:
+
+```powershell
+az login --scope https://analysis.windows.net/powerbi/api/.default --allow-no-subscriptions
+```
+
+Use the same account and tenant that can read the Capacity Metrics semantic model. The
+[Execute Queries API](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/execute-queries)
+requires model **Read + Build** permissions and the tenant's **Dataset Execute Queries REST API**
+setting. Keep tokens in the local credential cache/process memory, never in chat or committed files.
+This is an operator diagnostic path, not a replacement for the app's built-in Fabric sign-in.
+
+First supply the capacity-list and routing-region M parameters above. Then compare visible fact
+counts and earliest/latest `Datetime` against the requested UTC window. An unbound DirectQuery
+count of zero, or a populated imported capacity roster, does not establish actual usage. Do not
+substitute older data or widen the window silently to make a city appear populated.
+
+#### NaTType does not support astimezone
+
+Pandas represents a missing datetime cell as `NaT`. It is a Python datetime subclass, but
+timezone conversion is invalid. The ingest now preserves it as JSON `null` and SQL `NULL`;
+it never substitutes the current time or zero. Known timestamps are normalized to UTC.
+
+Update the complete notebook and matching v3 manifest as described above, preserve your parameters,
+and rerun the cells. The null-handling correction alone lives in `fabric/simcity_ingest.py`, but
+replacing only that cell does not update the DirectQuery routing or SQL table lookup.
 
 #### ADOMD: no permission to call Discover
 

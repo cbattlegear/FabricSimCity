@@ -208,11 +208,19 @@ def capacity_ids(rows: Iterable[Mapping[str, Any]], capacity_id_column: str) -> 
     return seen
 
 
+def _utc_datetime(value: _dt.datetime) -> _dt.datetime | None:
+    # pandas.NaT is a datetime subclass that compares unequal to itself, not a usable timestamp.
+    if value != value:
+        return None
+    aware = value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
+    return aware.astimezone(_dt.timezone.utc)
+
+
 def row_timestamp(row: Mapping[str, Any], timestamp_column: str) -> _dt.datetime | None:
     """Lift a row's own timepoint out, so the reader can window it in SQL."""
     value = normalize_row(row).get(timestamp_column)
     if isinstance(value, _dt.datetime):
-        return value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
+        return _utc_datetime(value)
     if isinstance(value, str):
         return parse_iso(value)
     return None
@@ -229,8 +237,8 @@ def json_safe(value: Any) -> Any:
     if isinstance(value, float):
         return None if value != value else value
     if isinstance(value, _dt.datetime):
-        aware = value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
-        return aware.astimezone(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        timestamp = _utc_datetime(value)
+        return timestamp.isoformat().replace("+00:00", "Z") if timestamp is not None else None
     if isinstance(value, _dt.date):
         return value.isoformat()
     return str(value)

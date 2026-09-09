@@ -63,6 +63,13 @@ Two lines in the report are easy to misread:
 - `measure-disasters.js` — screenshot-based component measurements for fires, water jets, puddles, and wrecks during the tour.
 - `measure-city-column.js` — fixture city column reachability, shadow-pass, and evidence readout smoke measurement.
 - `measure-atlas-column.js` — atlas sidebar reachability and trusted click check against `npm run dev`.
+- `measure-refresh.js` — renderer lifetime across a real 30-second refresh on both breakpoints.
+  Counts WebGL context requests before/after a trusted drawer click and refresh, and records the
+  compass after a keyboard camera turn. Exits nonzero if either action restarts the renderer,
+  the refresh resets the heading, or the canvas is unavailable or has no usable size.
+  Run with `--url http://localhost:5173 --headless --label before --json <report-path>`.
+  Set `VITE_FABRIC_SOURCE=fixture` in the dev-server process if local deployment settings select
+  the tenant backend. The probe observes the real timers without accelerating or replacing reads.
 
 ## Headed by default, and why that matters
 

@@ -194,6 +194,13 @@ more than one column.
 
 ## The city scene renders on demand, and the shadow map is not automatic
 
+The viewport owns a renderer for the lifetime of its canvas, not for the identity of its callbacks.
+`CapacityCityView` supplies fresh closures on refresh and sidebar interaction. Putting those in the
+scene-creation effect's dependencies destroys the populated scene, while unchanged data effects
+do not rerun to populate its replacement. Delegate through current callback refs instead of either
+recreating the renderer or capturing stale handlers. `CapacityCityViewport.test.tsx` exercises this
+lifecycle; `tools/measure-browser/measure-refresh.js` measures real refreshes at both breakpoints.
+
 This applies to `src/pending-port/CapacityCityScene.ts`, which is quarantined but not rewritten.
 The rules below survive the port and are the reason the file was kept rather than deleted.
 
@@ -511,12 +518,30 @@ the executed tests still fail when you revert the fix.
 That test skips when no Python is on `PATH` — but it **throws** when `CI` is set, because a skip
 there would quietly remove the only check that the Python half works at all.
 
+`pandas.NaT` passes `isinstance(value, datetime)` but cannot be timezone-converted. `_utc_datetime`
+checks its non-reflexive equality before conversion and shares that rule between JSON encoding
+and SQL timestamp extraction. Missing timestamps stay null; known timestamps become UTC before
+SQL drops timezone information. The executed regressions use real pandas when available and the
+same datetime-subclass contract on plain-Python CI, without requiring Fabric libraries.
+
+Rayfin's physical tables are `IngestRuns` and `IngestRows`, not the singular entity names. The
+notebook resolver accepts both forms, checks columns, and rejects ambiguous schemas/names rather
+than taking the first result. Its orchestration test must exercise that resolver against a catalog,
+not replace it with a fake returning the expected name: that stub hid the deployed-name failure.
+
+Bracket every column identifier in the notebook's hand-written SQL, including updates and cleanup.
+`rowCount` collides with SQL Server's reserved `ROWCOUNT` keyword; quoting the table does not quote
+its columns. A recording fake cannot detect SQL syntax errors. The executed tests inspect emitted
+identifiers and exercise retention deletes, and the SQL was also checked on a local SQL Server with
+`SET PARSEONLY ON` (ODBC `?` markers replaced by a declared variable). Parsing does not execute the
+statements or establish that tenant SQL persistence works.
+
 ### A recognized fact table is not a recognized schema
 
 The first live export contained `Metrics By Item Operation And Day`, but its date is `Datetime`,
 its operation is `Operation name`, and labels live in `Items` and `Capacities`. The original
 flattened-column assumptions rejected it. `metricsDailyWithDimensions` requires all three tables,
-and manifest v2 carries those requirements to Python. Keep every required table's probe rows in
+and the manifest carries those requirements to Python. Keep every required table's probe rows in
 the ingest: keeping just the fact makes a successful notebook run unreadable by the app.
 
 The UI uses `client.data.IngestRun`/`IngestRow` through the configured source, after adopting the
@@ -537,10 +562,34 @@ window strings also matter: `CEILING` returns a serial number, which the reader 
 a timestamp. `metricsDailyQueries.test.ts` and executed notebook tests pin these seams; local
 schema/reference checks are not DAX execution against a tenant.
 
+### DirectQuery row filters are not source parameters
+
+Live access exposed the second half of that schema: capacities and items are imported, but facts
+are DirectQuery. Without `MPARAMETER 'CapacitiesList' = { @CapacityId }` and
+`MPARAMETER 'RegionName' = @RegionName`, an unfiltered count returns zero. A `TREATAS` capacity
+filter does not substitute for those source parameters. `Region` can be the display label `Default`;
+only `Region without default` is a routing value. Do not infer a home region.
+
+Manifest v3 adds an imported `capacityInventory` query. Both the notebook and live TypeScript source
+discover routing first, then execute summaries/items/operations per capacity. The notebook still
+stores the concatenated, verbatim summaries under tenant-wide `capacitySummary`, keeping existing
+SQL readers compatible. Replay serves scoped summaries by filtering that one pinned snapshot,
+caches it once per client, and clears a rejected promise for retries. Do not add the requested
+region or clock-derived window to that replay key.
+
+Even `SUM` can return zero for an empty DirectQuery fact table. The summary checks for actual rows
+before claiming measured CU. Observation aliases are explicit UTC strings: executeQueries otherwise
+returns zone-less datetimes that `Date.parse` interprets in the browser's local timezone.
+
+All six capacities were queried read-only through the actual notebook orchestration on 2026-09-09:
+679 item rows and 2,458 operation-family rows, with SQL writes captured in memory and every row
+passed through the real replay/parser. This proves model queries and staging, not a completed
+write to a real SQL database.
+
 ## Validation commands
 ```powershell
 npx tsc -b            # 0 errors expected; the correct typecheck, see the Rayfin note above
-npx vitest run        # 1,212 tests / 75 files
+npx vitest run        # 1,235 tests / 76 files
 npm run build         # tsc -b + vite build
 npm run dev           # Vite on fixtures -- no tenant needed
 ```

@@ -137,6 +137,38 @@ describe('createIngestedDaxClient', () => {
     expect(store.queries[0].capacityId).toBe(TENANT_WIDE_CAPACITY_ID)
   })
 
+  it('serves scoped DirectQuery summaries from one pinned tenant-wide snapshot', async () => {
+    const store = new FakeStore(run(), [
+      row('{"[CapacityId]":"cap-1","TotalCuSeconds":12}'),
+      row('{"[CapacityId]":"cap-2","TotalCuSeconds":34}'),
+    ])
+    const client = createIngestedDaxClient({ store })
+    expect(await client.execute({ queryName: 'capacitySummary', query: '', parameters: {} })).toHaveLength(2)
+    for (const [capacityId, cu] of [['cap-1', 12], ['cap-2', 34]] as const) {
+      expect(await client.execute({
+        queryName: 'capacitySummary', query: '', parameters: { CapacityId: capacityId, RegionName: 'West US' },
+      })).toEqual([{ CapacityId: capacityId, TotalCuSeconds: cu }])
+    }
+    expect(store.queries).toHaveLength(1)
+    expect(store.queries[0]).toMatchObject({ runId: 'run-1', capacityId: TENANT_WIDE_CAPACITY_ID })
+  })
+
+  it('retries a failed summary snapshot instead of pinning a rejection', async () => {
+    let attempts = 0
+    const store: IngestStore = {
+      async latestCompleteRun() { return run() },
+      async readRows() {
+        if (++attempts === 1) throw new Error('transient summary read')
+        return [row('{"CapacityId":"cap-1"}')]
+      },
+    }
+    const client = createIngestedDaxClient({ store })
+    const request = { queryName: 'capacitySummary', query: '', parameters: {} } as const
+    await expect(client.execute(request)).rejects.toThrow('transient summary read')
+    await expect(client.execute(request)).resolves.toEqual([{ CapacityId: 'cap-1' }])
+    expect(attempts).toBe(2)
+  })
+
   it('reports NotConfigured when the notebook has never completed a run', async () => {
     const client = createIngestedDaxClient({ store: new FakeStore(null) })
 

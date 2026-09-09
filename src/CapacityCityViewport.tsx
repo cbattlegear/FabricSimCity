@@ -238,32 +238,30 @@ export function CapacityCityViewport({
     labels: true,
   })
 
-  const openIncident = useCallback(
-    (id: string | null) => onOpenIncident?.(id),
-    [onOpenIncident],
-  )
-
   /*
-   * The roster callback is held in a ref rather than passed straight into the scene options.
-   *
-   * The scene is created once and torn down only when its own inputs change; putting a caller's
-   * callback in that effect's dependencies would rebuild the entire city — assets, plan, roads and
-   * all — whenever the parent happened to re-render with a fresh closure.
+   * A refresh supplies new callbacks without necessarily changing the data. Recreating the scene
+   * then leaves it empty: the unchanged data effects do not run again to populate it. Keep the
+   * renderer mounted and delegate its events to the latest callbacks instead.
    */
-  const vehicleRosterRef = useRef(onVehicleRoster)
-  vehicleRosterRef.current = onVehicleRoster
+  const callbacksRef = useRef({ onSelect, onSelectRoad, onOpenIncident, onVehicleRoster })
+  callbacksRef.current = { onSelect, onSelectRoad, onOpenIncident, onVehicleRoster }
+
+  const openIncident = useCallback(
+    (id: string | null) => callbacksRef.current.onOpenIncident?.(id),
+    [],
+  )
 
   useEffect(() => {
     if (!canvasRef.current) return
     let controller: DatabaseCitySceneController
     try {
       controller = createDatabaseCityScene(canvasRef.current, {
-        onSelect,
-        onSelectRoad,
+        onSelect: id => callbacksRef.current.onSelect(id),
+        onSelectRoad: id => callbacksRef.current.onSelectRoad(id),
         onHoverRoad: setHoveredRoadId,
         onSelectIncident: openIncident,
         onCameraChange: () => setHeading(sceneRef.current?.heading() ?? 0),
-        onVehicleRoster: roster => vehicleRosterRef.current?.(roster),
+        onVehicleRoster: roster => callbacksRef.current.onVehicleRoster?.(roster),
         onTour: ({ active, stop }) => {
           setTouring(active)
           setTourStop(stop)
@@ -278,7 +276,7 @@ export function CapacityCityViewport({
       controller.dispose()
       sceneRef.current = null
     }
-  }, [onSelect, onSelectRoad, openIncident])
+  }, [openIncident])
 
   useEffect(() => sceneRef.current?.setObjects(objects, cityPlan), [objects, cityPlan])
   useEffect(() => sceneRef.current?.setRoads(roads), [roads])

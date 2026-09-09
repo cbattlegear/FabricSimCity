@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DAX_MANIFEST_VERSION } from './daxManifest.ts'
 
 export const NOTEBOOK_PATH = 'fabric/ingest_capacity_metrics.ipynb'
 
@@ -46,7 +47,7 @@ signed-in user's own permissions.
 
 **Before the first run**
 
-1. Deploy the app with \`npx rayfin up\` so the \`IngestRun\` and \`IngestRow\` tables exist.
+1. Deploy the app with \`npx rayfin up\` so the \`IngestRuns\` and \`IngestRows\` tables exist.
 2. Give this notebook's identity access to the app's SQL database, as a user with
    \`INSERT\`, \`UPDATE\`, \`DELETE\` and \`SELECT\` on those two tables.
 3. Give it Read and Build access to the Capacity Metrics semantic model, plus permission to
@@ -56,16 +57,19 @@ signed-in user's own permissions.
 Then schedule it at the same interval you set \`VITE_FABRIC_INGEST_INTERVAL_MINUTES\` to.
 Scheduled runs use the identity of the user who created or last updated the schedule.
 
-**Updating an existing notebook:** this notebook requires manifest version **2**. Update both
+**Updating an existing notebook:** this notebook requires manifest version **${DAX_MANIFEST_VERSION}**. Update both
 the notebook and its Built-in \`dax-queries.generated.json\`, preserving your parameter values,
-then restart the session and run all cells. The SQL entity schema has not changed. Confirm the
-schedule targets this updated notebook. The matching TypeScript reader is included in this
-revision: rebuild/redeploy the app with \`VITE_FABRIC_SOURCE=ingested\` and the matching tenant
-and dataset ids. It reads through Rayfin's built-in GraphQL adapter and adopts the Fabric portal
+then restart the session and run all cells. The SQL entity schema and stored summary layout have
+not changed; existing ingested readers remain compatible. Confirm the schedule targets this
+updated notebook. App deployments use \`VITE_FABRIC_SOURCE=ingested\` and the matching tenant
+and dataset ids. The app reads through Rayfin's built-in GraphQL adapter and adopts the Fabric portal
 session automatically, without a separate login flow.
 
 **Daily metrics with dimensions:** \`metricsDailyWithDimensions\` reads the daily fact plus
-\`Items\` and \`Capacities\`. It supplies CU, durations, operation counts and measured throttling,
+\`Items\` and \`Capacities\`. Imported capacity metadata supplies routing first, then each fact query
+binds \`MPARAMETER 'CapacitiesList'\` and \`MPARAMETER 'RegionName'\`. A DAX row filter alone does
+not populate this DirectQuery source. Routing uses \`Region without default\`, not the display
+label \`Default\`. It supplies CU, durations, operation counts and measured throttling,
 not 30-second utilization or per-item OneLake storage. Those unavailable measurements remain
 unknown. Autoscale-specific facts are not combined. The first partial day is excluded; freshness
 uses the latest daily bucket, not the time this notebook ran.

@@ -25,6 +25,7 @@ if "bind_dax_parameters" not in globals():  # pragma: no cover - notebook path
         bind_dax_parameters,
         capacity_ids,
         encode_row,
+        normalize_row,
         pick_generation,
         probe_rows_for_generation,
         probe_tables,
@@ -32,7 +33,7 @@ if "bind_dax_parameters" not in globals():  # pragma: no cover - notebook path
     )
 
 # Must equal DAX_MANIFEST_VERSION in `src/collect/daxManifest.ts`. Pinned by `ingestNotebook.test.ts`.
-DAX_MANIFEST_VERSION = 2
+DAX_MANIFEST_VERSION = 3
 
 # PARAMETERS -------------------------------------------------------------------------------------
 # Tag this cell "Parameters" in the Fabric notebook so a schedule or pipeline can override them.
@@ -128,17 +129,21 @@ def _newest_odbc_driver(pyodbc) -> str:
 def resolve_table(cursor, entity_name: str, required_columns: list[str]) -> str:
     """Find the table Rayfin generated for an entity, and check it has the columns expected.
 
-    The name is not assumed. `rayfin up` owns this schema, so if it ever pluralizes or reschemas an
-    entity, the failure should name the tables it did find rather than surface as a generic invalid
-    object name from the middle of a batch insert.
+    Rayfin pluralizes these entity names. Keep singular tables compatible, but never choose the
+    first match when multiple schemas or naming generations coexist.
     """
+    names = {
+        "IngestRun": ("IngestRun", "IngestRuns"),
+        "IngestRow": ("IngestRow", "IngestRows"),
+    }.get(entity_name, (entity_name,))
+    placeholders = ", ".join("LOWER(?)" for _ in names)
     cursor.execute(
-        """
+        f"""
         SELECT TABLE_SCHEMA, TABLE_NAME
         FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE' AND LOWER(TABLE_NAME) = LOWER(?)
+        WHERE TABLE_TYPE = 'BASE TABLE' AND LOWER(TABLE_NAME) IN ({placeholders})
         """,
-        entity_name,
+        *names,
     )
     matches = cursor.fetchall()
     if not matches:
@@ -152,8 +157,14 @@ def resolve_table(cursor, entity_name: str, required_columns: list[str]) -> str:
             f"The database currently has: {found}."
         )
 
+    if len(matches) != 1:
+        found = ", ".join(f"{schema}.{table}" for schema, table in matches)
+        raise RuntimeError(
+            f"Multiple tables match entity {entity_name}: {found}. "
+            "Resolve the ambiguity before ingesting; no table was selected."
+        )
     schema_name, table_name = matches[0]
-    qualified = f"[{schema_name}].[{table_name}]"
+    qualified = ".".join("[" + name.replace("]", "]]") + "]" for name in (schema_name, table_name))
 
     cursor.execute(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
@@ -238,18 +249,31 @@ def run_ingest(manifest: dict) -> str:
     queries = generation["queries"]
     window = {"Start": _iso(window_start), "End": _iso(window_end)}
 
-    summary_rows = evaluate_dax(bind_dax_parameters(queries["capacitySummary"], window))
-    ids = capacity_ids(summary_rows, generation["capacityIdColumn"])
+    inventory_query = queries.get("capacityInventory", queries["capacitySummary"])
+    inventory_rows = evaluate_dax(bind_dax_parameters(inventory_query, window))
+    ids = capacity_ids(inventory_rows, generation["capacityIdColumn"])
     if not ids:
         # A run with no capacities would be marked Complete and render as an empty atlas, which is
         # indistinguishable from a tenant that genuinely has none. Far more likely is that the
         # notebook identity cannot see the metrics model, so say so instead of publishing nothing.
         raise IngestError(
-            f"The capacity summary returned {len(summary_rows)} row(s) but no capacity ids in "
+            f"The capacity inventory returned {len(inventory_rows)} row(s) but no capacity ids in "
             f"column '{generation['capacityIdColumn']}'. Check that this notebook's identity can "
             "read the Capacity Metrics semantic model."
         )
-    print(f"{len(summary_rows)} capacity rows covering {len(ids)} capacities.")
+    print(f"{len(inventory_rows)} inventory rows covering {len(ids)} capacities.")
+    summary_rows = [] if "capacityInventory" in queries else inventory_rows
+    contexts = {}
+    if "capacityInventory" in queries:
+        for raw in inventory_rows:
+            row = normalize_row(raw)
+            capacity_id = row.get(generation["capacityIdColumn"])
+            region = row.get("Region")
+            if not isinstance(capacity_id, str) or not capacity_id or not isinstance(region, str) or not region:
+                raise IngestError("Capacity inventory must include a capacity id and its routing Region.")
+            if capacity_id in contexts and contexts[capacity_id] != region:
+                raise IngestError(f"Capacity {capacity_id} has ambiguous routing regions.")
+            contexts[capacity_id] = region
 
     pending: list[tuple] = []
 
@@ -270,10 +294,16 @@ def run_ingest(manifest: dict) -> str:
             )
 
     stage("schemaProbe", "", probe_rows_for_generation(probe, generation))
-    stage("capacitySummary", "", summary_rows)
 
     for capacity_id in ids:
         scoped = {"CapacityId": capacity_id, **window}
+        if "capacityInventory" in queries:
+            scoped["RegionName"] = contexts[capacity_id]
+            rows = evaluate_dax(bind_dax_parameters(queries["capacitySummary"], scoped))
+            if len(rows) != 1 or normalize_row(rows[0]).get(generation["capacityIdColumn"]) != capacity_id:
+                raise IngestError(f"Capacity summary did not return exactly capacity {capacity_id}.")
+            summary_rows.extend(rows)
+            print(f"  {capacity_id} capacitySummary: {len(rows)} row ({scoped['RegionName']})")
         for query_name in ("cityItems", "operationFamilies", "timepoints"):
             if query_name in generation.get("unavailableQueries", []):
                 print(f"  {capacity_id} {query_name}: unavailable in this schema; no samples inferred")
@@ -282,7 +312,9 @@ def run_ingest(manifest: dict) -> str:
             stage(query_name, capacity_id, rows)
             print(f"  {capacity_id} {query_name}: {len(rows)} rows")
 
+    stage("capacitySummary", "", summary_rows)
     connection = connect_sql()
+    run_table = None
     try:
         cursor = connection.cursor()
         run_table = resolve_table(
@@ -310,8 +342,8 @@ def run_ingest(manifest: dict) -> str:
 
         cursor.execute(
             f"INSERT INTO {run_table} "
-            "(id, tenantId, datasetId, schemaGeneration, status, startedAt, windowStart, "
-            " windowEnd, rowCount) VALUES (?, ?, ?, ?, 'Running', ?, ?, ?, 0)",
+            "([id], [tenantId], [datasetId], [schemaGeneration], [status], [startedAt], [windowStart], "
+            "[windowEnd], [rowCount]) VALUES (?, ?, ?, ?, 'Running', ?, ?, ?, 0)",
             run_id,
             TENANT_ID,
             METRICS_DATASET_ID,
@@ -325,7 +357,7 @@ def run_ingest(manifest: dict) -> str:
         cursor.fast_executemany = True
         insert = (
             f"INSERT INTO {row_table} "
-            "(id, runId, tenantId, queryName, capacityId, rowIndex, rowTimestamp, rowJson) "
+            "([id], [runId], [tenantId], [queryName], [capacityId], [rowIndex], [rowTimestamp], [rowJson]) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         for start in range(0, len(pending), BATCH_SIZE):
@@ -333,7 +365,7 @@ def run_ingest(manifest: dict) -> str:
             connection.commit()
 
         cursor.execute(
-            f"UPDATE {run_table} SET status = 'Complete', completedAt = ?, rowCount = ? WHERE id = ?",
+            f"UPDATE {run_table} SET [status] = 'Complete', [completedAt] = ?, [rowCount] = ? WHERE [id] = ?",
             _now(),
             len(pending),
             run_id,
@@ -343,7 +375,8 @@ def run_ingest(manifest: dict) -> str:
 
         prune_old_runs(cursor, connection, run_table, row_table)
     except Exception as error:
-        _mark_failed(connection, run_id, error)
+        if run_table is not None:
+            _mark_failed(connection, run_table, run_id, error)
         raise
     finally:
         connection.close()
@@ -351,19 +384,12 @@ def run_ingest(manifest: dict) -> str:
     return run_id
 
 
-def _mark_failed(connection, run_id: str, error: Exception) -> None:
+def _mark_failed(connection, run_table: str, run_id: str, error: Exception) -> None:
     """Record why a run stopped, so the app can say so instead of only showing stale data."""
     try:
         cursor = connection.cursor()
         cursor.execute(
-            "SELECT TABLE_SCHEMA + '.' + TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
-            "WHERE TABLE_TYPE = 'BASE TABLE' AND LOWER(TABLE_NAME) = 'ingestrun'"
-        )
-        found = cursor.fetchone()
-        if not found:
-            return
-        cursor.execute(
-            f"UPDATE {found[0]} SET status = 'Failed', completedAt = ?, failureMessage = ? WHERE id = ?",
+            f"UPDATE {run_table} SET [status] = 'Failed', [completedAt] = ?, [failureMessage] = ? WHERE [id] = ?",
             _now(),
             str(error)[:1024],
             run_id,
@@ -376,16 +402,16 @@ def _mark_failed(connection, run_id: str, error: Exception) -> None:
 def prune_old_runs(cursor, connection, run_table: str, row_table: str) -> None:
     """Delete all but the newest KEEP_RUNS completed runs, rows first."""
     cursor.execute(
-        f"SELECT id FROM {run_table} WHERE tenantId = ? AND datasetId = ? "
-        "ORDER BY startedAt DESC OFFSET ? ROWS",
+        f"SELECT [id] FROM {run_table} WHERE [tenantId] = ? AND [datasetId] = ? "
+        "ORDER BY [startedAt] DESC OFFSET ? ROWS",
         TENANT_ID,
         METRICS_DATASET_ID,
         KEEP_RUNS,
     )
     stale = [row[0] for row in cursor.fetchall()]
     for run_id in stale:
-        cursor.execute(f"DELETE FROM {row_table} WHERE runId = ?", run_id)
-        cursor.execute(f"DELETE FROM {run_table} WHERE id = ?", run_id)
+        cursor.execute(f"DELETE FROM {row_table} WHERE [runId] = ?", run_id)
+        cursor.execute(f"DELETE FROM {run_table} WHERE [id] = ?", run_id)
         connection.commit()
     if stale:
         print(f"Pruned {len(stale)} older run(s).")
