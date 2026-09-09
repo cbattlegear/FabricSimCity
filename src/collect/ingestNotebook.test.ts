@@ -61,6 +61,21 @@ interface NotebookCell {
 const notebook = JSON.parse(read(NOTEBOOK_PATH)) as { cells: NotebookCell[] }
 const cellText = (cell: NotebookCell) => cell.source.join('')
 
+function expectQuotedIngestColumns(statements: readonly string[]) {
+  expect(statements.length).toBeGreaterThan(0)
+  for (const statement of statements) {
+    for (const column of [
+      'rowCount', 'id', 'tenantId', 'datasetId', 'schemaGeneration', 'status', 'startedAt',
+      'completedAt', 'windowStart', 'windowEnd', 'failureMessage', 'runId', 'queryName',
+      'capacityId', 'rowIndex', 'rowTimestamp', 'rowJson',
+    ]) {
+      for (const match of statement.matchAll(new RegExp(`\\b${column}\\b`, 'gi'))) {
+        expect(statement.slice(match.index - 1, match.index + match[0].length + 1)).toBe(`[${match[0]}]`)
+      }
+    }
+  }
+}
+
 describe('the committed notebook', () => {
   it('matches what the generator produces from the Python sources', () => {
     // The `.ipynb` is the artifact uploaded to Fabric, but the `.py` files are what gets edited and
@@ -198,13 +213,16 @@ exec(${JSON.stringify(mainSource)})
 class Connection:
     def cursor(self): return self
     def execute(self, sql, *args):
-        assert sql.startswith("UPDATE [app].[IngestRuns] SET status = 'Failed'"), sql
+        assert sql.startswith("UPDATE [app].[IngestRuns] SET [status] = 'Failed'"), sql
         assert args[1:] == ("write failed", "run-id"), args
-    def commit(self): print("failure recorded")
+        self.statement = sql
+    def commit(self): print(json.dumps({"recorded": True, "sql": self.statement}))
 _mark_failed(Connection(), "[app].[IngestRuns]", "run-id", ValueError("write failed"))
 `)
     expect(result.ok, result.stderr).toBe(true)
-    expect(result.stdout).toBe('failure recorded')
+    const recorded = JSON.parse(result.stdout) as { recorded: boolean; sql: string }
+    expect(recorded.recorded).toBe(true)
+    expectQuotedIngestColumns([recorded.sql])
   })
 
   it('refuses missing routing metadata before any fact query or SQL write', () => {
@@ -465,6 +483,7 @@ class FakeSql(Catalog):
                                    "rowIndex", "rowTimestamp", "rowJson"],
         })
         self.rows = []
+        self.statements = []
         self.complete = False
         self.closed = False
     def cursor(self): return self
@@ -472,12 +491,17 @@ class FakeSql(Catalog):
         if "INFORMATION_SCHEMA." in sql:
             return super().execute(sql, *args)
         self.results = []
+        self.statements.append(sql)
+        assert sql.count("?") == len(args), (sql, args)
         assert "[dbo].[IngestRuns]" in sql or "[dbo].[IngestRows]" in sql, sql
-        if "status = 'Complete'" in sql:
+        if "status = 'Complete'" in sql.replace("[", "").replace("]", ""):
             assert args[1] == len(self.rows)
             self.complete = True
+        if "OFFSET" in sql: self.results = [("old-run",)]
     def executemany(self, sql, rows):
         assert sql.startswith("INSERT INTO [dbo].[IngestRows]"), sql
+        self.statements.append(sql)
+        assert all(sql.count("?") == len(row) for row in rows)
         self.rows.extend(rows)
     def commit(self): pass
     def close(self): self.closed = True
@@ -490,16 +514,28 @@ observations = [json.loads(row[7])["[ObservedAt]"] for row in connection.rows if
 print(json.dumps({"calls": calls, "complete": connection.complete, "closed": connection.closed,
                   "tables": sorted(probe_tables(schema)), "scopes": sorted({row[4] for row in scoped}),
                   "observations": observations,
+                  "sql": connection.statements,
                   "replayed": pick_generation(manifest, schema)["name"]}))
 `)
     expect(result.ok, result.stderr).toBe(true)
-    expect(JSON.parse(result.stdout.split('\n').at(-1)!)).toEqual({
+    const output = JSON.parse(result.stdout.split('\n').at(-1)!) as { sql: string[] }
+    expect(output).toEqual({
       calls: ['schemaProbe', 'capacityInventory', 'capacitySummary', 'cityItems', 'operationFamilies',
         'capacitySummary', 'cityItems', 'operationFamilies'],
       complete: true, closed: true, tables: ['Capacities', 'Items', 'Metrics By Item Operation And Day'],
       scopes: ['cap-a', 'cap-b'], replayed: 'metricsDailyWithDimensions',
       observations: [null, '2026-09-09T00:00:00Z'],
+      sql: expect.any(Array),
     })
+    expectQuotedIngestColumns(output.sql)
+    expect(output.sql).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^INSERT INTO \[dbo\]\.\[IngestRuns\].*\[rowCount\]/),
+      expect.stringMatching(/^INSERT INTO \[dbo\]\.\[IngestRows\]/),
+      expect.stringMatching(/^UPDATE \[dbo\]\.\[IngestRuns\].*\[rowCount\]/),
+      expect.stringMatching(/^SELECT \[id\].*ORDER BY \[startedAt\].*OFFSET/),
+      expect.stringMatching(/^DELETE FROM \[dbo\]\.\[IngestRows\]/),
+      expect.stringMatching(/^DELETE FROM \[dbo\]\.\[IngestRuns\]/),
+    ]))
     expect(result.stdout).toContain('timepoints: unavailable')
   })
 

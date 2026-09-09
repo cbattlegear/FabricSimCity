@@ -342,8 +342,8 @@ def run_ingest(manifest: dict) -> str:
 
         cursor.execute(
             f"INSERT INTO {run_table} "
-            "(id, tenantId, datasetId, schemaGeneration, status, startedAt, windowStart, "
-            " windowEnd, rowCount) VALUES (?, ?, ?, ?, 'Running', ?, ?, ?, 0)",
+            "([id], [tenantId], [datasetId], [schemaGeneration], [status], [startedAt], [windowStart], "
+            "[windowEnd], [rowCount]) VALUES (?, ?, ?, ?, 'Running', ?, ?, ?, 0)",
             run_id,
             TENANT_ID,
             METRICS_DATASET_ID,
@@ -357,7 +357,7 @@ def run_ingest(manifest: dict) -> str:
         cursor.fast_executemany = True
         insert = (
             f"INSERT INTO {row_table} "
-            "(id, runId, tenantId, queryName, capacityId, rowIndex, rowTimestamp, rowJson) "
+            "([id], [runId], [tenantId], [queryName], [capacityId], [rowIndex], [rowTimestamp], [rowJson]) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         for start in range(0, len(pending), BATCH_SIZE):
@@ -365,7 +365,7 @@ def run_ingest(manifest: dict) -> str:
             connection.commit()
 
         cursor.execute(
-            f"UPDATE {run_table} SET status = 'Complete', completedAt = ?, rowCount = ? WHERE id = ?",
+            f"UPDATE {run_table} SET [status] = 'Complete', [completedAt] = ?, [rowCount] = ? WHERE [id] = ?",
             _now(),
             len(pending),
             run_id,
@@ -389,7 +389,7 @@ def _mark_failed(connection, run_table: str, run_id: str, error: Exception) -> N
     try:
         cursor = connection.cursor()
         cursor.execute(
-            f"UPDATE {run_table} SET status = 'Failed', completedAt = ?, failureMessage = ? WHERE id = ?",
+            f"UPDATE {run_table} SET [status] = 'Failed', [completedAt] = ?, [failureMessage] = ? WHERE [id] = ?",
             _now(),
             str(error)[:1024],
             run_id,
@@ -402,16 +402,16 @@ def _mark_failed(connection, run_table: str, run_id: str, error: Exception) -> N
 def prune_old_runs(cursor, connection, run_table: str, row_table: str) -> None:
     """Delete all but the newest KEEP_RUNS completed runs, rows first."""
     cursor.execute(
-        f"SELECT id FROM {run_table} WHERE tenantId = ? AND datasetId = ? "
-        "ORDER BY startedAt DESC OFFSET ? ROWS",
+        f"SELECT [id] FROM {run_table} WHERE [tenantId] = ? AND [datasetId] = ? "
+        "ORDER BY [startedAt] DESC OFFSET ? ROWS",
         TENANT_ID,
         METRICS_DATASET_ID,
         KEEP_RUNS,
     )
     stale = [row[0] for row in cursor.fetchall()]
     for run_id in stale:
-        cursor.execute(f"DELETE FROM {row_table} WHERE runId = ?", run_id)
-        cursor.execute(f"DELETE FROM {run_table} WHERE id = ?", run_id)
+        cursor.execute(f"DELETE FROM {row_table} WHERE [runId] = ?", run_id)
+        cursor.execute(f"DELETE FROM {run_table} WHERE [id] = ?", run_id)
         connection.commit()
     if stale:
         print(f"Pruned {len(stale)} older run(s).")

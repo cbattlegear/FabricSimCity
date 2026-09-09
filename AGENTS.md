@@ -522,6 +522,13 @@ notebook resolver accepts both forms, checks columns, and rejects ambiguous sche
 than taking the first result. Its orchestration test must exercise that resolver against a catalog,
 not replace it with a fake returning the expected name: that stub hid the deployed-name failure.
 
+Bracket every column identifier in the notebook's hand-written SQL, including updates and cleanup.
+`rowCount` collides with SQL Server's reserved `ROWCOUNT` keyword; quoting the table does not quote
+its columns. A recording fake cannot detect SQL syntax errors. The executed tests inspect emitted
+identifiers and exercise retention deletes, and the SQL was also checked on a local SQL Server with
+`SET PARSEONLY ON` (ODBC `?` markers replaced by a declared variable). Parsing does not execute the
+statements or establish that tenant SQL persistence works.
+
 ### A recognized fact table is not a recognized schema
 
 The first live export contained `Metrics By Item Operation And Day`, but its date is `Datetime`,
